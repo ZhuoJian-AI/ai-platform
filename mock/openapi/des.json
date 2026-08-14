@@ -1,0 +1,608 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "DES 设计管理系统",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/schemes": {
+      "get": {
+        "tags": [
+          "DES 设计管理"
+        ],
+        "summary": "设计方案列表（按域/阶段过滤）",
+        "operationId": "listSchemes",
+        "parameters": [
+          {
+            "name": "domain",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "工业工程/能源环保/城乡服务",
+              "title": "Domain"
+            },
+            "description": "工业工程/能源环保/城乡服务"
+          },
+          {
+            "name": "stage",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "可研/扩初/施工图",
+              "title": "Stage"
+            },
+            "description": "可研/扩初/施工图"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "title": "Response Listschemes"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/schemes/{scheme_no}": {
+      "get": {
+        "tags": [
+          "DES 设计管理"
+        ],
+        "summary": "方案详情 + 关联图纸 + 碰撞数",
+        "operationId": "getScheme",
+        "parameters": [
+          {
+            "name": "scheme_no",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Scheme No"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Getscheme"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/drawings": {
+      "get": {
+        "tags": [
+          "DES 设计管理"
+        ],
+        "summary": "图纸列表（按方案/专业过滤）",
+        "operationId": "listDrawings",
+        "parameters": [
+          {
+            "name": "scheme_no",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "方案号 SCH-...",
+              "title": "Scheme No"
+            },
+            "description": "方案号 SCH-..."
+          },
+          {
+            "name": "discipline",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "建筑/结构/机电/工艺",
+              "title": "Discipline"
+            },
+            "description": "建筑/结构/机电/工艺"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "title": "Response Listdrawings"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/drawings/{drawing_no}": {
+      "get": {
+        "tags": [
+          "DES 设计管理"
+        ],
+        "summary": "图纸详情 + 合规标记",
+        "operationId": "getDrawing",
+        "parameters": [
+          {
+            "name": "drawing_no",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Drawing No"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Getdrawing"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/specs": {
+      "get": {
+        "tags": [
+          "DES 设计管理"
+        ],
+        "summary": "设计规范强条列表（按专业过滤）",
+        "operationId": "listSpecs",
+        "parameters": [
+          {
+            "name": "discipline",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "建筑/结构/机电/工艺/洁净",
+              "title": "Discipline"
+            },
+            "description": "建筑/结构/机电/工艺/洁净"
+          },
+          {
+            "name": "mandatory_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "仅强条",
+              "default": true,
+              "title": "Mandatory Only"
+            },
+            "description": "仅强条"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "title": "Response Listspecs"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/quantity-items": {
+      "get": {
+        "tags": [
+          "DES 设计管理"
+        ],
+        "summary": "算量项列表（按方案/专业过滤；带 ERP 物料码）",
+        "operationId": "listQuantityItems",
+        "parameters": [
+          {
+            "name": "scheme_no",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "方案号 SCH-...",
+              "title": "Scheme No"
+            },
+            "description": "方案号 SCH-..."
+          },
+          {
+            "name": "discipline",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "结构/建筑/机电",
+              "title": "Discipline"
+            },
+            "description": "结构/建筑/机电"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "title": "Response Listquantityitems"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/drawings/{drawing_no}/compliance": {
+      "get": {
+        "tags": [
+          "DES 设计管理"
+        ],
+        "summary": "图纸规范合规校验（扫描强条返违规项+修正建议）",
+        "operationId": "checkDrawingCompliance",
+        "parameters": [
+          {
+            "name": "drawing_no",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "图纸号，如 DWG-ARC-001",
+              "title": "Drawing No"
+            },
+            "description": "图纸号，如 DWG-ARC-001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Checkdrawingcompliance"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/schemes/{scheme_no}/takeoff": {
+      "get": {
+        "tags": [
+          "DES 设计管理"
+        ],
+        "summary": "方案算量与造价测算（联动 ERP 物料码）",
+        "operationId": "computeQuantityTakeoff",
+        "parameters": [
+          {
+            "name": "scheme_no",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "方案号，如 SCH-IND-001",
+              "title": "Scheme No"
+            },
+            "description": "方案号，如 SCH-IND-001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Computequantitytakeoff"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/schemes/{scheme_no}/clashes": {
+      "get": {
+        "tags": [
+          "DES 设计管理"
+        ],
+        "summary": "方案内跨专业碰撞清单",
+        "operationId": "detectClashes",
+        "parameters": [
+          {
+            "name": "scheme_no",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "方案号，如 SCH-IND-001",
+              "title": "Scheme No"
+            },
+            "description": "方案号，如 SCH-IND-001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "title": "Response Detectclashes"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

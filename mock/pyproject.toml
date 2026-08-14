@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mock*"]
+
+[project]
+name = "enterprise-mock"
+version = "0.1.0"
+description = "企业业务系统 Mock（MES / CRM / ERP …）——为 LLM Router 平台演示提供可调用的数据接口"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx>=0.28.0",
+]
+
+[project.scripts]
+enterprise-mock = "mock.__main__:main"

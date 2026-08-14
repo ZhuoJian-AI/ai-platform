@@ -1,0 +1,128 @@
+name: ${COMPOSE_PROJECT_NAME:-ai-platform}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_infra}
+      POSTGRES_USER: ${POSTGRES_USER:-ai_infra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    command:
+      - /bin/sh
+      - -c
+      - exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+
+  mock:
+    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-mock:${APP_IMAGE_TAG:-latest}
+    pull_policy: build
+    build:
+      context: ./mock
+      dockerfile: Dockerfile
+    environment:
+      MES_API_KEY: ${MES_API_KEY:?MES_API_KEY is required}
+      CRM_API_KEY: ${CRM_API_KEY:?CRM_API_KEY is required}
+    expose:
+      - "8010"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+
+  backend:
+    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-backend:${APP_IMAGE_TAG:-latest}
+    pull_policy: build
+    build:
+      context: ./llm_router/backend
+      dockerfile: Dockerfile
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?MASTER_ENCRYPTION_KEY is required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
+      PROXY_BASE_URL: ${PUBLIC_ORIGIN:?PUBLIC_ORIGIN is required}
+      API_KEY_CACHE_TTL: "${API_KEY_CACHE_TTL:-60}"
+      DLP_EXPOSE_MATCHES_IN_ERROR: "${DLP_EXPOSE_MATCHES_IN_ERROR:-false}"
+    expose:
+      - "8000"
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        alembic upgrade head
+        && exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+
+  frontend:
+    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-frontend:${APP_IMAGE_TAG:-latest}
+    pull_policy: build
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.coolify
+    expose:
+      - "80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+
+volumes:
+  postgres_data:
+  redis_data:

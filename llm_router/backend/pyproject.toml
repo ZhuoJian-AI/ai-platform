@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[project]
+name = "llm-router"
+version = "0.1.0"
+description = "Enterprise LLM API routing platform with DLP security fence"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "httpx>=0.28.0",
+    "redis>=5.2.0",
+    "regex>=2024.11.0",
+    "pyahocorasick>=2.1.0",
+    "cryptography>=44.0.0",
+    "structlog>=24.4.0",
+    "python-multipart>=0.0.18",
+    "bcrypt>=4.2.0",
+    "pyjwt>=2.10.0",
+    "email-validator>=2.2.0",
+    # LangGraph 编排底座：请求处理流水线以 StateGraph 表达。
+    # 仅引入 langgraph + langchain-core（不引入 langchain_openai/anthropic），
+    # 上游 LLM 调用仍走 httpx 字节透传，保留协议兼容性。
+    "langgraph>=0.2.40",
+    "langchain-core>=0.3.0",
+    # MCP server —— 把归口用户 scope 内五项能力暴露给第三方智能体终端（/mcp）。
+    # StructuredTool 共享层（capability_tools）对内喂 LangGraph runtime、对外经 MCP 暴露。
+    "mcp>=1.2.0,<2.0.0",
+    # 智能体平台：pgvector 向量检索（SQLAlchemy Vector 类型）
+    "pgvector>=0.3.6",
+    # embedding 余弦相似度计算
+    "numpy>=1.26.0",
+    # token 估算（agent 用量记账）
+    "tiktoken>=0.8.0",
+    # RAG 文档上传解析：PDF / Word / Excel / HTML 文本抽取
+    "pdfplumber>=0.11.0",
+    "python-docx>=1.1.0",
+    "beautifulsoup4>=4.12.0",
+    "openpyxl>=3.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "httpx>=0.28.0",
+    "ruff>=0.8.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

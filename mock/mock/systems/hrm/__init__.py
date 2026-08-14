@@ -1,0 +1,15 @@
+"""HRM 子系统——构造可被网关挂载的 FastAPI 子应用。"""
+
+from mock.core.registry import by_key
+from mock.core.server import build_app
+from . import routes
+
+_SYS = by_key("hrm")
+app = build_app(
+    title=_SYS.name,
+    system_key=_SYS.key,
+    version="1.0.0",
+    api_key=_SYS.api_key,
+    keys_to_tenants=_SYS.keys_to_tenants,
+    router=routes.router,
+)

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>星途服装 POC 演示访问信息 · ai_infra</title>
+<style>
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+body { font-family:"Noto Sans CJK SC","Noto Sans CJK","Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;
+  color:#1f2937; font-size:16px; line-height:1.85; margin:0; background:#eef1f6; -webkit-font-smoothing:antialiased; }
+a { color:#1677ff; text-decoration:none; }
+code, .mono { font-family:"Noto Sans Mono CJK","JetBrains Mono",Consolas,monospace; font-size:13.5px; background:#eef1f5; padding:1px 6px; border-radius:4px; color:#0f1f3d; }
+
+.topnav { position:sticky; top:0; z-index:100; background:rgba(255,255,255,.92); backdrop-filter:blur(10px);
+  border-bottom:1px solid #e6eaf2; display:flex; align-items:center; gap:18px; padding:10px max(24px, calc(50% - 480px)); }
+.topnav .brand { font-weight:700; color:#0f1f3d; font-size:15px; white-space:nowrap; }
+.topnav .brand span { color:#1677ff; }
+.topnav .links { display:flex; gap:6px; flex-wrap:wrap; }
+.topnav .links a { color:#475069; font-size:13.5px; padding:6px 12px; border-radius:6px; }
+.topnav .links a:hover { background:#eef4ff; color:#1677ff; }
+.topnav .right { margin-left:auto; font-size:12.5px; color:#9aa3b2; }
+
+section { max-width:100%; margin:0; padding:52px max(24px, calc(50% - 480px)); background:#fff; }
+section + section { border-top:1px solid #eef1f6; }
+
+.cover { position:relative; overflow:hidden; color:#fff;
+  background:linear-gradient(135deg,#0b1b3a 0%,#122a5e 45%,#1d4ed8 100%);
+  padding:72px max(24px, calc(50% - 480px)) 80px; }
+.cover::before { content:""; position:absolute; right:-140px; top:-140px; width:380px; height:380px;
+  background:radial-gradient(circle,rgba(99,179,237,.35) 0%,transparent 60%); border-radius:50%; }
+.cover .brand { font-size:14px; letter-spacing:3px; opacity:.82; position:relative; }
+.cover h1 { color:#fff; font-size:clamp(30px,5vw,48px); margin:18px 0 8px; letter-spacing:1px; line-height:1.15; position:relative; }
+.cover .sub { font-size:clamp(15px,2.4vw,20px); opacity:.92; font-weight:300; position:relative; }
+.cover .rule { width:120px; height:3px; background:#38bdf8; margin:18px 0; border-radius:2px; position:relative; }
+.cover .meta { font-size:13px; opacity:.85; line-height:1.9; position:relative; }
+
+h2.sec { font-size:26px; margin:6px 0 20px; padding:8px 0 8px 16px;
+  border-left:6px solid #1677ff; background:linear-gradient(90deg,#eef4ff 0%,#fff 96%); border-radius:4px; }
+h3.sub { font-size:20px; margin:34px 0 12px; color:#0f1f3d; }
+.lead { color:#4b5563; }
+
+table.data { width:100%; border-collapse:collapse; margin:16px 0; font-size:14px; background:#fff; overflow:hidden; }
+table.data th { background:#0f1f3d; color:#fff; padding:11px 12px; text-align:left; font-weight:600; font-size:13px; }
+table.data td { padding:10px 12px; border-bottom:1px solid #eceff4; vertical-align:top; }
+table.data tr:nth-child(even) td { background:#f7f9fc; }
+
+.callout { border-left:4px solid #1677ff; background:#f0f6ff; padding:14px 18px; border-radius:0 8px 8px 0; margin:18px 0; }
+.callout.warn { border-left-color:#f59e0b; background:#fff8ec; }
+.callout.key  { border-left-color:#10b981; background:#ecfdf5; }
+.callout h5 { margin:0 0 6px; font-size:15px; color:#0f1f3d; }
+.kv { display:flex; gap:12px; flex-wrap:wrap; margin:8px 0; }
+.kv .row { font-size:14px; flex:1 1 220px; } .kv .row b { color:#0f1f3d; }
+.note { font-size:13px; color:#6b7280; }
+.footnote { font-size:12px; color:#9aa3b2; margin-top:12px; }
+
+.totop { position:fixed; right:24px; bottom:24px; width:46px; height:46px; border-radius:50%;
+  background:#0f1f3d; color:#fff; border:none; font-size:20px; cursor:pointer; box-shadow:0 6px 18px rgba(0,0,0,.22);
+  opacity:0; pointer-events:none; transition:opacity .25s; z-index:90; }
+.totop.show { opacity:1; pointer-events:auto; }
+.totop:hover { background:#1677ff; }
+
+@media (max-width:760px) {
+  body { font-size:15px; }
+  section { padding:28px 18px; }
+  .topnav { padding:8px 14px; gap:10px; flex-wrap:wrap; }
+  .topnav .links a { font-size:12px; padding:4px 8px; }
+  .topnav .right { display:none; }
+  table.data { font-size:12.5px; }
+  table.data th, table.data td { padding:8px 8px; }
+}
+@media print {
+  .topnav, .totop { display:none; }
+  body { background:#fff; font-size:11pt; }
+  section { box-shadow:none; max-width:none; margin:0; border-radius:0; }
+}
+</style>
+</head>
+<body>
+<nav class="topnav">
+  <div class="brand">ai<span>infra</span> · 星途服装 POC 演示访问信息</div>
+  <div class="links">
+    <a href="#top">首页</a>
+    <a href="#terminal">业务终端访问</a>
+    <a href="#scenarios">归口用户与场景</a>
+    <a href="#systems">业务系统</a>
+    <a href="#steps">验证步骤</a>
+    <a href="#notes">说明</a>
+  </div>
+  <div class="right">星途服装 · 2026-07</div>
+</nav>
+
+<section class="cover" id="top">
+  <div class="brand">ai_infra · 企业级 AI 底座平台</div>
+  <h1>星途服装<br>POC 演示访问信息</h1>
+  <div class="sub">业务终端登录地址、归口用户名与统一密码</div>
+  <div class="rule"></div>
+  <div class="meta">
+    本页为《服装企业 AI 底座 POC 指南 · 星途服装》的配套访问附录，集中收录业务终端登录地址、<br>
+    归口用户名与统一密码，供客户现场自助验证七大场景。指南正文不出现这些凭证信息。
+  </div>
+</section>
+
+<section id="intro">
+  <h2 class="sec">附录　地址与账号一览</h2>
+  <p class="lead">星途服装业务终端为独立租户（独立 slug、独立组织、独立归口用户与密码）。客户可按下表用对应归口用户登录终端，复现指南正文中各场景的终端任务。管理端（控制台）的访问信息由平台方在 POC 现场单独提供，本页不对外披露。</p>
+  <div class="callout warn">
+    <h5>⚠️ 凭证使用须知</h5>
+    <ul class="note" style="margin:6px 0; padding-left:20px;">
+      <li>下列归口用户为 POC 演示专用账号，统一密码见「业务终端访问」小节；每个归口用户仅能看到本部门可见范围内的资源。</li>
+      <li>请勿在公开渠道传播本页地址与凭证；如需长期试用，请联系平台方正式签发。</li>
+      <li>首次登录如被强制改密，请按页面提示完成修改后再运行任务。</li>
+    </ul>
+  </div>
+  <p>对应的 POC 指南正文：<a href="starclothing-poc-guide.html">《服装企业 AI 底座 POC 指南 · 星途服装》</a></p>
+</section>
+
+<section id="terminal">
+  <h2 class="sec">一、业务终端访问</h2>
+  <div class="callout">
+    <h5>🖥️ 业务终端（客户可登录自助验证 7 个场景）</h5>
+    <div class="kv">
+      <div class="row"><b>登录地址：</b><code>https://infra.aievolve.org.cn/starclothing/terminal/login</code></div>
+      <div class="row"><b>统一密码：</b><code>12345678</code>（七个归口用户统一密码）</div>
+    </div>
+    <div class="row note">登录后在「新建任务」中选 <code>glm</code> / <code>smart</code> / <code>balanced</code> 模型别名（均路由到 glm-5.2），粘贴指南第二章对应场景的提示词，用 <code>/starclothing-xxx-query</code> 选择技能后提交运行。</div>
+    <div class="row note"><b>归口用户 Skills 包：</b>登录后点左下角用户名 →「导出 Skills」即时生成 zip 下载。包内 <code>.mcp.json</code> 已内嵌该归口用户 scope 的即时轮换 API key，第三方智能体终端（Claude Code / Codex / WorkBuddy）解压即可调用平台本体 / 技能 / 知识库 / 记忆 / 数据接口五项能力，无需另行输入凭证；下次导出自动轮换旧 key。</div>
+  </div>
+</section>
+
+<section id="scenarios">
+  <h2 class="sec">二、归口用户与场景对照</h2>
+  <p class="lead">七个场景各由一个归口部门用自己的账号去跑；下表给出「场景 → 归口部门 / 登录用户 / 选模型 / 选技能」的对照，客户按表任选一个场景即可复现。</p>
+  <table class="data">
+    <tr><th>场景</th><th>归口部门</th><th>登录用户</th><th>选模型</th><th>选技能</th></tr>
+    <tr><td><b>PD-1</b></td><td>开发部</td><td><code>dev-lead</code></td><td>balanced</td><td>/starclothing-plm-query</td></tr>
+    <tr><td><b>PD-2</b></td><td>设计部</td><td><code>fabric-dev</code></td><td>smart</td><td>/starclothing-scm-query</td></tr>
+    <tr><td><b>PD-3</b></td><td>品控部</td><td><code>qc-lead</code></td><td>smart</td><td>/starclothing-plm-query</td></tr>
+    <tr><td><b>SC-1</b></td><td>供应链部</td><td><code>supply-lead</code></td><td>balanced</td><td>/starclothing-scm-query + /starclothing-mes-query</td></tr>
+    <tr><td><b>SC-2</b></td><td>生产部</td><td><code>prod-lead</code></td><td>smart</td><td>/starclothing-mes-query + /starclothing-scm-query</td></tr>
+    <tr><td><b>SC-3</b></td><td>财务部</td><td><code>finance-lead</code></td><td>smart</td><td>/starclothing-crm-query + /mes + /erp-query</td></tr>
+    <tr><td><b>SC-4</b></td><td>商品部</td><td><code>merch-lead</code></td><td>balanced</td><td>/starclothing-scm-query + /starclothing-erp-query</td></tr>
+  </table>
+</section>
+
+<section id="systems">
+  <h2 class="sec">三、业务系统与管理端</h2>
+  <table class="data">
+    <tr><th>类别</th><th>项</th><th>值</th></tr>
+    <tr><td><b>模型</b></td><td>终端任务选模型</td><td><code>glm</code> / <code>smart</code> / <code>balanced</code>（均路由到 glm-5.2）</td></tr>
+    <tr><td><b>业务系统</b></td><td>PLM/SCM/ERP/MES/CRM 五类模拟（mock）系统</td><td>按归口部门各复制一份、共 13 套（通过接口密钥区分不同客户/租户）</td></tr>
+    <tr><td><b>管理端</b></td><td>控制台访问</td><td>由平台方现场提供，不在本页披露</td></tr>
+  </table>
+</section>
+
+<section id="steps">
+  <h2 class="sec">四、POC 验证建议步骤</h2>
+  <div class="callout key">
+    <ol style="margin:4px 0; padding-left:20px;">
+      <li>打开业务终端登录页，用任一归口用户登录（建议先用 <code>dev-lead</code> 跑 PD-1）。</li>
+      <li>新建任务 → 模型选 <code>balanced</code> → 粘贴指南第二章 PD-1 提示词 → 在输入框敲 <code>/</code> 选择技能 → 提交运行。</li>
+      <li>观察流式输出：会看到 <code>[tool_call]</code> 调用业务系统 → 结构化结果表 → <code>[final]</code> 生成 .docx 报告。</li>
+      <li>切换其他归口用户重复验证其余场景，体验“分部门只能看本部门资源”。</li>
+      <li>如需查看管理端配置（模型路由/智能体/工具/监控），联系平台方现场引导。</li>
+    </ol>
+  </div>
+</section>
+
+<section id="notes">
+  <h2 class="sec">五、说明</h2>
+  <ul class="note" style="padding-left:22px;">
+    <li>星途服装业务终端为独立租户（slug：<code>starclothing</code>），账号仅本租户可用。</li>
+    <li>所有归口用户共用统一密码 <code>12345678</code>；如客户现场已按安全策略改密，以改密后的口令为准。</li>
+    <li>管理端（控制台）凭证由平台方现场提供，不在指南正文与本页披露。</li>
+    <li>场景输出与管理端界面为基于真实演示数据渲染的示意图，具体数值以客户现场复跑结果为准。</li>
+  </ul>
+  <p class="footnote" style="margin-top:18mm; border-top:1px solid #e6eaf2; padding-top:8px;">
+    本附录由 ai_infra 平台编制，供 POC 评估使用。© 2026 ai_infra · 仅供 POC 评估使用。</p>
+</section>
+
+<button class="totop" id="totop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="返回顶部">↑</button>
+<script>
+(function(){
+  var b=document.getElementById('totop');
+  function on(){ if(window.scrollY>400){b.classList.add('show')}else{b.classList.remove('show')} }
+  window.addEventListener('scroll',on,{passive:true}); on();
+})();
+</script>
+</body>
+</html>

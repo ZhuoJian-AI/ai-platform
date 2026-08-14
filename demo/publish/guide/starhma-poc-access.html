@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="robots" content="noindex,nofollow">
+<title>星途热熔胶 POC 演示访问信息</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family:"Noto Sans CJK SC","Microsoft YaHei","Segoe UI",sans-serif; color:#1f2937; font-size:16px; line-height:1.85; margin:0; background:#f1f5fb; }
+.wrap { max-width:880px; margin:0 auto; padding:40px 28px 64px; }
+.topnav { position:sticky; top:0; z-index:10; background:rgba(15,23,42,.96); color:#fff; padding:12px 28px; display:flex; gap:16px; align-items:center; }
+.topnav .brand { font-weight:700; }
+.topnav a { color:#93c5fd; font-size:14px; }
+.topnav .back { margin-left:auto; }
+code { font-family:"Noto Sans Mono CJK",Consolas,monospace; background:#e8eefc; padding:1px 6px; border-radius:4px; color:#1e3a8a; font-size:13.5px; }
+.cover { background:linear-gradient(135deg,#0f172a,#1e3a8a,#1d4ed8); color:#fff; padding:48px 40px; border-radius:12px; margin-bottom:28px; }
+.cover h1 { margin:0 0 8px; font-size:30px; }
+.cover .sub { opacity:.9; }
+section { background:#fff; border:1px solid #e2e8f0; border-radius:10px; padding:24px 26px; margin:18px 0; }
+h2 { color:#1e3a8a; border-bottom:2px solid #60a5fa; padding-bottom:8px; margin-top:0; }
+table { width:100%; border-collapse:collapse; margin:12px 0; font-size:14px; }
+th { background:#0f172a; color:#fff; padding:10px; text-align:left; font-weight:600; }
+td { padding:9px 10px; border-bottom:1px solid #eef2f7; vertical-align:top; }
+tr:nth-child(even) td { background:#f8fafc; }
+.warn { border-left:4px solid #60a5fa; background:#eff6ff; padding:12px 16px; border-radius:0 8px 8px 0; margin:14px 0; }
+.note { font-size:13px; color:#6b7280; }
+.foot { text-align:center; color:#9aa3b2; font-size:12px; margin-top:32px; }
+.kv b { color:#0f172a; }
+</style>
+</head>
+<body>
+<nav class="topnav">
+  <span class="brand">星途热熔胶 POC · 访问信息</span>
+  <a class="back" href="https://infra.aievolve.org.cn/guide/starhma-poc-guide.html">← 返回 POC 指南</a>
+</nav>
+<div class="wrap">
+
+  <div class="cover">
+    <h1>星途热熔胶 POC 演示访问信息</h1>
+    <div class="sub">9 场景终端地址 + 归口账号 + 选模型 / 选技能 / 绑定智能体对照表</div>
+  </div>
+
+  <section id="intro">
+    <h2>📌 说明</h2>
+    <p>本页为星途热熔胶 POC 演示的<b>访问凭证页</b>（一企业一页），与《热熔胶企业 AI 底座 POC 指南》配套使用。指南只做业务方案介绍，凭证（地址 / 账号 / 密码）统一集中在本页。请妥善保管，勿外发。</p>
+    <div class="warn"><b>统一密码：</b><code>12345678</code>（以下所有归口业务用户与管理员均为同一密码）</div>
+  </section>
+
+  <section id="terminal">
+    <h2>🖥️ 业务终端（客户可登录自助验证 9 场景）</h2>
+    <div class="kv"><p><b>地址：</b><code>https://infra.aievolve.org.cn/starhma/terminal/login</code></p></div>
+    <p>登录后在「新建任务」中模型选 <code>glm-5.2</code>，绑定对应场景的模板智能体，粘贴指南第二章对应场景的提示词后提交运行。每个归口用户只能看到本部门 / 团队资源（组织级共享除外）。</p>
+  </section>
+
+  <section id="scenarios">
+    <h2>📋 场景 → 归口用户 / 选模型 / 选技能 / 绑定智能体 对照表</h2>
+    <table>
+      <tr><th>场景</th><th>任务名</th><th>登录用户</th><th>选模型</th><th>选技能（/-mention）</th><th>绑定智能体（template_agent_id）</th></tr>
+      <tr><td>RDM-01</td><td>配方智能推荐与初始配比</td><td>rd-formulator</td><td>glm-5.2</td><td>/starhma-rd-frm-erp-query</td><td>配方智能推荐与初始配比<br><code>e5188ebd-24e3-4adc-8fa7-8118832da288</code></td></tr>
+      <tr><td>RDM-02</td><td>实验数据分析与报告生成</td><td>rd-analyst</td><td>glm-5.2</td><td>/starhma-rd-lab-frm-query</td><td>实验数据分析与报告生成<br><code>fe5e56d7-84cc-426a-920d-a8a17d90be71</code></td></tr>
+      <tr><td>SAL-01</td><td>智能询盘与初步粘接方案</td><td>sales-rep</td><td>glm-5.2</td><td>/starhma-sales-crm-frm-erp-query</td><td>智能询盘与初步粘接方案<br><code>911847f5-57a3-43f5-8d5b-b98b92918e21</code></td></tr>
+      <tr><td>MFG-01</td><td>智能排产与订单冲突识别</td><td>mfg-planner</td><td>glm-5.2</td><td>/starhma-mfg-mes-pcm-erp-query</td><td>智能排产与订单冲突识别<br><code>f881da63-63d9-4d6d-a6ff-71ec404941c8</code></td></tr>
+      <tr><td>EQP-01</td><td>设备预测性维护与保养提醒</td><td>eqp-maintainer</td><td>glm-5.2</td><td>/starhma-eqp-pcm-mes-query</td><td>设备预测性维护与保养提醒<br><code>9f6a623a-88dd-4b3c-a40f-3b58e6fb1872</code></td></tr>
+      <tr><td>SCM-01</td><td>库存智能预警与补货建议</td><td>scm-manager</td><td>glm-5.2</td><td>/starhma-scm-erp-crm-query</td><td>库存智能预警与补货建议<br><code>31065753-d025-44a4-8d7d-3fd48d5a0864</code></td></tr>
+      <tr><td>QAS-01</td><td>售后粘接故障智能诊断</td><td>qas-engineer</td><td>glm-5.2</td><td>/starhma-qas-qas-crm-frm-query</td><td>售后粘接故障智能诊断<br><code>011fa0f8-ef5a-417e-a1a4-881694794c81</code></td></tr>
+      <tr><td>ADM-01</td><td>跨系统经营数据汇总</td><td>admin-officer</td><td>glm-5.2</td><td>/starhma-admin-erp-crm-mes-query</td><td>跨系统经营数据汇总<br><code>269c904a-9a0b-4f35-81e1-2522e90989bf</code></td></tr>
+      <tr><td>DOC-01</td><td>文档智能处理与检索</td><td>doc-clerk</td><td>glm-5.2</td><td>/starhma-admin-doc-erp-crm-query</td><td>文档智能处理与检索<br><code>3c14d454-8f08-4e70-a613-83c14387036c</code></td></tr>
+    </table>
+    <p class="note">辅助用户 it-specialist（信息中心·AI 应用组，平台运维，非对外场景）密码同为 <code>12345678</code>。</p>
+  </section>
+
+  <section id="systems">
+    <h2>🧩 业务系统与管理端</h2>
+    <table>
+      <tr><th>类别</th><th>项</th><th>值</th></tr>
+      <tr><td rowspan="2"><b>业务系统</b></td><td>ERP/MES/CRM 三类复用 + FRM 配方研发管理 / PCM 工艺与设备管理 / QAS 质量与技术服务 三类热熔胶特有模拟（mock）系统</td><td>6 套组织级共享（一把 mock API Key 全星途热熔胶租户用），部门级技能只绑本部门授权端点子集</td></tr>
+      <tr><td>终端模型</td><td><code>glm-5.2</code>（真实模型 id，终端下拉直接列，经智谱路由）</td></tr>
+      <tr><td><b>管理端</b></td><td>控制台</td><td>管理员 <code>admin</code> / <code>12345678</code>（org_admin，登录后自动锁定星途热熔胶组织），访问信息由平台方现场引导</td></tr>
+    </table>
+  </section>
+
+  <section id="steps">
+    <h2>✅ POC 验证建议步骤</h2>
+    <ol>
+      <li>打开业务终端登录页，用任一归口用户登录（建议先 <code>rd-formulator</code> 跑 RDM-01 配方智能推荐，或 <code>qas-engineer</code> 跑 QAS-01 售后粘接故障智能诊断——热熔胶行业特色场景）。</li>
+      <li>新建任务 → 模型选 <code>glm-5.2</code> → 绑定对应模板智能体 → 粘贴指南第二章对应提示词 → 提交运行。</li>
+      <li>观察流式输出：会看到 <code>tool_call</code> 调用业务系统 → 跨系统凑齐数据 → 结构化结果表 → <code>final</code> 收尾。</li>
+      <li>切换其他归口用户重复验证其余场景，体验"分级 scope 只能看本部门资源"；EQP-01 设备预测性维护为支撑类场景（P1），调 predictEquipmentFault 返风险等级与保养提醒。</li>
+      <li>如需查看管理端配置（模型路由 / 智能体 / 工具 / 监控），用 <code>admin</code> 登录控制台，或联系平台方现场引导。</li>
+    </ol>
+  </section>
+
+  <section id="notes">
+    <h2>⚠️ 注意事项</h2>
+    <ul>
+      <li>本页凭证仅供 POC 评估使用，演示数据为 mock 虚构（配方 FORM-CUS-002 / 批次 BAT-2026-0702 / 客诉 CC-2026-001 / 设备 EQ-MTR-02 / 合同 CT-HMA-001 等），非真实生产数据。</li>
+      <li>业务终端与管理端共用同一密码 <code>12345678</code>，POC 结束后由平台方回收 / 重置。</li>
+      <li>本页不引用星途服装、敏捷空调、敏睿钢铁、敏睿文具、星途勘探等其他租户的任何信息。</li>
+    </ul>
+  </section>
+
+  <p class="foot">© 2026 ai_infra · 星途热熔胶 POC 访问页 · 与 <a href="https://infra.aievolve.org.cn/guide/starhma-poc-guide.html">热熔胶企业 AI 底座 POC 指南</a> 配套</p>
+</div>
+</body>
+</html>

@@ -1,0 +1,519 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SEC 保密与合规管理系统",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/confidential-docs": {
+      "get": {
+        "tags": [
+          "SEC 保密与合规"
+        ],
+        "summary": "涉密文档清单（按密级/项目过滤）",
+        "operationId": "listConfidentialDocs",
+        "parameters": [
+          {
+            "name": "classification",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "机密/秘密/内部",
+              "title": "Classification"
+            },
+            "description": "机密/秘密/内部"
+          },
+          {
+            "name": "project_code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "项目号 PRJ-...",
+              "title": "Project Code"
+            },
+            "description": "项目号 PRJ-..."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "title": "Response Listconfidentialdocs"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/confidential-docs/{doc_no}": {
+      "get": {
+        "tags": [
+          "SEC 保密与合规"
+        ],
+        "summary": "涉密文档详情（密级/敏感词/来源）",
+        "operationId": "getConfidentialDoc",
+        "parameters": [
+          {
+            "name": "doc_no",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "涉密文档号，如 SECDOC-001",
+              "title": "Doc No"
+            },
+            "description": "涉密文档号，如 SECDOC-001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Getconfidentialdoc"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/confidential-marks": {
+      "get": {
+        "tags": [
+          "SEC 保密与合规"
+        ],
+        "summary": "涉密标记清单（密级/条文/图样定位；按文档过滤）",
+        "operationId": "listConfidentialFlags",
+        "parameters": [
+          {
+            "name": "doc_no",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "涉密文档号 SECDOC-...",
+              "title": "Doc No"
+            },
+            "description": "涉密文档号 SECDOC-..."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "title": "Response Listconfidentialflags"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/desensitization-records": {
+      "get": {
+        "tags": [
+          "SEC 保密与合规"
+        ],
+        "summary": "脱敏记录清单（脱密产物 + 处理方式）",
+        "operationId": "listDesensitizationRecords",
+        "parameters": [
+          {
+            "name": "source_system",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "DES/EPC",
+              "title": "Source System"
+            },
+            "description": "DES/EPC"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "title": "Response Listdesensitizationrecords"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/behavior-logs": {
+      "get": {
+        "tags": [
+          "SEC 保密与合规"
+        ],
+        "summary": "行为日志清单（含异常标记）",
+        "operationId": "listBehaviorLogs",
+        "parameters": [
+          {
+            "name": "risk_level",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "高/中/低",
+              "title": "Risk Level"
+            },
+            "description": "高/中/低"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "title": "Response Listbehaviorlogs"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/scan-confidentiality": {
+      "get": {
+        "tags": [
+          "SEC 保密与合规"
+        ],
+        "summary": "涉密内容检测（按来源文档号 DES DWG-/EPC PDOC- 返密级+标记+是否需脱密）",
+        "operationId": "scanConfidentiality",
+        "parameters": [
+          {
+            "name": "source_doc",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "来源文档号，如 DWG-STR-001 或 PDOC-BAT-001；亦可直传 SECDOC-001",
+              "title": "Source Doc"
+            },
+            "description": "来源文档号，如 DWG-STR-001 或 PDOC-BAT-001；亦可直传 SECDOC-001"
+          },
+          {
+            "name": "source_system",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "来源系统：DES/EPC；直传 SECDOC- 时任填",
+              "default": "DES",
+              "title": "Source System"
+            },
+            "description": "来源系统：DES/EPC；直传 SECDOC- 时任填"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Scanconfidentiality"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/desensitize": {
+      "get": {
+        "tags": [
+          "SEC 保密与合规"
+        ],
+        "summary": "文档脱密（按来源文档号产出脱敏记录）",
+        "operationId": "desensitizeDocument",
+        "parameters": [
+          {
+            "name": "source_doc",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "来源文档号，如 DWG-ARC-001 或 PDOC-BAT-001",
+              "title": "Source Doc"
+            },
+            "description": "来源文档号，如 DWG-ARC-001 或 PDOC-BAT-001"
+          },
+          {
+            "name": "source_system",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "来源系统：DES/EPC",
+              "default": "DES",
+              "title": "Source System"
+            },
+            "description": "来源系统：DES/EPC"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Desensitizedocument"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/behavior-anomalies": {
+      "get": {
+        "tags": [
+          "SEC 保密与合规"
+        ],
+        "summary": "保密行为预警（高频下载/非工作时间/尝试外发，按风险排序）",
+        "operationId": "listBehaviorAnomalies",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array",
+                  "title": "Response Listbehavioranomalies"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>文具贸易企业 AI 底座 POC 指南 · 敏睿文具 × ai_infra</title>
+<style>
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+body { font-family:"Noto Sans CJK SC","Noto Sans CJK","Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;
+  color:#1f2937; font-size:16px; line-height:1.85; margin:0; background:#eef1f6; -webkit-font-smoothing:antialiased; }
+a { color:#4338ca; text-decoration:none; }
+code, .mono { font-family:"Noto Sans Mono CJK","JetBrains Mono",Consolas,monospace; font-size:13.5px; background:#eef2ff; padding:1px 6px; border-radius:4px; color:#3730a3; }
+.topnav { position:sticky; top:0; z-index:100; background:rgba(255,255,255,.92); backdrop-filter:blur(10px);
+  border-bottom:1px solid #e6eaf2; display:flex; align-items:center; gap:18px; padding:10px max(24px, calc(50% - 480px)); }
+.topnav .brand { font-weight:700; color:#1e1b4b; font-size:15px; white-space:nowrap; }
+.topnav .brand span { color:#4338ca; }
+.topnav .links { display:flex; gap:6px; flex-wrap:wrap; }
+.topnav .links a { color:#475069; font-size:13.5px; padding:6px 12px; border-radius:6px; }
+.topnav .links a:hover { background:#eef2ff; color:#4338ca; }
+.topnav .right { margin-left:auto; font-size:12.5px; color:#9aa3b2; }
+section { max-width:100%; margin:0; padding:52px max(24px, calc(50% - 480px)); background:#fff; border-radius:0; box-shadow:none; }
+.cover { position:relative; overflow:hidden; color:#fff;
+  background:linear-gradient(135deg,#1e1b4b 0%,#312e81 45%,#4338ca 80%,#4f46e5 100%);
+  padding:84px max(24px, calc(50% - 480px)) 104px; min-height:62vh; display:flex; flex-direction:column; justify-content:center; }
+.cover::before { content:""; position:absolute; right:-140px; top:-140px; width:380px; height:380px;
+  background:radial-gradient(circle,rgba(99,102,241,.32) 0%,transparent 60%); border-radius:50%; }
+.cover::after { content:""; position:absolute; left:-80px; bottom:-120px; width:300px; height:300px;
+  background:radial-gradient(circle,rgba(139,92,246,.2) 0%,transparent 60%); border-radius:50%; }
+.cover .brand { font-size:14px; letter-spacing:3px; opacity:.82; position:relative; }
+.cover h1 { color:#fff; font-size:clamp(34px,6vw,56px); margin:20px 0 8px; letter-spacing:1px; line-height:1.15; position:relative; }
+.cover .sub { font-size:clamp(16px,2.5vw,22px); opacity:.92; font-weight:300; position:relative; }
+.cover .rule { width:120px; height:3px; background:#4f46e5; margin:20px 0; border-radius:2px; position:relative; }
+.cover .tags { position:relative; }
+.cover .meta { margin-top:auto; font-size:13px; opacity:.85; line-height:1.9; position:relative; }
+.cover .tag { display:inline-block; border:1px solid rgba(255,255,255,.4); border-radius:20px; padding:4px 12px; margin:3px 6px 3px 0; font-size:12px; }
+.toc { padding-top:48px; }
+.toc h2 { border-bottom:3px solid #4338ca; padding-bottom:10px; margin-top:0; }
+.toc ol { list-style:none; padding-left:0; counter-reset:toc; }
+.toc > ol > li { margin:14px 0; padding-left:36px; position:relative; font-size:17px; }
+.toc > ol > li::before { counter-increment:toc; content:counter(toc); position:absolute; left:0; top:3px;
+  width:24px; height:24px; background:#4338ca; color:#fff; border-radius:50%; text-align:center; line-height:24px; font-size:12px; }
+.toc > ol > li a { color:#1e1b4b; }
+.toc > ol > li a:hover { color:#4338ca; text-decoration:underline; }
+.toc .sub { padding-left:0; color:#6b7280; font-size:14px; margin-top:6px; }
+h2.sec { font-size:28px; margin:6px 0 20px; padding:8px 0 8px 16px;
+  border-left:6px solid #4338ca; background:linear-gradient(90deg,#eef2ff 0%,#fff 96%); border-radius:4px; }
+h3.sub { font-size:21px; margin:40px 0 12px; color:#1e1b4b; padding-top:8px; }
+h3.sub .n { color:#4338ca; }
+h4 { font-size:16px; margin:20px 0 6px; color:#3730a3; }
+.lead { color:#4b5563; }
+.card { border:1px solid #e6eaf2; border-radius:10px; padding:18px 20px; margin:16px 0; background:#fff; }
+.card.tinted { background:#f5f3ff; }
+.pill { display:inline-block; font-size:12px; padding:3px 11px; border-radius:12px; margin-right:6px; font-weight:600; }
+.pill.blue{background:#e0ecff;color:#1d4ed8;} .pill.green{background:#e6f7ec;color:#15803d;} .pill.gray{background:#eef1f5;color:#475069;} .pill.amber{background:#eef2ff;color:#4338ca;}
+.agentline{font-size:13.5px;margin:2px 0 10px;padding:6px 12px;background:linear-gradient(90deg,#e0e7ff,#f5f3ff);color:#3730a3;border:1px solid #c7d2fe;border-radius:6px;border-left:4px solid #4338ca;}
+.agentline b{color:#312e81;} .agentline code{background:#c7d2fe;color:#312e81;}
+table.data { width:100%; border-collapse:collapse; margin:16px 0; font-size:14px; background:#fff; overflow:hidden; }
+table.data th { background:#1e1b4b; color:#fff; padding:11px 12px; text-align:left; font-weight:600; font-size:13px; }
+table.data td { padding:10px 12px; border-bottom:1px solid #eceff4; vertical-align:top; }
+table.data tr:nth-child(even) td { background:#f5f3ff; }
+.callout { border-left:4px solid #4338ca; background:#eef2ff; padding:14px 18px; border-radius:0 8px 8px 0; margin:18px 0; }
+.callout.warn { border-left-color:#f59e0b; background:#fff8ec; }
+.callout.key  { border-left-color:#10b981; background:#ecfdf5; }
+.callout h5 { margin:0 0 6px; font-size:15px; color:#1e1b4b; }
+.kv { display:flex; gap:12px; flex-wrap:wrap; margin:8px 0; }
+.kv .row { font-size:14px; } .kv .row b { color:#1e1b4b; }
+.prompt { background:#1e1b4b; color:#f5f3ff; border-radius:10px; padding:16px 18px;
+  font-family:"Noto Sans Mono CJK",Consolas,monospace; font-size:14px; line-height:1.7; white-space:pre-wrap; position:relative; margin-top:8px; }
+.prompt .label { position:absolute; top:-11px; left:14px; background:#4338ca; color:#fff;
+  font-family:"Noto Sans CJK SC",sans-serif; font-size:11px; padding:2px 10px; border-radius:10px; }
+.realshot { width:100%; border:1px solid #d8dee8; border-radius:10px; box-shadow:0 6px 22px rgba(30,27,75,.12); display:block; margin:10px 0 6px; }
+.cap { font-size:12.5px; color:#6b7280; text-align:center; margin:0 0 20px; }
+.grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.note { font-size:13px; color:#6b7280; }
+ul.tight { margin:8px 0 12px; padding-left:22px; } ul.tight li { margin:5px 0; }
+.footnote { font-size:12px; color:#9aa3b2; margin-top:12px; }
+.totop { position:fixed; right:24px; bottom:24px; width:46px; height:46px; border-radius:50%;
+  background:#1e1b4b; color:#fff; border:none; font-size:20px; cursor:pointer; box-shadow:0 6px 18px rgba(0,0,0,.22);
+  opacity:0; pointer-events:none; transition:opacity .25s; z-index:90; }
+.totop.show { opacity:1; pointer-events:auto; }
+.totop:hover { background:#4338ca; }
+@media (max-width:760px) {
+  body { font-size:15px; }
+  section { padding:24px 18px; margin-bottom:16px; }
+  .cover { padding:56px 22px 64px; min-height:50vh; }
+  .grid2 { grid-template-columns:1fr; }
+  .topnav { padding:8px 14px; gap:10px; flex-wrap:wrap; }
+  .topnav .links a { font-size:12px; padding:4px 8px; }
+  .topnav .right { display:none; }
+  table.data { font-size:12.5px; }
+  table.data th, table.data td { padding:8px 8px; }
+}
+@media print {
+  .topnav, .totop { display:none; }
+  body { background:#fff; font-size:11pt; }
+  section { box-shadow:none; max-width:none; margin:0; border-radius:0; }
+  .page-break { page-break-after:always; }
+}
+</style>
+</head>
+<body>
+<nav class="topnav">
+  <div class="brand">ai<span>infra</span> · 文具贸易企业 AI 底座 POC 指南</div>
+  <div class="links">
+    <a href="#top">首页</a>
+    <a href="#toc">目录</a>
+    <a href="#ch1">企业概况</a>
+    <a href="#ch2">九大场景</a>
+    <a href="#ch3">管理端</a>
+  </div>
+  <div class="right">敏睿文具 × ai_infra · 2026-07</div>
+</nav>
+
+
+<!-- ===================== 封面 ===================== -->
+<section class="cover" id="top">
+  <div class="brand">ai_infra · 企业级 AI 底座平台</div>
+  <h1>文具贸易企业<br>AI 底座 POC 指南</h1>
+  <div class="sub">敏睿文具 × ai_infra 九大场景全链路验证</div>
+  <div class="rule"></div>
+  <div class="tags">
+    <span class="tag">模型路由器</span>
+    <span class="tag">智能体平台</span>
+    <span class="tag">工具连接器</span>
+    <span class="tag">应用监控台</span>
+    <span class="tag">分部门安全</span>
+  </div>
+  <div class="meta">
+    面向对象：文具贸易企业业务与信息化负责人<br>
+    编制日期：2026 年 7 月　|　版本：POC v1.0<br>
+    涵盖场景：销售 / 电商 / 市场 / 供应链 / 产品 / 客服 / 财务 / 人力 / 法务 共 9 场景
+  </div>
+</section>
+
+<!-- ===================== 目录 ===================== -->
+<section class="toc page-break" id="toc">
+  <h2>目　录</h2>
+  <ol>
+    <li><a href="#ch1">文具贸易企业基本情况与业务痛点</a>
+      <div class="sub">1.1 敏睿文具企业概况　1.2 业务现状与九类痛点　1.3 九大场景需求总览</div></li>
+    <li><a href="#ch2">九大场景的 AI 解决方案</a>
+      <div class="sub">2.1 渠道健康度监测与销售补货预测　2.2 线上渠道秩序管控与渠道效能分析　2.3 竞品动态监测与 B 端营销物料生成
+      2.4 报关单证智能处理与库存补货规划　2.5 渠道假货识别与全渠道反馈分析　2.6 售后工单智能处理与 B 端客服辅助
+      2.7 发票识别审核与费用对账　2.8 招聘人岗匹配与人事事务　2.9 合同智能审核与渠道维权合规</div></li>
+    <li><a href="#ch3">AI 底座管理端配置</a>
+      <div class="sub">3.1 平台总览　3.2 组织管理　3.3 模型路由器　3.4 智能体平台　3.5 工具连接器　3.6 应用监控台　3.7 分级 scope 安全模型</div></li>
+  </ol>
+</section>
+
+  <!-- ===================== 第一章 ===================== -->
+  <section id="ch1">
+    <h2 class="sec">第一章　企业基本情况与业务痛点</h2>
+    <p>敏睿文具是一家书写工具进口贸易与 B 端分销企业（POC demo），核心负责全系列书写工具的进口贸易、全国 B 端分销网络运营、KA 大客户管理及渠道品牌管控。营收以 B 端渠道为载体，覆盖经销商体系、大型零售连锁、政企采购等多元 B 端客户。</p>
+    <h4>核心业务链路</h4>
+    <p>对日进口采购 → 报关单证 → 仓储库存 → 经销商/KA/电商分销 → 渠道秩序与防伪维权 → 售后服务 → 财务对账回款。环环相扣，任一环节信息滞后都会放大经营风险。</p>
+    <h4>典型痛点（按部门）</h4>
+    <table class="data">
+      <tr><th>部门</th><th>痛点</th><th>对场景</th></tr>
+      <tr><td>销售管理部</td><td>渠道黑箱：进货频次/回款/窜货/销量下滑靠人工汇总，断货与信用风险滞后</td><td>SAL-01</td></tr>
+      <tr><td>电商渠道部</td><td>线上秩序乱：非授权店铺/低价窜货/假冒难发现，投放 ROI 低效难调</td><td>ECM-01</td></tr>
+      <tr><td>市场营销部</td><td>竞品响应慢、订货会宣讲/渠道政策文本制作成本高、宣传文案合规风险</td><td>MKT-01</td></tr>
+      <tr><td>供应链与物流部</td><td>单证录入错、HS 归类风险、库存粗放断货、汇率波动侵蚀汇兑</td><td>SCM-01</td></tr>
+      <tr><td>产品管理部</td><td>假货难识别、全渠道反馈分散、产品本地化改进滞后</td><td>PRD-01</td></tr>
+      <tr><td>客户服务部</td><td>售后工单流转慢、客服响应慢、超时升级缺位</td><td>SVC-01</td></tr>
+      <tr><td>财务部</td><td>发票录入/验真/对账滞后、应收逾期、费用超支</td><td>FIN-01</td></tr>
+      <tr><td>人力资源部</td><td>简历初筛低、招聘周期长、入转调离/考勤等事务重复</td><td>HR-01</td></tr>
+      <tr><td>法务合规部</td><td>合同风险条款难审、维权取证难批量发起、宣传/贸易合规风险</td><td>LEG-01</td></tr>
+    </table>
+    <p class="footnote">注：归口用户均为 member 业务角色，无管理后台权限；每个用户<b>只能看到本部门 / 团队可见范围（scope）内的资源</b>（组织级共享除外）。本 POC 剔除多模态生成类场景（文生图/海报/音频），保留文本智能、数据智能、单据/图像识别（感知类，非生成）。</p>
+  </section>
+
+  <!-- ===================== 第二章 ===================== -->
+  <section id="ch2">
+    <h2 class="sec">第二章　九大场景的 AI 解决方案</h2>
+    <p>九个场景都用同一种<b>终端任务方式</b>：业务用户用自己的归口账号登录终端，新建一个任务、选好模型（<code>glm-5.2</code>）、粘贴一段很短的提示词（写明"要做什么 + 针对哪些对象"后用 <code>/技能名</code> 引用技能）即可运行。智能体会自主判断该调哪些业务系统、按什么顺序查，跨系统把数据凑齐，边算边输出结构化结果，最后自动生成一份 .docx 报告可直接下发。提示词之所以能写得很短，是因为"输出格式、业务名词字典、智能体人设与规则"已由平台和模板预先配好，用户只补"本次目标"。</p>
+
+    <div class="callout">
+      <h5>📖 名词速查</h5>
+      <div class="kv">
+        <div class="row"><b>产品码（SKU-ZB-）</b>：文具产品主数据码，如 SKU-ZB-G001（中性笔 0.5 黑）；与 ERP 物料码 M-ZB- 不同码空间，按 product_code/material_code 关联。</div>
+        <div class="row"><b>经销商（DLR-）/KA（KA-）</b>：B 端客户码，DLR- 经销商、KA- 大客户、EC- 电商授权店、EXP- 海外。</div>
+        <div class="row"><b>报关单（CD-）</b>：进出口报关单号，如 CD202607001，引用采购单 PO-；发票 INV- 关联凭证 BV-AS-。</div>
+        <div class="row"><b>假货样本（CTF-）</b>：抽检/维权取证样本码，如 CTF20260701；其 evidence_code 关联渠道取证 EV- 与违规商家 MR-。</div>
+        <div class="row"><b>归口部门</b>：负责某项业务的部门，每个场景由一个归口部门用自己的账号去跑。</div>
+        <div class="row"><b>vibe working</b>：AI 作员工副驾驶辅助日常工作，不对终端客户直接交互。</div>
+        <div class="row"><b>RAG</b>：检索增强生成——先在企业知识库检索相关内容、再据此作答，而非凭空编。</div>
+        <div class="row"><b>本体</b>：用 Markdown 写的业务"字典"，告诉 AI 每个业务名词是什么、有哪些字段和编码规则。</div>
+        <div class="row"><b>端点/技能（skill）</b>：业务系统查询接口；一组端点打包成"功能工具"，智能体用 <code>/技能名</code> 引用。</div>
+        <div class="row"><b>流式输出</b>：AI 边算边把结果一段段吐出，不用等全部算完。</div>
+        <div class="row"><b>作用域（scope）</b>：资源可见范围，按 组织→部门→团队→用户 逐级限定。</div>
+        <div class="row"><b>glm-5.2</b>：本 POC 使用的大模型（智谱出品），终端下拉直接列真实模型 id。</div>
+      </div>
+    </div>
+
+    <!-- ============ SAL-01 ============ -->
+    <h3 class="sub" id="sal01"><span class="n">2.1</span> SAL-01 渠道健康度监测与销售补货预测</h3>
+    <div class="grid2">
+      <div>
+        <p><span class="pill blue">销售管理部·销售运营组</span><span class="pill green">CRM + ERP</span><span class="pill gray">glm-5.2</span></p>
+        <p class="lead">替代渠道经理凭经验盯盘：调 CRM 经销商客户(DLR-)/KA(KA-) + 销售订单(SO-) + 应收(REC-) + 回访，ERP 物料库存(M-ZB-)可承诺，检索「经销商画像与渠道规则库」取信用评分规则 + 销量预测因子，输出渠道健康度评分 + 销售预测与补货建议 + KA 运营建议。</p>
+        <div class="callout"><h5>提示词（直接复制）</h5>
+          <div class="agentline"><b>绑定智能体：</b>渠道健康度与销售补货</div>
+          <div class="prompt"><span class="label">composer</span>对经销商渠道做健康度监测 + 销售预测与补货建议，重点 DLR-01（华东经销商）、DLR-03（华南）。扫所有经销商与未交付订单，按渠道检索经销商画像与渠道规则库给健康度评分与补货建议。
+
+/agilestationery-sales-crm-erp-query</div>
+        </div>
+      </div>
+      <div>
+        <h4>输出结构</h4>
+        <ul class="tight">
+          <li>经销商健康度评分表（经销商 DLR-/KA- | 信用等级 | 进货频次 | 回款周期 | 窜货风险 | 健康分 | 预警）</li>
+          <li>销售预测与补货建议表（产品 SKU-ZB-/物料 M-ZB- | 区域 | 预测销量 | 当前库存 | 安全库存 | 补货量 | 断货风险）</li>
+          <li>KA 大客户运营建议（交叉销售 | 品类扩容 | 流失预警 | 挽留机制）</li>
+        </ul>
+      </div>
+    </div>
+    <img class="realshot" src="shots/agilestationery/sal01_top.png" alt="SAL-01 终端任务第一屏">
+    <div class="cap">图 2-1①　SAL-01 第一屏（任务入口 + composer 提示词 + 首条消息回放）</div>
+    <img class="realshot" src="shots/agilestationery/sal01.png" alt="SAL-01 终端任务执行结果">
+    <div class="cap">图 2-1②　SAL-01 最后一屏（归口用户视图：健康度评分 + 补货建议 + KA 运营）</div>
+
+    <!-- ============ ECM-01 ============ -->
+    <h3 class="sub" id="ecm01"><span class="n">2.2</span> ECM-01 线上渠道秩序管控与渠道效能分析</h3>
+    <div class="grid2">
+      <div>
+        <p><span class="pill blue">电商渠道部·电商运营组</span><span class="pill green">CHN + CRM</span><span class="pill gray">glm-5.2</span></p>
+        <p class="lead">替代电商运营人工巡查：调 CHN 渠道商家(MR-)授权状态 + 低价窜货违规(PV-) + 非授权店铺(UNS-) + 取证(EV-) + scoreViolationRisk 维权队列 + 渠道效能(GMV/投放/转化/退货/ROI)，检索「渠道秩序与平台规则库」取判定与投放优化规则，输出违规风险队列 + 渠道效能分析 + 秩序处置建议。</p>
+        <div class="callout"><h5>提示词（直接复制）</h5>
+          <div class="agentline"><b>绑定智能体：</b>渠道秩序与效能分析</div>
+          <div class="prompt"><span class="label">composer</span>对线上渠道做秩序管控与渠道效能分析，重点 MR-EC-09（淘宝冒名店，假冒+低价）、MR-DL-12（义乌窜货商，假冒+跨区）+ 渠道效能拼多多 ROI 下降。扫所有非授权店铺与违规取证，按渠道检索渠道秩序与平台规则库给风险队列与处置建议。
+
+/agilestationery-ecom-chn-crm-query</div>
+        </div>
+      </div>
+      <div>
+        <h4>输出结构</h4>
+        <ul class="tight">
+          <li>违规商家风险队列（商家 MR- | 渠道 | 授权 | 违规数 | 假冒取证 EV- | 风险等级 | 维权优先级）</li>
+          <li>渠道效能分析（渠道 | GMV | 投放 | 转化率 | 退货率 | ROI | 趋势）</li>
+          <li>渠道秩序处置建议（非授权店铺 UNS- | 平台 | 取证 | 维权动作）</li>
+        </ul>
+      </div>
+    </div>
+    <img class="realshot" src="shots/agilestationery/ecm01_top.png" alt="ECM-01 终端任务第一屏">
+    <div class="cap">图 2-2①　ECM-01 第一屏</div>
+    <img class="realshot" src="shots/agilestationery/ecm01.png" alt="ECM-01 终端任务执行结果">
+    <div class="cap">图 2-2②　ECM-01 最后一屏（归口用户视图：违规风险队列 + 渠道效能 + 处置建议）</div>
+
+    <!-- ============ MKT-01 ============ -->
+    <h3 class="sub" id="mkt01"><span class="n">2.3</span> MKT-01 竞品动态监测与 B 端营销物料生成</h3>
+    <div class="grid2">
+      <div>
+        <p><span class="pill blue">市场营销部·市场分析组</span><span class="pill green">CHN + CRM</span><span class="pill gray">glm-5.2</span></p>
+        <p class="lead">替代市场分析手工盯竞品 + 内容手写：调 CHN 竞品动态(CMP-) + 渠道效能对比，CRM 商机与客户偏好，检索「竞品情报与营销物料库」取监测框架 + 物料规范 + 合规禁用词，输出竞品动态周报 + <b>纯文本</b> B 端营销物料（订货会宣讲/渠道政策/陈列规范）+ 合规初审。<b>仅纯文本生成，不做海报/图片/音频</b>。</p>
+        <div class="callout"><h5>提示词（直接复制）</h5>
+          <div class="agentline"><b>绑定智能体：</b>竞品监测与营销物料</div>
+          <div class="prompt"><span class="label">composer</span>做竞品动态监测与 B 端营销物料生成，重点 CMP-01（百乐 V5 新品线上加码）、CMP-02（三菱政企集采）。扫所有竞品动态，按品类检索竞品情报与营销物料库给竞品周报 + 中性笔订货会宣讲文案（纯文本）+ 合规初审。
+
+/agilestationery-mkt-chn-query</div>
+        </div>
+      </div>
+      <div>
+        <h4>输出结构</h4>
+        <ul class="tight">
+          <li>竞品动态周报（竞品 CMP- | 品类 | 渠道政策 | 新品 | 价格 | KA 策略 | 弱点 | 对策）</li>
+          <li>B 端营销物料（订货会宣讲文案 / 渠道政策通知 / 陈列规范文本——纯文本，多版本）</li>
+          <li>合规初审（极限词/虚假宣传风险 | 修改建议 | 结论）</li>
+        </ul>
+      </div>
+    </div>
+    <img class="realshot" src="shots/agilestationery/mkt01_top.png" alt="MKT-01 终端任务第一屏">
+    <div class="cap">图 2-3①　MKT-01 第一屏</div>
+    <img class="realshot" src="shots/agilestationery/mkt01.png" alt="MKT-01 终端任务执行结果">
+    <div class="cap">图 2-3②　MKT-01 最后一屏（归口用户视图：竞品周报 + 纯文本物料 + 合规初审）</div>
+
+    <!-- ============ SCM-01 ============ -->
+    <h3 class="sub" id="scm01"><span class="n">2.4</span> SCM-01 报关单证智能处理与库存补货规划</h3>
+    <div class="grid2">
+      <div>
+        <p><span class="pill blue">供应链与物流部·报关与单证组</span><span class="pill green">CST + SCM + ERP</span><span class="pill gray">glm-5.2</span></p>
+        <p class="lead">替代报关员手工录单 + 库存员凭经验补货：调 CST 报关单(CD-)/HS 归类(HS-)/发票(INV-)验真/汇率(FX-)/合规校验，SCM 供应商(SUP-)/多家比价(ASQ)/补货建议/在途到货/交期异动，ERP 采购单(PO-)/库存(M-ZB-)，检索「报关合规与库存规则库」取归类标准 + 补货规则 + 汇率规则，输出报关单证处理 + HS 归类 + 库存补货 + 汇率预警。</p>
+        <div class="callout"><h5>提示词（直接复制）</h5>
+          <div class="agentline"><b>绑定智能体：</b>报关单证与库存补货</div>
+          <div class="prompt"><span class="label">composer</span>对当前进口报关单做单证识别与合规校验 + 库存补货规划，重点 CD202607001（SKU-ZB-G001 中性笔，已申报）、CD202607005（中性笔 0.4，异常-归类存疑）+ 发票 INV202607001 验真。扫所有在途报关单与低库存 SKU，按品类检索报关合规与库存规则库给归类/合规/补货/汇率建议。
+
+/agilestationery-supply-cst-scm-erp-query</div>
+        </div>
+      </div>
+      <div>
+        <h4>输出结构</h4>
+        <ul class="tight">
+          <li>报关单证处理表（报关单 CD- | 产品 | HS 码 | 状态 | 合规风险 | 发票 INV- 验真 | 关联采购 PO-）</li>
+          <li>HS 归类推荐（产品 | HS 码 | 名称 | 进口税率 | 增值税率 | 理由）</li>
+          <li>库存补货规划（物料 M-ZB- | 当前库存 | 安全库存 | 补货量 | 在途到货 | 交期异动）</li>
+          <li>汇率预警（货币对 | 汇率 | 趋势 | 付款时点建议）</li>
+        </ul>
+      </div>
+    </div>
+    <img class="realshot" src="shots/agilestationery/scm01_top.png" alt="SCM-01 终端任务第一屏">
+    <div class="cap">图 2-4①　SCM-01 第一屏</div>
+    <img class="realshot" src="shots/agilestationery/scm01.png" alt="SCM-01 终端任务执行结果">
+    <div class="cap">图 2-4②　SCM-01 最后一屏（归口用户视图：报关处理 + HS 归类 + 补货 + 汇率）</div>
+
+    <!-- ============ PRD-01 ============ -->
+    <h3 class="sub" id="prd01"><span class="n">2.5</span> PRD-01 渠道假货识别与全渠道反馈分析</h3>
+    <div class="grid2">
+      <div>
+        <p><span class="pill blue">产品管理部·产品与防伪组</span><span class="pill green">PIM</span><span class="pill gray">glm-5.2</span></p>
+        <p class="lead">替代人工目检鉴假 + 反馈散落：调 PIM 产品(SKU-ZB-) + 假货样本(CTF-) + 正品防伪档案 + identifyAuthenticity 真伪鉴定（<b>感知类图像比对，不生成图片</b>：比对笔身/包装/防伪标识）+ 全渠道反馈(FB-，质量/功能/包装/书写体验四维) + scoreCounterfeitRisk 假货分布，检索「假货特征与产品标准库」取比对要点，输出假货鉴定 + 假货分布 + 反馈分析 + 产品改进建议（反向输出日本总部）。</p>
+        <div class="callout"><h5>提示词（直接复制）</h5>
+          <div class="agentline"><b>绑定智能体：</b>假货识别与反馈分析</div>
+          <div class="prompt"><span class="label">composer</span>对渠道抽检样本做假货识别与全渠道反馈分析，重点 CTF20260701（SKU-ZB-G001 华南电商抽检，假货）、CTF20260704（SKU-ZB-M001 华北电商抽检，假货）+ 反馈 FB20260706（中性笔整批笔尖偏磨，严重）。扫所有假货样本与反馈，按产品检索假货特征与产品标准库给鉴定/分布/反馈/改进建议。
+
+/agilestationery-product-pim-query</div>
+        </div>
+      </div>
+      <div>
+        <h4>输出结构</h4>
+        <ul class="tight">
+          <li>假货鉴定表（样本 CTF- | 产品 SKU-ZB- | 来源 | 疑似特征 | 鉴定结论 | 置信度 | 风险 | 关联取证 EV-）</li>
+          <li>假货分布与风险（渠道 | 区域 | 假货频次 | 风险等级 | 维权建议）</li>
+          <li>全渠道反馈分析（产品 | 类型[质量/功能/包装/书写体验] | 频次 | 影响量 | 高频问题）</li>
+          <li>产品改进建议（反馈 → 改进方向 → 反向输出日本总部研发端）</li>
+        </ul>
+      </div>
+    </div>
+    <img class="realshot" src="shots/agilestationery/prd01_top.png" alt="PRD-01 终端任务第一屏">
+    <div class="cap">图 2-5①　PRD-01 第一屏</div>
+    <img class="realshot" src="shots/agilestationery/prd01.png" alt="PRD-01 终端任务执行结果">
+    <div class="cap">图 2-5②　PRD-01 最后一屏（归口用户视图：假货鉴定 + 分布 + 反馈 + 改进）</div>
+
+    <!-- ============ SVC-01 ============ -->
+    <h3 class="sub" id="svc01"><span class="n">2.6</span> SVC-01 售后工单智能处理与 B 端客服辅助</h3>
+    <div class="grid2">
+      <div>
+        <p><span class="pill blue">客户服务部·客服与售后组</span><span class="pill green">CRM + ERP</span><span class="pill gray">glm-5.2</span></p>
+        <p class="lead">替代客服手工分派工单：调 CRM 售后工单(CASE-) + 客户(DLR-/KA-) + 销售订单(SO-)资质校验 + 回访，ERP 库存(M-ZB-)与采购在途，检索「售后政策与工单规则库」取工单分派/超时升级/客服话术规则，输出工单处理 + 客服辅助 + 服务质量分析。</p>
+        <div class="callout"><h5>提示词（直接复制）</h5>
+          <div class="agentline"><b>绑定智能体：</b>售后工单与客服辅助</div>
+          <div class="prompt"><span class="label">composer</span>对当前售后工单做智能处理与客服辅助，重点 CASE-0002（KA-02 笔夹松动脱落，严重，8D）、CASE-0006（DLR-01 中性笔整批笔尖偏磨，严重，8D）+ CASE-0005（运输破损补发）。扫所有未闭环工单，按问题类型检索售后政策与工单规则库给资质校验/分派/超时升级建议。
+
+/agilestationery-service-crm-erp-query</div>
+        </div>
+      </div>
+      <div>
+        <h4>输出结构</h4>
+        <ul class="tight">
+          <li>售后工单处理表（工单 CASE- | 客户 | 产品 | 问题 | 严重度 | 资质校验 | 分派 | 处理结论 | 超时状态）</li>
+          <li>客服辅助（话术推荐 | 政策查询 | 历史订单上下文 | 复杂问题分派对象）</li>
+          <li>服务质量分析（问题类型 | 处理时效 | 满意度 | 高频短板）</li>
+        </ul>
+      </div>
+    </div>
+    <img class="realshot" src="shots/agilestationery/svc01_top.png" alt="SVC-01 终端任务第一屏">
+    <div class="cap">图 2-6①　SVC-01 第一屏</div>
+    <img class="realshot" src="shots/agilestationery/svc01.png" alt="SVC-01 终端任务执行结果">
+    <div class="cap">图 2-6②　SVC-01 最后一屏（归口用户视图：工单处理 + 客服辅助 + 服务质量）</div>
+
+    <!-- ============ FIN-01 ============ -->
+    <h3 class="sub" id="fin01"><span class="n">2.7</span> FIN-01 发票识别审核与费用对账</h3>
+    <div class="grid2">
+      <div>
+        <p><span class="pill blue">财务部·财务对账组</span><span class="pill green">ERP + CST + CRM</span><span class="pill gray">glm-5.2</span></p>
+        <p class="lead">替代财务手工录发票 + 手工对账：调 ERP 凭证(BV-AS-)/应付(ASAP)/采购(PO-)/成本中心(CC-ZB-)，CST 发票(INV-)识别验真/汇率/合规校验，CRM 应收(REC-)/客户/订单，检索「财务合规与发票规则库」取发票审核 + 应收 + 合规规则，输出发票验真 + 费用对账 + 应收催收 + 风险预警。终端一次登录跨 ERP/CST/CRM 调用（SSO 免登）。</p>
+        <div class="callout"><h5>提示词（直接复制）</h5>
+          <div class="agentline"><b>绑定智能体：</b>发票识别与费用对账</div>
+          <div class="prompt"><span class="label">composer</span>做发票识别审核与费用对账，重点发票 INV202607001（进项，关联凭证 BV-AS-2026-0701）、INV202607007（存疑-发票代码异常）+ 应收 DLR-03 逾期。扫所有发票与凭证/应付/应收做对账，差异率>2% 标异常，按场景检索财务合规与发票规则库给验真/对账/催收建议。
+
+/agilestationery-finance-erp-cst-crm-query</div>
+        </div>
+      </div>
+      <div>
+        <h4>输出结构</h4>
+        <ul class="tight">
+          <li>发票识别验真表（发票 INV- | 类型 | 方向 | 金额 | 税额 | 验真 | 关联凭证 BV- | 状态）</li>
+          <li>费用对账差异表（凭证 BV- ↔ 发票 INV- ↔ 采购 PO- ↔ 应收 REC- | 差异 | 差异率 | 异常等级）</li>
+          <li>应收催收清单（应收 REC- | 客户 | 余额 | 逾期天数 | 催办对象）</li>
+          <li>风险预警（毛利率 | 费用超支 | 回款逾期）</li>
+        </ul>
+      </div>
+    </div>
+    <img class="realshot" src="shots/agilestationery/fin01_top.png" alt="FIN-01 终端任务第一屏">
+    <div class="cap">图 2-7①　FIN-01 第一屏</div>
+    <img class="realshot" src="shots/agilestationery/fin01.png" alt="FIN-01 终端任务执行结果">
+    <div class="cap">图 2-7②　FIN-01 最后一屏（归口用户视图：发票验真 + 对账 + 催收 + 风险）</div>
+
+    <!-- ============ HR-01 ============ -->
+    <h3 class="sub" id="hr01"><span class="n">2.8</span> HR-01 招聘人岗匹配与人事事务</h3>
+    <div class="grid2">
+      <div>
+        <p><span class="pill blue">人力资源部·招聘组</span><span class="pill green">HRM</span><span class="pill gray">glm-5.2</span></p>
+        <p class="lead">替代 HR 手工筛简历：调 HRM 招聘需求(ASRC) + 简历(ASRM) + 岗位(P-，电商运营 P-EC/产品管理 P-PRD/报关 P-CUS 等) + 员工/考勤/薪酬/会议，检索「岗位JD与人事制度库」（团队级）取岗位 JD + 5 维度评估规则（学历15%/经验25%/行业25%/技能25%/软技能10%）+ 面试题库 + 人事制度，输出简历评估排序 + 推荐短名单 + 面试题 + 到岗催办 + 人事问答。</p>
+        <div class="callout"><h5>提示词（直接复制）</h5>
+          <div class="agentline"><b>绑定智能体：</b>招聘人岗匹配</div>
+          <div class="prompt"><span class="label">composer</span>对电商运营专员 P-EC 岗位做简历筛选与人岗匹配，招聘需求 ASRC（headcount 2，紧急）。扫该岗位所有简历，按岗位检索岗位JD与人事制度库给 5 维度评估排序 + 推荐短名单 + 面试题 + 到岗催办。
+
+/agilestationery-hr-hrm-query</div>
+        </div>
+      </div>
+      <div>
+        <h4>输出结构</h4>
+        <ul class="tight">
+          <li>简历评估排序表（排名 | 简历 ASRM | 姓名 | 学历 | 经验 | 行业 | 技能 | 软技能 | 综合 | 状态）</li>
+          <li>推荐短名单（top 5 + 匹配要点与短板）</li>
+          <li>面试题（3 通用 + 5 专业 + 2 案例）</li>
+          <li>到岗催办 + 人事问答（ASRC | headcount | 缺口 | 催办对象 + 考勤/薪资/福利）</li>
+        </ul>
+      </div>
+    </div>
+    <img class="realshot" src="shots/agilestationery/hr01_top.png" alt="HR-01 终端任务第一屏">
+    <div class="cap">图 2-8①　HR-01 第一屏</div>
+    <img class="realshot" src="shots/agilestationery/hr01.png" alt="HR-01 终端任务执行结果">
+    <div class="cap">图 2-8②　HR-01 最后一屏（归口用户视图：简历排序 + 短名单 + 面试题 + 催办）</div>
+
+    <!-- ============ LEG-01 ============ -->
+    <h3 class="sub" id="leg01"><span class="n">2.9</span> LEG-01 合同智能审核与渠道维权合规</h3>
+    <div class="grid2">
+      <div>
+        <p><span class="pill blue">法务合规部·合同与维权组</span><span class="pill green">CHN + CRM</span><span class="pill gray">glm-5.2</span></p>
+        <p class="lead">替代法务手工审合同 + 逐家维权：调 CHN 违规商家(MR-)/低价违规/非授权店铺/取证(EV-)/scoreViolationRisk 维权队列/竞品(CMP-)，CRM 经销商客户(DLR-)，检索「合同条款与合规规则库」取合同审核 + 维权流程 + 合规审查规则，输出合同风险审核 + 渠道维权清单（批量发起平台投诉）+ 合规审查（极限词/虚假宣传 + 进出口贸易合规）。</p>
+        <div class="callout"><h5>提示词（直接复制）</h5>
+          <div class="agentline"><b>绑定智能体：</b>合同审核与渠道维权</div>
+          <div class="prompt"><span class="label">composer</span>做合同智能审核与渠道维权合规，重点 MR-EC-09（淘宝冒名店，取证 EV20260701 + 假货 CTF20260701）、MR-EC-15（拼多多冒名，EV20260706 + CTF20260706）。扫所有违规取证，按场景检索合同条款与合规规则库给合同风险条款/维权清单/合规审查。
+
+/agilestationery-legal-chn-crm-query</div>
+        </div>
+      </div>
+      <div>
+        <h4>输出结构</h4>
+        <ul class="tight">
+          <li>合同审核（合同类型 | 风险条款[账期/违约/排他/返利] | 风险等级 | 修改建议）</li>
+          <li>渠道维权清单（商家 MR- | 违规 | 取证 EV- | 假货关联 CTF- | 维权动作 | 平台投诉状态）</li>
+          <li>合规审查（宣传文案极限词/虚假宣传 | 进出口贸易合规[海关/外汇/商检] | 风险点 | 建议）</li>
+        </ul>
+      </div>
+    </div>
+    <img class="realshot" src="shots/agilestationery/leg01_top.png" alt="LEG-01 终端任务第一屏">
+    <div class="cap">图 2-9①　LEG-01 第一屏</div>
+    <img class="realshot" src="shots/agilestationery/leg01.png" alt="LEG-01 终端任务执行结果">
+    <div class="cap">图 2-9②　LEG-01 最后一屏（归口用户视图：合同审核 + 维权清单 + 合规审查）</div>
+  </section>
+
+  <!-- ===================== 第三章 ===================== -->
+  <section id="ch3">
+    <h2 class="sec">第三章　AI 底座管理端配置</h2>
+    <p>ai_infra 控制台顶部为五个一级菜单（子系统），左侧为当前子系统的功能页面；所有资源按组织架构隔离。本章按子系统逐页介绍每个功能页，并附敏睿文具组织（以 <code>admin</code> 登录）下的真实页面截图。登录后组织自动锁定为当前管理员被指派的那个组织（顶部以标签展示本组织名，无需手动切换），所有查询自动限定在本组织内。</p>
+
+    <h3 class="sub"><span class="n">3.1</span> 平台总览与四组件</h3>
+    <p>平台是一站式 AI 基础设施，提供大模型路由、智能体编排、工具接入与应用监控四类能力，由五个子系统共享同一套后台控制台与基础设施（数据库 PostgreSQL + 缓存 Redis + 向量库 pgvector）。</p>
+    <table class="data">
+      <tr><th>子系统</th><th>定位</th><th>核心能力</th></tr>
+      <tr><td><b>组织管理</b></td><td>权限地基</td><td>组织→部门→团队三级层级、管理员与用户管理、速率/预算限额逐级收紧</td></tr>
+      <tr><td><b>模型路由器</b></td><td>统一大模型中转</td><td>API Key、模型提供商、DLP 安全围栏、模型路由与用量管控</td></tr>
+      <tr><td><b>智能体平台</b></td><td>智能体编排</td><td>工作空间、智能体配置、RAG 知识库、长期记忆</td></tr>
+      <tr><td><b>工具连接器</b></td><td>业务系统接入</td><td>数据接口、技能（功能工具）、本体</td></tr>
+      <tr><td><b>应用监控台</b></td><td>三子系统统一看板</td><td>调用量、Token、延迟、错误率、DLP、成功率</td></tr>
+    </table>
+    <p class="footnote">敏睿文具采用<b>四层提示词架构</b>：L1 短 composer（用户终端只写"目标+对象+/技能名"）/ L2 模板四段 system_prompt（人设/职责端点链/检索 RAG/业务规则/输出格式，落在归口部门智能体模板）/ L3 org-scope identifiers.md（业务名词字典+跨码空间映射，组织本体全员可见）/ L4 数据接口目录（可用端点，组织级全员可见）。喂 LLM 的内容<b>不含场景代号</b>（SAL-01 等），用具体示例码（DLR-01 / SKU-ZB-G001 / CD202607001 / CTF20260701），避免模型臆造编码导致 404。</p>
+
+    <h3 class="sub"><span class="n">3.2</span> 组织管理</h3>
+    <p>组织管理是全平台的权限地基。先建"组织 → 部门 → 团队"三级层级，每一级都能设两道上限：①<b>速率</b>（RPM/TPM）②<b>预算</b>（美元/Token）。下级能用的模型、速率和预算上限只能在上级范围内再收紧、不能突破上级；组织创建时的网址标识（Slug）一经设定不可修改。</p>
+    <h4>组织架构</h4>
+    <p>三栏列表：组织 → 部门 → 团队。敏睿文具下已建 9 个归口业务部门（销售管理 / 电商渠道 / 市场营销 / 供应链与物流 / 产品管理 / 客户服务 / 财务 / 人力资源 / 法务合规）+ 行政与IT 部，13 个团队。</p>
+    <img class="realshot" src="shots/agilestationery/mgmt/org-structure.png" alt="组织架构页">
+    <div class="cap">图 3-1　组织架构（敏睿文具 → 9+IT 部门 → 13 团队三级层级）</div>
+    <h4>用户管理</h4>
+    <p>管理组织内终端用户（组织成员），同组织内用户名唯一，可设角色（组织管理员 / 成员）与启用状态。敏睿文具下 16 个用户，9 个归口业务用户即在此维护。</p>
+    <img class="realshot" src="shots/agilestationery/mgmt/org-users.png" alt="用户管理页">
+    <div class="cap">图 3-2　用户管理（用户名 / 显示名 / 角色 / 部门 / 团队 / 状态）</div>
+
+    <h3 class="sub"><span class="n">3.3</span> 模型路由器</h3>
+    <p>统一的大模型中转站：分层级的 Key 体系、多家模型提供商管理、DLP 安全围栏。找 Key 时按 团队级 &gt; 部门级 &gt; 组织级 的顺序优先匹配。本 POC 的 LLM 提供商与路由策略与敏捷空调 / 敏睿钢铁 demo 一致（智谱 glm-5.2 等，真实 key 自 agileac 同步）。</p>
+    <h4>API Key 管理</h4>
+    <p>每个 Key 绑定到组织/部门/团队某个节点，自动继承该节点及其上层的可见范围与限额。敏睿文具下 16 个 Key（组织级默认 + 15 个团队级场景 Key）。</p>
+    <img class="realshot" src="shots/agilestationery/mgmt/keys.png" alt="API Key 管理页">
+    <div class="cap">图 3-3　API Key 管理（分部门 / 团队签发 + 速率/预算上限）</div>
+    <h4>模型提供商</h4>
+    <p>登记要对接的大模型厂商。敏睿文具下活跃提供商（智谱 glm-5.2 / Anthropic / DeepSeek / 阿里通义 text-embedding-v4 等经此路由，配置与敏捷空调一致）。</p>
+    <img class="realshot" src="shots/agilestationery/mgmt/providers.png" alt="模型提供商页">
+    <div class="cap">图 3-4　模型提供商（多家厂商 + 真实模型 id 路由）</div>
+    <h4>安全围栏</h4>
+    <p>对发给大模型的请求和返回的响应双向做脱敏/拦截。规则库是平台内置的只读模板（涵盖个人隐私、财务、凭证、医疗、文件等类别）。</p>
+    <img class="realshot" src="shots/agilestationery/mgmt/dlp.png" alt="安全围栏页">
+    <div class="cap">图 3-5　安全围栏 DLP（规则库 + 组织级范围生效）</div>
+
+    <h3 class="sub"><span class="n">3.4</span> 智能体平台</h3>
+    <p>基于流程编排：运行时按"加载配置 → 检索知识库(RAG) → 载入长期记忆 → 智能体与工具多步往返（大模型边想边调业务系统）→ 保存记忆 → 写运行日志"的顺序执行，结果边算边流式输出。敏睿文具采用<b>四层架构模板</b>：人设 / 业务规则 / 输出骨架由 agent 模板的 system_prompt 承载，用户终端只写"目标 + 对象 + 技能"几十字提示词，任务 config 绑 <code>template_agent_id</code> 即可继承技能与模型。</p>
+    <h4>工作空间</h4>
+    <p>智能体专用的文件读写区（沙箱，彼此隔离），随组织架构逐级嵌套。敏睿文具下随组织架构自动生成工作空间。</p>
+    <img class="realshot" src="shots/agilestationery/mgmt/agent-workspaces.png" alt="工作空间页">
+    <div class="cap">图 3-6　工作空间（产品与防伪专员个人沙箱文件管理）</div>
+    <h4>智能体</h4>
+    <p>一个 agent = 一份人设（system_prompt）+ 可选的 RAG 知识库 + 工作空间 + 判官模板。敏睿文具按 9 个场景归口部门建了 <b>9 个业务智能体</b>（全部门级 scope）。</p>
+    <h5 style="margin:14px 0 4px;color:#1e3a8a">敏睿文具智能体清单（9 个，部门级）</h5>
+    <table class="data">
+      <tr><th style="width:140px">组织节点</th><th>智能体</th><th style="width:240px">slug</th><th style="width:70px">RAG</th></tr>
+      <tr><td>销售管理部</td><td>渠道健康度与销售补货</td><td>agilestationery-sal-01-channel-health</td><td>有</td></tr>
+      <tr><td>电商渠道部</td><td>渠道秩序与效能分析</td><td>agilestationery-ecm-01-channel-order</td><td>有</td></tr>
+      <tr><td>市场营销部</td><td>竞品监测与营销物料</td><td>agilestationery-mkt-01-competitor-content</td><td>有</td></tr>
+      <tr><td>供应链与物流部</td><td>报关单证与库存补货</td><td>agilestationery-scm-01-customs-replenishment</td><td>有</td></tr>
+      <tr><td>产品管理部</td><td>假货识别与反馈分析</td><td>agilestationery-prd-01-counterfeit-feedback</td><td>有</td></tr>
+      <tr><td>客户服务部</td><td>售后工单与客服辅助</td><td>agilestationery-svc-01-after-sales</td><td>有</td></tr>
+      <tr><td>财务部</td><td>发票识别与费用对账</td><td>agilestationery-fin-01-invoice-reconciliation</td><td>有</td></tr>
+      <tr><td>人力资源部</td><td>招聘人岗匹配</td><td>agilestationery-hr-01-recruitment</td><td>有</td></tr>
+      <tr><td>法务合规部</td><td>合同审核与渠道维权</td><td>agilestationery-leg-01-contract-enforcement</td><td>有</td></tr>
+    </table>
+    <img class="realshot" src="shots/agilestationery/mgmt/agent-agents.png" alt="智能体页">
+    <div class="cap">图 3-7　智能体（产品管理部·假货识别与反馈分析，部门级 scope）</div>
+    <h4>RAG 知识库</h4>
+    <p>左中右三栏：组织架构树 · 知识库 · 文件夹与文档。系统按分块策略把文档切成小块并转成向量（text-embedding-v4）用于语义检索。敏睿文具按 scope 分级建了 9 个知识库（8 部门级 + 1 团队级）。</p>
+    <h5 style="margin:14px 0 4px;color:#1e3a8a">敏睿文具 RAG 知识库清单（9 个，按 scope 分级）</h5>
+    <table class="data">
+      <tr><th style="width:120px">组织节点</th><th style="width:180px">知识库</th><th>文档</th></tr>
+      <tr><td>销售管理部</td><td>经销商画像与渠道规则库</td><td>经销商 4 级分层(信用评分) + 销量预测与补货规则 + KA 运营规则</td></tr>
+      <tr><td>电商渠道部</td><td>渠道秩序与平台规则库</td><td>低价倾销判定 + 渠道效能指标口径 + 智能投放优化</td></tr>
+      <tr><td>市场营销部</td><td>竞品情报与营销物料库</td><td>竞品监测框架 + B 端文本物料规范 + 合规禁用词清单</td></tr>
+      <tr><td>供应链与物流部</td><td>报关合规与库存规则库</td><td>HS 归类标准 + 单据识别 + 补货规则 + 汇率预警</td></tr>
+      <tr><td>产品管理部</td><td>假货特征与产品标准库</td><td>防伪比对要点 + 品类生命周期 + 全渠道反馈四维分类</td></tr>
+      <tr><td>客户服务部</td><td>售后政策与工单规则库</td><td>退换货资质校验 + 工单分派/超时升级 + 客服话术</td></tr>
+      <tr><td>财务部</td><td>财务合规与发票规则库</td><td>发票识别验真 + 费用报销 + 应收账龄 + 风险合规</td></tr>
+      <tr><td>法务合规部</td><td>合同条款与合规规则库</td><td>合同风险条款 + 渠道维权流程 + 极限词/贸易合规</td></tr>
+      <tr><td>招聘组（团队级）</td><td>岗位JD与人事制度库</td><td>典型岗位 JD + 胜任力 + 5 维度评估 + 面试题 + 人事制度</td></tr>
+    </table>
+    <img class="realshot" src="shots/agilestationery/mgmt/agent-rag.png" alt="RAG 知识库页">
+    <div class="cap">图 3-8　RAG 知识库（产品管理部·假货特征与产品标准库 + 检索测试）</div>
+    <h4>长期记忆</h4>
+    <p>长期记忆以 markdown 形式存储，随组织架构自动生成。终端跑任务时按 用户→团队→部门→组织 四级聚合加载。</p>
+    <img class="realshot" src="shots/agilestationery/mgmt/agent-memory.png" alt="长期记忆页">
+    <div class="cap">图 3-9　长期记忆（产品与防伪专员个人记忆，markdown 存档）</div>
+
+    <h3 class="sub"><span class="n">3.5</span> 工具连接器</h3>
+    <p>接入业务系统并定义技能与本体。敏睿文具的 7 套 mock 业务系统统一建在<b>组织级</b>（一把 API Key 全敏捷文具用），但<b>部门级技能只绑本部门授权的端点子集</b>——同样的端点，不同部门技能绑不同的子集。</p>
+    <h4>数据接口</h4>
+    <p>敏睿文具 7 套组织级系统（ERP/CRM/SCM/HRM + PIM/CST/CHN），共 96 个数据接口。</p>
+    <h5 style="margin:14px 0 4px;color:#1e3a8a">敏睿文具数据接口清单（7 套组织级系统 / 96 个端点）</h5>
+    <table class="data">
+      <tr><th style="width:130px">组织节点</th><th style="width:200px">系统</th><th>数据接口（端点，含 identifyAuthenticity/recommendHsCode/verifyInvoice/scoreViolationRisk 等文具特有端点）</th></tr>
+      <tr><td>敏睿文具（组织级）</td><td>ERP 资源计划系统</td><td>共 16：listMaterials · listInventory · listPurchaseOrders · listPayables · listVouchers · listCostCenters · … · health</td></tr>
+      <tr><td>敏睿文具（组织级）</td><td>CRM 销售与经销商系统</td><td>共 14：listCustomers · getCustomer · listSalesOrders · listComplaints · listReceivables · listFollowUps · … · health</td></tr>
+      <tr><td>敏睿文具（组织级）</td><td>SCM 供应链协同系统</td><td>共 18：listSuppliers · listQuotations · compareQuotations · listReplenishmentSuggestions · listFabricArrivalPlans · listLeadtimeSnapshots · … · health</td></tr>
+      <tr><td>敏睿文具（组织级）</td><td>HRM 人力资源系统</td><td>共 17：listEmployees · listPositions · listResumesByPosition · listRecruitments · listPayrolls · … · health</td></tr>
+      <tr><td>敏睿文具（组织级）</td><td>PIM 产品与防伪系统（文具特有）</td><td>共 10：listProducts · getProduct · listAntiCounterfeitSamples · getAuthenticityProfile · identifyAuthenticity · listFeedback · scoreCounterfeitRisk · … · health</td></tr>
+      <tr><td>敏睿文具（组织级）</td><td>CST 报关与单证系统（文具特有）</td><td>共 11：listDeclarations · listHsCodes · recommendHsCode · listInvoices · verifyInvoice · getExchangeRate · checkCompliance · scoreDeclarationRisk · … · health</td></tr>
+      <tr><td>敏睿文具（组织级）</td><td>CHN 渠道与电商秩序系统（文具特有）</td><td>共 10：listMerchants · listPriceViolations · listUnauthorizedStores · listEvidence · listChannelPerformance · listCompetitors · scoreViolationRisk · … · health</td></tr>
+    </table>
+    <p class="note">说明：7 套系统统一组织级共享（一把 mock API Key），<b>部门级技能</b>只绑本部门场景授权的端点子集——同一套端点，销售部技能只绑 CRM+ERP 客户/订单/库存子集、产品部技能只绑 PIM 全端点，由技能 scope 控制，而非系统级复制。</p>
+    <img class="realshot" src="shots/agilestationery/mgmt/tools-data-interfaces.png" alt="数据接口页">
+    <div class="cap">图 3-10　数据接口目录（7 套组织级系统 / 96 端点）</div>
+    <h4>技能</h4>
+    <p>敏睿文具按归口部门配置了 9 个查询技能（9 场景归口部门各一个，行政与IT 部作平台运维方不设对外技能）。</p>
+    <h5 style="margin:14px 0 4px;color:#1e3a8a">敏睿文具技能清单（9 个，部门级）</h5>
+    <table class="data">
+      <tr><th style="width:140px">组织节点</th><th>技能（文件夹）</th></tr>
+      <tr><td>销售管理部</td><td>敏睿文具·销售部 查询技能（sales-crm-erp）</td></tr>
+      <tr><td>电商渠道部</td><td>敏睿文具·电商部 查询技能（ecom-chn-crm）</td></tr>
+      <tr><td>市场营销部</td><td>敏睿文具·市场部 查询技能（mkt-chn）</td></tr>
+      <tr><td>供应链与物流部</td><td>敏睿文具·供应链部 查询技能（supply-cst-scm-erp，跨 3 系统）</td></tr>
+      <tr><td>产品管理部</td><td>敏睿文具·产品部 查询技能（product-pim）</td></tr>
+      <tr><td>客户服务部</td><td>敏睿文具·客服部 查询技能（service-crm-erp）</td></tr>
+      <tr><td>财务部</td><td>敏睿文具·财务部 查询技能（finance-erp-cst-crm，跨 3 系统）</td></tr>
+      <tr><td>人力资源部</td><td>敏睿文具·人力资源部 查询技能（hr-hrm）</td></tr>
+      <tr><td>法务合规部</td><td>敏睿文具·法务部 查询技能（legal-chn-crm）</td></tr>
+    </table>
+    <img class="realshot" src="shots/agilestationery/mgmt/tools-skills.png" alt="技能页">
+    <div class="cap">图 3-11　技能（功能工具，按部门级文件夹存）</div>
+    <h4>本体</h4>
+    <p>用 Markdown 文件描述业务对象。敏睿文具建了 8 个组织级本体文件夹（ERP/CRM/SCM/HRM/PIM/CST/CHN + Cross）共 39 个文件，7 域含 <code>identifiers.md</code> 标识符约定与跨码空间映射（防 LLM 把产品 SKU-ZB- 当物料 M-ZB-、把报关单 CD- 当采购单 PO-、把发票 INV- 当凭证 BV-、把假货样本 CTF- 直传给渠道取证 EV- 等 404）。</p>
+    <h5 style="margin:14px 0 4px;color:#1e3a8a">敏睿文具本体清单（8 文件夹 / 39 文件）</h5>
+    <table class="data">
+      <tr><th style="width:130px">组织节点</th><th style="width:160px">文件夹</th><th>本体文件</th></tr>
+      <tr><td>敏睿文具（组织级）</td><td>ERP / CRM / SCM / HRM</td><td>各 README · object-types · link-types · action-types · identifiers（5×4=20，4 域含标识符约定与跨码空间映射）</td></tr>
+      <tr><td>敏睿文具（组织级）</td><td>PIM / CST / CHN（文具特有）</td><td>各 README · object-types · link-types · action-types · identifiers（5×3=15，3 域含标识符约定）</td></tr>
+      <tr><td>敏睿文具（组织级）</td><td>Cross</td><td>README · object-types · link-types · action-types（4，8 条跨系统闭环链接）</td></tr>
+    </table>
+    <img class="realshot" src="shots/agilestationery/mgmt/tools-ontology.png" alt="本体页">
+    <div class="cap">图 3-12　业务本体（7 域 + Cross 组织级 + 标识符编码规则）</div>
+
+    <h3 class="sub"><span class="n">3.6</span> 应用监控台</h3>
+    <p>把路由器/智能体/工具三个子系统的数据统一汇总展示。敏睿文具 9 场景验证已产生智能体运行与工具调用记录。</p>
+    <h4>总览</h4>
+    <p>三子系统汇总卡片与调用量对比图。</p>
+    <img class="realshot" src="shots/agilestationery/mgmt/monitor-overview.png" alt="监控总览页">
+    <div class="cap">图 3-13　监控总览</div>
+    <h4>路由器监控</h4>
+    <p>四张 Tab：概览 / 路由指标 / 预算消耗 / 审计日志。点「路由指标」Tab。</p>
+    <img class="realshot" src="shots/agilestationery/mgmt/monitor-router.png" alt="路由器监控页">
+    <div class="cap">图 3-14　路由器监控（概览/路由指标/预算/审计 四 Tab）</div>
+    <h4>智能体监控</h4>
+    <p>运行数、成功率、Token、平均延迟；按智能体明细。</p>
+    <img class="realshot" src="shots/agilestationery/mgmt/monitor-agents.png" alt="智能体监控页">
+    <div class="cap">图 3-15　智能体监控（运行数/成功率/Token/延迟）</div>
+    <h4>工具监控</h4>
+    <p>连接器/端点/技能三个维度的调用数、错误率、平均延迟。</p>
+    <img class="realshot" src="shots/agilestationery/mgmt/monitor-tools.png" alt="工具监控页">
+    <div class="cap">图 3-16　工具监控（三维度调用 + 资源盘点）</div>
+
+    <h3 class="sub"><span class="n">3.7</span> 分级 scope 安全模型与流式可观测</h3>
+    <p>敏睿文具所有资源按<b>组织 / 部门 / 团队</b>三级 scope 分级：7 套业务系统与 8 域组织级本体<b>组织级共享</b>（全员可见）；部门级技能 / RAG / 智能体按归口部门隔离；团队级资源（招聘组 RAG）更细粒度。安全隔离落在<b>技能层</b>：同一套组织级端点，不同部门技能只绑本部门授权的子集。</p>
+    <table class="data">
+      <tr><th>场景归口</th><th>可见本体</th><th>可见数据接口</th><th>可见技能</th><th>可见 RAG</th></tr>
+      <tr><td>渠道运营专员</td><td>组织级 8 域</td><td>组织级 7 系统（CRM 经销商/ERP 库存）</td><td>/agilestationery-sales-crm-erp-query</td><td>经销商画像与渠道规则库（部门级）</td></tr>
+      <tr><td>报关与单证专员</td><td>组织级 8 域</td><td>组织级 7 系统（CST+SCM+ERP 子集）</td><td>/agilestationery-supply-cst-scm-erp-query</td><td>报关合规与库存规则库（部门级）</td></tr>
+      <tr><td>产品与防伪专员</td><td>组织级 8 域</td><td>组织级 7 系统（PIM 全端点）</td><td>/agilestationery-product-pim-query</td><td>假货特征与产品标准库（部门级）</td></tr>
+      <tr><td>招聘专员</td><td>组织级 8 域</td><td>组织级 7 系统（HRM 简历/岗位）</td><td>/agilestationery-hr-hrm-query</td><td>岗位JD与人事制度库（团队级）</td></tr>
+    </table>
+    <div class="callout">
+      <h5>🔒 为什么"分级 scope"是安全的</h5>
+      <ul class="tight" style="margin-bottom:0;">
+        <li><b>最小可见面</b>：业务用户只能看到本部门 / 团队被显式授权的技能与 RAG，跨部门敏感数据（如假货样本库对销售部、合同条款库对产品部）默认不可见。</li>
+        <li><b>技能层隔离</b>：7 套系统组织级共享，但部门级技能只绑本部门授权端点子集——销售部技能只调 CRM+ERP 客户/库存、产品部技能只调 PIM 全端点，暗箱穿透被技能 scope 阻断。</li>
+        <li><b>API Key 分团队签发</b>：15 个团队级 Key + 组织级默认 Key，各自 RPM/token 预算上限，单团队异常不影响其他部门。</li>
+        <li><b>DLP 围栏组织级生效</b>：经销商名单、供应商报价、发票凭证等敏感数据外发规则按范围配置，越权外发即阻断/告警。</li>
+      </ul>
+    </div>
+    <p class="footnote"><b>流式可观测（SSE 6 trace）</b>：每次任务运行流式输出 6 类 trace——场景模板注入 / 知识库检索（retriever=vector，非关键词回退）/ 长期记忆载入 / 组织本体注入 / 数据接口注入 / 引用技能，随后多段结构化文本与 tool_call 调用业务系统，最终 generate_docx 生成 .docx 报告，过程透明可审计。</p>
+  </section>
+
+
+<section class="page-break">
+  <p class="footnote" style="margin-top:18mm; border-top:1px solid #e6eaf2; padding-top:8px;">
+    本指南由 ai_infra 平台基于敏睿文具 demo 实际验证数据编制。文中终端任务输出与管理端界面为真实演示数据截图（含经销商码 DLR-01 / 产品码 SKU-ZB-G001 / 报关单 CD202607001 / 假货样本 CTF20260701 等），具体数值以客户现场复跑结果为准。© 2026 ai_infra · 仅供 POC 评估使用。</p>
+</section>
+
+<button class="totop" id="totop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="返回顶部">↑</button>
+<script>
+(function(){
+  var b=document.getElementById('totop');
+  function on(){ if(window.scrollY>400){b.classList.add('show')}else{b.classList.remove('show')} }
+  window.addEventListener('scroll',on,{passive:true}); on();
+})();
+</script>
+</body>
+</html>

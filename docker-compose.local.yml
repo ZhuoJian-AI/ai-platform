@@ -1,0 +1,6 @@
+services:
+  backend:
+    environment:
+      APP_ENV: development
+      DEBUG: "true"
+      PROXY_BASE_URL: http://localhost:8000

@@ -1,0 +1,54 @@
+# 忽略可重新生成的构建产物、缓存、本地工具配置以及所有运行时秘密。
+# 环境变量真实值、数据库备份、证书和私钥不得进入 Git。
+
+# ── Secrets / local data ──────────────────────────────────────
+.env
+.env.*
+!.env.example
+!**/.env.example
+backups/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ── Python ─────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+
+# ── Node / Frontend ────────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/build/
+*.tsbuildinfo
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── OS / Editor ────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Claude Code 本地工具配置（机器相关，不入库）──────────────────
+.claude/

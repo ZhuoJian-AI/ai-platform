@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="robots" content="noindex,nofollow">
+<title>星途勘探 POC 演示访问信息</title>
+<style>
+* { box-sizing: border-box; }
+body { font-family:"Noto Sans CJK SC","Microsoft YaHei","Segoe UI",sans-serif; color:#1f2937; font-size:16px; line-height:1.85; margin:0; background:#f1f5fb; }
+.wrap { max-width:880px; margin:0 auto; padding:40px 28px 64px; }
+.topnav { position:sticky; top:0; z-index:10; background:rgba(15,23,42,.96); color:#fff; padding:12px 28px; display:flex; gap:16px; align-items:center; }
+.topnav .brand { font-weight:700; }
+.topnav a { color:#93c5fd; font-size:14px; }
+.topnav .back { margin-left:auto; }
+code { font-family:"Noto Sans Mono CJK",Consolas,monospace; background:#e8eefc; padding:1px 6px; border-radius:4px; color:#1e3a8a; font-size:13.5px; }
+.cover { background:linear-gradient(135deg,#0f172a,#1e3a8a,#1d4ed8); color:#fff; padding:48px 40px; border-radius:12px; margin-bottom:28px; }
+.cover h1 { margin:0 0 8px; font-size:30px; }
+.cover .sub { opacity:.9; }
+section { background:#fff; border:1px solid #e2e8f0; border-radius:10px; padding:24px 26px; margin:18px 0; }
+h2 { color:#1e3a8a; border-bottom:2px solid #60a5fa; padding-bottom:8px; margin-top:0; }
+table { width:100%; border-collapse:collapse; margin:12px 0; font-size:14px; }
+th { background:#0f172a; color:#fff; padding:10px; text-align:left; font-weight:600; }
+td { padding:9px 10px; border-bottom:1px solid #eef2f7; vertical-align:top; }
+tr:nth-child(even) td { background:#f8fafc; }
+.warn { border-left:4px solid #60a5fa; background:#eff6ff; padding:12px 16px; border-radius:0 8px 8px 0; margin:14px 0; }
+.note { font-size:13px; color:#6b7280; }
+.foot { text-align:center; color:#9aa3b2; font-size:12px; margin-top:32px; }
+.kv b { color:#0f172a; }
+</style>
+</head>
+<body>
+<nav class="topnav">
+  <span class="brand">星途勘探 POC · 访问信息</span>
+  <a class="back" href="https://infra.aievolve.org.cn/guide/starexploration-poc-guide.html">← 返回 POC 指南</a>
+</nav>
+<div class="wrap">
+
+  <div class="cover">
+    <h1>星途勘探 POC 演示访问信息</h1>
+    <div class="sub">9 场景终端地址 + 归口账号 + 选模型 / 选技能对照表</div>
+  </div>
+
+  <section id="intro">
+    <h2>📌 说明</h2>
+    <p>本页为星途勘探 POC 演示的<b>访问凭证页</b>（一企业一页），与《勘探设计企业 AI 底座 POC 指南》配套使用。指南只做业务方案介绍，凭证（地址 / 账号 / 密码）统一集中在本页。请妥善保管，勿外发。</p>
+    <div class="warn"><b>统一密码：</b><code>12345678</code>（以下所有归口业务用户与管理员均为同一密码）</div>
+  </section>
+
+  <section id="terminal">
+    <h2>🖥️ 业务终端（客户可登录自助验证 9 场景）</h2>
+    <div class="kv"><p><b>地址：</b><code>https://infra.aievolve.org.cn/starexploration/terminal/login</code></p></div>
+    <p>登录后在「新建任务」中模型选 <code>glm-5.2</code>，绑定对应场景的模板智能体，粘贴指南第二章对应场景的提示词后提交运行。每个归口用户只能看到本部门 / 团队资源（组织级共享除外）。</p>
+    <p><b>归口用户 Skills 包：</b>登录后点左下角用户名 →「导出 Skills」即时生成 zip 下载。包内 <code>.mcp.json</code> 已内嵌该归口用户 scope 的即时轮换 API key，第三方智能体终端（Claude Code / Codex / WorkBuddy）解压即可调用平台本体 / 技能 / 知识库 / 记忆 / 数据接口五项能力，无需另行输入凭证；下次导出自动轮换旧 key。</p>
+  </section>
+
+  <section id="scenarios">
+    <h2>📋 场景 → 归口用户 / 选模型 / 选技能 / 绑定智能体 对照表</h2>
+    <table>
+      <tr><th>场景</th><th>任务名</th><th>登录用户</th><th>选模型</th><th>选技能（/-mention）</th><th>绑定智能体</th></tr>
+      <tr><td>DES-01</td><td>设计方案智能比选与规范合规校验</td><td>des-engineer</td><td>glm-5.2</td><td>/starexploration-design-des-erp-query</td><td>设计方案比选与合规校验</td></tr>
+      <tr><td>QTO-01</td><td>智能算量与造价测算</td><td>cost-estimator</td><td>glm-5.2</td><td>/starexploration-cost-des-erp-query</td><td>智能算量与造价测算</td></tr>
+      <tr><td>FIN-01</td><td>票据识别审核与智能核算</td><td>fin-accountant</td><td>glm-5.2</td><td>/starexploration-finance-erp-crm-query</td><td>票据审核与智能核算</td></tr>
+      <tr><td>ADM-01</td><td>公文生成与会议纪要闭环</td><td>admin-officer</td><td>glm-5.2</td><td>/starexploration-admin-hrm-query</td><td>公文与会议纪要闭环</td></tr>
+      <tr><td>LEG-01</td><td>合同智能审查与履约风险校验</td><td>leg-counsel</td><td>glm-5.2</td><td>/starexploration-legal-crm-erp-query</td><td>合同审查与履约风险校验</td></tr>
+      <tr><td>EPC-01</td><td>项目进度风险预警与成本管控</td><td>epc-manager</td><td>glm-5.2</td><td>/starexploration-epc-epc-erp-query</td><td>项目进度风险与成本管控</td></tr>
+      <tr><td>SAF-01</td><td>施工现场安全隐患智能识别</td><td>saf-inspector</td><td>glm-5.2</td><td>/starexploration-safety-epc-query</td><td>现场安全隐患智能识别</td></tr>
+      <tr><td>SEC-01</td><td>涉密内容检测与文档脱密</td><td>sec-officer</td><td>glm-5.2</td><td>/starexploration-security-sec-des-epc-query</td><td>涉密检测与文档脱密</td></tr>
+      <tr><td>HR-01</td><td>智能招聘与人岗匹配</td><td>hr-recruiter</td><td>glm-5.2</td><td>/starexploration-hr-hrm-query</td><td>招聘人岗匹配</td></tr>
+    </table>
+    <p class="note">辅助用户 it-specialist / it-infra（信息中心，平台运维，非对外场景）密码同为 <code>12345678</code>。</p>
+  </section>
+
+  <section id="systems">
+    <h2>🧩 业务系统与管理端</h2>
+    <table>
+      <tr><th>类别</th><th>项</th><th>值</th></tr>
+      <tr><td rowspan="2"><b>业务系统</b></td><td>ERP/HRM/CRM 三类复用 + DES 设计管理 / EPC 工程项目 / SEC 保密与合规 三类勘探设计特有模拟（mock）系统</td><td>6 套组织级共享（一把 mock API Key 全星途勘探租户用），部门级技能只绑本部门授权端点子集</td></tr>
+      <tr><td>终端模型</td><td><code>glm-5.2</code>（真实模型 id，终端下拉直接列，经智谱路由）</td></tr>
+      <tr><td><b>管理端</b></td><td>控制台</td><td>管理员 <code>admin</code> / <code>12345678</code>（org_admin，登录后自动锁定星途勘探组织），访问信息由平台方现场引导</td></tr>
+    </table>
+  </section>
+
+  <section id="steps">
+    <h2>✅ POC 验证建议步骤</h2>
+    <ol>
+      <li>打开业务终端登录页，用任一归口用户登录（建议先 <code>des-engineer</code> 跑 DES-01 设计方案合规校验，或 <code>sec-officer</code> 跑 SEC-01 涉密检测脱密——涉密资质单位特色场景）。</li>
+      <li>新建任务 → 模型选 <code>glm-5.2</code> → 绑定对应模板智能体 → 粘贴指南第二章对应提示词 → 提交运行。</li>
+      <li>观察流式输出：会看到 <code>tool_call</code> 调用业务系统 → 跨系统凑齐数据 → 结构化结果表 → <code>final</code> 收尾。</li>
+      <li>切换其他归口用户重复验证其余场景，体验"分级 scope 只能看本部门资源"；SAF-01 现场隐患识别为感知类（传文本画面描述返识别结果+整改工单，不生成图片）。</li>
+      <li>如需查看管理端配置（模型路由 / 智能体 / 工具 / 监控），用 <code>admin</code> 登录控制台，或联系平台方现场引导。</li>
+    </ol>
+  </section>
+
+  <section id="notes">
+    <h2>⚠️ 注意事项</h2>
+    <ul>
+      <li>本页凭证仅供 POC 评估使用，演示数据为 mock 虚构（方案 SCH-IND-001 / 图纸 DWG-ARC-001 / 项目 PRJ-BAT-001 / 合同 CT-SE-002 / 涉密文档 SECDOC-001 等），非真实生产数据。</li>
+      <li>业务终端与管理端共用同一密码 <code>12345678</code>，POC 结束后由平台方回收 / 重置。</li>
+      <li>本页不引用敏睿钢铁、敏捷空调、星途服装、敏睿文具等其他租户的任何信息。</li>
+    </ul>
+  </section>
+
+  <p class="foot">© 2026 ai_infra · 星途勘探 POC 访问页 · 与 <a href="https://infra.aievolve.org.cn/guide/starexploration-poc-guide.html">勘探设计企业 AI 底座 POC 指南</a> 配套</p>
+</div>
+</body>
+</html>

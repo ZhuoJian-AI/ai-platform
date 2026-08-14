@@ -1,0 +1,224 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SCM 供应链协同系统（服装）",
+    "version": "1.0.0",
+    "description": "星图服装供应链协同 mock 子系统。覆盖供应商、报价单（多家对比）、产能日历、面料到货计划、补单节奏建议、交期快照异动检测（PD-2 关键）、物料校验（SC-1）。仅含 tenant=starclothing 数据，API key: scm-starclothing-demo-key。"
+  },
+  "servers": [
+    {"url": "/scm", "description": "网关挂载前缀"}
+  ],
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-API-Key"}
+    }
+  },
+  "security": [{"ApiKeyAuth": []}],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {"200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object"}}}}}
+      }
+    },
+    "/api/v1/suppliers": {
+      "get": {
+        "tags": ["SCM 供应商"],
+        "summary": "供应商列表",
+        "operationId": "listSuppliers",
+        "parameters": [
+          {"name": "category", "in": "query", "required": false, "schema": {"type": "string", "description": "面料/辅料/外协/辅料包装"}},
+          {"name": "keyword", "in": "query", "required": false, "schema": {"type": "string", "description": "名称模糊匹配"}}
+        ],
+        "responses": {"200": {"description": "供应商列表", "content": {"application/json": {"schema": {"type": "array", "items": {"type": "object"}}}}}}
+      }
+    },
+    "/api/v1/suppliers/{code}": {
+      "get": {
+        "tags": ["SCM 供应商"],
+        "summary": "供应商详情 + 产能/报价",
+        "operationId": "getSupplier",
+        "parameters": [
+          {"name": "code", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "供应商详情", "content": {"application/json": {"schema": {"type": "object"}}}}, "404": {"description": "未找到"}}
+      }
+    },
+    "/api/v1/suppliers/{code}/capacity": {
+      "get": {
+        "tags": ["SCM 供应商"],
+        "summary": "供应商未来 N 天产能占用",
+        "operationId": "getSupplierCapacity",
+        "parameters": [
+          {"name": "code", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "days", "in": "query", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 90, "default": 14}}
+        ],
+        "responses": {"200": {"description": "产能占用序列", "content": {"application/json": {"schema": {"type": "object"}}}}, "404": {"description": "未找到"}}
+      }
+    },
+    "/api/v1/quotations": {
+      "get": {
+        "tags": ["SCM 报价"],
+        "summary": "报价单列表",
+        "operationId": "listQuotations",
+        "parameters": [
+          {"name": "supplier_code", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "material_code", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "status", "in": "query", "required": false, "schema": {"type": "string", "description": "有效/已过期/已下单"}}
+        ],
+        "responses": {"200": {"description": "报价单列表", "content": {"application/json": {"schema": {"type": "array", "items": {"type": "object"}}}}}}
+      }
+    },
+    "/api/v1/quotations/{quotation_no}": {
+      "get": {
+        "tags": ["SCM 报价"],
+        "summary": "报价单详情",
+        "operationId": "getQuotation",
+        "parameters": [
+          {"name": "quotation_no", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "报价单", "content": {"application/json": {"schema": {"type": "object"}}}}, "404": {"description": "未找到"}}
+      }
+    },
+    "/api/v1/quotations/compare": {
+      "get": {
+        "tags": ["SCM 报价"],
+        "summary": "同规格多家报价对比（综合评分排序）",
+        "operationId": "compareQuotations",
+        "parameters": [
+          {"name": "material_code", "in": "query", "required": true, "schema": {"type": "string", "description": "物料编码，如 M-WOOL-DBL-360"}}
+        ],
+        "responses": {"200": {"description": "比价结果", "content": {"application/json": {"schema": {"type": "object"}}}}, "404": {"description": "无有效报价"}}
+      }
+    },
+    "/api/v1/capacity-calendar": {
+      "get": {
+        "tags": ["SCM 产能"],
+        "summary": "供应商产能日历",
+        "operationId": "listCapacityCalendar",
+        "parameters": [
+          {"name": "supplier_code", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "date", "in": "query", "required": false, "schema": {"type": "string", "description": "YYYY-MM-DD 精确过滤"}}
+        ],
+        "responses": {"200": {"description": "产能日历", "content": {"application/json": {"schema": {"type": "array", "items": {"type": "object"}}}}}}
+      }
+    },
+    "/api/v1/fabric-arrival-plans": {
+      "get": {
+        "tags": ["SCM 到货"],
+        "summary": "面料在途到货计划",
+        "operationId": "listFabricArrivalPlans",
+        "parameters": [
+          {"name": "supplier_code", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "material_code", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "status", "in": "query", "required": false, "schema": {"type": "string", "description": "在途/已到货/延误"}}
+        ],
+        "responses": {"200": {"description": "到货计划", "content": {"application/json": {"schema": {"type": "array", "items": {"type": "object"}}}}}}
+      }
+    },
+    "/api/v1/replenishment-suggestions": {
+      "get": {
+        "tags": ["SCM 补单"],
+        "summary": "补单节奏建议列表",
+        "operationId": "listReplenishmentSuggestions",
+        "parameters": [
+          {"name": "style_code", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "bulk_no", "in": "query", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "补单建议", "content": {"application/json": {"schema": {"type": "array", "items": {"type": "object"}}}}}}
+      }
+    },
+    "/api/v1/suggest-replenishment": {
+      "get": {
+        "tags": ["SCM 补单"],
+        "summary": "按交期反推 + 产能占用给补单节奏",
+        "operationId": "suggestReplenishment",
+        "parameters": [
+          {"name": "style_code", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "total_qty", "in": "query", "required": true, "schema": {"type": "integer", "minimum": 1}},
+          {"name": "delivery_date", "in": "query", "required": true, "schema": {"type": "string", "description": "YYYY-MM-DD"}}
+        ],
+        "responses": {"200": {"description": "补单节奏", "content": {"application/json": {"schema": {"type": "object"}}}}, "400": {"description": "日期格式错误"}}
+      }
+    },
+    "/api/v1/leadtime-snapshots": {
+      "get": {
+        "tags": ["SCM 交期"],
+        "summary": "交期快照列表",
+        "operationId": "listLeadtimeSnapshots",
+        "parameters": [
+          {"name": "material_code", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "supplier_code", "in": "query", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "交期快照", "content": {"application/json": {"schema": {"type": "array", "items": {"type": "object"}}}}}}
+      }
+    },
+    "/api/v1/leadtime-diff": {
+      "get": {
+        "tags": ["SCM 交期"],
+        "summary": "实时交期异动检测（PD-2 关键，绝不缓存）",
+        "operationId": "getLeadtimeDiff",
+        "parameters": [
+          {"name": "material_code", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "supplier_code", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "since", "in": "query", "required": true, "schema": {"type": "string", "description": "ISO 时间戳，取该时刻之后的最新快照为基线"}}
+        ],
+        "responses": {"200": {"description": "交期异动", "content": {"application/json": {"schema": {"type": "object"}}}}, "400": {"description": "since 非法"}, "404": {"description": "无快照"}}
+      }
+    },
+    "/api/v1/estimate-leadtime": {
+      "get": {
+        "tags": ["SCM 交期"],
+        "summary": "按产能占用 + 在途实时估算交期（PD-2 关键，绝不缓存）",
+        "operationId": "estimateLeadtime",
+        "parameters": [
+          {"name": "material_code", "in": "query", "required": true, "schema": {"type": "string"}},
+          {"name": "qty", "in": "query", "required": true, "schema": {"type": "integer", "minimum": 1}}
+        ],
+        "responses": {"200": {"description": "实时估算交期", "content": {"application/json": {"schema": {"type": "object"}}}}, "404": {"description": "无报价"}}
+      }
+    },
+    "/api/v1/material-validations": {
+      "get": {
+        "tags": ["SCM 校验"],
+        "summary": "物料校验记录（工厂端/我方端双向）",
+        "operationId": "listMaterialValidations",
+        "parameters": [
+          {"name": "initiated_by", "in": "query", "required": false, "schema": {"type": "string", "description": "factory/internal"}},
+          {"name": "work_order", "in": "query", "required": false, "schema": {"type": "string", "description": "MES 工单号"}},
+          {"name": "status", "in": "query", "required": false, "schema": {"type": "string", "description": "正常/缺料/超领"}}
+        ],
+        "responses": {"200": {"description": "校验记录", "content": {"application/json": {"schema": {"type": "array", "items": {"type": "object"}}}}}}
+      },
+      "post": {
+        "tags": ["SCM 校验"],
+        "summary": "新建物料校验记录（写入演示，区分工厂端/我方端发起）",
+        "operationId": "createMaterialValidation",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "initiated_by": {"type": "string", "enum": ["factory", "internal"]},
+                  "work_order_no": {"type": "string"},
+                  "style_code": {"type": "string"},
+                  "bom_material_code": {"type": "string"},
+                  "required_qty": {"type": "number"},
+                  "actual_qty": {"type": "number"},
+                  "operator": {"type": "string"},
+                  "check_date": {"type": "string", "description": "YYYY-MM-DD"}
+                }
+              },
+              "examples": [{"initiated_by": "factory", "work_order_no": "WO20260607", "style_code": "XT-DS2026-001", "bom_material_code": "M-WOOL-DBL-360", "required_qty": 1500, "actual_qty": 1480, "operator": "裁剪-王", "check_date": "2026-06-29"}]
+            }
+          }
+        },
+        "responses": {"200": {"description": "新建结果", "content": {"application/json": {"schema": {"type": "object"}}}}}
+      }
+    }
+  }
+}

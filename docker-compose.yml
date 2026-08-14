@@ -1,0 +1,54 @@
+services:
+  postgres:
+    # pgvector/pgvector 镜像 = 官方 postgres + vector 扩展预装，用于 RAG 向量检索。
+    # pg16 与原 postgres:16-alpine 数据卷兼容。
+    image: pgvector/pgvector:pg16
+    container_name: ai_infra_postgres
+    environment:
+      POSTGRES_USER: ai_infra
+      POSTGRES_PASSWORD: ai_infra
+      POSTGRES_DB: ai_infra
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres:/docker-entrypoint-initdb.d
+    command: ["postgres", "-c", "listen_addresses=*"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_infra"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai_infra_redis
+    ports:
+      - "6381:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 业务系统 Mock 网关（MES / CRM / …）——为平台演示提供可调用的数据接口。
+  # 启动：docker compose up -d mock；本机访问 http://localhost:8010
+  mock:
+    build: ./mock
+    container_name: ai_infra_mock
+    ports:
+      - "8010:8010"
+    environment:
+      MES_API_KEY: ${MES_API_KEY:-mes-mock-demo-key}
+      CRM_API_KEY: ${CRM_API_KEY:-crm-mock-demo-key}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8010/health').status==200 else 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  redisdata:
