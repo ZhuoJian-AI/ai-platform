@@ -70,7 +70,7 @@ class AgentRunEvent(Base, TimestampMixin):
         BigInteger, ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=True, index=True
     )
     task_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=True, index=True
+        String, nullable=True, index=True
     )
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

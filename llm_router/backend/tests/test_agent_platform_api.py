@@ -80,7 +80,7 @@ async def test_judge_crud(client: AsyncClient):
     assert g.status_code == 200
 
 
-# ── RAG collection + ingest（embedding 无 provider 时优雅降级）──
+# ── RAG collection + ingest（embedding 无 provider 时明确失败）──
 
 @pytest.mark.asyncio
 async def test_rag_collection_and_ingest(client: AsyncClient):
@@ -92,13 +92,15 @@ async def test_rag_collection_and_ingest(client: AsyncClient):
     assert coll.status_code == 201
     coll_id = coll.json()["id"]
 
-    # 无 embedding provider：ingest 应仍建文档与文本块（embedding=NULL）
+    # 无 embedding provider：不得伪装成入库成功；保留 failed 文档供前端排查。
     doc = await client.post(
         f"/api/v1/rag/{coll_id}/documents",
         json={"source": "manual.txt", "content": "a" * 120, "title": "手动文档"},
     )
-    assert doc.status_code == 201
-    assert doc.json()["source"] == "manual.txt"
+    assert doc.status_code == 502
+    assert "embedding 不可用" in doc.json()["detail"]
 
     docs = await client.get(f"/api/v1/rag/{coll_id}/documents")
     assert len(docs.json()) == 1
+    assert docs.json()[0]["source"] == "manual.txt"
+    assert docs.json()[0]["status"] == "failed"

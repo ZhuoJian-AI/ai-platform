@@ -9,9 +9,7 @@
 修复后：同路径即便存在软删记录，upsert 应复活该行并覆盖内容，不再 INSERT 冲突。
 
 自包含：本测试自建引擎 + 仅创建所需 3 张表（organizations / workspaces /
-workspace_files），不复用 conftest 的全量 ``Base.metadata.create_all``——后者因
-``agent_run_events.task_id`` 模型声明了一个与 live schema 不符、类型不兼容的 FK
-而全量建表失败（pre-existing，与本修复无关）。
+workspace_files），使软删除唯一约束回归场景与全局 API 测试夹具相互隔离。
 """
 
 import asyncpg
@@ -32,9 +30,8 @@ _TEST_DB = "ai_infra_ws_upsert_test"
 _TABLES = [Organization.__table__, Workspace.__table__, WorkspaceFile.__table__]
 
 
-# 本测试自建引擎 + 仅建 3 张表，不复用 conftest 的全量 ``db_engine`` autouse fixture
-# （后者全量 ``Base.metadata.create_all`` 因 ``agent_run_events.task_id`` 模型声明的
-# 类型不兼容 FK 而失败，且指向不可达的 localhost:5434 测试库）。在此于本模块内覆盖为 no-op。
+# 本测试自建引擎 + 仅建 3 张表，不复用 conftest 的全量 ``db_engine`` autouse fixture，
+# 让该回归场景使用独立数据库生命周期。在此于本模块内覆盖为 no-op。
 @pytest_asyncio.fixture(autouse=True)
 async def db_engine():  # noqa: D401 — overrides conftest autouse fixture for this module
     yield

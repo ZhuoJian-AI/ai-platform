@@ -101,12 +101,17 @@ async def client(db_session: AsyncSession) -> AsyncClient:
         yield db_session
 
     test_admin = Admin(
-        email="test@ai-infra.local",
+        username="test-admin",
         password_hash="x",
         role="super_admin",
         is_active=True,
     )
-    test_auth = CurrentAdmin(admin=test_admin, id=1, email=test_admin.email, role="super_admin")
+    test_auth = CurrentAdmin(
+        admin=test_admin,
+        id=1,
+        username=test_admin.username,
+        role="super_admin",
+    )
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[require_admin] = lambda: test_auth

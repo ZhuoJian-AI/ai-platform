@@ -337,9 +337,9 @@ async def ingest_document(
 ) -> RagDocument:
     """同步入库（终端 JSON 文本 / 既有文本粘贴路径）：写入源文档，分块并嵌入向量。
 
-    embedding 失败时仍保留文本块（embedding 为 NULL）。``created_by`` 记录创建者
-    （终端用户 id）。与上传文件入库不同，此处在请求线程内一次性完成分块+嵌入，
-    直接置 ``status='ready'``/``progress=100``。
+    embedding 失败时清理半成品分块并抛出 ``EmbeddingError``，由 API 层将文档状态
+    持久化为 ``failed`` 并返回 502。``created_by`` 记录创建者（终端用户 id）。
+    与上传文件入库不同，此处在请求线程内一次性完成分块+嵌入。
     """
     doc = RagDocument(
         collection_id=coll.id,
@@ -371,9 +371,9 @@ async def _chunk_and_embed(
 ) -> None:
     """删除旧分块 → 分批嵌入 → 写入 RagChunk → 置 ready/100。
 
-    embedding 失败时仍保留文本块（embedding 为 NULL），不阻断入库。``on_progress``
-    为异步回调 ``(done, total)``，在每批嵌入完成后调用，供后台任务更新 progress 并
-    commit（使其对轮询可见）。同步入库路径不传 ``on_progress``（请求线程内一次完成）。
+    embedding 失败时清理已写入的半成品分块、将文档置为 ``failed`` 并抛出异常。
+    ``on_progress`` 为异步回调 ``(done, total)``，在每批嵌入完成后调用，供后台任务
+    更新 progress 并 commit（使其对轮询可见）。同步入库路径不传 ``on_progress``。
     """
     # 删除旧分块（RagChunk 无软删列，物理删除；新建入库时无旧分块，delete 为空操作）
     await db.execute(delete(RagChunk).where(RagChunk.document_id == doc.id))
@@ -798,7 +798,6 @@ async def soft_delete_folder(db: AsyncSession, folder: RagFolder) -> None:
         sf.deleted_at = now  # type: ignore[assignment]
 
     # 该文件夹自身 + 前缀下文档
-    doc_cond_paths = [folder.path, prefix]
     docs = (await db.execute(
         select(RagDocument).where(
             RagDocument.collection_id == folder.collection_id,

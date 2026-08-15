@@ -18,19 +18,24 @@ async def test_create_user(client: AsyncClient):
     org_id = await _make_org(client)
     resp = await client.post(
         f"/api/v1/organizations/{org_id}/users",
-        json={"email": "alice@example.com", "display_name": "Alice", "role": "member"},
+        json={
+            "username": "alice",
+            "password": "test-pass-123",
+            "display_name": "Alice",
+            "role": "member",
+        },
     )
     assert resp.status_code == 201
     data = resp.json()
-    assert data["email"] == "alice@example.com"
+    assert data["username"] == "alice"
     assert data["role"] == "member"
     assert data["organization_id"] == org_id
 
 
 @pytest.mark.asyncio
-async def test_create_user_duplicate_email(client: AsyncClient):
+async def test_create_user_duplicate_username(client: AsyncClient):
     org_id = await _make_org(client, slug="dup-org")
-    payload = {"email": "bob@example.com", "role": "member"}
+    payload = {"username": "bob", "password": "test-pass-123", "role": "member"}
     r1 = await client.post(f"/api/v1/organizations/{org_id}/users", json=payload)
     assert r1.status_code == 201
     r2 = await client.post(f"/api/v1/organizations/{org_id}/users", json=payload)
@@ -42,8 +47,9 @@ async def test_list_update_delete_user(client: AsyncClient):
     org_id = await _make_org(client, slug="crud-org")
     create = await client.post(
         f"/api/v1/organizations/{org_id}/users",
-        json={"email": "carol@example.com", "role": "member"},
+        json={"username": "carol", "password": "test-pass-123", "role": "member"},
     )
+    assert create.status_code == 201
     user_id = create.json()["id"]
 
     # list
