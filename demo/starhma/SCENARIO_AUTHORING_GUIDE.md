@@ -1,1 +1,0 @@
-../starclothing/SCENARIO_AUTHORING_GUIDE.md

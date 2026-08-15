@@ -1,1 +1,0 @@
-../starclothing/CROSS_AGENT_HANDOFF_DESIGN.md
