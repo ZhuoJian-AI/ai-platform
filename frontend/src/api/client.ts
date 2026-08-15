@@ -507,7 +507,40 @@ export interface Workspace {
 export interface WorkspaceFile {
   id: string; workspace_id: string; path: string; size: number;
   content_hash: string | null; content: string | null; metadata: Record<string, unknown>;
+  extracted_text: string | null; parse_status: 'unparsed' | 'ready' | 'unsupported' | 'failed';
+  parse_kind: string | null; parse_error: string | null;
   created_at: string; updated_at: string;
+}
+
+export interface WorkspaceFilePreview {
+  id: string; path: string; parse_status: WorkspaceFile['parse_status'];
+  parse_kind: string | null; parse_error: string | null; extracted_text: string | null;
+}
+
+function uploadWorkspaceFile(
+  url: string, file: File, path: string, tokenKey: string,
+): Promise<WorkspaceFile> {
+  return new Promise((resolve, reject) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('path', path);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${BASE_URL}${url}`);
+    const token = localStorage.getItem(tokenKey);
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        let detail = xhr.statusText;
+        try { detail = JSON.parse(xhr.responseText)?.detail || detail; } catch { /* keep statusText */ }
+        reject(new ApiError(xhr.status, detail));
+        return;
+      }
+      try { resolve(JSON.parse(xhr.responseText) as WorkspaceFile); }
+      catch { reject(new ApiError(xhr.status, '响应解析失败')); }
+    };
+    xhr.onerror = () => reject(new ApiError(0, '网络错误，上传失败'));
+    xhr.send(fd);
+  });
 }
 
 export interface WorkspaceFolder {
@@ -540,7 +573,11 @@ export const workspaces = {
   listFiles: (wsId: string) => request<WorkspaceFile[]>(`/api/v1/workspaces/${wsId}/files`),
   upsertFile: (wsId: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>
     request<WorkspaceFile>(`/api/v1/workspaces/${wsId}/files`, { method: 'POST', body: JSON.stringify(data) }),
+  uploadFile: (wsId: string, file: File, path: string) =>
+    uploadWorkspaceFile(`/api/v1/workspaces/${wsId}/files/upload`, file, path, 'ai_infra_token'),
   getFile: (id: string) => request<WorkspaceFile>(`/api/v1/files/${id}`),
+  getFilePreview: (id: string) => request<WorkspaceFilePreview>(`/api/v1/files/${id}/preview`),
+  reparseFile: (id: string) => request<WorkspaceFile>(`/api/v1/files/${id}/reparse`, { method: 'POST' }),
   updateFile: (id: string, data: { content?: string; metadata?: Record<string, unknown> }) =>
     request<WorkspaceFile>(`/api/v1/files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteFile: (id: string) => request<void>(`/api/v1/files/${id}`, { method: 'DELETE' }),
@@ -1200,7 +1237,11 @@ export const terminal = {
   listAllWsFiles: () => userRequest<WorkspaceFileSummary[]>('/api/v1/terminal/workspace-files'),
   upsertWsFile: (wsId: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>
     userRequest<WorkspaceFile>(`/api/v1/terminal/workspaces/${wsId}/files`, { method: 'POST', body: JSON.stringify(data) }),
+  uploadWsFile: (wsId: string, file: File, path: string) =>
+    uploadWorkspaceFile(`/api/v1/terminal/workspaces/${wsId}/files/upload`, file, path, USER_TOKEN_KEY),
   getWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}`),
+  getWsFilePreview: (id: string) => userRequest<WorkspaceFilePreview>(`/api/v1/terminal/files/${id}/preview`),
+  reparseWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}/reparse`, { method: 'POST' }),
   updateWsFile: (id: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>
     userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteWsFile: (id: string) => userRequest<void>(`/api/v1/terminal/files/${id}`, { method: 'DELETE' }),

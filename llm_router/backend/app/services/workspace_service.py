@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import mimetypes
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -20,6 +21,15 @@ from app.schemas.workspace import (
     WorkspaceFolderCreate,
     WorkspaceUpdate,
 )
+from app.services import doc_parser
+
+MAX_WORKSPACE_FILE_BYTES = 5 * 1024 * 1024
+MAX_LLM_FILE_CHARS = 100_000
+
+
+class WorkspaceFileUploadError(ValueError):
+    """工作空间原文件上传校验失败。"""
+
 
 # ── Workspace ──────────────────────────────────────────────────────────
 
@@ -101,6 +111,8 @@ async def upsert_file(db: AsyncSession, ws: Workspace, data: WorkspaceFileCreate
         content_bytes = content.encode("utf-8")
         size = len(content_bytes)
         content_hash = hashlib.sha256(content_bytes).hexdigest()
+    parse_status = "unparsed" if meta.get("binary") else "ready"
+    parse_kind = None if meta.get("binary") else "text"
     # 注意：此处**不**按 ``deleted_at IS NULL`` 过滤。唯一约束 ``uq_wsfile_path`` 是
     # ``(workspace_id, path)`` 且**不含** deleted_at——同一路径即便旧记录已被软删，仍占用
     # 该 (workspace_id, path) 槽位。若按 deleted_at 过滤会漏掉软删记录 → 走 INSERT 分支
@@ -121,6 +133,8 @@ async def upsert_file(db: AsyncSession, ws: Workspace, data: WorkspaceFileCreate
             content_hash=content_hash,
             content=content,
             content_ref=path,
+            parse_status=parse_status,
+            parse_kind=parse_kind,
             metadata_=meta,
         )
         db.add(f)
@@ -128,11 +142,18 @@ async def upsert_file(db: AsyncSession, ws: Workspace, data: WorkspaceFileCreate
         f.content = content
         f.size = size
         f.content_hash = content_hash
+        f.extracted_text = None
+        f.parse_status = parse_status
+        f.parse_kind = parse_kind
+        f.parse_error = None
         # 复活被软删的同路径记录：upsert 语义是「该路径现在应是这份内容」，
         # 旧记录的软删状态不应阻挡新写入（否则唯一约束会让 INSERT 失败）。
         f.deleted_at = None
         # 合并而非覆盖：保留既有元数据（如 task_id 归属标记），仅用新值更新同名字段。
         f.metadata_ = {**(f.metadata_ or {}), **meta}
+        if not meta.get("binary"):
+            f.metadata_.pop("binary", None)
+            f.metadata_.pop("mime", None)
     await db.flush()
     await db.refresh(f)
     return f
@@ -173,6 +194,10 @@ async def update_file(db: AsyncSession, f: WorkspaceFile, data: WorkspaceFileUpd
         f.content = content
         f.size = len(content.encode("utf-8"))
         f.content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        f.extracted_text = None
+        f.parse_status = "ready"
+        f.parse_kind = "text"
+        f.parse_error = None
     if data.metadata is not None:
         f.metadata_ = data.metadata
     await db.flush()
@@ -185,9 +210,99 @@ async def soft_delete_file(db: AsyncSession, f: WorkspaceFile) -> None:
     await db.flush()
 
 
-def resolve_file_content(f: WorkspaceFile) -> str:
-    """agent 运行时读取文件内容：当前后端直接返回内联 content。"""
-    return f.content or ""
+async def ingest_uploaded_file(
+    db: AsyncSession,
+    ws: Workspace,
+    *,
+    path: str,
+    filename: str,
+    content_type: str | None,
+    raw: bytes,
+) -> WorkspaceFile:
+    """保存工作空间原文件并同步提取可预览、可供 LLM 使用的结构化文本。"""
+    if not raw:
+        raise WorkspaceFileUploadError("文件为空")
+    if len(raw) > MAX_WORKSPACE_FILE_BYTES:
+        raise WorkspaceFileUploadError(
+            f"文件过大（{len(raw)} 字节），上限 {MAX_WORKSPACE_FILE_BYTES // (1024 * 1024)}MB"
+        )
+    mime = content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    encoded = base64.b64encode(raw).decode("ascii")
+    f = await upsert_file(db, ws, WorkspaceFileCreate(
+        path=path,
+        content=encoded,
+        metadata={"binary": True, "mime": mime, "name": filename},
+    ))
+    await _parse_binary_file(db, f, filename=filename, content_type=mime, raw=raw)
+    return f
+
+
+async def reparse_file(db: AsyncSession, f: WorkspaceFile) -> WorkspaceFile:
+    """重新解析历史二进制工作空间文件；原始内容不变。"""
+    if not (f.metadata_ or {}).get("binary"):
+        f.parse_status = "ready"
+        f.parse_kind = "text"
+        f.parse_error = None
+        f.extracted_text = None
+        await db.flush()
+        await db.refresh(f)
+        return f
+    try:
+        raw = base64.b64decode(f.content or "", validate=False)
+    except ValueError as exc:
+        f.parse_status = "failed"
+        f.parse_error = f"原文件 Base64 损坏：{exc}"
+        await db.flush()
+        await db.refresh(f)
+        return f
+    meta = f.metadata_ or {}
+    await _parse_binary_file(
+        db,
+        f,
+        filename=str(meta.get("name") or f.path.rsplit("/", 1)[-1]),
+        content_type=str(meta.get("mime") or "application/octet-stream"),
+        raw=raw,
+    )
+    return f
+
+
+async def _parse_binary_file(
+    db: AsyncSession,
+    f: WorkspaceFile,
+    *,
+    filename: str,
+    content_type: str | None,
+    raw: bytes,
+) -> None:
+    try:
+        text, kind = doc_parser.extract_text(filename, content_type, raw)
+        if not text.strip():
+            raise doc_parser.UnsupportedFileTypeError("文件解析后内容为空")
+        f.extracted_text = text
+        f.parse_status = "ready"
+        f.parse_kind = kind
+        f.parse_error = None
+    except doc_parser.UnsupportedFileTypeError as exc:
+        f.extracted_text = None
+        message = str(exc)
+        f.parse_status = "unsupported" if message.startswith("不支持的文件类型") else "failed"
+        f.parse_kind = None
+        f.parse_error = message[:1000]
+    await db.flush()
+    await db.refresh(f)
+
+
+def resolve_file_content(f: WorkspaceFile, *, max_chars: int = MAX_LLM_FILE_CHARS) -> str:
+    """给智能体读取文件：文本返回原文，二进制返回解析结果，绝不返回 Base64。"""
+    if not (f.metadata_ or {}).get("binary"):
+        return f.content or ""
+    if f.parse_status != "ready" or not (f.extracted_text or "").strip():
+        detail = f.parse_error or "尚未解析"
+        return f"[文件 {f.path} 无法读取正文：{detail}]"
+    text = f.extracted_text or ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n\n[内容已截断：原文 {len(text)} 字符，本轮最多注入 {max_chars} 字符]"
 
 
 # ── WorkspaceFolder ────────────────────────────────────────────────────

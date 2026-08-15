@@ -11,6 +11,17 @@ ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
 
 RUN pip install --no-cache-dir uv
 
+# 旧版 Word/Excel/PowerPoint 统一转为现代中间格式后复用 Python 解析器。
+# 使用无界面组件，避免在服务端安装桌面环境。
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libreoffice-writer-nogui \
+        libreoffice-calc-nogui \
+        libreoffice-impress-nogui \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml .
 
 RUN uv pip install --system -e ".[dev]"

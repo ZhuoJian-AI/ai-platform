@@ -175,13 +175,20 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
   });
 
   const uploadFile = useMutation({
-    mutationFn: (v: { path: string; content: string; metadata?: Record<string, unknown> }) => {
+    mutationFn: (v: { path: string; file: File }) => {
       if (!wsId) return Promise.reject(new Error('no ws'));
-      return terminal.upsertWsFile(wsId, v);
+      return terminal.uploadWsFile(wsId, v.file, v.path);
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['ws-mgr-files'] }); message.success('文件已上传'); },
     onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '上传失败'),
   });
+
+  const reparseFile = async (fileId: string) => {
+    const updated = await terminal.reparseWsFile(fileId);
+    await qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+    if (updated.parse_status === 'ready') message.success('文件解析完成');
+    else message.warning(updated.parse_error || '文件仍无法解析');
+  };
 
   const delFile = useMutation({
     mutationFn: (id: string) => terminal.deleteWsFile(id),
@@ -295,30 +302,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                         message.warning(`文件过大（> ${MAX_UPLOAD_BYTES / 1024 / 1024}MB），请选择更小的文件`);
                         return Upload.LIST_IGNORE;
                       }
-                      const reader = new FileReader();
-                      reader.onload = () => {
-                        const buf = new Uint8Array(reader.result as ArrayBuffer);
-                        const path = [...cwd, file.name].join('/');
-                        // 文本/二进制判定：含 NUL 或非合法 UTF-8 → 二进制（base64 内联）
-                        let textContent: string | null = null;
-                        if (!buf.includes(0)) {
-                          try { textContent = new TextDecoder('utf-8', { fatal: true }).decode(buf); }
-                          catch { textContent = null; }
-                        }
-                        if (textContent !== null) {
-                          uploadFile.mutate({ path, content: textContent, metadata: {} });
-                        } else {
-                          let bin = '';
-                          const chunk = 0x8000;
-                          for (let i = 0; i < buf.length; i += chunk) bin += String.fromCharCode(...buf.subarray(i, i + chunk));
-                          uploadFile.mutate({
-                            path, content: btoa(bin),
-                            metadata: { binary: true, mime: file.type || 'application/octet-stream', name: file.name },
-                          });
-                        }
-                      };
-                      reader.onerror = () => message.error('读取文件失败');
-                      reader.readAsArrayBuffer(file);
+                      uploadFile.mutate({ path: [...cwd, file.name].join('/'), file: file as File });
                       return false;
                     }}
                   >
@@ -425,6 +409,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
         initialHref={browserHref}
         onClose={() => setBrowserOpen(false)}
         resolveHref={resolveHref}
+        onReparse={reparseFile}
       />
 
       {/* 新建文件夹 */}

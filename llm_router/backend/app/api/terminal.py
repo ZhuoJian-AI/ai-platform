@@ -73,6 +73,7 @@ from app.schemas.ontology import (
 from app.schemas.user import UserRead
 from app.schemas.workspace import (
     WorkspaceFileCreate,
+    WorkspaceFilePreviewRead,
     WorkspaceFileRead,
     WorkspaceFolderCreate,
     WorkspaceFolderRead,
@@ -556,6 +557,27 @@ async def upsert_ws_file_endpoint(
     return f
 
 
+@router.post("/terminal/workspaces/{ws_id}/files/upload", response_model=WorkspaceFileRead, status_code=201)
+async def upload_ws_file_endpoint(
+    ws_id: UUID,
+    file: UploadFile = File(...),
+    path: str | None = Form(default=None),
+    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    assert_user_write(cu)
+    ws = await _get_visible_workspace(db, ws_id, cu)
+    raw = await file.read()
+    try:
+        f = await workspace_service.ingest_uploaded_file(
+            db, ws, path=path or file.filename or "upload.bin",
+            filename=file.filename or "upload.bin", content_type=file.content_type, raw=raw,
+        )
+    except workspace_service.WorkspaceFileUploadError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await db.commit()
+    return f
+
+
 @router.get("/terminal/files/{file_id}", response_model=WorkspaceFileRead)
 async def get_ws_file_endpoint(
     file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
@@ -566,6 +588,35 @@ async def get_ws_file_endpoint(
     ws = await workspace_service.get_workspace(db, f.workspace_id)
     if ws is None or not scope_service.is_workspace_visible(ws, cu):
         raise HTTPException(status_code=404, detail="File not found")
+    return f
+
+
+@router.get("/terminal/files/{file_id}/preview", response_model=WorkspaceFilePreviewRead)
+async def preview_ws_file_endpoint(
+    file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+        raise HTTPException(status_code=404, detail="File not found")
+    return f
+
+
+@router.post("/terminal/files/{file_id}/reparse", response_model=WorkspaceFileRead)
+async def reparse_ws_file_endpoint(
+    file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    assert_user_write(cu)
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+        raise HTTPException(status_code=404, detail="File not found")
+    f = await workspace_service.reparse_file(db, f)
+    await db.commit()
     return f
 
 
@@ -947,7 +998,7 @@ async def ingest_kb_document_endpoint(
 @router.post("/terminal/rag/{coll_id}/documents/upload", response_model=RagDocumentRead, status_code=201)
 async def upload_kb_document_endpoint(
     coll_id: UUID,
-    file: UploadFile = File(..., description="待解析入库的文档（pdf/docx/xlsx/csv/txt/md/html）"),
+    file: UploadFile = File(..., description="待解析入库的 PDF / Word / Excel / PowerPoint / 文本文档"),
     title: str | None = Form(default=None),
     folder_path: str = Form(default=""),
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),

@@ -49,6 +49,11 @@ class WorkspaceFile(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     content_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 内联文本内容（小文件直接落库，便于在线编辑与 agent 即时读取）。
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Office/PDF 等二进制文件的结构化文本解析结果；原文件仍保存在 content(base64)。
+    extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parse_status: Mapped[str] = mapped_column(String(20), nullable=False, default="unparsed")
+    parse_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
 
     workspace = relationship("Workspace", back_populates="files")

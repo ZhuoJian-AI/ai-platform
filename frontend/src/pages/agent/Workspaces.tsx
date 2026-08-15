@@ -7,7 +7,7 @@ import {
   DeleteOutlined, BankOutlined, ApartmentOutlined,
   TeamOutlined, UserOutlined, FolderOutlined, FileTextOutlined,
   FolderAddOutlined, ArrowUpOutlined, HomeOutlined, UploadOutlined,
-  DownloadOutlined, EyeOutlined, CloseOutlined,
+  DownloadOutlined, EyeOutlined, CloseOutlined, ReloadOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
@@ -143,12 +143,23 @@ export default function Workspaces() {
   }, [files, folders, cwd]);
 
   const uploadFile = useMutation({
-    mutationFn: (v: { path: string; content: string; metadata?: Record<string, unknown> }) => {
+    mutationFn: (v: { path: string; file: File }) => {
       if (!fileModalWs) return Promise.reject(new Error('no ws'));
-      return workspaces.upsertFile(fileModalWs.id, v);
+      return workspaces.uploadFile(fileModalWs.id, v.file, v.path);
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['workspace-files'] }); message.success('文件已上传'); },
     onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '上传失败'),
+  });
+
+  const reparseFile = useMutation({
+    mutationFn: (id: string) => workspaces.reparseFile(id),
+    onSuccess: (updated) => {
+      setOpenFiles((items) => items.map((f) => f.id === updated.id ? updated : f));
+      qc.invalidateQueries({ queryKey: ['workspace-files'] });
+      if (updated.parse_status === 'ready') message.success('文件解析完成');
+      else message.warning(updated.parse_error || '文件仍无法解析');
+    },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '重新解析失败'),
   });
 
   /** 把二进制文件的 base64 content 解码为 Blob 并触发下载。 */
@@ -336,25 +347,7 @@ export default function Workspaces() {
                           message.warning(`文件过大（> ${MAX_UPLOAD_BYTES / 1024 / 1024}MB），请选择更小的文件`);
                           return Upload.LIST_IGNORE;
                         }
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                          const buf = new Uint8Array(reader.result as ArrayBuffer);
-                          const path = [...cwd, file.name].join('/');
-                          let textContent: string | null = null;
-                          if (!buf.includes(0)) {
-                            try { textContent = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { textContent = null; }
-                          }
-                          if (textContent !== null) {
-                            uploadFile.mutate({ path, content: textContent, metadata: {} });
-                          } else {
-                            let bin = '';
-                            const chunk = 0x8000;
-                            for (let i = 0; i < buf.length; i += chunk) bin += String.fromCharCode(...buf.subarray(i, i + chunk));
-                            uploadFile.mutate({ path, content: btoa(bin), metadata: { binary: true, mime: file.type || 'application/octet-stream', name: file.name } });
-                          }
-                        };
-                        reader.onerror = () => message.error('读取文件失败');
-                        reader.readAsArrayBuffer(file);
+                        uploadFile.mutate({ path: [...cwd, file.name].join('/'), file: file as File });
                         return false;
                       }}
                     >
@@ -497,7 +490,12 @@ export default function Workspaces() {
         )}
         <div style={{ flex: 1, minHeight: 0 }}>
           {activeFile && (
-            <FileViewer file={activeFile} onDownload={() => isBinary(activeFile) ? downloadBinary(activeFile) : downloadText(activeFile)} />
+            <FileViewer
+              file={activeFile}
+              onDownload={() => isBinary(activeFile) ? downloadBinary(activeFile) : downloadText(activeFile)}
+              onReparse={() => reparseFile.mutate(activeFile.id)}
+              reparsing={reparseFile.isPending}
+            />
           )}
         </div>
       </Drawer>
@@ -533,13 +531,25 @@ export default function Workspaces() {
  *  - 二进制图片：data URL 内嵌 <img>；二进制 PDF：data URL 内嵌 <iframe>；其它二进制：仅提供下载。
  *  - 文本：Markdown 用 react-markdown 渲染；HTML（含 .doc/.docx 存为 HTML）用 iframe srcDoc；其余纯文本用 <pre>。
  */
-function FileViewer({ file, onDownload }: { file: WorkspaceFile; onDownload: () => void }) {
+function FileViewer({ file, onDownload, onReparse, reparsing }: {
+  file: WorkspaceFile; onDownload: () => void; onReparse: () => void; reparsing: boolean;
+}) {
   const meta = (file.metadata ?? {}) as { binary?: boolean; mime?: string; name?: string };
   const ext = extOf(file.path);
   const content = file.content ?? '';
 
   // 二进制文件
   if (meta.binary) {
+    if (file.parse_status === 'ready' && file.extracted_text) {
+      return (
+        <div style={{ height: '100%', overflowY: 'auto', padding: '16px 20px' }}>
+          <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: FS.aux }}>
+            已解析为 {file.parse_kind || '文本'} · 原文件可通过右上角下载
+          </Typography.Text>
+          <div className="wb-md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{file.extracted_text}</ReactMarkdown></div>
+        </div>
+      );
+    }
     const mime = meta.mime || 'application/octet-stream';
     if (mime.startsWith('image/')) {
       return (
@@ -556,10 +566,13 @@ function FileViewer({ file, onDownload }: { file: WorkspaceFile; onDownload: () 
       <div style={viewerCenter}>
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
           description={<>
-            <div>二进制文件（{mime}）不支持在线预览</div>
+            <div>{file.parse_error || `该二进制文件（${mime}）尚无可预览文本`}</div>
             <Typography.Text type="secondary" style={{ fontSize: FS.aux }}>{file.path}</Typography.Text>
           </>} />
-        <Button icon={<DownloadOutlined />} onClick={onDownload} style={{ marginTop: 12 }}>下载</Button>
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <Button icon={<ReloadOutlined />} onClick={onReparse} loading={reparsing}>重新解析</Button>
+          <Button icon={<DownloadOutlined />} onClick={onDownload}>下载</Button>
+        </div>
       </div>
     );
   }

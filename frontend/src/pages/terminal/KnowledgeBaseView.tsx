@@ -59,7 +59,12 @@ function leaf(p: string): string {
 }
 
 /** 支持上传的扩展名（与后端 doc_parser 对齐：pdf/docx/xlsx/csv/txt/md/html）。 */
-const ACCEPT_EXTS = ['pdf', 'docx', 'xlsx', 'xls', 'xlsm', 'csv', 'tsv', 'txt', 'text', 'log', 'md', 'markdown', 'htm', 'html'];
+const ACCEPT_EXTS = [
+  'pdf', 'doc', 'docx', 'docm', 'dot', 'dotx', 'dotm', 'rtf', 'odt',
+  'xls', 'xlsx', 'xlsm', 'xlsb', 'xlt', 'xltx', 'xltm', 'ods',
+  'ppt', 'pptx', 'pptm', 'pps', 'ppsx', 'ppsm', 'pot', 'potx', 'potm', 'odp',
+  'csv', 'tsv', 'txt', 'text', 'log', 'md', 'markdown', 'htm', 'html',
+];
 const ACCEPT_ATTR = ACCEPT_EXTS.map((e) => `.${e}`).join(',');
 const isAccepted = (name: string): boolean => {
   const ext = (name.split('.').pop() || '').toLowerCase();
@@ -200,7 +205,7 @@ export default function KnowledgeBaseView() {
         file: f, phase: 'queued' as UploadPhase, percent: 0, folderPath,
       });
     });
-    if (skipped > 0) message.info(`已跳过 ${skipped} 个不支持的文件（仅支持 pdf/docx/xlsx/csv/txt/md/html）`);
+    if (skipped > 0) message.info(`已跳过 ${skipped} 个不支持的文件（支持 PDF / Word / Excel / PowerPoint / 文本 / HTML）`);
     enqueue(items);
   };
   const closeUploadModal = () => {
@@ -582,7 +587,7 @@ export default function KnowledgeBaseView() {
             </div>
             <div style={{ padding: 18 }}>
               <Typography.Text style={{ fontSize: 12, color: '#86868b', display: 'block', marginBottom: 12 }}>
-                支持 PDF / Word(docx) / Excel(xlsx/csv) / txt / md / html；上传后自动解析分块嵌入。入库位置：{currentFolder || '根目录'}
+                支持 PDF / Word / Excel / PowerPoint / 文本与网页文件；上传后自动解析分块嵌入。入库位置：{currentFolder || '根目录'}
               </Typography.Text>
               <Upload.Dragger
                 multiple

@@ -142,7 +142,7 @@ async def ingest_document_endpoint(
 @router.post("/rag/{coll_id}/documents/upload", response_model=RagDocumentRead, status_code=201)
 async def upload_document_endpoint(
     coll_id: UUID,
-    file: UploadFile = File(..., description="待解析入库的文档（pdf/docx/xlsx/csv/txt/md/html）"),
+    file: UploadFile = File(..., description="待解析入库的 PDF / Word / Excel / PowerPoint / 文本文档"),
     title: str | None = Form(default=None),
     folder_path: str = Form(default=""),
     auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),

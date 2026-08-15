@@ -65,8 +65,21 @@ class WorkspaceFileRead(MetaReadModel):
     size: int
     content_hash: str | None = None
     content: str | None = None
+    extracted_text: str | None = None
+    parse_status: str = "unparsed"
+    parse_kind: str | None = None
+    parse_error: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class WorkspaceFilePreviewRead(BaseModel):
+    id: UUID
+    path: str
+    parse_status: str
+    parse_kind: str | None = None
+    parse_error: str | None = None
+    extracted_text: str | None = None
 
 
 class WorkspaceFolderCreate(BaseModel):

@@ -745,7 +745,8 @@ async def agent_loop(state: AgentState) -> dict:
         system_prompt = f"{system_prompt}\n\n[知识库检索结果]\n{ctx_text}"
 
     # 用户以 @<file_id> 引用的工作空间文件：读取内容注入 system prompt（仿本体/RAG）。
-    # 二进制文件只标注不内联；越权（不在用户 scope 内）文件跳过。文件是上下文，Ask/Plan 也注入。
+    # Office/PDF 二进制文件使用工作空间已提取文本，绝不把 Base64 注入模型。
+    # 越权（不在用户 scope 内）文件跳过。文件是上下文，Ask/Plan 也注入。
     ref_file_ids = state.get("referenced_file_ids") or []
     if ref_file_ids:
         user = deps.get("user")
@@ -762,10 +763,6 @@ async def agent_loop(state: AgentState) -> dict:
             if ws is None or (user is not None and not scope_service.is_workspace_visible(ws, user)):
                 continue  # 文件不可见，跳过
             file_names.append(f.path)
-            is_bin = bool((f.metadata_ or {}).get("binary"))
-            if is_bin:
-                file_parts.append(f"[引用文件 {f.path}]（二进制文件，已引用，无法内联内容）")
-                continue
             content = workspace_service.resolve_file_content(f)
             if content.strip():
                 file_parts.append(f"[引用文件 {f.path}]\n{content}")

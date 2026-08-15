@@ -24,6 +24,8 @@ type Source =
   | { kind: 'pdf'; url: string; href: string }
   | { kind: 'docx'; url: string; href: string }
   | { kind: 'docx-bin'; content: string; path: string; href: string; fileId: string }
+  | { kind: 'parsed'; content: string; originalContent: string; mime: string; path: string; href: string; fileId: string; parseKind: string | null }
+  | { kind: 'binary'; content: string; mime: string; path: string; href: string; fileId: string; note: string }
   | { kind: 'image'; src: string; href: string; path?: string; fileId?: string }
   | { kind: 'md'; content: string; path: string; href: string; fileId: string }
   | { kind: 'html'; content: string; path: string; href: string; fileId: string }
@@ -60,6 +62,7 @@ function classifyUrl(url: string): Source {
 export function classifyFile(f: {
   id: string; path: string; content: string | null;
   metadata?: Record<string, unknown> | null;
+  extracted_text?: string | null; parse_status?: string; parse_kind?: string | null; parse_error?: string | null;
 }): Source {
   const content = f.content ?? '';
   const ext = extOf(f.path);
@@ -68,6 +71,20 @@ export function classifyFile(f: {
   if ((meta.binary && (meta.mime || '').startsWith('image/')) || IMAGE_EXTS.has(ext)) {
     const mime = meta.mime || imgMimeOf(ext);
     return { kind: 'image', src: `data:${mime};base64,${content}`, href: f.path, path: f.path, fileId: f.id };
+  }
+  if (meta.binary && f.parse_status === 'ready' && f.extracted_text) {
+    return {
+      kind: 'parsed', content: f.extracted_text, originalContent: content,
+      mime: meta.mime || 'application/octet-stream', path: f.path, href: f.path,
+      fileId: f.id, parseKind: f.parse_kind ?? null,
+    };
+  }
+  if (meta.binary) {
+    return {
+      kind: 'binary', content, mime: meta.mime || 'application/octet-stream',
+      path: f.path, href: f.path, fileId: f.id,
+      note: f.parse_error || '该文件尚未解析，可点击“重新解析”',
+    };
   }
   if (ext === 'md' || ext === 'markdown') return { kind: 'md', content, path: f.path, href: f.path, fileId: f.id };
   // 二进制 .docx（base64 + metadata.binary）：客户端 mammoth 解析为 HTML 渲染，避免 base64 乱码。
@@ -135,9 +152,10 @@ export interface BrowserDrawerProps {
   onClose: () => void;
   /** 把任意 href（http URL 或工作空间路径）解析为可渲染的 Source。 */
   resolveHref: (href: string) => Promise<Source>;
+  onReparse?: (fileId: string) => Promise<void>;
 }
 
-export default function BrowserDrawer({ open, initialHref, onClose, resolveHref }: BrowserDrawerProps) {
+export default function BrowserDrawer({ open, initialHref, onClose, resolveHref, onReparse }: BrowserDrawerProps) {
   const [history, setHistory] = useState<Source[]>([]);
   const [index, setIndex] = useState(-1);
   const [loading, setLoading] = useState(false);
@@ -231,6 +249,22 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref 
     setRefreshKey((k) => k + 1);
   };
 
+  const reparse = async () => {
+    if (!current || current.kind !== 'binary' || !onReparse) return;
+    setLoading(true);
+    try {
+      await onReparse(current.fileId);
+      const src = await resolveHref(current.href);
+      const at = indexRef.current;
+      setHistory((h) => { const n = [...h]; n[at] = src; return n; });
+      setRefreshKey((k) => k + 1);
+    } catch (e) {
+      message.error((e as Error)?.message || '重新解析失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // 在新标签页打开：URL 直接打开；文件类生成 blob 预览
   const openInNewTab = () => {
     if (!current) return;
@@ -240,6 +274,13 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref 
     }
     if (current.kind === 'docx-bin') {
       const blob = new Blob([b64ToUint8(current.content)], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener');
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      return;
+    }
+    if (current.kind === 'parsed') {
+      const blob = new Blob([current.content], { type: 'text/markdown;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       window.open(url, '_blank', 'noopener');
       setTimeout(() => URL.revokeObjectURL(url), 30000);
@@ -258,7 +299,7 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref 
       setTimeout(() => URL.revokeObjectURL(url), 30000);
       return;
     }
-    if (current.url) window.open(current.url, '_blank', 'noopener');
+    if (current.kind === 'unsupported' && current.url) window.open(current.url, '_blank', 'noopener');
   };
 
   // 下载当前预览内容：工作空间文件→内容 blob 下载；外部 URL→新标签打开由浏览器处理
@@ -299,6 +340,17 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref 
       a.download = current.path.split('/').pop() || current.path;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
+      return;
+    }
+    if (current.kind === 'parsed' || current.kind === 'binary') {
+      const raw = current.kind === 'parsed' ? current.originalContent : current.content;
+      const blob = new Blob([b64ToUint8(raw)], { type: current.mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = current.path.split('/').pop() || current.path;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
     }
   };
 
@@ -332,7 +384,7 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref 
     current?.kind === 'pdf' ? <FilePdfOutlined /> :
     current?.kind === 'docx' || current?.kind === 'docx-bin' ? <FileWordOutlined /> :
     current?.kind === 'image' ? <FileImageOutlined /> :
-    current?.kind === 'md' || current?.kind === 'text' || current?.kind === 'html' ? <FileTextOutlined /> :
+    current?.kind === 'md' || current?.kind === 'text' || current?.kind === 'html' || current?.kind === 'parsed' ? <FileTextOutlined /> :
     <SelectOutlined />;
 
   return (
@@ -407,6 +459,21 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref 
         {current?.kind === 'md' && (
           <div className="wb-md" style={{ height: '100%', overflowY: 'auto', padding: '20px 24px' }}>
             <MdNav content={current.content} onLink={navigate} />
+          </div>
+        )}
+        {current?.kind === 'parsed' && (
+          <div className="wb-md" style={{ height: '100%', overflowY: 'auto', padding: '20px 24px' }}>
+            <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
+              已解析为 {current.parseKind || '文本'} · 下载按钮保留原文件
+            </Typography.Text>
+            <MdNav content={current.content} onLink={navigate} />
+          </div>
+        )}
+        {current?.kind === 'binary' && (
+          <div style={{ padding: 40, textAlign: 'center' }}>
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={current.note} />
+            {onReparse && <Button type="primary" onClick={reparse} style={{ marginRight: 8 }}>重新解析</Button>}
+            <Button icon={<DownloadOutlined />} onClick={download}>下载原文件</Button>
           </div>
         )}
         {current?.kind === 'html' && (
