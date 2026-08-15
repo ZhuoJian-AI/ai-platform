@@ -12,7 +12,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ai_infra}
       POSTGRES_USER: ${POSTGRES_USER:-ai_infra}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -29,7 +29,7 @@ services:
   redis:
     image: redis:7-alpine
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
     command:
       - /bin/sh
       - -c
@@ -53,8 +53,8 @@ services:
       context: ./mock
       dockerfile: Dockerfile
     environment:
-      MES_API_KEY: ${MES_API_KEY:?MES_API_KEY is required}
-      CRM_API_KEY: ${CRM_API_KEY:?CRM_API_KEY is required}
+      MES_API_KEY: ${MES_API_KEY:?}
+      CRM_API_KEY: ${CRM_API_KEY:?}
     expose:
       - "8010"
     healthcheck:
@@ -76,11 +76,11 @@ services:
     environment:
       APP_ENV: production
       DEBUG: "false"
-      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
-      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?MASTER_ENCRYPTION_KEY is required}
-      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
-      REDIS_URL: ${REDIS_URL:?REDIS_URL is required}
-      PROXY_BASE_URL: ${PUBLIC_ORIGIN:?PUBLIC_ORIGIN is required}
+      SECRET_KEY: ${SECRET_KEY:?}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?}
+      DATABASE_URL: ${DATABASE_URL:?}
+      REDIS_URL: ${REDIS_URL:?}
+      PROXY_BASE_URL: ${PUBLIC_ORIGIN:?}
       API_KEY_CACHE_TTL: "${API_KEY_CACHE_TTL:-60}"
       DLP_EXPOSE_MATCHES_IN_ERROR: "${DLP_EXPOSE_MATCHES_IN_ERROR:-false}"
     expose:
