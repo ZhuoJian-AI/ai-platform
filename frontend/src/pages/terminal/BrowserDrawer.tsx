@@ -4,6 +4,7 @@ import {
   ArrowLeftOutlined, ArrowRightOutlined, ReloadOutlined, SelectOutlined,
   FileTextOutlined, GlobalOutlined, FileWordOutlined, FilePdfOutlined,
   FileImageOutlined, DownloadOutlined, ShareAltOutlined,
+  ExportOutlined, FullscreenOutlined, FullscreenExitOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -129,6 +130,11 @@ function MdNav({ content, onLink }: { content: string; onLink: (href: string) =>
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{
+        table: ({ node: _n, ...props }) => (
+          <div className="wb-md-table-wrap">
+            <table {...props} />
+          </div>
+        ),
         a: ({ node: _n, href, ...props }) => (
           <a
             {...props}
@@ -160,11 +166,17 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref,
   const [index, setIndex] = useState(-1);
   const [loading, setLoading] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   // 标记某次 resolve 是否由"刷新"触发——刷新失败时回退展示旧内容，避免清屏。
   const refreshTickRef = useRef(0);
   // index 的 ref 镜像：异步 navigate/refresh 完成后读取最新游标，避免闭包 stale 值。
   const indexRef = useRef(-1);
   useEffect(() => { indexRef.current = index; }, [index]);
+
+  // 每次关闭预览后恢复为侧边抽屉，避免下次打开时意外占满屏幕。
+  useEffect(() => {
+    if (!open) setIsFullscreen(false);
+  }, [open]);
 
   // 二进制 .docx → HTML 的客户端转换结果。current 切换或刷新时重算。
   const [docxHtml, setDocxHtml] = useState<string | null>(null);
@@ -372,6 +384,8 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref,
   const navBtn = (onClick: () => void, disabled: boolean, icon: ReactNode, title: string) => (
     <Tooltip title={title}>
       <button
+        type="button"
+        aria-label={title}
         onClick={onClick} disabled={disabled}
         style={navBtnStyle(disabled)}
       >{icon}</button>
@@ -389,7 +403,11 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref,
 
   return (
     <Drawer
-      placement="right" open={open} width={760} onClose={onClose}
+      placement="right"
+      open={open}
+      width={isFullscreen ? '100vw' : 'min(760px, 100vw)'}
+      onClose={onClose}
+      rootClassName="wb-browser-drawer"
       styles={{
         header: { display: 'none' },
         body: { padding: 0, background: '#fff', display: 'flex', flexDirection: 'column' },
@@ -413,7 +431,13 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref,
         </div>
         {navBtn(download, false, <DownloadOutlined />, '下载')}
         {canShare && navBtn(share, false, <ShareAltOutlined />, '生成分享链接')}
-        {navBtn(openInNewTab, false, <SelectOutlined />, '在新标签页中打开')}
+        {navBtn(
+          () => setIsFullscreen((value) => !value),
+          false,
+          isFullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />,
+          isFullscreen ? '退出全屏预览' : '全屏预览',
+        )}
+        {navBtn(openInNewTab, false, <ExportOutlined />, '在新标签页中打开')}
         <Button size="small" type="text" onClick={onClose} style={{ color: '#6b7280' }}>关闭</Button>
       </div>
 

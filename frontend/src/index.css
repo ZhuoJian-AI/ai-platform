@@ -206,12 +206,20 @@ button {
 }
 .wb-md a { color: #6366F1; text-decoration: none; }
 .wb-md a:hover { text-decoration: underline; }
+.wb-md-table-wrap {
+  width: 100%;
+  margin: 8px 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
 .wb-md table {
-  margin: 8px 0; border-collapse: collapse; width: auto; max-width: 100%;
+  margin: 0; border-collapse: collapse; width: max-content; min-width: 100%; max-width: none;
   font-size: 13px;
 }
 .wb-md th, .wb-md td {
-  border: 1px solid #E5E7EB; padding: 5px 9px; text-align: left;
+  min-width: 88px; max-width: 360px;
+  border: 1px solid #E5E7EB; padding: 7px 10px; text-align: left; vertical-align: top;
+  overflow-wrap: anywhere;
 }
 .wb-md th { background: #F8F9FC; font-weight: 600; }
 
