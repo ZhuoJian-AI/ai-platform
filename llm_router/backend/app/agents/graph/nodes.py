@@ -336,6 +336,7 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
     ontology_ids = list(state.get("ontology_ids") or [])
     rag_ids = list(state.get("rag_collection_ids") or [])
     referenced_skills: list[dict] = []
+    # 结构化附件优先进入 state；正文中的历史 @UUID 再补充，按出现顺序去重。
     referenced_file_ids: list[str] = []
 
     if user is not None:
@@ -359,6 +360,11 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
         # 解析用户消息中 @<file_id> 引用的工作空间文件（精确 UUID，避免误命中邮件等）。
         # agent_loop 读取这些文件内容注入 system prompt；越权文件在 agent_loop 校验时跳过。
         seen_fids: set[str] = set()
+        for raw_fid in state.get("referenced_file_ids") or []:
+            fid = str(raw_fid)
+            if fid not in seen_fids:
+                seen_fids.add(fid)
+                referenced_file_ids.append(fid)
         for m in re.finditer(
             r'(?<![\w])@([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})',
             state.get("request", "") or "",
@@ -775,7 +781,7 @@ async def agent_loop(state: AgentState) -> dict:
         ctx_text = "\n\n---\n".join(c["content"] for c in rag_ctx)
         system_prompt = f"{system_prompt}\n\n[知识库检索结果]\n{ctx_text}"
 
-    # 用户以 @<file_id> 引用的工作空间文件：读取内容注入 system prompt（仿本体/RAG）。
+    # 用户通过结构化附件或 @<file_id> 引用的工作空间文件：读取内容注入 system prompt。
     # Office/PDF 二进制文件使用工作空间已提取文本，绝不把 Base64 注入模型。
     # 越权（不在用户 scope 内）文件跳过。文件是上下文，Ask/Plan 也注入。
     ref_file_ids = state.get("referenced_file_ids") or []
@@ -803,7 +809,7 @@ async def agent_loop(state: AgentState) -> dict:
             mapping = "\n".join(f"- @{r['file_id']} → {r['path']}" for r in file_refs)
             system_prompt = (
                 f"{system_prompt}\n\n[已解析的文件引用]\n"
-                "用户消息中的 @UUID 已由系统精确解析，映射如下：\n"
+                "本轮结构化附件或用户消息中的 @UUID 已由系统精确解析，映射如下：\n"
                 f"{mapping}\n"
                 "这些文件内容已直接载入下方上下文。请把 UUID 与对应路径视为同一个文件，不得声称无法按 UUID 定位；"
                 "除非用户明确要求比较其他文件，否则不要调用工作空间列表/读取工具，也不要分析未引用文件。\n\n"

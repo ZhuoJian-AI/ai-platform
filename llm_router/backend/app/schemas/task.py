@@ -42,6 +42,9 @@ class TaskUpdate(BaseModel):
 class TaskRunRequest(BaseModel):
     message: str
     stream: bool = False
+    # 聊天输入框拖入/选择的工作空间文件。与正文中的历史 ``@UUID`` 引用并行兼容；
+    # 端点会校验文件属于任务当前工作空间且已解析完成，再把快照写入 user 消息 metadata。
+    attachment_file_ids: list[UUID] = Field(default_factory=list, max_length=10)
     # 逐次运行覆盖（不落库）：
     #   字段未传 → 沿用 task.config.template_agent_id（向后兼容 demo 旧 /run 调用）
     #   显式传 UUID → 该次用此智能体（load_config 拼 persona + 继承 skill_ids/model_alias）

@@ -1,6 +1,7 @@
 import {
   useCallback, useEffect, useRef, useState, forwardRef, useImperativeHandle, useMemo,
-  type CSSProperties, type FormEvent, type KeyboardEvent, type ReactNode,
+  type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent,
+  type Dispatch, type FormEvent, type KeyboardEvent, type ReactNode, type SetStateAction,
 } from 'react';
 import { useParams } from 'react-router-dom';
 import {
@@ -75,6 +76,58 @@ interface ChatMsg {
   id?: string;           // user 消息 ID（DB 回放后携带；用于按轮删除对话）
   // 该轮用户消息发送时选中的智能体名（逐次覆盖，不落库；仅本轮 live 气泡展示，历史回放无）。
   agentName?: string | null;
+  attachments?: MessageAttachment[];
+}
+
+interface MessageAttachment {
+  file_id: string;
+  workspace_id: string;
+  path: string;
+  name: string;
+}
+
+type ComposerAttachmentStatus = 'uploading' | 'parsing' | 'ready' | 'failed';
+
+interface ComposerAttachment extends MessageAttachment {
+  client_id: string;
+  file: File;
+  file_id: string;
+  status: ComposerAttachmentStatus;
+  progress: number;
+  error?: string;
+}
+
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const MAX_ATTACHMENTS = 10;
+const MAX_UPLOAD_CONCURRENCY = 3;
+
+function safeAttachmentName(name: string): string {
+  const cleaned = name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim() || '未命名文件';
+  return cleaned.length <= 180 ? cleaned : cleaned.slice(cleaned.length - 180);
+}
+
+function attachmentPath(scopeKey: string, name: string): string {
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+  return `会话附件/${scopeKey}/${stamp}-${crypto.randomUUID().slice(0, 8)}-${safeAttachmentName(name)}`;
+}
+
+function messageAttachments(metadata: Record<string, unknown> | undefined): MessageAttachment[] {
+  const raw = metadata?.attachments;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const value = item as Record<string, unknown>;
+    const fileId = typeof value.file_id === 'string' ? value.file_id : '';
+    const workspaceId = typeof value.workspace_id === 'string' ? value.workspace_id : '';
+    const path = typeof value.path === 'string' ? value.path : '';
+    if (!fileId || !workspaceId || !path) return [];
+    return [{
+      file_id: fileId,
+      workspace_id: workspaceId,
+      path,
+      name: typeof value.name === 'string' && value.name ? value.name : (path.split('/').pop() || path),
+    }];
+  });
 }
 
 /** 把后端持久化的 traces 数组还原为执行过程 blocks（历史回放用）。
@@ -109,7 +162,9 @@ function restoreChat(messages: TerminalTaskMessage[]): ChatMsg[] {
   return messages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .map((m) => {
-      if (m.role !== 'assistant') return { role: 'user', content: m.content, id: m.id };
+      if (m.role !== 'assistant') {
+        return { role: 'user', content: m.content, id: m.id, attachments: messageAttachments(m.metadata) };
+      }
       const traces = (m.metadata?.traces as Record<string, unknown>[] | undefined) ?? [];
       const blocks = traces.length ? tracesToBlocks(traces) : undefined;
       if (blocks && m.content) blocks.push({ kind: 'text', content: m.content });
@@ -167,6 +222,8 @@ export default function Terminal() {
   // 新建任务作曲器
   const [composerOpen, setComposerOpen] = useState(true);
   const [input, setInput] = useState('');
+  const [inputAttachments, setInputAttachments] = useState<ComposerAttachment[]>([]);
+  const [draftAttachmentKey, setDraftAttachmentKey] = useState(() => crypto.randomUUID());
   const [config, setConfig] = useState<TaskConfig>(DEFAULT_CONFIG);
   const [cfgOpen, setCfgOpen] = useState(false);
   // 终端「选智能体」逐次覆盖（不落库）：选中后随 /run 发送；null=通用智能体。
@@ -177,6 +234,7 @@ export default function Terminal() {
 
   // 跟随输入（选中任务后的对话）
   const [followUp, setFollowUp] = useState('');
+  const [followUpAttachments, setFollowUpAttachments] = useState<ComposerAttachment[]>([]);
 
   // 浏览器抽屉：点击对话内容中的文件/链接时弹出，内嵌浏览器可预览网页与文档
   const [browserOpen, setBrowserOpen] = useState(false);
@@ -387,13 +445,13 @@ export default function Terminal() {
     }
   }, [dispatchEvent]);
 
-  const runStream = useCallback(async (taskId: string, msg: string) => {
+  const runStream = useCallback(async (taskId: string, msg: string, attachments: MessageAttachment[] = []) => {
     // 乐观载入：立即显示用户消息 + 一个「思考中」回合，第一时间给反馈
     // 该轮若选了智能体，把智能体名挂到用户消息上，气泡内按技能 chip 同款展示（逐次覆盖、不落库）。
     const turnAgentName = selectedAgentId ? agentLabel : null;
     setChat((c) => [
       ...c,
-      { role: 'user', content: msg, agentName: turnAgentName },
+      { role: 'user', content: msg, agentName: turnAgentName, attachments },
       { role: 'assistant', content: '', blocks: [{ kind: 'phase', index: 0 }] },
     ]);
     setTraceLog([]);
@@ -401,7 +459,9 @@ export default function Terminal() {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const resp = await terminal.runTaskStream(taskId, msg, controller.signal, selectedAgentId);
+      const resp = await terminal.runTaskStream(
+        taskId, msg, controller.signal, selectedAgentId, attachments.map((item) => item.file_id),
+      );
       if (!resp.ok || !resp.body) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err.detail || `HTTP ${resp.status}`);
@@ -484,6 +544,7 @@ export default function Terminal() {
   // 统一任务选择入口：切到不同任务前先断开当前 SSE 读端，保证切回运行中任务时可重连回放。
   const selectTask = useCallback(async (id: string | null) => {
     if (id !== selectedId) abortActiveStream();
+    if (id !== selectedId) setFollowUpAttachments([]);
     if (id) {
       // 强制抓最新任务数据再切换，避免用 react-query 旧缓存回放：
       // 任务首次选中（createTask+runStream 起步瞬间）抓到的缓存里 run_status 尚非 running、
@@ -521,13 +582,17 @@ export default function Terminal() {
   };
 
   const startTask = async () => {
-    if (!input.trim() || streaming) return;
+    const readyAttachments = inputAttachments.filter((item) => item.status === 'ready' && item.file_id);
+    if ((!input.trim() && !readyAttachments.length) || streaming) return;
     if (!config.model_alias) {
       message.warning('请先选择模型后再执行');
       setCfgContext('composer'); setCfgOpen(true);
       return;
     }
-    const msg = input.trim();
+    const msg = input.trim() || `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`;
+    const attachmentSnapshots: MessageAttachment[] = readyAttachments.map(({ file_id, workspace_id, path, name }) => ({
+      file_id, workspace_id, path, name,
+    }));
     try {
       const task = await terminal.createTask({ title: msg.slice(0, 60), message: msg, config });
       // 新建后立即让左栏任务列表可见（不再等流结束才 invalidate）——根治「执行期间左栏看不到任务」诱因。
@@ -538,22 +603,28 @@ export default function Terminal() {
       setComposerOpen(false);
       setSelectedId(task.id);
       setInput('');
-      await runStream(task.id, msg);
+      setInputAttachments([]);
+      await runStream(task.id, msg, attachmentSnapshots);
     } catch (e) {
       message.error((e as Error).message);
     }
   };
 
   const sendFollowUp = async () => {
-    if (!selectedId || !followUp.trim() || streaming) return;
+    const readyAttachments = followUpAttachments.filter((item) => item.status === 'ready' && item.file_id);
+    if (!selectedId || (!followUp.trim() && !readyAttachments.length) || streaming) return;
     if (!taskConfig.model_alias) {
       message.warning('请先选择模型后再执行');
       setCfgContext('chat'); setCfgOpen(true);
       return;
     }
-    const msg = followUp.trim();
+    const msg = followUp.trim() || `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`;
+    const attachmentSnapshots: MessageAttachment[] = readyAttachments.map(({ file_id, workspace_id, path, name }) => ({
+      file_id, workspace_id, path, name,
+    }));
     setFollowUp('');
-    await runStream(selectedId, msg);
+    setFollowUpAttachments([]);
+    await runStream(selectedId, msg, attachmentSnapshots);
   };
 
   const newTask = () => {
@@ -565,6 +636,9 @@ export default function Terminal() {
     setTraceLog([]);
     setComposerOpen(true);
     setInput('');
+    setInputAttachments([]);
+    setFollowUpAttachments([]);
+    setDraftAttachmentKey(crypto.randomUUID());
     setConfig(DEFAULT_CONFIG);
     setView('assistant');
   };
@@ -853,6 +927,8 @@ export default function Terminal() {
             ) : composerOpen ? (
               <HomeView
                 input={input} setInput={setInput}
+                attachments={inputAttachments} setAttachments={setInputAttachments}
+                attachmentScopeKey={`草稿-${draftAttachmentKey}`}
                 placeholder={COMPOSER_PLACEHOLDER}
                 config={config}
                 resources={resources}
@@ -868,6 +944,7 @@ export default function Terminal() {
                 taskTitle={selectedTask?.title || '任务对话'}
                 chat={chat} streaming={streaming}
                 followUp={followUp} setFollowUp={setFollowUp}
+                attachments={followUpAttachments} setAttachments={setFollowUpAttachments}
                 onSend={sendFollowUp} onStop={stopStream}
                 onTogglePanel={() => setDrawerOpen(true)}
                 onNew={newTask}
@@ -879,6 +956,7 @@ export default function Terminal() {
                 onLink={openLink}
                 fileLinks={fileLinks}
                 fileRefMap={fileRefMap}
+                fileRefsLoaded={allWsFiles !== undefined}
                 onDeleteTurn={(messageId) => {
                   if (!selectedId) return;
                   setTurnDelConfirm({ taskId: selectedId, messageId });
@@ -1185,6 +1263,9 @@ const MentionInput = forwardRef<ComposerInputHandle, {
 
 function TaskInputBox(props: {
   value: string; setValue: (v: string) => void;
+  attachments: ComposerAttachment[];
+  setAttachments: Dispatch<SetStateAction<ComposerAttachment[]>>;
+  attachmentScopeKey: string;
   onSend: () => void; onStop?: () => void; streaming: boolean;
   placeholder: string;
   config: TaskConfig; resources: TerminalResources | undefined;
@@ -1196,16 +1277,27 @@ function TaskInputBox(props: {
   maxWidth?: number; sendLabel?: string;
 }) {
   const {
-    value, setValue, onSend, onStop, streaming, placeholder, config, resources,
+    value, setValue, attachments, setAttachments, attachmentScopeKey,
+    onSend, onStop, streaming, placeholder, config, resources,
     onSetExecMode, onOpenConfig, onImportSkill, agentLabel, maxWidth = 800, sendLabel = '开始执行',
   } = props;
-  const wsName = (config.workspace_id && resources?.workspaces.find((w) => w.id === config.workspace_id)?.name) || null;
-  const canSend = !!value.trim() && !streaming;
+  const effectiveWorkspaceId = config.workspace_id ?? resources?.defaults?.workspace_id ?? null;
+  const wsName = (effectiveWorkspaceId && resources?.workspaces.find((w) => w.id === effectiveWorkspaceId)?.name) || null;
+  const hasReadyAttachment = attachments.some((item) => item.status === 'ready');
+  const attachmentsReady = attachments.every((item) => item.status === 'ready');
+  const canSend = (!!value.trim() || hasReadyAttachment) && attachmentsReady && !streaming;
 
   // ── 引用下拉（向上）：技能（/ 或 chip）/ 工作空间文件（@）共用一个 Popover ──
   const inputRef = useRef<ComposerInputHandle>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const attachmentsRef = useRef(attachments);
+  const uploadControllersRef = useRef(new Map<string, AbortController>());
+  const activeUploadsRef = useRef(0);
+  const uploadWaitersRef = useRef<Array<() => void>>([]);
+  const previousWorkspaceRef = useRef<string | null>(effectiveWorkspaceId);
   const searchRef = useRef<{ focus: (opts?: unknown) => void } | null>(null);
   const qc = useQueryClient();
+  const [dragActive, setDragActive] = useState(false);
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerMode, setPickerMode] = useState<'skill' | 'file'>('skill');
@@ -1280,6 +1372,162 @@ function TaskInputBox(props: {
   const onPickFile = (f: WorkspaceFileSummary) => {
     setQuery(''); setPickerOpen(false);
     inputRef.current?.insertFileChip(f.id, f.path);
+  };
+
+  const updateAttachment = useCallback((clientId: string, patch: Partial<ComposerAttachment>) => {
+    setAttachments((current) => current.map((item) => (
+      item.client_id === clientId ? { ...item, ...patch } : item
+    )));
+  }, [setAttachments]);
+
+  useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
+
+  const refreshWorkspaceFiles = useCallback((workspaceId: string) => {
+    qc.invalidateQueries({ queryKey: ['terminal-ws-files'] });
+    qc.invalidateQueries({ queryKey: ['terminal-all-ws-files'] });
+    qc.invalidateQueries({ queryKey: ['terminal-ws-files', workspaceId] });
+    qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+  }, [qc]);
+
+  const uploadOne = useCallback(async (draft: ComposerAttachment, workspaceId: string) => {
+    const controller = new AbortController();
+    uploadControllersRef.current.set(draft.client_id, controller);
+    if (activeUploadsRef.current >= MAX_UPLOAD_CONCURRENCY) {
+      await new Promise<void>((resolve) => uploadWaitersRef.current.push(resolve));
+    }
+    if (controller.signal.aborted) {
+      uploadControllersRef.current.delete(draft.client_id);
+      uploadWaitersRef.current.shift()?.();
+      return;
+    }
+    activeUploadsRef.current += 1;
+    updateAttachment(draft.client_id, { status: 'uploading', progress: 0, error: undefined });
+    try {
+      const uploaded = await terminal.uploadWsFile(workspaceId, draft.file, draft.path, {
+        signal: controller.signal,
+        onProgress: (progress) => updateAttachment(draft.client_id, { progress }),
+        onUploadComplete: () => updateAttachment(draft.client_id, { status: 'parsing', progress: 100 }),
+      });
+      const nextStatus: ComposerAttachmentStatus = uploaded.parse_status === 'ready' ? 'ready' : 'failed';
+      updateAttachment(draft.client_id, {
+        file_id: uploaded.id,
+        workspace_id: uploaded.workspace_id,
+        path: uploaded.path,
+        status: nextStatus,
+        progress: 100,
+        error: nextStatus === 'failed'
+          ? (uploaded.parse_error || (uploaded.parse_status === 'unsupported' ? '暂不支持该文件格式' : '文件解析失败'))
+          : undefined,
+      });
+      refreshWorkspaceFiles(workspaceId);
+    } catch (error) {
+      if ((error as Error).name !== 'AbortError') {
+        updateAttachment(draft.client_id, {
+          status: 'failed',
+          error: (error as Error).message || '上传失败',
+        });
+      }
+    } finally {
+      activeUploadsRef.current = Math.max(0, activeUploadsRef.current - 1);
+      uploadControllersRef.current.delete(draft.client_id);
+      uploadWaitersRef.current.shift()?.();
+    }
+  }, [refreshWorkspaceFiles, updateAttachment]);
+
+  const queueFiles = useCallback(async (fileList: FileList | File[]) => {
+    const workspaceId = effectiveWorkspaceId;
+    if (!workspaceId) {
+      message.warning('请先选择工作空间，再上传聊天附件');
+      onOpenConfig();
+      return;
+    }
+    const available = Math.max(0, MAX_ATTACHMENTS - attachmentsRef.current.length);
+    const selected = Array.from(fileList).slice(0, available);
+    if (!available) {
+      message.warning(`每条消息最多添加 ${MAX_ATTACHMENTS} 个附件`);
+      return;
+    }
+    if (fileList.length > available) {
+      message.warning(`每条消息最多添加 ${MAX_ATTACHMENTS} 个附件，已保留前 ${available} 个`);
+    }
+    const drafts: ComposerAttachment[] = selected.map((file) => ({
+      client_id: crypto.randomUUID(),
+      file,
+      file_id: '',
+      workspace_id: workspaceId,
+      path: attachmentPath(attachmentScopeKey, file.name),
+      name: file.name,
+      status: file.size > MAX_ATTACHMENT_BYTES ? 'failed' : 'uploading',
+      progress: 0,
+      error: file.size > MAX_ATTACHMENT_BYTES ? '文件超过 5MB 上限' : undefined,
+    }));
+    attachmentsRef.current = [...attachmentsRef.current, ...drafts];
+    setAttachments((current) => [...current, ...drafts]);
+    const pending = drafts.filter((item) => item.status !== 'failed');
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < pending.length) {
+        const item = pending[cursor++];
+        await uploadOne(item, workspaceId);
+      }
+    };
+    await Promise.all(Array.from(
+      { length: Math.min(MAX_UPLOAD_CONCURRENCY, pending.length) },
+      () => worker(),
+    ));
+  }, [attachmentScopeKey, effectiveWorkspaceId, onOpenConfig, setAttachments, uploadOne]);
+
+  const retryAttachment = useCallback(async (item: ComposerAttachment) => {
+    if (item.file.size > MAX_ATTACHMENT_BYTES) {
+      message.warning('该文件超过 5MB，请压缩或拆分后重新选择');
+      return;
+    }
+    if (item.file_id) {
+      updateAttachment(item.client_id, { status: 'parsing', error: undefined, progress: 100 });
+      try {
+        const reparsed = await terminal.reparseWsFile(item.file_id);
+        updateAttachment(item.client_id, {
+          status: reparsed.parse_status === 'ready' ? 'ready' : 'failed',
+          error: reparsed.parse_status === 'ready'
+            ? undefined
+            : (reparsed.parse_error || '文件解析失败'),
+        });
+        refreshWorkspaceFiles(item.workspace_id);
+      } catch (error) {
+        updateAttachment(item.client_id, { status: 'failed', error: (error as Error).message || '重新解析失败' });
+      }
+      return;
+    }
+    await uploadOne(item, item.workspace_id);
+  }, [refreshWorkspaceFiles, updateAttachment, uploadOne]);
+
+  const removeAttachment = useCallback((item: ComposerAttachment) => {
+    uploadControllersRef.current.get(item.client_id)?.abort();
+    uploadControllersRef.current.delete(item.client_id);
+    attachmentsRef.current = attachmentsRef.current.filter((candidate) => candidate.client_id !== item.client_id);
+    setAttachments((current) => current.filter((candidate) => candidate.client_id !== item.client_id));
+    if (item.file_id) message.info('已从消息移除，但文件仍保存在工作空间');
+  }, [setAttachments]);
+
+  useEffect(() => {
+    const previous = previousWorkspaceRef.current;
+    if (previous && effectiveWorkspaceId !== previous && attachments.length) {
+      uploadControllersRef.current.forEach((controller) => controller.abort());
+      uploadControllersRef.current.clear();
+      attachmentsRef.current = [];
+      setAttachments([]);
+      message.warning('工作空间已切换，待发送附件已从消息移除；已上传文件仍保留在原工作空间');
+    }
+    previousWorkspaceRef.current = effectiveWorkspaceId;
+  }, [attachments.length, effectiveWorkspaceId, setAttachments]);
+
+  useEffect(() => () => {
+    uploadControllersRef.current.forEach((controller) => controller.abort());
+    uploadControllersRef.current.clear();
+  }, []);
+
+  const statusLabel: Record<ComposerAttachmentStatus, string> = {
+    uploading: '上传中', parsing: '解析中', ready: '可以发送', failed: '处理失败',
   };
 
   const pickerContent = (
@@ -1358,7 +1606,66 @@ function TaskInputBox(props: {
         content={pickerContent}
         onOpenChange={(open) => { if (!open) closePicker(false); }}
       >
-      <div ref={triggerWrapRef} style={{ border: `1px solid ${WB.border}`, borderRadius: 12, boxShadow: '0 1px 2px rgba(0,0,0,0.04)', background: '#fff' }}>
+      <div
+        ref={triggerWrapRef}
+        onDragEnter={(event) => { event.preventDefault(); event.stopPropagation(); setDragActive(true); }}
+        onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'copy'; }}
+        onDragLeave={(event) => {
+          event.preventDefault();
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false);
+        }}
+        onDrop={(event: ReactDragEvent<HTMLDivElement>) => {
+          event.preventDefault(); event.stopPropagation(); setDragActive(false);
+          if (event.dataTransfer.files.length) void queueFiles(event.dataTransfer.files);
+        }}
+        style={{ position: 'relative', border: `1px solid ${dragActive ? WB.primary : WB.border}`, borderRadius: 12, boxShadow: dragActive ? '0 0 0 3px rgba(99,102,241,0.12)' : '0 1px 2px rgba(0,0,0,0.04)', background: '#fff', transition: 'border-color .15s, box-shadow .15s' }}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          hidden
+          onChange={(event: ChangeEvent<HTMLInputElement>) => {
+            if (event.target.files?.length) void queueFiles(event.target.files);
+            event.target.value = '';
+          }}
+        />
+        {dragActive && (
+          <div style={{ position: 'absolute', inset: 0, zIndex: 5, borderRadius: 11, background: 'rgba(238,240,247,0.94)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: WB.primary, fontSize: 14, fontWeight: 600, pointerEvents: 'none' }}>
+            <UploadOutlined style={{ marginRight: 8 }} />松开上传到当前工作空间
+          </div>
+        )}
+        {!!attachments.length && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8, padding: '10px 12px 0' }}>
+            {attachments.map((item) => (
+              <div key={item.client_id} style={{ border: `1px solid ${item.status === 'failed' ? '#fecaca' : WB.border}`, background: item.status === 'failed' ? '#fff7f7' : '#f9fafb', borderRadius: 9, padding: '8px 10px', minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <FileTextOutlined style={{ color: item.status === 'failed' ? '#dc2626' : WB.primary, flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div title={item.name} style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</div>
+                    <div style={{ fontSize: 11, color: item.status === 'failed' ? '#dc2626' : '#6b7280', marginTop: 2 }}>
+                      {statusLabel[item.status]}{item.status === 'uploading' ? ` ${item.progress}%` : ''}
+                    </div>
+                  </div>
+                  {(item.status === 'uploading' || item.status === 'parsing') && <Spin size="small" />}
+                  {item.status === 'ready' && <CheckCircleOutlined style={{ color: '#16a34a' }} />}
+                  {item.status === 'failed' && item.file.size <= MAX_ATTACHMENT_BYTES && (
+                    <Button type="link" size="small" onClick={() => void retryAttachment(item)} style={{ padding: 0, fontSize: 11 }}>重试</Button>
+                  )}
+                  <Tooltip title={item.file_id ? '从消息移除（不删除工作空间文件）' : '移除'}>
+                    <CloseOutlined onClick={() => removeAttachment(item)} style={{ color: '#9ca3af', cursor: 'pointer', fontSize: 12 }} />
+                  </Tooltip>
+                </div>
+                {item.error && <div title={item.error} style={{ fontSize: 11, color: '#dc2626', marginTop: 5, lineHeight: 1.35 }}>{item.error}</div>}
+                {item.status === 'uploading' && (
+                  <div style={{ height: 2, background: '#e5e7eb', borderRadius: 999, marginTop: 6, overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${item.progress}%`, background: WB.primary, transition: 'width .15s' }} />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         <MentionInput
           ref={inputRef}
           value={value} onChange={setValue}
@@ -1401,6 +1708,11 @@ function TaskInputBox(props: {
               title="引用工作空间文件（输入 @ 也可唤出，再次点击关闭）">
               <FileTextOutlined /> 文件
             </span>
+            <span style={chipBtnStyle}
+              onClick={() => fileInputRef.current?.click()}
+              title="上传附件到当前工作空间（可多选）">
+              <UploadOutlined /> 上传附件
+            </span>
             <span
               onClick={onOpenConfig}
               title="任务资源配置"
@@ -1420,7 +1732,7 @@ function TaskInputBox(props: {
               ><CloseOutlined /></button>
             </Tooltip>
           ) : (
-            <Tooltip title={sendLabel}>
+            <Tooltip title={!attachmentsReady ? '附件处理完成后才能发送' : sendLabel}>
               <button
                 onClick={onSend} disabled={!canSend}
                 style={{
@@ -1443,13 +1755,19 @@ function TaskInputBox(props: {
 
 function HomeView(props: {
   input: string; setInput: (v: string) => void; placeholder: string;
+  attachments: ComposerAttachment[];
+  setAttachments: Dispatch<SetStateAction<ComposerAttachment[]>>;
+  attachmentScopeKey: string;
   config: TaskConfig;
   resources: TerminalResources | undefined;
   onSetExecMode: (m: TaskConfig['exec_mode']) => void;
   onOpenConfig: () => void; onImportSkill: () => void; onStart: () => void; streaming: boolean;
   agentLabel: string;
 }) {
-  const { input, setInput, placeholder, config, resources, onSetExecMode, onOpenConfig, onImportSkill, onStart, streaming, agentLabel } = props;
+  const {
+    input, setInput, attachments, setAttachments, attachmentScopeKey, placeholder,
+    config, resources, onSetExecMode, onOpenConfig, onImportSkill, onStart, streaming, agentLabel,
+  } = props;
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
       {/* 顶部状态条 */}
@@ -1473,6 +1791,8 @@ function HomeView(props: {
         {/* 输入框 */}
         <TaskInputBox
           value={input} setValue={setInput}
+          attachments={attachments} setAttachments={setAttachments}
+          attachmentScopeKey={attachmentScopeKey}
           onSend={onStart} streaming={streaming}
           placeholder={placeholder}
           config={config} resources={resources}
@@ -1554,6 +1874,8 @@ function ChatView(props: {
   taskTitle: string;
   chat: ChatMsg[]; streaming: boolean;
   followUp: string; setFollowUp: (v: string) => void;
+  attachments: ComposerAttachment[];
+  setAttachments: Dispatch<SetStateAction<ComposerAttachment[]>>;
   onSend: () => void; onStop: () => void;
   onTogglePanel: () => void; onNew: () => void;
   config: TaskConfig; resources: TerminalResources | undefined;
@@ -1564,10 +1886,15 @@ function ChatView(props: {
   onLink: (href: string) => void;
   fileLinks: { path: string; name: string }[];
   fileRefMap: Map<string, string>;
+  fileRefsLoaded: boolean;
   onDeleteTurn: (messageId: string) => void;
   agentLabel: string;
 }) {
-  const { taskTitle, chat, streaming, followUp, setFollowUp, onSend, onStop, onNew, config, resources, onSetExecMode, onOpenConfig, onImportSkill, onLink, fileLinks, fileRefMap, onDeleteTurn, agentLabel } = props;
+  const {
+    taskTitle, chat, streaming, followUp, setFollowUp, attachments, setAttachments,
+    onSend, onStop, onNew, config, resources, onSetExecMode, onOpenConfig,
+    onImportSkill, selectedId, onLink, fileLinks, fileRefMap, fileRefsLoaded, onDeleteTurn, agentLabel,
+  } = props;
   // slug → 技能名称，供用户消息气泡把 /slug 还原为技能名 chip（样式与输入框一致）
   const skillRefMap = useMemo(() => {
     const m = new Map<string, string>();
@@ -1624,6 +1951,28 @@ function ChatView(props: {
                         <Avatar size={20} style={{ background: '#ede9fe', color: '#7c3aed', fontSize: 10 }}>{'我'}</Avatar>
                         <span style={{ fontSize: 12, color: '#6b7280' }}>我</span>
                       </div>
+                      {!!m.attachments?.length && (
+                        <div style={{ display: 'grid', gap: 6, marginBottom: m.content ? 8 : 0 }}>
+                          {m.attachments.map((attachment) => {
+                            const availablePath = fileRefMap.get(attachment.file_id);
+                            const unavailable = fileRefsLoaded && !availablePath;
+                            return (
+                              <button
+                                key={attachment.file_id}
+                                type="button"
+                                disabled={unavailable}
+                                onClick={() => onLink(availablePath || attachment.path)}
+                                title={unavailable ? '文件已不存在或不可访问' : attachment.path}
+                                style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', border: `1px solid ${unavailable ? '#e5e7eb' : '#d8dcf4'}`, background: unavailable ? '#f3f4f6' : '#fff', borderRadius: 8, padding: '7px 9px', cursor: unavailable ? 'not-allowed' : 'pointer', color: unavailable ? '#9ca3af' : '#374151', textAlign: 'left' }}
+                              >
+                                <FileTextOutlined style={{ color: unavailable ? '#9ca3af' : WB.primary }} />
+                                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>{attachment.name}</span>
+                                <span style={{ fontSize: 10, flexShrink: 0 }}>{unavailable ? '不可访问' : '已引用'}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
                       <div style={{ fontSize: 14, color: '#1f2937', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{renderUserContent(m.content, skillRefMap, fileRefMap, m.agentName)}</div>
                     </div>
                   </>
@@ -1641,6 +1990,8 @@ function ChatView(props: {
         <div style={{ maxWidth: 820, margin: '0 auto' }}>
           <TaskInputBox
             value={followUp} setValue={setFollowUp}
+            attachments={attachments} setAttachments={setAttachments}
+            attachmentScopeKey={selectedId || '任务未选择'}
             onSend={onSend} onStop={onStop} streaming={streaming}
             placeholder="追加消息（Enter 发送，Shift+Enter 换行）"
             config={config} resources={resources}

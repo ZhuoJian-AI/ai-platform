@@ -50,6 +50,8 @@ class AgentState(TypedDict, total=False):
     # general 模式：用户在消息中以 @<file_id> 引用的工作空间文件 id（load_config 解析填充）。
     # agent_loop 读取这些文件内容注入 system prompt（仿本体/RAG），二进制文件只标注不内联。
     referenced_file_ids: list[str]
+    # 本轮结构化附件的服务端校验快照；写入 user TaskMessage.metadata 供历史回放。
+    attachment_files: list[dict]
 
     # ── 对话 ──
     request: str  # 本轮用户输入

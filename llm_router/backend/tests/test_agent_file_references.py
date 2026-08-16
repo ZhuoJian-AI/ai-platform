@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.graph import nodes
+from app.agents.graph import nodes, runner
+from app.api import terminal as terminal_api
 from app.models.organization import Organization
 from app.models.workspace import Workspace, WorkspaceFile
 from app.schemas.workspace import WorkspaceFileCreate
@@ -151,3 +154,168 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
     assert file_trace["references"] == [
         {"file_id": file_id, "path": "WAIC展商联系方式.xlsx"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    org, ws, selected = await _make_workspace_with_file(
+        db_session,
+        path="会话附件/task-1/指定文件.docx",
+        content="只能注入这份附件的内容",
+    )
+    await workspace_service.upsert_file(
+        db_session,
+        ws,
+        WorkspaceFileCreate(path="根目录/其他文件.docx", content="绝对不得注入"),
+    )
+    await db_session.flush()
+    captured: dict = {}
+
+    async def fake_stream_chat(_db, _org_id, _alias, messages, **kwargs):
+        captured["system_prompt"] = kwargs["system_prompt"]
+        yield "text", "已分析附件", None
+
+    async def fake_build_tools(_db, _skill_ids, _workspace_id):
+        return nodes._builtin_tool_defs(), {}
+
+    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session})
+    monkeypatch.setattr(nodes.llm_client, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr(nodes, "_build_tools", fake_build_tools)
+
+    file_id = str(selected.id)
+    result = await nodes.agent_loop({
+        "mode": "general",
+        "org_id": str(org.id),
+        "workspace_id": str(ws.id),
+        "system_prompt": "你是测试助手。",
+        "messages": [{"role": "user", "content": "请分析我刚刚拖入的文件"}],
+        "referenced_file_ids": [file_id],
+        "skill_ids": [],
+        "exec_mode": "craft",
+        "memory_context": [],
+        "rag_context": [],
+        "steps": [],
+        "traces": [],
+        "usage": {},
+    })
+
+    prompt = captured["system_prompt"]
+    assert "只能注入这份附件的内容" in prompt
+    assert "绝对不得注入" not in prompt
+    assert f"@{file_id} → 会话附件/task-1/指定文件.docx" in prompt
+    assert result["assistant_final"] == "已分析附件"
+
+
+def test_general_state_and_message_metadata_preserve_attachment_snapshot():
+    file_id = str(uuid4())
+    workspace_id = str(uuid4())
+    snapshot = {
+        "file_id": file_id,
+        "workspace_id": workspace_id,
+        "path": "会话附件/draft/report.xlsx",
+        "name": "report.xlsx",
+    }
+    user = SimpleNamespace(id=str(uuid4()), department_id=None, team_id=None)
+
+    state = runner._general_initial_state(
+        org_id=str(uuid4()),
+        user=user,
+        task_id=str(uuid4()),
+        message="请分析附件",
+        session_id=None,
+        config={"workspace_id": workspace_id, "model_alias": "test"},
+        attachment_files=[snapshot],
+    )
+
+    assert state["referenced_file_ids"] == [file_id]
+    assert runner._user_message_metadata(state) == {"attachments": [snapshot]}
+
+
+@pytest.mark.asyncio
+async def test_attachment_validation_rejects_cross_workspace_and_unready(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workspace_id = uuid4()
+    other_workspace_id = uuid4()
+    file_id = uuid4()
+    cu = SimpleNamespace()
+    ws = SimpleNamespace(id=workspace_id)
+
+    async def get_workspace(_db, _workspace_id):
+        return ws
+
+    monkeypatch.setattr(terminal_api.workspace_service, "get_workspace", get_workspace)
+    monkeypatch.setattr(terminal_api.scope_service, "is_workspace_visible", lambda _ws, _cu: True)
+
+    async def cross_workspace_file(_db, _file_id):
+        return SimpleNamespace(
+            id=file_id,
+            workspace_id=other_workspace_id,
+            path="other/report.xlsx",
+            parse_status="ready",
+            parse_error=None,
+            metadata_={"name": "report.xlsx"},
+        )
+
+    monkeypatch.setattr(terminal_api.workspace_service, "get_file", cross_workspace_file)
+    with pytest.raises(HTTPException) as exc_info:
+        await terminal_api._resolve_task_attachments(db_session, cu, str(workspace_id), [file_id])
+    assert exc_info.value.status_code == 400
+    assert "不属于当前任务工作空间" in exc_info.value.detail
+
+    async def unready_file(_db, _file_id):
+        return SimpleNamespace(
+            id=file_id,
+            workspace_id=workspace_id,
+            path="会话附件/task/report.xlsx",
+            parse_status="failed",
+            parse_error="文档已加密",
+            metadata_={"name": "report.xlsx"},
+        )
+
+    monkeypatch.setattr(terminal_api.workspace_service, "get_file", unready_file)
+    with pytest.raises(HTTPException) as exc_info:
+        await terminal_api._resolve_task_attachments(db_session, cu, str(workspace_id), [file_id])
+    assert exc_info.value.status_code == 422
+    assert "文档已加密" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_attachment_validation_returns_deduplicated_display_snapshot(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workspace_id = uuid4()
+    file_id = uuid4()
+    cu = SimpleNamespace()
+
+    async def get_file(_db, _file_id):
+        return SimpleNamespace(
+            id=file_id,
+            workspace_id=workspace_id,
+            path="会话附件/task/internal-report.xlsx",
+            parse_status="ready",
+            parse_error=None,
+            metadata_={"name": "原始报告.xlsx"},
+        )
+
+    async def get_workspace(_db, _workspace_id):
+        return SimpleNamespace(id=workspace_id)
+
+    monkeypatch.setattr(terminal_api.workspace_service, "get_file", get_file)
+    monkeypatch.setattr(terminal_api.workspace_service, "get_workspace", get_workspace)
+    monkeypatch.setattr(terminal_api.scope_service, "is_workspace_visible", lambda _ws, _cu: True)
+
+    snapshots = await terminal_api._resolve_task_attachments(
+        db_session, cu, str(workspace_id), [file_id, file_id],
+    )
+    assert snapshots == [{
+        "file_id": str(file_id),
+        "workspace_id": str(workspace_id),
+        "path": "会话附件/task/internal-report.xlsx",
+        "name": "原始报告.xlsx",
+    }]

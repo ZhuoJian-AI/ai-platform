@@ -123,6 +123,46 @@ async def _get_owned_task(db: AsyncSession, task_id: UUID, cu: CurrentUser) -> T
     return task
 
 
+async def _resolve_task_attachments(
+    db: AsyncSession,
+    cu: CurrentUser,
+    workspace_id: str | None,
+    file_ids: list[UUID],
+) -> list[dict]:
+    """校验本轮结构化附件并生成可安全持久化的显示快照。"""
+    if not file_ids:
+        return []
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="请先为任务选择工作空间后再添加附件")
+
+    snapshots: list[dict] = []
+    seen: set[str] = set()
+    for file_id in file_ids:
+        fid = str(file_id)
+        if fid in seen:
+            continue
+        seen.add(fid)
+        f = await workspace_service.get_file(db, file_id)
+        if f is None:
+            raise HTTPException(status_code=404, detail=f"附件不存在或已删除：{fid}")
+        if str(f.workspace_id) != str(workspace_id):
+            raise HTTPException(status_code=400, detail=f"附件不属于当前任务工作空间：{f.path}")
+        ws = await workspace_service.get_workspace(db, f.workspace_id)
+        if ws is None or not scope_service.is_workspace_visible(ws, cu):
+            raise HTTPException(status_code=404, detail=f"附件不存在或无权访问：{fid}")
+        if f.parse_status != "ready":
+            detail = f.parse_error or "文件尚未解析完成"
+            raise HTTPException(status_code=422, detail=f"附件无法用于对话：{f.path}（{detail}）")
+        meta = f.metadata_ or {}
+        snapshots.append({
+            "file_id": fid,
+            "workspace_id": str(f.workspace_id),
+            "path": f.path,
+            "name": str(meta.get("name") or f.path.rsplit("/", 1)[-1]),
+        })
+    return snapshots
+
+
 async def _user_defaults(db: AsyncSession, cu: CurrentUser) -> dict:
     """终端默认装配：默认工作空间=用户个人工作空间；默认模型=最近一次执行任务时选中的模型
     （从未执行过任务则为 None——不预填，强制用户显式选择；选中并执行后写入 task.config 即成为默认）。
@@ -440,6 +480,9 @@ async def run_task_endpoint(
             cfg["workspace_id"] = defaults["workspace_id"]
     if not cfg.get("model_alias"):
         raise HTTPException(status_code=400, detail="请先选择模型后再执行任务")
+    attachment_files = await _resolve_task_attachments(
+        db, cu, cfg.get("workspace_id"), data.attachment_file_ids,
+    )
     # 模型必须在用户当前可用范围内（脏值如裸 "glm" 或已失效模型直接挡掉，避免跑到路由失败）。
     _available = await scope_service.list_available_models_for_user(db, cu)
     if cfg["model_alias"] != "default" and cfg["model_alias"] not in _available:
@@ -456,6 +499,7 @@ async def run_task_endpoint(
             graph, org_id=str(task.organization_id), user=cu, task=task,
             message=data.message, config=cfg,
             session_id=task.session_id, db=db, request=request,
+            attachment_files=attachment_files,
         )
         # 流式响应内部完成图执行（含 save_memory/extract_memory/write_run_log）；
         # commit 由各节点 flush 后于响应结束时统一提交。
@@ -465,6 +509,7 @@ async def run_task_endpoint(
         graph, org_id=str(task.organization_id), user=cu, task=task,
         message=data.message, config=cfg,
         session_id=task.session_id, db=db, request=request,
+        attachment_files=attachment_files,
     )
     await db.commit()
     return result

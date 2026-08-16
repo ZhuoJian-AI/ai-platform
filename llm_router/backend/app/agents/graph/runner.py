@@ -57,7 +57,7 @@ def _initial_state(agent_id: str, org_id: str, message: str, session_id: str | N
 
 def _general_initial_state(
     *, org_id: str, user: CurrentUser, task_id: str, message: str, session_id: str | None,
-    config: dict,
+    config: dict, attachment_files: list[dict] | None = None,
 ) -> AgentState:
     """构造 general 模式 initial state：从任务 config 装配资源（空数组=自动匹配，由 load_config 解析）。"""
     return {
@@ -82,7 +82,15 @@ def _general_initial_state(
         # 前缀拼到 GENERAL_SYSTEM_PROMPT 之前（终端任务借此承载场景 persona + 不可由
         # 本体/目录推导的业务规则 + 输出骨架，用户 composer 只需写目标+对象）。
         "template_agent_id": config.get("template_agent_id"),
+        "attachment_files": list(attachment_files or []),
+        "referenced_file_ids": [str(item["file_id"]) for item in (attachment_files or [])],
     }
+
+
+def _user_message_metadata(initial: AgentState) -> dict:
+    """持久化本轮结构化附件快照；无附件时保持历史消息 metadata 为空。"""
+    attachments = list(initial.get("attachment_files") or [])
+    return {"attachments": attachments} if attachments else {}
 
 
 def _config(session_id: str) -> dict:
@@ -181,17 +189,24 @@ async def run_general_agent(
     session_id: str | None,
     db: Any,
     request: Any,
+    attachment_files: list[dict] | None = None,
 ) -> dict:
     """非流式：终端通用智能体执行，返回最终 state 摘要。"""
     start = time.monotonic()
     initial = _general_initial_state(org_id=org_id, user=user, task_id=str(task.id),
-                                     message=message, session_id=session_id, config=config)
+                                     message=message, session_id=session_id, config=config,
+                                     attachment_files=attachment_files)
     lg_config = _config(initial["session_id"])
     ctx = _general_context(db, request, user, task)
 
     # 起始即落 user 消息（与流式 _run_graph_bg 一致）：save_memory 收尾只补 assistant。
     try:
-        db.add(TaskMessage(task_id=task.id, role="user", content=initial.get("request", "")))
+        db.add(TaskMessage(
+            task_id=task.id,
+            role="user",
+            content=initial.get("request", ""),
+            metadata_=_user_message_metadata(initial),
+        ))
         await db.flush()
     except Exception:  # noqa: BLE001
         logger.warning("general_usermsg_persist_failed", task_id=str(task.id), exc_info=True)
@@ -223,6 +238,7 @@ async def stream_general_agent(
     session_id: str | None,
     db: Any,
     request: Any,
+    attachment_files: list[dict] | None = None,
 ) -> Response:
     """流式：终端通用智能体执行——后台 detach 跑，SSE 回放 + 续接 live。
 
@@ -241,6 +257,7 @@ async def stream_general_agent(
         initial = _general_initial_state(
             org_id=org_id, user=user, task_id=task_id,
             message=message, session_id=session_id_used, config=config,
+            attachment_files=attachment_files,
         )
         lg_config = _config(initial["session_id"])
         bg_task = asyncio.create_task(
@@ -281,8 +298,12 @@ async def _run_graph_bg(
             # 运行中重连看不到提示词；且 run 在 persist 前崩溃会连用户消息一起丢）。
             # 收尾 save_memory 只补 assistant，不重复落 user。
             try:
-                db.add(TaskMessage(task_id=task.id, role="user",
-                                   content=initial.get("request", "")))
+                db.add(TaskMessage(
+                    task_id=task.id,
+                    role="user",
+                    content=initial.get("request", ""),
+                    metadata_=_user_message_metadata(initial),
+                ))
                 await db.commit()
             except Exception:  # noqa: BLE001
                 logger.warning("general_bg_usermsg_persist_failed",

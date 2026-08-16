@@ -517,8 +517,14 @@ export interface WorkspaceFilePreview {
   parse_kind: string | null; parse_error: string | null; extracted_text: string | null;
 }
 
+export interface WorkspaceUploadOptions {
+  signal?: AbortSignal;
+  onProgress?: (percent: number) => void;
+  onUploadComplete?: () => void;
+}
+
 function uploadWorkspaceFile(
-  url: string, file: File, path: string, tokenKey: string,
+  url: string, file: File, path: string, tokenKey: string, options?: WorkspaceUploadOptions,
 ): Promise<WorkspaceFile> {
   return new Promise((resolve, reject) => {
     const fd = new FormData();
@@ -528,6 +534,12 @@ function uploadWorkspaceFile(
     xhr.open('POST', `${BASE_URL}${url}`);
     const token = localStorage.getItem(tokenKey);
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        options?.onProgress?.(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      }
+    };
+    xhr.upload.onload = () => options?.onUploadComplete?.();
     xhr.onload = () => {
       if (xhr.status < 200 || xhr.status >= 300) {
         let detail = xhr.statusText;
@@ -539,6 +551,14 @@ function uploadWorkspaceFile(
       catch { reject(new ApiError(xhr.status, '响应解析失败')); }
     };
     xhr.onerror = () => reject(new ApiError(0, '网络错误，上传失败'));
+    xhr.onabort = () => reject(new DOMException('上传已取消', 'AbortError'));
+    if (options?.signal) {
+      if (options.signal.aborted) {
+        reject(new DOMException('上传已取消', 'AbortError'));
+        return;
+      }
+      options.signal.addEventListener('abort', () => xhr.abort(), { once: true });
+    }
     xhr.send(fd);
   });
 }
@@ -1208,18 +1228,21 @@ export const terminal = {
   /** 删除一整轮对话（user+assistant 消息），并清理仅本轮产出、未被后续轮次覆盖的工作空间文件。 */
   deleteTaskMessage: (taskId: string, messageId: string) =>
     userRequest<void>(`/api/v1/terminal/tasks/${taskId}/messages/${messageId}`, { method: 'DELETE' }),
-  runTask: (id: string, message: string, template_agent_id?: string | null) =>
+  runTask: (id: string, message: string, template_agent_id?: string | null, attachment_file_ids: string[] = []) =>
     userRequest<{ assistant: string; steps: unknown[]; usage: Record<string, number>; run_id: number; latency_ms: number }>(
       `/api/v1/terminal/tasks/${id}/run`,
-      { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null }) },
+      { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null, attachment_file_ids }) },
     ),
   /** 流式执行：返回原始 Response，由调用方解析 SSE（仿 AgentPlayground）。
    *  template_agent_id 逐次覆盖（不落库）：undefined=沿用 task.config；null=通用；UUID=该次用此智能体。 */
-  runTaskStream: (id: string, message: string, signal: AbortSignal, template_agent_id?: string | null) =>
+  runTaskStream: (
+    id: string, message: string, signal: AbortSignal,
+    template_agent_id?: string | null, attachment_file_ids: string[] = [],
+  ) =>
     fetch(`${BASE_URL}/api/v1/terminal/tasks/${id}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem(USER_TOKEN_KEY) || ''}` },
-      body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null }),
+      body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null, attachment_file_ids }),
       signal,
     }),
   /** resume：重连/回放一个运行中或已完成的 run（后台 detach 执行，刷新不丢）。 */
@@ -1237,8 +1260,8 @@ export const terminal = {
   listAllWsFiles: () => userRequest<WorkspaceFileSummary[]>('/api/v1/terminal/workspace-files'),
   upsertWsFile: (wsId: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>
     userRequest<WorkspaceFile>(`/api/v1/terminal/workspaces/${wsId}/files`, { method: 'POST', body: JSON.stringify(data) }),
-  uploadWsFile: (wsId: string, file: File, path: string) =>
-    uploadWorkspaceFile(`/api/v1/terminal/workspaces/${wsId}/files/upload`, file, path, USER_TOKEN_KEY),
+  uploadWsFile: (wsId: string, file: File, path: string, options?: WorkspaceUploadOptions) =>
+    uploadWorkspaceFile(`/api/v1/terminal/workspaces/${wsId}/files/upload`, file, path, USER_TOKEN_KEY, options),
   getWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}`),
   getWsFilePreview: (id: string) => userRequest<WorkspaceFilePreview>(`/api/v1/terminal/files/${id}/preview`),
   reparseWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}/reparse`, { method: 'POST' }),
