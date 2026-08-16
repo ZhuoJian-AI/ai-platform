@@ -36,7 +36,8 @@ from app.schemas.rag import RagRetrieveRequest
 from app.schemas.workspace import WorkspaceFileCreate
 from app.services import memory_service, scope_service, workspace_service
 from app.services.rag_service import retrieve as rag_retrieve
-from app.services.skill_store_service import SKILL_MANIFEST_PATH, get_file_by_path as get_skill_file_by_path
+from app.services.skill_store_service import SKILL_MANIFEST_PATH
+from app.services.skill_store_service import get_file_by_path as get_skill_file_by_path
 from app.tools.executor import execute_endpoint
 from app.tools.skill_manifest import parse_skill_manifest
 
@@ -75,18 +76,20 @@ TOOL_STRATEGY_PROMPT = (
     "3. 同一数据若可由「详情端点(path 参数)」或「列表端点(query 参数)」获取时按需选择——已知具体编码"
     "用详情端点，需筛选或枚举时用列表端点，避免对每个对象都先试详情再降级到列表。\n"
     "4. 调用失败时不要无差别重试：先据返回信息判断是参数缺失、值不存在还是路径错误，修正入参或换端点"
-    "后再试；连续失败则停止并向用户说明，不要继续盲目调用。"
+    "后再试；连续失败则停止并向用户说明，不要继续盲目调用。\n"
+    "5. 若上方[已解析的文件引用]已经提供文件内容，直接使用该内容完成任务；不要为了确认 UUID 再调用"
+    "`workspace_list_files` 或 `workspace_read_file`，也不要自行读取、分析用户未引用的其他文件。只有用户明确"
+    "要求比较/遍历工作空间，或引用内容明确标记为不可用时，才调用文件工具。"
 )
 
 # ── 输出协议（Craft 模式注入，场景无关 boilerplate，避免每个任务提示词重复）────
-# 约束 agent「先在文本流式输出完整分析，再生成附件」+「不要臆造数据」。
-# 这两条在 v2~v6 时代是手贴在每个任务提示词里的 boilerplate，现上提到 runtime，
-# 任务提示词只需写业务目标与对象，不再重复这两段。
+# 约束 agent「先输出完整分析，仅在任务明确要求时生成附件」+「不要臆造数据」。
+# 任务提示词只需写业务目标、对象和期望交付物，不必重复这两段。
 OUTPUT_PROTOCOL_PROMPT = (
     "\n\n[输出协议]\n"
-    "1. 先在文本里流式输出完整分析（按任务要求分段，每段都带具体数据，让评审会参与者能实时看到推理过程），"
-    "**分析完成后再**调 `generate_docx` 把同样内容打包成附件供归档分发。不要直接跳到 docx 生成，"
-    "让屏幕只显示一句\"现在生成报告文档\"。\n"
+    "1. 先在文本里流式输出完整分析。仅当用户请求或智能体任务说明明确要求生成、导出、下载、归档报告/附件时，"
+    "才在分析完成后调用 `generate_docx`；普通问答、解释或文件分析不得擅自生成附件。需要生成时，不要直接"
+    "跳到 docx，让屏幕只显示一句\"现在生成报告文档\"。\n"
     "2. 不要臆造数据：所有编码 / 工单号 / 款号 / 数值 / 结论必须来自已注入的数据接口返回、"
     "本体、知识库检索命中或用户给定，不可拼凑不存在的标识符。"
 )
@@ -114,15 +117,22 @@ def _builtin_tool_defs() -> list[dict]:
     return [
         {"type": "function", "function": {
             "name": "workspace_list_files",
-            "description": "列出当前工作空间中全部文件的路径。",
+            "description": (
+                "列出当前工作空间中全部文件，返回每个文件的 file_id 与 path。"
+                "仅在用户要求浏览、比较或遍历工作空间时调用。"
+            ),
             "parameters": {"type": "object", "properties": {}},
         }},
         {"type": "function", "function": {
             "name": "workspace_read_file",
-            "description": "读取当前工作空间中指定路径文件的内容。",
+            "description": (
+                "读取当前工作空间中的一个文件，可传 file_id 或 path。用户消息含 @UUID 时直接把 UUID 作为 file_id；"
+                "若[已解析的文件引用]已经注入内容，无需重复调用。"
+            ),
             "parameters": {"type": "object", "properties": {
+                "file_id": {"type": "string", "description": "工作空间文件 UUID"},
                 "path": {"type": "string", "description": "相对工作空间根的 POSIX 路径"}},
-                "required": ["path"]},
+            },
         }},
         {"type": "function", "function": {
             "name": "workspace_write_file",
@@ -176,9 +186,26 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
         async with db.begin_nested():
             if name == "workspace_list_files":
                 files = await workspace_service.list_files(db, ws.id)
-                return json.dumps([f.path for f in files], ensure_ascii=False)
+                return json.dumps(
+                    [{"file_id": str(f.id), "path": f.path} for f in files],
+                    ensure_ascii=False,
+                )
             if name == "workspace_read_file":
-                f = await workspace_service.get_file_by_path(db, ws.id, params.get("path", ""))
+                file_id = str(params.get("file_id") or "").strip()
+                path = str(params.get("path") or "").strip()
+                f = None
+                if file_id:
+                    try:
+                        f = await workspace_service.get_file(db, UUID(file_id))
+                    except (ValueError, AttributeError):
+                        f = None
+                    # 内置工具始终受当前任务绑定工作空间约束；不能借 file_id 跨工作空间读取。
+                    if f is not None and str(f.workspace_id) != str(ws.id):
+                        f = None
+                elif path:
+                    f = await workspace_service.get_file_by_path(db, ws.id, path)
+                else:
+                    return "file_id or path is required"
                 if f is None:
                     return "file not found"
                 return workspace_service.resolve_file_content(f)
@@ -200,6 +227,7 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 return f"deleted {params.get('path', '')}"
             if name == "generate_docx":
                 import base64 as _b64
+
                 from app.tools.docx_builder import markdown_to_docx_bytes
                 filename = (params.get("filename") or "document.docx").strip()
                 if not filename.lower().endswith(".docx"):
@@ -581,7 +609,10 @@ async def _build_tools(db, skill_ids: list[str], workspace_id: str | None) -> tu
 async def _execute_tool_call(
     state: AgentState, tool_call: dict, registry: dict[str, dict],
 ) -> tuple[dict, str, bool]:
-    """执行单个 tool_call，返回 (tool 消息, 结果预览, 是否成功)。不负责 emit——由 agent_loop 在调用前后下发 tool_call/tool_result 事件。"""
+    """执行单个 tool_call，返回 (tool 消息, 结果预览, 是否成功)。
+
+    不负责 emit——由 agent_loop 在调用前后下发 tool_call/tool_result 事件。
+    """
     deps = get_deps()
     db = deps["db"]
     name = tool_call.get("name", "")
@@ -752,6 +783,7 @@ async def agent_loop(state: AgentState) -> dict:
         user = deps.get("user")
         file_parts: list[str] = []
         file_names: list[str] = []
+        file_refs: list[dict[str, str]] = []
         for fid in ref_file_ids:
             try:
                 f = await workspace_service.get_file(db, UUID(fid))
@@ -763,16 +795,22 @@ async def agent_loop(state: AgentState) -> dict:
             if ws is None or (user is not None and not scope_service.is_workspace_visible(ws, user)):
                 continue  # 文件不可见，跳过
             file_names.append(f.path)
+            file_refs.append({"file_id": fid, "path": f.path})
             content = workspace_service.resolve_file_content(f)
-            if content.strip():
-                file_parts.append(f"[引用文件 {f.path}]\n{content}")
-        if file_parts:
+            rendered = content if content.strip() else "（文件内容为空或尚未解析，无法直接分析）"
+            file_parts.append(f"[引用文件 file_id={fid} path={f.path}]\n{rendered}")
+        if file_refs:
+            mapping = "\n".join(f"- @{r['file_id']} → {r['path']}" for r in file_refs)
             system_prompt = (
-                f"{system_prompt}\n\n[引用的工作空间文件] 以下为用户在本任务中显式引用的工作空间文件内容：\n"
+                f"{system_prompt}\n\n[已解析的文件引用]\n"
+                "用户消息中的 @UUID 已由系统精确解析，映射如下：\n"
+                f"{mapping}\n"
+                "这些文件内容已直接载入下方上下文。请把 UUID 与对应路径视为同一个文件，不得声称无法按 UUID 定位；"
+                "除非用户明确要求比较其他文件，否则不要调用工作空间列表/读取工具，也不要分析未引用文件。\n\n"
                 + "\n\n".join(file_parts)
             )
         file_trace = {"category": "file", "title": "引用工作空间文件",
-                      "files": len(file_names), "paths": file_names}
+                      "files": len(file_names), "paths": file_names, "references": file_refs}
         _emit({"type": "trace", **file_trace})
         traces.append(file_trace)
 
