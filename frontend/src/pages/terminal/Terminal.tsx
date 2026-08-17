@@ -248,10 +248,10 @@ export default function Terminal() {
   const { data: modelData } = useQuery<TerminalModels>({
     queryKey: ['terminal-models'], queryFn: () => terminal.models(),
   });
-  const { data: agentData } = useQuery<{ agents: TerminalAgent[] }>({
-    queryKey: ['terminal-agents'], queryFn: () => terminal.agents(),
+  const { data: agentsList = [] } = useQuery<TerminalAgent[]>({
+    queryKey: ['terminal-task-agent-options'],
+    queryFn: async () => (await terminal.agents()).agents,
   });
-  const agentsList = agentData?.agents ?? [];
   // 智能体 chip 文案：选中显示名称，未选=通用智能体。
   const agentLabel = selectedAgentId
     ? (agentsList.find((a) => a.id === selectedAgentId)?.name ?? '已选')
@@ -307,6 +307,7 @@ export default function Terminal() {
     if (cfgOpen) {
       qc.invalidateQueries({ queryKey: ['terminal-resources'] });
       qc.invalidateQueries({ queryKey: ['terminal-models'] });
+      qc.invalidateQueries({ queryKey: ['terminal-task-agent-options'] });
     }
   }, [cfgOpen, qc]);
 

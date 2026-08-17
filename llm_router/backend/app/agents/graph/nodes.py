@@ -797,7 +797,7 @@ async def _execute_code_skill(state: AgentState, entry: dict, params: dict) -> s
             raw = base64.b64decode(item.get("content_base64") or "", validate=True)
             original = PurePosixPath(str(item.get("name") or "output.bin")).name
             path = f"技能输出/{task_part}/{stamp}-{uuid4().hex[:8]}-{original}"
-            saved = await workspace_service.save_uploaded_file(
+            saved = await workspace_service.ingest_uploaded_file(
                 db, ws, path=path, filename=original,
                 content_type=mimetypes.guess_type(original)[0], raw=raw,
             )

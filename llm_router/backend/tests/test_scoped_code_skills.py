@@ -2,23 +2,28 @@
 
 from __future__ import annotations
 
+import base64
 import io
+import json
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException, UploadFile
 
+from app.agents.graph import nodes
 from app.agents.graph.nodes import _build_tools
 from app.api.skill_packages import _import_response
 from app.auth.user_auth import CurrentUser
 from app.models.department import Department
 from app.models.organization import Organization
 from app.models.rag import RagCollection
-from app.models.skill import SkillFolder
+from app.models.skill import SkillFolder, SkillVersion
 from app.models.team import Team
 from app.models.user import User
+from app.models.workspace import Workspace
 from app.schemas.user import ManagerScopeGrant
-from app.services import skill_import_service
+from app.services import skill_import_service, workspace_service
 from app.services.scope_service import assert_bound_rags_visible
 from app.services.skill_scope_service import (
     assert_bound_skills_visible,
@@ -156,6 +161,82 @@ Always validate the input workbook before processing.
     assert exc.value.status_code == 422
     disabled_tools, _ = await _build_tools(db_session, [str(folder.id)], None, user=cu)
     assert disabled_tools == []
+
+
+@pytest.mark.asyncio
+async def test_executable_skill_output_is_ingested_into_workspace(db_session, monkeypatch):
+    org, _, department, _, _, user, cu = await _hierarchy(db_session)
+    workspace = Workspace(
+        organization_id=org.id,
+        name="Personal workspace",
+        slug=f"personal-{uuid4().hex[:8]}",
+        scope_type="user",
+        scope_id=str(user.id),
+        is_active=True,
+    )
+    folder = SkillFolder(
+        organization_id=org.id,
+        scope_type="user",
+        scope_id=str(user.id),
+        created_by=str(user.id),
+        name="Executable report",
+        slug=f"report-{uuid4().hex[:8]}",
+        is_active=True,
+    )
+    db_session.add_all([workspace, folder])
+    await db_session.flush()
+    version = SkillVersion(
+        skill_folder_id=folder.id,
+        version_no=1,
+        package_hash=uuid4().hex + uuid4().hex,
+        manifest={},
+        archive=b"test-package",
+        runtime="python",
+        entrypoint="main.py",
+        is_executable=True,
+        install_status="ready",
+    )
+    db_session.add(version)
+    await db_session.flush()
+    folder.active_version_id = version.id
+    await db_session.flush()
+
+    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": cu})
+    monkeypatch.setattr(
+        nodes.skill_runner_client,
+        "execute_version",
+        AsyncMock(return_value=({
+            "stdout": "created result",
+            "outputs": [{
+                "name": "result.txt",
+                "content_base64": base64.b64encode("处理完成".encode()).decode(),
+            }],
+        }, 17)),
+    )
+
+    result = json.loads(await nodes._execute_code_skill(
+        {
+            "org_id": str(org.id),
+            "task_id": None,
+            "template_agent_id": None,
+            "workspace_id": str(workspace.id),
+            "exec_mode": "craft",
+            "referenced_file_ids": [],
+        },
+        {"folder": folder, "version": version},
+        {},
+    ))
+
+    assert result["status"] == "success"
+    assert result["summary"] == "created result"
+    assert len(result["outputs"]) == 1
+    output = result["outputs"][0]
+    assert output["name"] == "result.txt"
+    assert output["path"].startswith("技能输出/playground/")
+    saved = await workspace_service.get_file(db_session, output["file_id"])
+    assert saved is not None
+    assert saved.parse_status == "ready"
+    assert base64.b64decode(saved.content or "").decode() == "处理完成"
 
 
 @pytest.mark.asyncio
