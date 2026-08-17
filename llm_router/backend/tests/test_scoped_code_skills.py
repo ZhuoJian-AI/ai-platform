@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException, UploadFile
 
 from app.agents.graph.nodes import _build_tools
+from app.api.skill_packages import _import_response
 from app.auth.user_auth import CurrentUser
 from app.models.department import Department
 from app.models.organization import Organization
@@ -117,6 +118,9 @@ Always validate the input workbook before processing.
     assert version1.version_no == 1
     assert version1.install_status == "ready"
     assert folder.active_version_id == version1.id
+    await db_session.commit()
+    response = await _import_response(db_session, folder, version1)
+    assert response.folder.is_installed is True
 
     duplicate = UploadFile(filename="skill.md", file=io.BytesIO(skill_v1))
     same_folder, same_version = await skill_import_service.import_package(

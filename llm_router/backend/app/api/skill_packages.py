@@ -40,6 +40,16 @@ async def _folder(db: AsyncSession, folder_id: UUID) -> SkillFolder:
     return row
 
 
+async def _import_response(
+    db: AsyncSession, folder: SkillFolder, version: SkillVersion,
+) -> SkillImportRead:
+    """Reload server-generated/updated fields before Pydantic reads the ORM rows."""
+    await db.refresh(folder)
+    await db.refresh(folder, attribute_names=["files"])
+    await db.refresh(version)
+    return SkillImportRead(folder=folder, version=version)
+
+
 @router.post("/terminal/skills/import", response_model=SkillImportRead, status_code=202)
 async def terminal_import_skill(
     background: BackgroundTasks,
@@ -58,7 +68,7 @@ async def terminal_import_skill(
     await db.commit()
     if version.install_status == "pending":
         background.add_task(skill_runner_client.install_version, version.id)
-    return SkillImportRead(folder=folder, version=version)
+    return await _import_response(db, folder, version)
 
 
 @router.post("/organizations/{org_id}/skill-folders/import", response_model=SkillImportRead, status_code=202)
@@ -78,7 +88,7 @@ async def admin_import_skill(
     await db.commit()
     if version.install_status == "pending":
         background.add_task(skill_runner_client.install_version, version.id)
-    return SkillImportRead(folder=folder, version=version)
+    return await _import_response(db, folder, version)
 
 
 @router.get("/terminal/skill-scopes", response_model=list[SkillScopeNode])
@@ -160,6 +170,7 @@ async def terminal_retry(
     version.install_error = None
     await db.commit()
     background.add_task(skill_runner_client.install_version, version.id)
+    await db.refresh(version)
     return version
 
 
@@ -174,6 +185,7 @@ async def terminal_activate(
     await assert_user_can_manage_folder(db, cu, folder)
     await skill_import_service.activate_version(db, folder, version)
     await db.commit()
+    await db.refresh(version)
     return version
 
 
@@ -191,6 +203,7 @@ async def admin_retry(
     version.install_error = None
     await db.commit()
     background.add_task(skill_runner_client.install_version, version.id)
+    await db.refresh(version)
     return version
 
 
@@ -206,6 +219,7 @@ async def admin_activate(
     assert_org_access(auth, folder.organization_id)
     await skill_import_service.activate_version(db, folder, version)
     await db.commit()
+    await db.refresh(version)
     return version
 
 
