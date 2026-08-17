@@ -44,7 +44,7 @@ if errorlevel 1 (
     echo [1/4] Docker is ready.
 )
 
-echo [2/4] Starting PostgreSQL, Redis, Mock API and backend...
+echo [2/4] Starting PostgreSQL, Redis, Mock API, Skill Runner and backend...
 docker compose %COMPOSE_FILES% up -d
 if errorlevel 1 (
     echo [INFO] Normal startup failed. Retrying with image build...
@@ -95,6 +95,7 @@ call :wait_for_port 8000 45 "Backend"
 call :wait_for_port 8010 30 "Mock API"
 call :wait_for_port 5434 30 "PostgreSQL"
 call :wait_for_port 6381 30 "Redis"
+call :wait_for_port 8020 45 "Skill Runner"
 
 echo.
 echo ============================================================
@@ -105,6 +106,7 @@ call :show_port 8000 "Backend"
 call :show_port 8010 "Mock API"
 call :show_port 5434 "PostgreSQL"
 call :show_port 6381 "Redis"
+call :show_port 8020 "Skill Runner"
 echo.
 echo   Admin console: http://localhost:5173
 echo   Backend health: http://localhost:8000/health

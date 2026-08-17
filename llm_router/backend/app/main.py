@@ -1,5 +1,6 @@
 """LLM Router — FastAPI application entry point."""
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -66,10 +67,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     get_agent_graph()
     logger.info("agent_graph_ready")
 
+    # Retry interrupted executable Skill dependency installs after restart.
+    install_resume_task = None
+    if settings.code_skills_enabled:
+        from app.services.skill_runner_client import resume_pending_installs
+        install_resume_task = asyncio.create_task(resume_pending_installs())
+
     # 启动 MCP session manager task group（FastAPI app.mount 不跑子应用 lifespan，
     # 故在此显式启动；否则 streamable_http 握手报 "Task group is not initialized"）。
     async with mcp.session_manager.run():
         yield
+    if install_resume_task is not None and not install_resume_task.done():
+        install_resume_task.cancel()
     logger.info("llm_router_stopping")
 
 

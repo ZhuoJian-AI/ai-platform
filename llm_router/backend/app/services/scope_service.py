@@ -11,8 +11,10 @@ organization（全组织，scope_id 为 None）/ department / team / user。一�
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from uuid import UUID
 
-from sqlalchemy import or_, select
+from fastapi import HTTPException
+from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -23,7 +25,7 @@ from app.models.data_interface import DataInterface, DataSystem
 from app.models.llm_provider import LlmProvider
 from app.models.ontology import OntologyFile
 from app.models.rag import RagCollection
-from app.models.skill import SkillFolder
+from app.models.skill import SkillFile, SkillFolder
 from app.models.workspace import Workspace
 
 
@@ -55,13 +57,21 @@ def scope_filter(model, cu: CurrentUser):
 async def list_skills_for_user(db: AsyncSession, cu: CurrentUser) -> list[SkillFolder]:
     """用户可见的技能文件夹（组织级 + 用户 dept/team/user 命中）。
 
-    技能已文件夹化：返回 SkillFolder（无 is_active 维度，文件夹即启用；
-    是否真正装配为工具取决于其 skill.md manifest 是否合法）。
+    新版包必须已有活动版本；存量技能只要存在 skill.md 仍兼容显示。
     """
     stmt = select(SkillFolder).where(
         SkillFolder.organization_id == cu.organization_id,
         SkillFolder.deleted_at.is_(None),
+        SkillFolder.is_active.is_(True),
         scope_filter(SkillFolder, cu),
+        or_(
+            SkillFolder.active_version_id.is_not(None),
+            exists(select(SkillFile.id).where(
+                SkillFile.skill_folder_id == SkillFolder.id,
+                SkillFile.path == "skill.md",
+                SkillFile.deleted_at.is_(None),
+            )),
+        ),
     )
     return list((await db.execute(stmt)).scalars().all())
 
@@ -86,6 +96,63 @@ async def list_rags_for_user(db: AsyncSession, cu: CurrentUser) -> list[RagColle
         scope_filter(RagCollection, cu),
     )
     return list((await db.execute(stmt)).scalars().all())
+
+
+def is_rag_visible(collection: RagCollection, cu: CurrentUser) -> bool:
+    if str(collection.organization_id) != str(cu.organization_id) or collection.deleted_at is not None:
+        return False
+    if collection.scope_type == "organization":
+        return True
+    if collection.scope_type == "department":
+        return bool(cu.department_id and collection.scope_id == cu.department_id)
+    if collection.scope_type == "team":
+        return bool(cu.team_id and collection.scope_id == cu.team_id)
+    return collection.scope_type == "user" and collection.scope_id == cu.id
+
+
+async def assert_bound_rags_visible(
+    db: AsyncSession, cu: CurrentUser, collection_ids: list[str],
+) -> list[RagCollection]:
+    """Validate Agent RAG bindings without trusting client-supplied UUIDs."""
+    if not collection_ids:
+        return []
+    try:
+        ids = [UUID(str(value)) for value in collection_ids]
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid RAG collection id") from exc
+    rows = list((await db.execute(select(RagCollection).where(
+        RagCollection.id.in_(ids), RagCollection.deleted_at.is_(None),
+    ))).scalars().all())
+    by_id = {str(row.id): row for row in rows}
+    ordered = []
+    for value in collection_ids:
+        collection = by_id.get(str(value))
+        if collection is None or not is_rag_visible(collection, cu):
+            raise HTTPException(status_code=403, detail="RAG collection is not available to this user")
+        ordered.append(collection)
+    return ordered
+
+
+async def assert_admin_bound_rags(
+    db: AsyncSession, org_id: UUID | str, collection_ids: list[str],
+) -> list[RagCollection]:
+    if not collection_ids:
+        return []
+    try:
+        ids = [UUID(str(value)) for value in collection_ids]
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid RAG collection id") from exc
+    rows = list((await db.execute(select(RagCollection).where(
+        RagCollection.id.in_(ids), RagCollection.deleted_at.is_(None),
+    ))).scalars().all())
+    by_id = {str(row.id): row for row in rows}
+    ordered = []
+    for value in collection_ids:
+        collection = by_id.get(str(value))
+        if collection is None or str(collection.organization_id) != str(org_id):
+            raise HTTPException(status_code=403, detail="RAG collection belongs to another organization")
+        ordered.append(collection)
+    return ordered
 
 
 async def list_data_interfaces_for_user(db: AsyncSession, cu: CurrentUser) -> list[DataInterface]:

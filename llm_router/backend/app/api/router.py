@@ -12,7 +12,6 @@ from app.api.api_keys import router as api_key_router
 from app.api.audit_logs import router as audit_router
 from app.api.budget import router as budget_router
 from app.api.config import router as config_router
-from app.api.memory import router as memory_router
 
 # 工具连接器
 from app.api.connectors import router as connector_router
@@ -20,11 +19,13 @@ from app.api.data_interfaces import router as data_interface_router
 from app.api.departments import router as dept_router
 from app.api.dlp_rules import router as dlp_router
 from app.api.llm_providers import router as provider_router
+from app.api.memory import router as memory_router
 from app.api.monitor import router as monitor_router
 from app.api.ontology import router as ontology_router
 from app.api.organizations import router as org_router
 from app.api.rag import router as rag_router
 from app.api.routing_policies import router as routing_router
+from app.api.skill_packages import router as skill_package_router
 from app.api.skills import router as skill_router
 from app.api.teams import router as team_router
 from app.api.terminal import router as terminal_router
@@ -52,6 +53,7 @@ api_router.include_router(judge_router, tags=["judges"])
 api_router.include_router(connector_router, tags=["connectors"])
 api_router.include_router(data_interface_router, tags=["data-interfaces"])
 api_router.include_router(skill_router, tags=["skills"])
+api_router.include_router(skill_package_router, tags=["skill-packages"])
 api_router.include_router(ontology_router, tags=["ontology"])
 api_router.include_router(api_key_router, tags=["api-keys"])
 api_router.include_router(provider_router, tags=["llm-providers"])

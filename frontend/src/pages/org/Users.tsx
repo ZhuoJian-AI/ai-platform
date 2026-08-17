@@ -6,7 +6,7 @@ import {
 import { PlusOutlined, DeleteOutlined, EditOutlined, LockOutlined, UserOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { organizations, users } from '../../api/client';
-import type { User } from '../../api/client';
+import type { ManagerScopeGrant, User } from '../../api/client';
 import { ApiError } from '../../api/client';
 import { useOrgTree } from '../../hooks/useOrgTree';
 import OrgSelect from '../../components/OrgSelect';
@@ -21,6 +21,7 @@ export default function UsersPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<User | null>(null);
   const [form] = Form.useForm();
+  const watchedBelongTo = Form.useWatch('belongTo', form) as string | undefined;
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [resetTarget, setResetTarget] = useState<User | null>(null);
   const [newPassword, setNewPassword] = useState('');
@@ -67,6 +68,21 @@ export default function UsersPage() {
 
   const isEdit = !!editing;
 
+  const managerOptions = useMemo(() => {
+    const membership = resolveBelong(watchedBelongTo);
+    const options: { value: string; label: string }[] = [];
+    if (membership.department_id) options.push({
+      value: `department:${membership.department_id}`,
+      label: `部门负责人：${deptName(membership.department_id) ?? membership.department_id}`,
+    });
+    if (membership.team_id) options.push({
+      value: `team:${membership.team_id}`,
+      label: `团队负责人：${teamName(membership.team_id) ?? membership.team_id}`,
+    });
+    return options;
+  // nodeMap changes when the organization tree loads; manager labels should update with it.
+  }, [watchedBelongTo, nodeMap]);
+
   const openCreate = () => { setEditing(null); form.resetFields(); setModalOpen(true); };
   const openEdit = (r: User) => { setEditing(r); setModalOpen(true); };
   const openReset = (r: User) => { setResetTarget(r); setNewPassword(''); setResetModalOpen(true); };
@@ -79,6 +95,7 @@ export default function UsersPage() {
         display_name: editing.display_name,
         is_active: editing.is_active,
         belongTo: toBelongValue(editing.department_id, editing.team_id),
+        manager_scope_keys: (editing.manager_scopes ?? []).map((grant) => `${grant.scope_type}:${grant.scope_id}`),
       });
     }
   }, [modalOpen, editing, form]);
@@ -86,7 +103,10 @@ export default function UsersPage() {
   const closeModal = () => { setModalOpen(false); setEditing(null); form.resetFields(); };
 
   const createUser = useMutation({
-    mutationFn: (data: { username: string; display_name?: string | null; role: string; is_active: boolean; password: string; department_id?: string | null; team_id?: string | null }) => {
+    mutationFn: (data: {
+      username: string; display_name?: string | null; role: string; is_active: boolean; password: string;
+      department_id?: string | null; team_id?: string | null; manager_scopes?: ManagerScopeGrant[];
+    }) => {
       if (!orgId) { message.error('请先创建组织'); return Promise.reject(new Error('No org')); }
       return users.create(orgId, data);
     },
@@ -112,6 +132,10 @@ export default function UsersPage() {
   const submit = (v: Record<string, unknown>) => {
     // 「所属」树节点 → department_id / team_id，选择部门/团队后自动绑定
     const { department_id, team_id } = resolveBelong(v.belongTo as string | undefined);
+    const manager_scopes = ((v.manager_scope_keys as string[] | undefined) ?? []).map((key) => {
+      const [scope_type, scope_id] = key.split(':');
+      return { scope_type, scope_id } as ManagerScopeGrant;
+    });
     const payload = {
       username: v.username,
       display_name: v.display_name,
@@ -120,6 +144,7 @@ export default function UsersPage() {
       password: v.password,
       department_id,
       team_id,
+      manager_scopes,
     };
     if (isEdit) {
       const { password, ...updatePayload } = payload;
@@ -170,6 +195,14 @@ export default function UsersPage() {
               render: (v: boolean) => <Tag color={v ? 'green' : 'red'}>{v ? '启用' : '停用'}</Tag>,
             },
             {
+              title: '负责人授权', dataIndex: 'manager_scopes', width: 180,
+              render: (grants: ManagerScopeGrant[] | undefined) => (grants?.length
+                ? grants.map((grant) => <Tag key={`${grant.scope_type}:${grant.scope_id}`} color="purple">
+                    {grant.scope_type === 'department' ? '部门负责人' : '团队负责人'}
+                  </Tag>)
+                : <Typography.Text type="secondary">—</Typography.Text>),
+            },
+            {
               title: '操作', width: 230, fixed: 'right',
               render: (_: unknown, r: User) => (
                 <Space size="small">
@@ -216,6 +249,20 @@ export default function UsersPage() {
               treeNodeFilterProp="title"
               allowClear
               placeholder="选择所属（组织 / 部门 / 团队）"
+              onChange={() => form.setFieldValue('manager_scope_keys', [])}
+            />
+          </Form.Item>
+          <Form.Item
+            name="manager_scope_keys"
+            label="技能负责人授权"
+            extra="负责人可上传、升级、停用其范围内的 Skill；部门负责人同时可管理下属团队 Skill。普通成员留空。"
+          >
+            <Select
+              mode="multiple"
+              allowClear
+              options={managerOptions}
+              placeholder={managerOptions.length ? '可选：任命为当前部门/团队负责人' : '请先选择部门或团队'}
+              disabled={!managerOptions.length}
             />
           </Form.Item>
           {!isEdit && (

@@ -29,6 +29,7 @@ from app.schemas.skill import (
     SkillUpdate,
 )
 from app.services.connector_service import get_endpoint
+from app.services.skill_scope_service import validate_scope_target
 from app.services.skill_service import (
     create_skill,
     get_skill,
@@ -38,14 +39,32 @@ from app.services.skill_service import (
 )
 from app.services.skill_store_service import (
     create_folder as create_skill_folder,
+)
+from app.services.skill_store_service import (
     get_file as get_skill_file,
+)
+from app.services.skill_store_service import (
     get_folder as get_skill_folder,
+)
+from app.services.skill_store_service import (
     list_files as list_skill_files,
+)
+from app.services.skill_store_service import (
     list_folders as list_skill_folders,
+)
+from app.services.skill_store_service import (
     soft_delete_file as soft_delete_skill_file,
+)
+from app.services.skill_store_service import (
     soft_delete_folder as soft_delete_skill_folder,
+)
+from app.services.skill_store_service import (
     update_file as update_skill_file,
+)
+from app.services.skill_store_service import (
     update_folder as update_skill_folder,
+)
+from app.services.skill_store_service import (
     upsert_file as upsert_skill_file,
 )
 from app.tools.executor import execute_endpoint
@@ -160,6 +179,8 @@ async def create_skill_folder_endpoint(
     org_id: UUID, data: SkillFolderCreate,
     _: CurrentAdmin = Depends(require_org_access_write), db: AsyncSession = Depends(get_db),
 ):
+    normalized_scope_id = await validate_scope_target(db, org_id, data.scope_type, data.scope_id)
+    data = data.model_copy(update={"scope_id": normalized_scope_id})
     try:
         return await create_skill_folder(db, org_id, data)
     except IntegrityError:
@@ -214,6 +235,8 @@ async def upsert_skill_file_endpoint(
     if not f:
         raise HTTPException(status_code=404, detail="Skill folder not found")
     assert_org_write_access(auth, f.organization_id)
+    if f.active_version_id:
+        raise HTTPException(status_code=409, detail="Versioned Skill files are immutable; import a new package version")
     return await upsert_skill_file(db, f, data)
 
 
@@ -243,6 +266,8 @@ async def update_skill_file_endpoint(
     if not f:
         raise HTTPException(status_code=404, detail="Skill folder not found")
     assert_org_write_access(auth, f.organization_id)
+    if f.active_version_id:
+        raise HTTPException(status_code=409, detail="Versioned Skill files are immutable; import a new package version")
     return await update_skill_file(db, fl, data)
 
 
@@ -257,4 +282,6 @@ async def delete_skill_file_endpoint(
     if not f:
         raise HTTPException(status_code=404, detail="Skill folder not found")
     assert_org_write_access(auth, f.organization_id)
+    if f.active_version_id:
+        raise HTTPException(status_code=409, detail="Versioned Skill files are immutable; import a new package version")
     await soft_delete_skill_file(db, fl)

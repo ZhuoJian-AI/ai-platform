@@ -171,7 +171,7 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
         captured["system_prompt"] = kwargs["system_prompt"]
         yield "text", "已分析指定文件", None
 
-    async def fake_build_tools(_db, _skill_ids, _workspace_id):
+    async def fake_build_tools(_db, _skill_ids, _workspace_id, _user=None):
         return nodes._builtin_tool_defs(), {}
 
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session})
@@ -231,7 +231,7 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
         captured["system_prompt"] = kwargs["system_prompt"]
         yield "text", "已分析附件", None
 
-    async def fake_build_tools(_db, _skill_ids, _workspace_id):
+    async def fake_build_tools(_db, _skill_ids, _workspace_id, _user=None):
         return nodes._builtin_tool_defs(), {}
 
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session})

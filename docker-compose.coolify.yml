@@ -67,6 +67,29 @@ services:
     init: true
     logging: *default-logging
 
+  skill-runner:
+    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-skill-runner:${APP_IMAGE_TAG:-latest}
+    pull_policy: build
+    build:
+      context: ./skill_runner
+      dockerfile: Dockerfile
+    environment:
+      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
+      SKILL_CACHE_ROOT: /cache
+    expose:
+      - "8020"
+    volumes:
+      - skill_cache:/cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+
   backend:
     image: ${COMPOSE_PROJECT_NAME:-ai-platform}-backend:${APP_IMAGE_TAG:-latest}
     pull_policy: build
@@ -83,6 +106,10 @@ services:
       PROXY_BASE_URL: ${PUBLIC_ORIGIN:?}
       API_KEY_CACHE_TTL: "${API_KEY_CACHE_TTL:-60}"
       DLP_EXPOSE_MATCHES_IN_ERROR: "${DLP_EXPOSE_MATCHES_IN_ERROR:-false}"
+      CODE_SKILLS_ENABLED: "${CODE_SKILLS_ENABLED:-true}"
+      SKILL_RUNNER_URL: http://skill-runner:8020
+      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
+      SKILL_RUNNER_TIMEOUT_SECONDS: "${SKILL_RUNNER_TIMEOUT_SECONDS:-120}"
     expose:
       - "8000"
     command:
@@ -97,6 +124,8 @@ services:
       redis:
         condition: service_healthy
       mock:
+        condition: service_healthy
+      skill-runner:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
@@ -126,3 +155,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  skill_cache:

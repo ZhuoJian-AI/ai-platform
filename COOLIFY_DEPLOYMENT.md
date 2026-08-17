@@ -38,6 +38,9 @@ Path 留空。不要给 PostgreSQL、Redis、Mock 或 backend 配置公网域名
 - `MASTER_ENCRYPTION_KEY=<Fernet key>`
 - `MES_API_KEY=<随机长字符串>`
 - `CRM_API_KEY=<随机长字符串>`
+- `CODE_SKILLS_ENABLED=true`
+- `SKILL_RUNNER_TOKEN=<随机长字符串>`
+- `SKILL_RUNNER_TIMEOUT_SECONDS=120`
 
 `MASTER_ENCRYPTION_KEY` 必须使用 Fernet 格式，可由服务器管理员在安全终端生成：
 
@@ -54,7 +57,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 验收要求：
 
-1. `postgres`、`redis`、`mock`、`backend`、`frontend` 均健康；
+1. `postgres`、`redis`、`mock`、`skill-runner`、`backend`、`frontend` 均健康；
 2. `https://ai-platform.staging.zhuojianai.com/health` 返回 HTTP 200；
 3. 管理员入口 `/login` 可以打开并登录；
 4. Coolify 运行版本对应 GitHub `main` 的 SHA；

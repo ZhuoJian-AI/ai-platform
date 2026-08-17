@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     # Redis (Docker Redis on port 6381)
     redis_url: str = "redis://localhost:6381/0"
 
+    # Executable Skill runner (internal network only)
+    code_skills_enabled: bool = False
+    skill_runner_url: str = "http://localhost:8020"
+    skill_runner_token: str = "skill-runner-dev-token-change-in-production"
+    skill_runner_timeout_seconds: int = 120
+    skill_package_max_bytes: int = 10 * 1024 * 1024
+
     # API Key cache
     api_key_cache_ttl: int = 60
 

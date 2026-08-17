@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { Input, Typography, Upload, message, Empty, Spin, Tooltip } from 'antd';
+import { Input, Typography, Upload, message, Empty, Spin, Tooltip, Tag } from 'antd';
 import {
   DeleteOutlined, BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined,
   FolderOutlined, FileTextOutlined, EditOutlined, RightOutlined,
@@ -9,10 +9,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
-  terminal, type KbNode, type SkillFolder, type SkillFile, type SkillFileMeta,
+  terminal, type SkillScopeNode, type SkillFolder, type SkillFile, type SkillFileMeta,
 } from '../../api/client';
 import { ApiError } from '../../api/client';
-import { useUserAuth } from '../../context/UserAuthContext';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 
 /** WorkBuddy 配色（与 KnowledgeBaseView / WorkspaceManagerView 一致）。 */
@@ -34,36 +33,26 @@ interface TreeNode {
   name: string;
   scope: string;
   scopeId: string | null;
+  canImport: boolean;
+  canManage: boolean;
   children?: TreeNode[];
 }
 
-/** 把后端单链 KbNode[] 组装成 组织→部门→团队→个人 嵌套树（每级至多一个）。 */
-function buildTree(nodes: KbNode[]): TreeNode[] {
-  let child: TreeNode | null = null;
-  for (let i = nodes.length - 1; i >= 0; i--) {
-    const n = nodes[i];
-    const node: TreeNode = {
-      key: `${n.scope_type}:${n.scope_id ?? ''}`,
-      name: n.name, scope: n.scope_type, scopeId: n.scope_id,
-      children: child ? [child] : undefined,
-    };
-    child = node;
-  }
-  return child ? [child] : [];
+/** 负责人可能管理多个并列节点，技能作用域接口因此按节点平铺返回。 */
+function buildTree(nodes: SkillScopeNode[]): TreeNode[] {
+  return nodes.map((n) => ({
+    key: `${n.scope_type}:${n.scope_id ?? ''}`,
+    name: n.name,
+    scope: n.scope_type,
+    scopeId: n.scope_id,
+    canImport: n.can_import,
+    canManage: n.can_manage,
+  }));
 }
 
 /** 取路径末段。 */
 function leaf(p: string): string {
   return p.includes('/') ? p.slice(p.lastIndexOf('/') + 1) : p;
-}
-
-/** 把名称转为合法 slug（小写、连字符、[a-z0-9-]）。 */
-function slugify(s: string): string {
-  return s.toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/-{2,}/g, '-')
-    .slice(0, 100) || `skill-${Date.now()}`;
 }
 
 type ConfirmTarget =
@@ -72,15 +61,14 @@ type ConfirmTarget =
 
 /** 终端「技能」视图：左右两栏（参照工作空间样式）。
  *  左栏：用户可见作用域单链（组织/部门/团队/个人）；右栏：选中 scope 下的技能操作区。
- *  导入：任意可见 scope 均可（上传 skill.md → 新建技能文件夹 + 补传 skill.md）；
- *  重命名 / 删除 / 补传文件：仅限「自己创建」的技能（created_by === 当前用户）。 */
+ *  导入：在可管理 scope 上传 ZIP/MD；智能体绑定与技能安装相互独立。 */
 export default function SkillManagerView() {
   const qc = useQueryClient();
-  const { user } = useUserAuth();
-  const myId = user?.id ?? null;
   const composingRef = useRef(false);
 
-  const [scope, setScope] = useState<{ type: string; id: string | null; name: string } | null>(null);
+  const [scope, setScope] = useState<{
+    type: string; id: string | null; name: string; canImport: boolean; canManage: boolean;
+  } | null>(null);
   const [keyword, setKeyword] = useState('');
   const [expanded, setExpanded] = useState<string | null>(null);
   const [renameModal, setRenameModal] = useState<{ target: SkillFolder; value: string } | null>(null);
@@ -89,7 +77,7 @@ export default function SkillManagerView() {
 
   // 左栏 scope 链（与知识库同源，资源无关）
   const { data: kbNodes, isLoading: nodesLoading } = useQuery({
-    queryKey: ['kb-nodes'], queryFn: () => terminal.skillNodes(),
+    queryKey: ['skill-scopes'], queryFn: () => terminal.skillScopes(),
   });
   const treeData = useMemo(() => buildTree(kbNodes ?? []), [kbNodes]);
 
@@ -97,7 +85,10 @@ export default function SkillManagerView() {
   useEffect(() => {
     if (scope || !kbNodes?.length) return;
     const userNode = kbNodes.find((n) => n.scope_type === 'user');
-    if (userNode) setScope({ type: userNode.scope_type, id: userNode.scope_id, name: userNode.name });
+    if (userNode) setScope({
+      type: userNode.scope_type, id: userNode.scope_id, name: userNode.name,
+      canImport: userNode.can_import, canManage: userNode.can_manage,
+    });
   }, [kbNodes, scope]);
 
   // 右栏：选中 scope 下的技能
@@ -113,22 +104,44 @@ export default function SkillManagerView() {
     queryFn: () => expanded ? terminal.listSkillFiles(expanded) : Promise.resolve([]),
     enabled: !!expanded,
   });
-
-  const isOwner = (created_by: string | null) => !!myId && created_by === myId;
+  const { data: expandedVersions } = useQuery({
+    queryKey: ['terminal-skill-versions', expanded],
+    queryFn: () => expanded ? terminal.listSkillVersions(expanded) : Promise.resolve([]),
+    enabled: !!expanded,
+    refetchInterval: (query) => query.state.data?.some((v) => ['pending', 'installing'].includes(v.install_status)) ? 1500 : false,
+  });
 
   // 切换 scope 时收起展开
   useEffect(() => { setExpanded(null); }, [scope?.type, scope?.id]);
 
-  // 导入技能：上传 .md → 新建文件夹 + 补传 skill.md
+  // 导入技能包：ZIP 可包含 SKILL.md、脚本、依赖和资源；MD 继续兼容说明型技能。
   const importSkill = useMutation({
-    mutationFn: (v: { name: string; slug: string; content: string }) => {
+    mutationFn: (file: File) => {
       if (!scope) return Promise.reject(new Error('no scope'));
-      return terminal.createSkill({
-        name: v.name, slug: v.slug, scope_type: scope.type, scope_id: scope.id,
-      }).then((folder) => terminal.upsertSkillFile(folder.id, { path: 'skill.md', content: v.content }).then(() => folder));
+      return terminal.importSkill(file, { scope_type: scope.type, scope_id: scope.id });
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['terminal-skills'] }); message.success('技能已导入'); },
+    onSuccess: ({ version }) => {
+      qc.invalidateQueries({ queryKey: ['terminal-skills'] });
+      qc.invalidateQueries({ queryKey: ['terminal-skill-versions'] });
+      message.success(version.install_status === 'ready' ? '技能已安装，可在智能体中绑定' : '技能包已上传，正在安装依赖');
+    },
     onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '导入失败'),
+  });
+
+  const retryVersion = useMutation({
+    mutationFn: (id: string) => terminal.retrySkillVersion(id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['terminal-skill-versions'] }); message.success('已重新开始安装'); },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '重试失败'),
+  });
+
+  const activateVersion = useMutation({
+    mutationFn: (id: string) => terminal.activateSkillVersion(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['terminal-skills'] });
+      qc.invalidateQueries({ queryKey: ['terminal-skill-versions'] });
+      message.success('已切换活动版本');
+    },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '切换失败'),
   });
 
   // 补传文件
@@ -143,6 +156,15 @@ export default function SkillManagerView() {
     mutationFn: (v: { id: string; name: string }) => terminal.updateSkill(v.id, { name: v.name }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['terminal-skills'] }); setRenameModal(null); message.success('已重命名'); },
     onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '重命名失败'),
+  });
+
+  const toggleSkill = useMutation({
+    mutationFn: (v: { id: string; is_active: boolean }) => terminal.updateSkill(v.id, { is_active: v.is_active }),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ['terminal-skills'] });
+      message.success(v.is_active ? '技能已启用' : '技能已停用');
+    },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '状态更新失败'),
   });
 
   const delSkill = useMutation({
@@ -200,7 +222,10 @@ export default function SkillManagerView() {
             <MacTree
               nodes={treeData}
               selectedKey={scope ? `${scope.type}:${scope.id ?? ''}` : null}
-              onSelect={(type, id, name) => setScope({ type, id, name })}
+              onSelect={(node) => setScope({
+                type: node.scope, id: node.scopeId, name: node.name,
+                canImport: node.canImport, canManage: node.canManage,
+              })}
             />
           )}
         </aside>
@@ -221,20 +246,17 @@ export default function SkillManagerView() {
                   style={{ width: 220 }} value={keyword} onChange={(e) => setKeyword(e.target.value)}
                 />
                 <Upload
-                  showUploadList={false} accept=".md,.markdown,.txt"
+                  showUploadList={false} accept=".zip,.md,.markdown"
                   beforeUpload={(file) => {
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                      const text = String(reader.result ?? '');
-                      const base = file.name.replace(/\.(md|markdown|txt)$/i, '');
-                      importSkill.mutate({ name: base, slug: slugify(base), content: text });
-                    };
-                    reader.onerror = () => message.error('读取文件失败');
-                    reader.readAsText(file);
+                    importSkill.mutate(file as File);
                     return false;
                   }}
                 >
-                  <button style={{ ...toolBtnStyle, background: WB.primary, color: '#fff', border: 'none' }} disabled={importSkill.isPending}>
+                  <button
+                    style={{ ...toolBtnStyle, background: scope.canImport ? WB.primary : '#eef0f3', color: scope.canImport ? '#fff' : '#86868b', border: 'none' }}
+                    disabled={!scope.canImport || importSkill.isPending}
+                    title={scope.canImport ? '上传 ZIP 或 SKILL.md' : '你没有该节点的技能管理权限'}
+                  >
                     <UploadOutlined style={{ fontSize: 13 }} /> {importSkill.isPending ? '导入中…' : '导入技能'}
                   </button>
                 </Upload>
@@ -248,7 +270,7 @@ export default function SkillManagerView() {
                   <PaneEmpty text={kw ? '无匹配技能' : '该作用域下暂无技能，点「导入技能」新建'} />
                 ) : (
                   filtered.map((s) => {
-                    const owner = isOwner(s.created_by);
+                    const owner = scope.canManage;
                     const open = expanded === s.id;
                     return (
                       <div key={s.id} style={{ borderBottom: `1px solid ${WB.border}` }}>
@@ -261,7 +283,7 @@ export default function SkillManagerView() {
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                               <Typography.Text ellipsis style={{ fontSize: 13, color: '#1d1d1f', fontWeight: 500 }}>{s.name}</Typography.Text>
-                              {owner && <span style={minePillStyle}>我创建</span>}
+                              {owner && <span style={minePillStyle}>可管理</span>}
                             </div>
                             <Typography.Text type="secondary" ellipsis style={{ fontSize: 11, display: 'block' }}>{s.slug}</Typography.Text>
                           </div>
@@ -270,6 +292,10 @@ export default function SkillManagerView() {
                               title={owner ? '重命名' : '仅可重命名自己创建的'} disabled={!owner}
                               icon={<EditOutlined />} onClick={() => setRenameModal({ target: s, value: s.name })}
                             />
+                            <button
+                              style={toolBtnStyle} disabled={!owner || toggleSkill.isPending}
+                              onClick={() => toggleSkill.mutate({ id: s.id, is_active: !s.is_active })}
+                            >{s.is_active ? '停用' : '启用'}</button>
                             <IconAction
                               title={owner ? '删除' : '仅可删除自己创建的'} danger disabled={!owner}
                               icon={<DeleteOutlined />} onClick={() => setConfirm({ kind: 'skill', id: s.id, title: s.name })}
@@ -279,7 +305,24 @@ export default function SkillManagerView() {
 
                         {open && (
                           <div style={{ background: '#fafafa', padding: '8px 12px 10px 30px' }}>
-                            <Space style={{ marginBottom: 6 }}>
+                            {(expandedVersions ?? []).map((version) => (
+                              <div key={version.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0', fontSize: 12 }}>
+                                <Tag color={version.install_status === 'ready' ? 'green' : version.install_status === 'failed' ? 'red' : 'blue'}>
+                                  v{version.version_no} · {version.install_status}
+                                </Tag>
+                                <span>{version.runtime}{version.is_executable ? ' · 可执行' : ' · 说明型'}</span>
+                                {s.active_version_id === version.id && <Tag color="purple">当前版本</Tag>}
+                                <span style={{ flex: 1 }} />
+                                {owner && version.install_status === 'failed' && (
+                                  <button style={toolBtnStyle} onClick={() => retryVersion.mutate(version.id)}>重试安装</button>
+                                )}
+                                {owner && version.install_status === 'ready' && s.active_version_id !== version.id && (
+                                  <button style={toolBtnStyle} onClick={() => activateVersion.mutate(version.id)}>切换到此版本</button>
+                                )}
+                                {version.install_error && <Tooltip title={version.install_error}><Tag color="red">查看错误</Tag></Tooltip>}
+                              </div>
+                            ))}
+                            {!s.active_version_id && <Space style={{ marginBottom: 6 }}>
                               <Upload showUploadList={false}
                                 beforeUpload={(file) => {
                                   const reader = new FileReader();
@@ -298,7 +341,10 @@ export default function SkillManagerView() {
                               {!owner && (
                                 <Typography.Text type="secondary" style={{ fontSize: 11 }}>仅可在自己创建的技能下补传 / 删除文件</Typography.Text>
                               )}
-                            </Space>
+                            </Space>}
+                            {s.active_version_id && (
+                              <Typography.Text type="secondary" style={{ fontSize: 11 }}>版本包文件不可直接修改；请导入新 ZIP/MD 进行升级</Typography.Text>
+                            )}
                             {(expandedFiles?.length ?? 0) === 0 ? (
                               <PaneEmpty text="暂无文件（skill.md 定义函数 manifest）" />
                             ) : (
@@ -310,7 +356,8 @@ export default function SkillManagerView() {
                                   <div style={{ display: 'flex', gap: 2 }} onClick={(e) => e.stopPropagation()}>
                                     <IconAction title="查看" icon={<EyeOutlined />} onClick={() => openView(fl)} />
                                     <IconAction
-                                      title={owner ? '删除' : '仅可删除自己创建的'} danger disabled={!owner}
+                                      title={s.active_version_id ? '版本包文件不可直接删除' : owner ? '删除' : '无管理权限'}
+                                      danger disabled={!owner || !!s.active_version_id}
                                       icon={<DeleteOutlined />} onClick={() => setConfirm({ kind: 'file', id: fl.id, title: leaf(fl.path) })}
                                     />
                                   </div>
@@ -393,7 +440,7 @@ export default function SkillManagerView() {
 function MacTree({ nodes, selectedKey, onSelect }: {
   nodes: TreeNode[];
   selectedKey: string | null;
-  onSelect: (type: string, id: string | null, name: string) => void;
+  onSelect: (node: TreeNode) => void;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(nodes.map((n) => n.key)));
   const toggle = (key: string) => setExpanded((s) => {
@@ -408,7 +455,7 @@ function MacTree({ nodes, selectedKey, onSelect }: {
     return (
       <div key={node.key}>
         <div
-          onClick={() => onSelect(node.scope, node.scopeId, node.name)}
+          onClick={() => onSelect(node)}
           onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = WB.hover; }}
           onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent'; }}
           style={treeRowStyle(active, level)}

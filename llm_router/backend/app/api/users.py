@@ -69,14 +69,14 @@ async def login_user_by_slug_endpoint(
 async def create_user_endpoint(
     org_id: UUID,
     data: UserCreate,
-    _: CurrentAdmin = Depends(require_org_access_write),
+    auth: CurrentAdmin = Depends(require_org_access_write),
     db: AsyncSession = Depends(get_db),
 ):
     org = await get_organization(db, org_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
     try:
-        return await create_user(db, org_id, data)
+        return await create_user(db, org_id, data, created_by_admin_id=auth.id)
     except IntegrityError:
         await db.rollback()
         raise HTTPException(status_code=409, detail=f"Username '{data.username}' already exists in this organization")
@@ -116,7 +116,7 @@ async def update_user_endpoint(
         raise HTTPException(status_code=404, detail="User not found")
     assert_org_write_access(auth, user.organization_id)
     try:
-        return await update_user(db, user, data)
+        return await update_user(db, user, data, created_by_admin_id=auth.id)
     except IntegrityError:
         await db.rollback()
         raise HTTPException(status_code=409, detail="Username already exists in this organization")

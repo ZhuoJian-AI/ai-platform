@@ -32,7 +32,7 @@ class AgentCreate(BaseModel):
 class AgentUpdate(BaseModel):
     name: str | None = Field(None, max_length=255)
     description: str | None = None
-    system_prompt: str | None = None
+    system_prompt: str | None = Field(None, min_length=1)
     model_alias: str | None = None
     workflow: list | None = None
     memory_config: dict | None = None

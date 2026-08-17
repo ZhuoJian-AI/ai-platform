@@ -4,7 +4,17 @@
 ``SkillFolder`` + ``SkillFile``，agent ``_build_tools`` 改读 skill.md manifest。
 """
 
-from sqlalchemy import BigInteger, Boolean, CheckConstraint, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -63,10 +73,23 @@ class SkillFolder(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     # 创建者（终端用户 id）：admin / 历史数据为 None；终端「仅可操作自己创建的技能」据此判定
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     active_version_id: Mapped[str | None] = mapped_column(
-        ForeignKey("skill_versions.id", ondelete="SET NULL", use_alter=True), nullable=True, index=True
+        ForeignKey(
+            "skill_versions.id", name="fk_skill_folder_active_version",
+            ondelete="SET NULL", use_alter=True,
+        ),
+        nullable=True,
+        index=True,
     )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     files = relationship("SkillFile", back_populates="folder", lazy="selectin")
+
+    @property
+    def is_installed(self) -> bool:
+        """Active package or a compatible legacy skill.md is available."""
+        return self.is_active and (bool(self.active_version_id) or any(
+            item.deleted_at is None and item.path.lower() == "skill.md" for item in (self.files or [])
+        ))
 
 
 class SkillFile(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
@@ -141,7 +164,9 @@ class SkillExecution(TimestampMixin, Base):
     )
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
-    agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.id", ondelete="SET NULL"), nullable=True, index=True)
+    agent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     skill_folder_id: Mapped[str] = mapped_column(
         ForeignKey("skill_folders.id", ondelete="RESTRICT"), nullable=False, index=True
     )

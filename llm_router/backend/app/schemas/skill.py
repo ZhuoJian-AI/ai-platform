@@ -64,6 +64,7 @@ class SkillFolderCreate(BaseModel):
 class SkillFolderUpdate(BaseModel):
     name: str | None = Field(None, max_length=255)
     slug: str | None = Field(None, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    is_active: bool | None = None
 
 
 class SkillFolderRead(OrmModel):
@@ -75,6 +76,8 @@ class SkillFolderRead(OrmModel):
     slug: str
     created_by: str | None = None
     active_version_id: UUID | None = None
+    is_active: bool = True
+    is_installed: bool = False
     created_at: datetime
     updated_at: datetime
 

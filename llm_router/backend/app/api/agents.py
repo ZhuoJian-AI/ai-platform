@@ -23,6 +23,8 @@ from app.services.agent_service import (
     soft_delete_agent,
     update_agent,
 )
+from app.services.scope_service import assert_admin_bound_rags
+from app.services.skill_scope_service import assert_admin_bound_skills, validate_scope_target
 
 router = APIRouter()
 
@@ -32,6 +34,9 @@ async def create_agent_endpoint(
     org_id: UUID, data: AgentCreate,
     _: CurrentAdmin = Depends(require_org_access_write), db: AsyncSession = Depends(get_db),
 ):
+    await validate_scope_target(db, org_id, data.scope_type, data.scope_id)
+    await assert_admin_bound_skills(db, org_id, data.skill_ids)
+    await assert_admin_bound_rags(db, org_id, data.rag_collection_ids)
     try:
         return await create_agent(db, org_id, data)
     except IntegrityError:
@@ -69,6 +74,12 @@ async def update_agent_endpoint(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     assert_org_write_access(auth, agent.organization_id)
+    if data.skill_ids is not None:
+        await assert_admin_bound_skills(db, agent.organization_id, data.skill_ids)
+    if data.rag_collection_ids is not None:
+        await assert_admin_bound_rags(db, agent.organization_id, data.rag_collection_ids)
+    if data.scope_type is not None:
+        await validate_scope_target(db, agent.organization_id, data.scope_type, data.scope_id)
     return await update_agent(db, agent, data)
 
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
-  Input, Modal, Tooltip, Typography, Upload, message,
+  Input, Modal, Tooltip, Typography, Upload, message, Tag,
 } from 'antd';
 import {
   DeleteOutlined, EditOutlined, SearchOutlined, UploadOutlined,
@@ -37,14 +37,6 @@ const NODE_ICON: Record<string, ReactNode> = {
   org: <BankOutlined />, dept: <ApartmentOutlined />, team: <TeamOutlined />, user: <UserOutlined />,
 };
 const iconForKey = (key: string): ReactNode => NODE_ICON[key.split(':')[0]] ?? <FolderOutlined />;
-
-function slugify(s: string): string {
-  return s.toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .replace(/-{2,}/g, '-')
-    .slice(0, 100) || `skill-${Date.now()}`;
-}
 
 /** 技能（文件夹）管理：Finder 风。左：组织架构树（节点作用域）；右：技能列表（可展开看文件）。
  *  一个技能 = 一个文件夹；上传 skill.md 即新建技能，skill.md 内 ```skill JSON 块定义 function-tool。 */
@@ -97,15 +89,25 @@ export default function Skills() {
     queryFn: () => expanded ? skillStore.listFiles(expanded) : Promise.resolve([]),
     enabled: !!expanded,
   });
+  const { data: expandedVersions } = useQuery({
+    queryKey: ['skill-versions', expanded],
+    queryFn: () => expanded ? skillStore.listVersions(expanded) : Promise.resolve([]),
+    enabled: !!expanded,
+    refetchInterval: (query) => query.state.data?.some((v) => ['pending', 'installing'].includes(v.install_status)) ? 1500 : false,
+  });
 
   const uploadSkill = useMutation({
-    mutationFn: (v: { name: string; slug: string; content: string }) => {
+    mutationFn: (file: File) => {
       if (!scope) return Promise.reject(new Error('no scope'));
-      return skillStore.createFolder(scope.orgId, {
-        name: v.name, slug: v.slug, scope_type: scope.scope_type, scope_id: scope.scope_id,
-      }).then((folder) => skillStore.upsertFile(folder.id, { path: 'skill.md', content: v.content }).then(() => folder));
+      return skillStore.importPackage(scope.orgId, file, {
+        scope_type: scope.scope_type, scope_id: scope.scope_id,
+      });
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['skill-folders'] }); message.success('技能已上传'); },
+    onSuccess: ({ version }) => {
+      qc.invalidateQueries({ queryKey: ['skill-folders'] });
+      qc.invalidateQueries({ queryKey: ['skill-versions'] });
+      message.success(version.install_status === 'ready' ? '技能已安装' : '技能包已上传，正在安装依赖');
+    },
     onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '上传失败'),
   });
 
@@ -114,6 +116,22 @@ export default function Skills() {
       skillStore.upsertFile(v.folderId, { path: v.path, content: v.content }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['skill-files'] }); message.success('文件已上传'); },
     onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '上传失败'),
+  });
+
+  const retryVersion = useMutation({
+    mutationFn: (id: string) => skillStore.retryVersion(id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['skill-versions'] }); message.success('已重新开始安装'); },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '重试失败'),
+  });
+
+  const activateVersion = useMutation({
+    mutationFn: (id: string) => skillStore.activateVersion(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['skill-folders'] });
+      qc.invalidateQueries({ queryKey: ['skill-versions'] });
+      message.success('已切换活动版本');
+    },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '切换失败'),
   });
 
   const delFolder = useMutation({
@@ -134,6 +152,15 @@ export default function Skills() {
     onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '重命名失败'),
   });
 
+  const toggleFolder = useMutation({
+    mutationFn: (v: { id: string; is_active: boolean }) => skillStore.updateFolder(v.id, { is_active: v.is_active }),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ['skill-folders'] });
+      message.success(v.is_active ? '技能已启用' : '技能已停用');
+    },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '状态更新失败'),
+  });
+
   const openView = (f: SkillFileMeta) => {
     skillStore.getFile(f.id).then(setViewFile).catch(() => message.error('读取失败'));
   };
@@ -150,16 +177,9 @@ export default function Skills() {
         extra={
           <>
             <Input size="small" allowClear placeholder="搜索技能" prefix={<SearchOutlined style={{ color: WB.textAux }} />} style={{ width: 180 }} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
-            <Upload showUploadList={false} accept=".md,.markdown,.txt"
+            <Upload showUploadList={false} accept=".zip,.md,.markdown"
               beforeUpload={(file) => {
-                const reader = new FileReader();
-                reader.onload = () => {
-                  const text = String(reader.result ?? '');
-                  const base = file.name.replace(/\.(md|markdown|txt)$/i, '');
-                  uploadSkill.mutate({ name: base, slug: slugify(base), content: text });
-                };
-                reader.onerror = () => message.error('读取文件失败');
-                reader.readAsText(file);
+                uploadSkill.mutate(file as File);
                 return false;
               }}
             >
@@ -213,12 +233,30 @@ export default function Skills() {
                       <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: WB.text }}>{f.name}</span>
                       <span style={{ display: 'flex', gap: 2, flex: '0 0 auto' }} onClick={(e) => e.stopPropagation()}>
                         <Tooltip title="重命名"><ActionBtn icon={<EditOutlined />} onClick={() => { setRenameModal(f); setRenameName(f.name); }} /></Tooltip>
+                        <ToolButton onClick={() => toggleFolder.mutate({ id: f.id, is_active: !f.is_active })}>{f.is_active ? '停用' : '启用'}</ToolButton>
                         <ActionBtn icon={<DeleteOutlined />} danger onClick={() => setConfirm({ kind: 'folder', id: f.id, name: f.name })} />
                       </span>
                     </div>
                     {open && (
                       <div style={{ padding: '4px 12px 10px 40px', borderBottom: `1px solid ${WB.border}` }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                        {(expandedVersions ?? []).map((version) => (
+                          <div key={version.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0', fontSize: FS.micro }}>
+                            <Tag color={version.install_status === 'ready' ? 'green' : version.install_status === 'failed' ? 'red' : 'blue'}>
+                              v{version.version_no} · {version.install_status}
+                            </Tag>
+                            <span>{version.runtime}{version.is_executable ? ' · 可执行' : ' · 说明型'}</span>
+                            {f.active_version_id === version.id && <Tag color="purple">当前版本</Tag>}
+                            <span style={{ flex: 1 }} />
+                            {version.install_status === 'failed' && (
+                              <ToolButton onClick={() => retryVersion.mutate(version.id)}>重试安装</ToolButton>
+                            )}
+                            {version.install_status === 'ready' && f.active_version_id !== version.id && (
+                              <ToolButton onClick={() => activateVersion.mutate(version.id)}>切换版本</ToolButton>
+                            )}
+                            {version.install_error && <Tooltip title={version.install_error}><Tag color="red">查看错误</Tag></Tooltip>}
+                          </div>
+                        ))}
+                        {!f.active_version_id && <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                           <Upload showUploadList={false}
                             beforeUpload={(file) => {
                               const reader = new FileReader();
@@ -233,7 +271,10 @@ export default function Skills() {
                             <ToolButton icon={<UploadOutlined style={{ fontSize: 12 }} />} disabled={uploadFile.isPending}>上传文件</ToolButton>
                           </Upload>
                           <Typography.Text style={{ fontSize: FS.micro, color: WB.textAux }}>skill.md 定义函数 manifest</Typography.Text>
-                        </div>
+                        </div>}
+                        {f.active_version_id && (
+                          <Typography.Text style={{ fontSize: FS.micro, color: WB.textAux }}>版本包文件不可直接修改；请导入新 ZIP/MD 进行升级</Typography.Text>
+                        )}
                         {(expandedFiles?.length ?? 0) === 0 ? (
                           <div style={{ padding: '4px 0', color: WB.textAux, fontSize: FS.micro }}>暂无文件</div>
                         ) : (expandedFiles ?? []).map((fl) => (
@@ -243,7 +284,11 @@ export default function Skills() {
                             <span style={{ fontSize: FS.micro, color: WB.textAux }}>{fl.size} B</span>
                             <span style={{ display: 'flex', gap: 2, flex: '0 0 auto' }}>
                               <Tooltip title="查看"><ActionBtn icon={<EyeOutlined />} onClick={() => openView(fl)} /></Tooltip>
-                              <ActionBtn icon={<DeleteOutlined />} danger onClick={() => setConfirm({ kind: 'file', id: fl.id, name: fl.path })} />
+                              <ActionBtn
+                                icon={<DeleteOutlined />} danger
+                                title={f.active_version_id ? '版本包文件不可直接删除' : '删除'}
+                                onClick={f.active_version_id ? undefined : () => setConfirm({ kind: 'file', id: fl.id, name: fl.path })}
+                              />
                             </span>
                           </div>
                         ))}

@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.user_auth import CurrentUser
 from app.models.department import Department
-from app.models.skill import ScopeManagerAssignment, SkillFolder
+from app.models.skill import ScopeManagerAssignment, SkillFile, SkillFolder
 from app.models.team import Team
 from app.models.user import User
 from app.schemas.user import ManagerScopeGrant
+
+if TYPE_CHECKING:
+    from app.auth.user_auth import CurrentUser
 
 VALID_SCOPE_TYPES = {"organization", "department", "team", "user"}
 
@@ -97,6 +100,7 @@ async def replace_manager_grants(
             created_by_admin_id=created_by_admin_id,
         ))
     await db.flush()
+    await db.refresh(user, attribute_names=["manager_assignments"])
 
 
 async def managed_scopes(db: AsyncSession, cu: CurrentUser) -> set[tuple[str, str | None]]:
@@ -161,7 +165,47 @@ async def assert_bound_skills_visible(
         folder = by_id.get(str(raw))
         if folder is None or not user_can_use_folder(cu, folder):
             raise HTTPException(status_code=403, detail="Skill is not available to this user")
+        if not folder.is_active:
+            raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is disabled")
         if require_ready and not folder.active_version_id:
-            raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is not installed")
+            legacy = (await db.execute(select(SkillFile.id).where(
+                SkillFile.skill_folder_id == folder.id,
+                SkillFile.path == "skill.md",
+                SkillFile.deleted_at.is_(None),
+            ))).first()
+            if legacy is None:
+                raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is not installed")
+        ordered.append(folder)
+    return ordered
+
+
+async def assert_admin_bound_skills(
+    db: AsyncSession, org_id: UUID | str, skill_ids: list[str], *, require_ready: bool = True,
+) -> list[SkillFolder]:
+    if not skill_ids:
+        return []
+    try:
+        uuids = [UUID(str(value)) for value in skill_ids]
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid Skill id") from exc
+    rows = list((await db.execute(select(SkillFolder).where(
+        SkillFolder.id.in_(uuids), SkillFolder.deleted_at.is_(None),
+    ))).scalars().all())
+    by_id = {str(row.id): row for row in rows}
+    ordered = []
+    for value in skill_ids:
+        folder = by_id.get(str(value))
+        if folder is None or str(folder.organization_id) != str(org_id):
+            raise HTTPException(status_code=403, detail="Skill belongs to another organization")
+        if not folder.is_active:
+            raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is disabled")
+        if require_ready and not folder.active_version_id:
+            legacy = (await db.execute(select(SkillFile.id).where(
+                SkillFile.skill_folder_id == folder.id,
+                SkillFile.path == "skill.md",
+                SkillFile.deleted_at.is_(None),
+            ))).first()
+            if legacy is None:
+                raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is not installed")
         ordered.append(folder)
     return ordered

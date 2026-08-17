@@ -134,8 +134,9 @@ export default function Agents() {
     enabled: !!orgId && !nodeIsOrg,
   });
   const skillList = useMemo(() => {
-    const map = new Map<string, { id: string; name: string; slug: string }>();
-    for (const s of [...(skillOrg ?? []), ...(skillNode ?? [])] as unknown as { id: string; name: string; slug: string }[]) {
+    const map = new Map<string, { id: string; name: string; slug: string; scope_type: string }>();
+    for (const s of [...(skillOrg ?? []), ...(skillNode ?? [])]) {
+      if (!s.is_installed) continue;
       map.set(s.id, s);
     }
     return [...map.values()];
@@ -300,18 +301,18 @@ export default function Agents() {
                 <Form.Item name="system_prompt" label="系统提示词" rules={[{ required: true }]}>
                   <TextArea rows={10} style={{ fontFamily: 'monospace' }} />
                 </Form.Item>
-                <Form.Item name="rag_collection_ids" label="绑定 RAG 集合（可多选，任务未指定时继承）">
+                <Form.Item name="rag_collection_ids" label="绑定 RAG 集合（可多选，仅此智能体使用）">
                   <Select
                     mode="multiple" allowClear showSearch placeholder="无"
                     optionFilterProp="label"
                     options={ragList?.map((c) => ({ value: c.id, label: c.name })) ?? []}
                   />
                 </Form.Item>
-                <Form.Item name="skill_ids" label="绑定技能（可多选，任务未指定时继承）">
+                <Form.Item name="skill_ids" label="绑定技能（可多选，仅此智能体可调用）">
                   <Select
                     mode="multiple" allowClear showSearch placeholder="无"
                     optionFilterProp="label"
-                    options={skillList.map((s) => ({ value: s.id, label: `${s.name}` }))}
+                    options={skillList.map((s) => ({ value: s.id, label: `${s.name}（${SCOPE_LABEL[s.scope_type] ?? s.scope_type}）` }))}
                   />
                 </Form.Item>
                 <Space>
@@ -355,7 +356,7 @@ export default function Agents() {
             <Select
               mode="multiple" allowClear showSearch placeholder="无"
               optionFilterProp="label"
-              options={skillList.map((s) => ({ value: s.id, label: `${s.name}` }))}
+              options={skillList.map((s) => ({ value: s.id, label: `${s.name}（${SCOPE_LABEL[s.scope_type] ?? s.scope_type}）` }))}
             />
           </Form.Item>
         </Form>

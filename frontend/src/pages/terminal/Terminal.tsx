@@ -2352,7 +2352,7 @@ function ResourcePanel({ taskConfig, resources }: { taskConfig: TaskConfig; reso
       </div>
       <div>
         <Typography.Text type="secondary">技能</Typography.Text>
-        <div><Tag color="blue">按权限自动匹配 {resources?.skills.length ?? 0}（在输入框用 /slug 引用）</Tag></div>
+        <div><Tag color="blue">由所选智能体显式绑定（可选库 {resources?.skills.length ?? 0}）</Tag></div>
       </div>
       <div>
         <Typography.Text type="secondary">本体</Typography.Text>
@@ -2360,7 +2360,7 @@ function ResourcePanel({ taskConfig, resources }: { taskConfig: TaskConfig; reso
       </div>
       <div>
         <Typography.Text type="secondary">知识库</Typography.Text>
-        <div><Tag color="blue">按权限自动检索 {resources?.rags.length ?? 0}</Tag></div>
+        <div><Tag color="blue">由所选智能体显式绑定（可选库 {resources?.rags.length ?? 0}）</Tag></div>
       </div>
       <div>
         <Typography.Text type="secondary">长期记忆</Typography.Text>

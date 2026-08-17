@@ -12,25 +12,34 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.graph import get_agent_graph, run_general_agent, stream_general_agent
-from app.agents.graph import run_registry
+from app.agents.graph import get_agent_graph, run_general_agent, run_registry, stream_general_agent
 from app.agents.graph.runner import stream_persisted_run
 from app.auth.user_auth import CurrentUser, assert_user_org_access, assert_user_write, require_user
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.department import Department
-from app.models.organization import Organization
 from app.models.ontology import OntologyFile, OntologyFolder
+from app.models.organization import Organization
 from app.models.rag import RagCollection, RagDocument, RagFolder
-from app.models.skill import SkillFile, SkillFolder
+from app.models.skill import SkillFolder
 from app.models.task import Task
 from app.models.team import Team
+from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
+from app.schemas.data_interface import DataInterfaceRead, DataSystemRead
+from app.schemas.ontology import (
+    OntologyFileCreate,
+    OntologyFileRead,
+    OntologyFileUpdate,
+    OntologyFolderCreate,
+    OntologyFolderRead,
+    OntologyFolderRename,
+)
 from app.schemas.rag import (
+    RagChunkRead,
     RagCollectionCreate,
     RagCollectionRead,
     RagCollectionUpdate,
-    RagChunkRead,
     RagDocumentCreate,
     RagDocumentRead,
     RagDocumentStatusRead,
@@ -40,20 +49,6 @@ from app.schemas.rag import (
     RagFolderUpdate,
     RagReingestRequest,
 )
-from app.schemas.data_interface import DataInterfaceRead, DataSystemRead
-from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
-from app.services.data_interface_service import (
-    get_system,
-    list_interfaces,
-    list_systems,
-)
-from app.schemas.task import (
-    TaskCreate,
-    TaskRead,
-    TaskReadWithMessages,
-    TaskRunRequest,
-    TaskUpdate,
-)
 from app.schemas.skill import (
     SkillFileCreate,
     SkillFileRead,
@@ -62,13 +57,12 @@ from app.schemas.skill import (
     SkillFolderRead,
     SkillFolderUpdate,
 )
-from app.schemas.ontology import (
-    OntologyFileCreate,
-    OntologyFileRead,
-    OntologyFileUpdate,
-    OntologyFolderCreate,
-    OntologyFolderRead,
-    OntologyFolderRename,
+from app.schemas.task import (
+    TaskCreate,
+    TaskRead,
+    TaskReadWithMessages,
+    TaskRunRequest,
+    TaskUpdate,
 )
 from app.schemas.user import UserRead
 from app.schemas.workspace import (
@@ -80,37 +74,89 @@ from app.schemas.workspace import (
     WorkspaceFolderRead,
     WorkspaceRead,
 )
-from app.services import memory_service, scope_service, task_service, workspace_service
-from app.services import doc_parser, rag_service
-from app.services import skills_pack_service
-from app.services.skill_store_service import (
-    create_folder as create_skill_folder,
-    get_file as get_skill_file,
-    get_folder as get_skill_folder,
-    list_files as list_skill_files,
-    list_folders as list_skill_folders,
-    soft_delete_file as soft_delete_skill_file,
-    soft_delete_folder as soft_delete_skill_folder,
-    update_folder as update_skill_folder,
-    upsert_file as upsert_skill_file,
-)
-from app.services.ontology_store_service import (
-    create_folder as create_ontology_folder,
-    get_file as get_ontology_file,
-    get_folder as get_ontology_folder,
-    list_files as list_ontology_files,
-    list_folders as list_ontology_folders,
-    rename_folder as rename_ontology_folder,
-    soft_delete_file as soft_delete_ontology_file,
-    soft_delete_folder as soft_delete_ontology_folder,
-    update_file as update_ontology_file,
-    upsert_file as upsert_ontology_file,
+from app.services import (
+    doc_parser,
+    memory_service,
+    rag_service,
+    scope_service,
+    skill_scope_service,
+    skills_pack_service,
+    task_service,
+    workspace_service,
 )
 from app.services.agent_service import (
     create_agent as create_agent_svc,
+)
+from app.services.agent_service import (
     get_agent as get_agent_svc,
+)
+from app.services.agent_service import (
     list_agents as list_agents_svc,
+)
+from app.services.agent_service import (
     soft_delete_agent as soft_delete_agent_svc,
+)
+from app.services.data_interface_service import (
+    get_system,
+    list_interfaces,
+    list_systems,
+)
+from app.services.ontology_store_service import (
+    create_folder as create_ontology_folder,
+)
+from app.services.ontology_store_service import (
+    get_file as get_ontology_file,
+)
+from app.services.ontology_store_service import (
+    get_folder as get_ontology_folder,
+)
+from app.services.ontology_store_service import (
+    list_files as list_ontology_files,
+)
+from app.services.ontology_store_service import (
+    list_folders as list_ontology_folders,
+)
+from app.services.ontology_store_service import (
+    rename_folder as rename_ontology_folder,
+)
+from app.services.ontology_store_service import (
+    soft_delete_file as soft_delete_ontology_file,
+)
+from app.services.ontology_store_service import (
+    soft_delete_folder as soft_delete_ontology_folder,
+)
+from app.services.ontology_store_service import (
+    update_file as update_ontology_file,
+)
+from app.services.ontology_store_service import (
+    upsert_file as upsert_ontology_file,
+)
+from app.services.skill_store_service import (
+    create_folder as create_skill_folder,
+)
+from app.services.skill_store_service import (
+    get_file as get_skill_file,
+)
+from app.services.skill_store_service import (
+    get_folder as get_skill_folder,
+)
+from app.services.skill_store_service import (
+    list_files as list_skill_files,
+)
+from app.services.skill_store_service import (
+    list_folders as list_skill_folders,
+)
+from app.services.skill_store_service import (
+    soft_delete_file as soft_delete_skill_file,
+)
+from app.services.skill_store_service import (
+    soft_delete_folder as soft_delete_skill_folder,
+)
+from app.services.skill_store_service import (
+    update_folder as update_skill_folder,
+)
+from app.services.skill_store_service import (
+    upsert_file as upsert_skill_file,
 )
 
 router = APIRouter()
@@ -203,7 +249,10 @@ async def resources_endpoint(
     defaults = await _user_defaults(db, cu)
     return {
         "workspaces": [WorkspaceRead.model_validate(w).model_dump() for w in workspaces],
-        "skills": [{"id": str(s.id), "name": s.name, "slug": s.slug} for s in skills],
+        "skills": [{
+            "id": str(s.id), "name": s.name, "slug": s.slug,
+            "scope_type": s.scope_type, "scope_id": s.scope_id,
+        } for s in skills],
         # 本体已文件化：返回轻量摘要（id / name=文件名 / path），供下拉与计数。
         "ontologies": [
             {"id": str(o.id), "name": o.path.rsplit("/", 1)[-1], "path": o.path}
@@ -314,6 +363,8 @@ async def create_agent_endpoint(
         _available = await scope_service.list_available_models_for_user(db, cu)
         if data.model_alias not in _available:
             raise HTTPException(status_code=400, detail="所选模型当前不可用，请重新选择模型")
+    await skill_scope_service.assert_bound_skills_visible(db, cu, data.skill_ids)
+    await scope_service.assert_bound_rags_visible(db, cu, data.rag_collection_ids)
     try:
         agent = await create_agent_svc(db, cu.organization_id, data, created_by=cu.id)
     except IntegrityError:
@@ -340,6 +391,10 @@ async def update_agent_endpoint(
         _available = await scope_service.list_available_models_for_user(db, cu)
         if provided["model_alias"] not in _available:
             raise HTTPException(status_code=400, detail="所选模型当前不可用，请重新选择模型")
+    if "skill_ids" in provided:
+        await skill_scope_service.assert_bound_skills_visible(db, cu, provided["skill_ids"] or [])
+    if "rag_collection_ids" in provided:
+        await scope_service.assert_bound_rags_visible(db, cu, provided["rag_collection_ids"] or [])
     for field, value in provided.items():
         setattr(agent, field, value)
     agent.version += 1
@@ -495,6 +550,10 @@ async def run_task_endpoint(
     if "template_agent_id" in provided:
         tpl = provided["template_agent_id"]
         cfg["template_agent_id"] = (tpl or None)
+    if cfg.get("template_agent_id"):
+        selected_agent = await _get_visible_agent(db, UUID(str(cfg["template_agent_id"])), cu)
+        await skill_scope_service.assert_bound_skills_visible(db, cu, list(selected_agent.skill_ids or []))
+        await scope_service.assert_bound_rags_visible(db, cu, list(selected_agent.rag_collection_ids or []))
     if data.stream:
         resp = await stream_general_agent(
             graph, org_id=str(task.organization_id), user=cu, task=task,
@@ -824,7 +883,8 @@ async def _get_visible_skill_folder(db: AsyncSession, folder_id: UUID, cu: Curre
     if f is None:
         raise HTTPException(status_code=404, detail="Skill folder not found")
     assert_user_org_access(cu, f.organization_id)
-    if not _scope_in_effective(cu, f.scope_type, f.scope_id):
+    can_manage = (f.scope_type, f.scope_id) in await skill_scope_service.managed_scopes(db, cu)
+    if not skill_scope_service.user_can_use_folder(cu, f) and not can_manage:
         raise HTTPException(status_code=404, detail="Skill folder not found")
     return f
 
@@ -1178,7 +1238,9 @@ async def list_skills_endpoint(
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
     """列出选中 scope 下的技能文件夹（scope 必须在用户有效集合内）。"""
-    if not _scope_in_effective(cu, scope_type, scope_id):
+    if not _scope_in_effective(cu, scope_type, scope_id) and (
+        scope_type, scope_id
+    ) not in await skill_scope_service.managed_scopes(db, cu):
         raise HTTPException(status_code=404, detail="Scope not accessible")
     return await list_skill_folders(db, cu.organization_id, scope_type, scope_id)
 
@@ -1190,8 +1252,10 @@ async def create_skill_endpoint(
 ):
     """导入技能：新建技能文件夹（created_by 记为当前用户）；随后前端补传 skill.md。"""
     assert_user_write(cu)
-    if not _scope_in_effective(cu, data.scope_type, data.scope_id):
-        raise HTTPException(status_code=403, detail="无权在该作用域下新建技能")
+    normalized_scope_id = await skill_scope_service.assert_user_can_manage_scope(
+        db, cu, data.scope_type, data.scope_id,
+    )
+    data = data.model_copy(update={"scope_id": normalized_scope_id})
     try:
         f = await create_skill_folder(db, cu.organization_id, data, created_by=cu.id)
     except IntegrityError:
@@ -1210,10 +1274,12 @@ async def update_skill_endpoint(
     """重命名技能（仅创建者）；终端仅允许改 name。"""
     assert_user_write(cu)
     f = await _get_visible_skill_folder(db, folder_id, cu)
-    _assert_owner(f, cu)
-    if not data.name:
-        raise HTTPException(status_code=400, detail="name required")
-    f = await update_skill_folder(db, f, SkillFolderUpdate(name=data.name))
+    await skill_scope_service.assert_user_can_manage_folder(db, cu, f)
+    if data.name is None and data.is_active is None:
+        raise HTTPException(status_code=400, detail="name or is_active required")
+    f = await update_skill_folder(
+        db, f, SkillFolderUpdate(name=data.name, is_active=data.is_active),
+    )
     await db.commit()
     await db.refresh(f)
     return f
@@ -1226,7 +1292,7 @@ async def delete_skill_endpoint(
     """删除技能（仅创建者）。"""
     assert_user_write(cu)
     f = await _get_visible_skill_folder(db, folder_id, cu)
-    _assert_owner(f, cu)
+    await skill_scope_service.assert_user_can_manage_folder(db, cu, f)
     await soft_delete_skill_folder(db, f)
     await db.commit()
 
@@ -1248,7 +1314,9 @@ async def upsert_skill_file_endpoint(
     """补传文件（仅技能创建者）。"""
     assert_user_write(cu)
     f = await _get_visible_skill_folder(db, folder_id, cu)
-    _assert_owner(f, cu)
+    await skill_scope_service.assert_user_can_manage_folder(db, cu, f)
+    if f.active_version_id:
+        raise HTTPException(status_code=409, detail="Versioned Skill files are immutable; import a new package version")
     fl = await upsert_skill_file(db, f, data)
     await db.commit()
     await db.refresh(fl)
@@ -1277,7 +1345,9 @@ async def delete_skill_file_endpoint(
     if fl is None:
         raise HTTPException(status_code=404, detail="Skill file not found")
     f = await _get_visible_skill_folder(db, fl.skill_folder_id, cu)
-    _assert_owner(f, cu)
+    await skill_scope_service.assert_user_can_manage_folder(db, cu, f)
+    if f.active_version_id:
+        raise HTTPException(status_code=409, detail="Versioned Skill files are immutable; import a new package version")
     await soft_delete_skill_file(db, fl)
     await db.commit()
 

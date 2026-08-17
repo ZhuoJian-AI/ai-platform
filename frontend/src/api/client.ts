@@ -6,7 +6,8 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const token = localStorage.getItem('ai_infra_token');
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const isMultipart = options?.body instanceof FormData;
+  const headers: Record<string, string> = isMultipart ? {} : { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const resp = await fetch(`${BASE_URL}${path}`, {
@@ -334,8 +335,14 @@ export interface User {
   team_id: string | null;
   is_active: boolean;
   must_change_password: boolean;
+  manager_scopes: ManagerScopeGrant[];
   created_at: string;
   updated_at: string;
+}
+
+export interface ManagerScopeGrant {
+  scope_type: 'department' | 'team';
+  scope_id: string;
 }
 
 export interface UserCreateInput {
@@ -346,6 +353,7 @@ export interface UserCreateInput {
   team_id?: string | null;
   is_active?: boolean;
   password: string;
+  manager_scopes?: ManagerScopeGrant[];
 }
 
 export const users = {
@@ -892,7 +900,25 @@ export const skills = {
 export interface SkillFolder {
   id: string; organization_id: string; scope_type: string; scope_id: string | null;
   name: string; slug: string; created_by: string | null;
+  active_version_id: string | null;
+  is_active: boolean;
+  is_installed: boolean;
   created_at: string; updated_at: string;
+}
+
+export interface SkillVersion {
+  id: string; skill_folder_id: string; version_no: number; package_hash: string;
+  manifest: Record<string, unknown>; runtime: 'prompt' | 'python' | 'node';
+  entrypoint: string | null; is_executable: boolean;
+  install_status: 'pending' | 'installing' | 'ready' | 'failed';
+  install_error: string | null; created_at: string; updated_at: string;
+}
+
+export interface SkillImportResult { folder: SkillFolder; version: SkillVersion }
+
+export interface SkillScopeNode extends KbNode {
+  can_import: boolean;
+  can_manage: boolean;
 }
 
 export interface SkillFileMeta {
@@ -908,6 +934,7 @@ export interface SkillFile extends SkillFileMeta {
 /** /terminal/resources 返回的技能文件夹轻量摘要。 */
 export interface SkillFolderSummary {
   id: string; name: string; slug: string;
+  scope_type: string; scope_id: string | null;
 }
 
 /** /terminal/workspace-files 返回的工作空间文件轻量摘要（跨全部可访问工作空间，供 @ 引用下拉）。 */
@@ -921,7 +948,7 @@ export const skillStore = {
     request<SkillFolder[]>(`/api/v1/organizations/${orgId}/skill-folders?scope_type=${scope.scope_type}&scope_id=${scope.scope_id ?? ''}`),
   createFolder: (orgId: string, data: { name: string; slug: string; scope_type: string; scope_id: string | null }) =>
     request<SkillFolder>(`/api/v1/organizations/${orgId}/skill-folders`, { method: 'POST', body: JSON.stringify(data) }),
-  updateFolder: (id: string, data: { name?: string; slug?: string }) =>
+  updateFolder: (id: string, data: { name?: string; slug?: string; is_active?: boolean }) =>
     request<SkillFolder>(`/api/v1/skill-folders/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteFolder: (id: string) => request<void>(`/api/v1/skill-folders/${id}`, { method: 'DELETE' }),
   listFiles: (folderId: string) =>
@@ -932,6 +959,20 @@ export const skillStore = {
   updateFile: (id: string, data: { path?: string; content?: string; metadata?: Record<string, unknown> }) =>
     request<SkillFile>(`/api/v1/skill-files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteFile: (id: string) => request<void>(`/api/v1/skill-files/${id}`, { method: 'DELETE' }),
+  importPackage: (orgId: string, file: File, scope: ScopeRef) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('scope_type', scope.scope_type);
+    if (scope.scope_id) fd.append('scope_id', scope.scope_id);
+    return request<SkillImportResult>(`/api/v1/organizations/${orgId}/skill-folders/import`, {
+      method: 'POST', body: fd, headers: {},
+    });
+  },
+  listVersions: (folderId: string) => request<SkillVersion[]>(`/api/v1/skill-folders/${folderId}/versions`),
+  retryVersion: (versionId: string) =>
+    request<SkillVersion>(`/api/v1/skill-versions/${versionId}/retry`, { method: 'POST' }),
+  activateVersion: (versionId: string) =>
+    request<SkillVersion>(`/api/v1/skill-versions/${versionId}/activate`, { method: 'POST' }),
 };
 
 // ── Tool Connector: Ontology ───────────────────────────────────────────
@@ -1082,7 +1123,8 @@ const USER_TOKEN_KEY = 'ai_infra_user_token';
 
 function userRequest<T>(path: string, options?: RequestInit): Promise<T> {
   const token = localStorage.getItem(USER_TOKEN_KEY);
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const isMultipart = options?.body instanceof FormData;
+  const headers: Record<string, string> = isMultipart ? {} : { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
   return fetch(`${BASE_URL}${path}`, { headers: { ...headers, ...(options?.headers as Record<string, string>) }, ...options })
     .then(async (resp) => {
@@ -1127,8 +1169,7 @@ export interface TerminalModels {
 
 export interface TaskConfig {
   workspace_id: string | null;
-  // 技能 / 本体 / RAG 知识库不在任务配置中指定：技能在输入框用 /slug 引用（运行时主动执行），
-  // 本体与知识库运行时按用户权限自动注入/检索。
+  // Skill/RAG 由本次选中的智能体显式绑定；本体与长期记忆仍按用户权限装配。
   model_alias: string | null;
   /** 执行模式：craft（自主多步执行）/ ask（只读单轮问答）/ plan（出方案不执行） */
   exec_mode: 'craft' | 'ask' | 'plan';
@@ -1218,6 +1259,20 @@ export const terminal = {
     userRequest<Agent>(`/api/v1/terminal/agents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAgent: (id: string) =>
     userRequest<void>(`/api/v1/terminal/agents/${id}`, { method: 'DELETE' }),
+  skillScopes: () => userRequest<SkillScopeNode[]>('/api/v1/terminal/skill-scopes'),
+  importSkill: (file: File, scope: { scope_type: string; scope_id?: string | null }) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('scope_type', scope.scope_type);
+    if (scope.scope_id) fd.append('scope_id', scope.scope_id);
+    return userRequest<SkillImportResult>('/api/v1/terminal/skills/import', { method: 'POST', body: fd });
+  },
+  listSkillVersions: (folderId: string) =>
+    userRequest<SkillVersion[]>(`/api/v1/terminal/skills/${folderId}/versions`),
+  retrySkillVersion: (versionId: string) =>
+    userRequest<SkillVersion>(`/api/v1/terminal/skill-versions/${versionId}/retry`, { method: 'POST' }),
+  activateSkillVersion: (versionId: string) =>
+    userRequest<SkillVersion>(`/api/v1/terminal/skill-versions/${versionId}/activate`, { method: 'POST' }),
   memory: () => userRequest<TerminalMemoryItem[]>('/api/v1/terminal/memory'),
   /** 即时生成归口用户 skills 包 zip 并下载（鉴权内嵌、即时轮换；无需在第三方端再输凭证）。 */
   exportSkillsPack: async (): Promise<void> => {
@@ -1428,7 +1483,7 @@ export const terminal = {
   },
   createSkill: (data: { name: string; slug: string; scope_type: string; scope_id: string | null }) =>
     userRequest<SkillFolder>('/api/v1/terminal/skills', { method: 'POST', body: JSON.stringify(data) }),
-  updateSkill: (id: string, data: { name?: string }) =>
+  updateSkill: (id: string, data: { name?: string; is_active?: boolean }) =>
     userRequest<SkillFolder>(`/api/v1/terminal/skills/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteSkill: (id: string) => userRequest<void>(`/api/v1/terminal/skills/${id}`, { method: 'DELETE' }),
   listSkillFiles: (folderId: string) =>

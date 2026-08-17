@@ -61,10 +61,14 @@ def upgrade() -> None:
     )
     op.create_index("ix_skill_versions_folder", "skill_versions", ["skill_folder_id"])
     op.create_index("ix_skill_versions_status", "skill_versions", ["install_status"])
+    op.add_column(
+        "skill_folders",
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
+    )
     op.add_column("skill_folders", sa.Column("active_version_id", postgresql.UUID(as_uuid=True), nullable=True))
     op.create_foreign_key(
         "fk_skill_folder_active_version", "skill_folders", "skill_versions",
-        ["active_version_id"], ["id"], ondelete="SET NULL", use_alter=True,
+        ["active_version_id"], ["id"], ondelete="SET NULL",
     )
     op.create_index("ix_skill_folders_active_version", "skill_folders", ["active_version_id"])
 
@@ -93,7 +97,11 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["skill_version_id"], ["skill_versions.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
     )
-    for column in ("organization_id", "user_id", "task_id", "agent_id", "skill_folder_id", "skill_version_id", "status"):
+    execution_indexes = (
+        "organization_id", "user_id", "task_id", "agent_id",
+        "skill_folder_id", "skill_version_id", "status",
+    )
+    for column in execution_indexes:
         op.create_index(f"ix_skill_executions_{column}", "skill_executions", [column])
 
     op.drop_constraint("uq_skill_folder_scope_slug", "skill_folders", type_="unique")
@@ -119,5 +127,6 @@ def downgrade() -> None:
     op.drop_index("ix_skill_folders_active_version", table_name="skill_folders")
     op.drop_constraint("fk_skill_folder_active_version", "skill_folders", type_="foreignkey")
     op.drop_column("skill_folders", "active_version_id")
+    op.drop_column("skill_folders", "is_active")
     op.drop_table("skill_versions")
     op.drop_table("scope_manager_assignments")

@@ -7,7 +7,7 @@ import {
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  terminal, type Agent, type KbNode, type RagCollection, type SkillFolder,
+  terminal, type Agent, type KbNode,
 } from '../../api/client';
 import { ApiError } from '../../api/client';
 import { useUserAuth } from '../../context/UserAuthContext';
@@ -92,17 +92,10 @@ export default function AgentManagerView() {
     enabled: !!scope,
   });
 
-  // 右栏绑定选项：选中 scope 下的 RAG / 技能（供多选下拉；org 节点取组织级）
-  const ragScope = scope ? { scope_type: scope.type, scope_id: scope.id } : null;
-  const { data: ragList } = useQuery({
-    queryKey: ['terminal-rag', ragScope?.scope_type, ragScope?.scope_id],
-    queryFn: () => terminal.listKbCollections(ragScope!),
-    enabled: !!ragScope,
-  });
-  const { data: skillList } = useQuery({
-    queryKey: ['terminal-skills', ragScope?.scope_type, ragScope?.scope_id],
-    queryFn: () => terminal.listSkills(ragScope!),
-    enabled: !!ragScope,
+  // 智能体可绑定用户继承到的全部资源，而非只看当前树节点的直接资源。
+  // 后端只返回已安装成功的 Skill，组织/部门/团队来源在选项中显式标注。
+  const { data: resources } = useQuery({
+    queryKey: ['terminal-resources'], queryFn: () => terminal.resources(),
   });
 
   const isOwner = (created_by: string | null) => !!myId && created_by === myId;
@@ -174,8 +167,10 @@ export default function AgentManagerView() {
     : (agents ?? []);
   const canCreate = !!scope && scope.type !== 'organization';
 
-  const ragOptions = (ragList ?? []).map((c: RagCollection) => ({ value: c.id, label: c.name }));
-  const skillOptions = (skillList ?? []).map((s: SkillFolder) => ({ value: s.id, label: s.name }));
+  const ragOptions = (resources?.rags ?? []).map((c) => ({ value: c.id, label: c.name }));
+  const skillOptions = (resources?.skills ?? []).map((s) => ({
+    value: s.id, label: `${s.name}（${SCOPE_LABEL[s.scope_type] ?? s.scope_type}）`,
+  }));
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, fontFamily: WB_FONT, background: '#fff' }}>
@@ -315,12 +310,15 @@ export default function AgentManagerView() {
                   <Form.Item name="system_prompt" label="系统提示词" rules={[{ required: true }]}>
                     <TextArea rows={10} style={{ fontFamily: 'monospace' }} />
                   </Form.Item>
-                  <Form.Item name="rag_collection_ids" label="绑定 RAG 集合（可多选，任务未指定时继承）">
+                  <Form.Item name="rag_collection_ids" label="绑定 RAG 集合（可多选，仅此智能体使用）">
                     <Select mode="multiple" allowClear showSearch placeholder="无" optionFilterProp="label" options={ragOptions} />
                   </Form.Item>
-                  <Form.Item name="skill_ids" label="绑定技能（可多选，任务未指定时继承）">
+                  <Form.Item name="skill_ids" label="绑定技能（可多选，仅此智能体可调用）">
                     <Select mode="multiple" allowClear showSearch placeholder="无" optionFilterProp="label" options={skillOptions} />
                   </Form.Item>
+                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: -16, marginBottom: 16, fontSize: 12 }}>
+                    未绑定的技能不会暴露给模型，自动调用和 /command 都不可使用。
+                  </Typography.Text>
                   <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
                     <Form.Item name="temperature" label="Temperature"><InputNumber min={0} max={2} step={0.1} /></Form.Item>
                     <Form.Item name="max_tokens" label="Max Tokens"><InputNumber min={1} /></Form.Item>

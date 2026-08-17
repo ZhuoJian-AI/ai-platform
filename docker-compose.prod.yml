@@ -12,6 +12,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      skill-runner:
+        condition: service_healthy
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -21,6 +23,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       PROXY_BASE_URL: https://infra.aievolve.org.cn
       API_KEY_CACHE_TTL: "60"
+      CODE_SKILLS_ENABLED: "true"
+      SKILL_RUNNER_URL: http://skill-runner:8020
+      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:-skill-runner-local-dev-token}
+      SKILL_RUNNER_TIMEOUT_SECONDS: "120"
     ports:
       - "127.0.0.1:8000:8000"
     command:

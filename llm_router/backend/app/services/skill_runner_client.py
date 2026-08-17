@@ -1,0 +1,88 @@
+"""Internal HTTP client and resilient installation worker for skill-runner."""
+
+from __future__ import annotations
+
+import base64
+import time
+from uuid import UUID
+
+import httpx
+import structlog
+from sqlalchemy import select
+
+from app.config import settings
+from app.database import async_session_factory
+from app.models.skill import SkillFolder, SkillVersion
+from app.services.skill_import_service import activate_version
+
+logger = structlog.get_logger()
+
+
+def _headers() -> dict[str, str]:
+    return {"X-Skill-Runner-Token": settings.skill_runner_token}
+
+
+async def install_version(version_id: UUID | str) -> None:
+    async with async_session_factory() as db:
+        version = await db.get(SkillVersion, UUID(str(version_id)))
+        if version is None or version.install_status == "ready":
+            return
+        version.install_status = "installing"
+        version.install_error = None
+        await db.commit()
+        payload = {
+            "package_hash": version.package_hash,
+            "archive_base64": base64.b64encode(version.archive).decode("ascii"),
+            "runtime": version.runtime,
+            "entrypoint": version.entrypoint,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=settings.skill_runner_timeout_seconds) as client:
+                response = await client.post(
+                    f"{settings.skill_runner_url.rstrip('/')}/install", json=payload, headers=_headers()
+                )
+                response.raise_for_status()
+            version.install_status = "ready"
+            folder = await db.get(SkillFolder, version.skill_folder_id)
+            if folder is not None:
+                await activate_version(db, folder, version)
+        except Exception as exc:  # noqa: BLE001
+            version.install_status = "failed"
+            version.install_error = str(exc)[:2000]
+            logger.warning("skill_install_failed", version_id=str(version.id), error=str(exc))
+        await db.commit()
+
+
+async def resume_pending_installs() -> None:
+    if not settings.code_skills_enabled:
+        return
+    async with async_session_factory() as db:
+        ids = list((await db.execute(select(SkillVersion.id).where(
+            SkillVersion.is_executable.is_(True),
+            SkillVersion.install_status.in_(["pending", "installing"]),
+        ))).scalars().all())
+    for version_id in ids:
+        await install_version(version_id)
+
+
+async def execute_version(
+    version: SkillVersion, *, params: dict, inputs: list[dict], execution_id: int,
+) -> tuple[dict, int]:
+    started = time.perf_counter()
+    payload = {
+        "package_hash": version.package_hash,
+        "archive_base64": base64.b64encode(version.archive).decode("ascii"),
+        "runtime": version.runtime,
+        "entrypoint": version.entrypoint,
+        "params": params,
+        "inputs": inputs,
+        "arguments": version.manifest.get("arguments") or [],
+        "execution_id": execution_id,
+        "timeout_seconds": settings.skill_runner_timeout_seconds,
+    }
+    async with httpx.AsyncClient(timeout=settings.skill_runner_timeout_seconds + 15) as client:
+        response = await client.post(
+            f"{settings.skill_runner_url.rstrip('/')}/execute", json=payload, headers=_headers()
+        )
+        response.raise_for_status()
+    return response.json(), int((time.perf_counter() - started) * 1000)

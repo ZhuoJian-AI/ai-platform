@@ -12,18 +12,19 @@ from app.auth.security import hash_password, verify_password
 from app.config import settings
 from app.models.user import User
 from app.schemas.user import UserCreate, UserLoginResponse, UserRead, UserUpdate
+from app.services.memory_lifecycle import soft_delete_node_memory
 from app.services.memory_service import consolidate_user_memory, upsert_user_profile_memory
 from app.services.organization_service import (
     get_dept_name_by_id,
     get_org_name_slug_by_id,
     get_team_name_by_id,
 )
+from app.services.skill_scope_service import replace_manager_grants, validate_user_membership
 from app.services.workspace_lifecycle import (
     ensure_node_workspace,
     soft_delete_node_workspace,
     sync_node_workspace,
 )
-from app.services.memory_lifecycle import soft_delete_node_memory
 
 
 def _user_ws_name(user: User) -> str:
@@ -87,7 +88,10 @@ async def consolidate_user_profile_memory(db: AsyncSession, user: User) -> dict:
     )
 
 
-async def create_user(db: AsyncSession, org_id: UUID, data: UserCreate) -> User:
+async def create_user(
+    db: AsyncSession, org_id: UUID, data: UserCreate, *, created_by_admin_id: int | None = None,
+) -> User:
+    await validate_user_membership(db, org_id, data.department_id, data.team_id)
     user = User(
         organization_id=org_id,
         username=data.username,
@@ -101,6 +105,7 @@ async def create_user(db: AsyncSession, org_id: UUID, data: UserCreate) -> User:
     )
     db.add(user)
     await db.flush()
+    await replace_manager_grants(db, user, data.manager_scopes, created_by_admin_id)
     # 组织管理员（role='admin'）非终端用户：不持有工作空间，也不沉淀个人档案记忆。
     if user.role != "admin":
         await ensure_node_workspace(db, org_id, "user", str(user.id), _user_ws_name(user), str(user.id))
@@ -123,10 +128,16 @@ async def get_user(db: AsyncSession, user_id: UUID) -> User | None:
     return result.scalar_one_or_none()
 
 
-async def update_user(db: AsyncSession, user: User, data: UserUpdate) -> User:
+async def update_user(
+    db: AsyncSession, user: User, data: UserUpdate, *, created_by_admin_id: int | None = None,
+) -> User:
     values = data.model_dump(exclude_unset=True)
     # password 不是列，需单独哈希处理
     password = values.pop("password", None)
+    requested_manager_scopes = values.pop("manager_scopes", None)
+    next_department_id = values.get("department_id", user.department_id)
+    next_team_id = values.get("team_id", user.team_id)
+    await validate_user_membership(db, user.organization_id, next_department_id, next_team_id)
     role_changed = "role" in values
     prev_role = user.role
     for field, value in values.items():
@@ -136,6 +147,23 @@ async def update_user(db: AsyncSession, user: User, data: UserUpdate) -> User:
         user.must_change_password = True
     await db.flush()
     await db.refresh(user)
+
+    if requested_manager_scopes is not None:
+        await replace_manager_grants(db, user, requested_manager_scopes, created_by_admin_id)
+    elif role_changed or {"department_id", "team_id", "is_active"} & values.keys():
+        # 调岗/停用/角色变化时只保留仍与新成员关系一致的授权。
+        surviving = []
+        for grant in user.manager_assignments or []:
+            if grant.deleted_at is not None:
+                continue
+            if grant.scope_type == "department" and str(user.department_id or "") == grant.scope_id:
+                surviving.append({"scope_type": "department", "scope_id": grant.scope_id})
+            if grant.scope_type == "team" and str(user.team_id or "") == grant.scope_id:
+                surviving.append({"scope_type": "team", "scope_id": grant.scope_id})
+        from app.schemas.user import ManagerScopeGrant
+        await replace_manager_grants(
+            db, user, [ManagerScopeGrant(**item) for item in surviving], created_by_admin_id,
+        )
 
     is_admin = user.role == "admin"
     # 工作空间：组织管理员不持有。角色变更时按新角色补建/移除；仅普通用户重命名时同步。
@@ -195,6 +223,7 @@ async def login_user(
 
 async def soft_delete_user(db: AsyncSession, user: User) -> None:
     user.deleted_at = datetime.now(UTC)
+    await replace_manager_grants(db, user, [])
     # 组织管理员本就不持有工作空间/个人记忆，跳过；仅普通用户软删其绑定工作空间与个人记忆。
     if user.role != "admin":
         await soft_delete_node_workspace(db, user.organization_id, "user", str(user.id))
