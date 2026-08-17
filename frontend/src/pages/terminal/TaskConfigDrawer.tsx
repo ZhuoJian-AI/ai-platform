@@ -107,7 +107,8 @@ export default function TaskConfigDrawer({ open, onApply, resources, config, mod
 
       <Divider orientation="left">智能体</Divider>
       <Select
-        style={{ width: '100%' }} allowClear showSearch placeholder="不绑定（通用智能体）"
+        style={{ width: '100%' }} allowClear showSearch optionFilterProp="label"
+        placeholder="不绑定（通用智能体）"
         value={agentId ?? undefined}
         onChange={(v) => onAgentChange((v as string) ?? null)}
         options={agents.map((a) => ({ value: a.id, label: `${a.name}（${a.slug}）` }))}
