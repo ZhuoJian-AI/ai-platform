@@ -9,10 +9,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const isMultipart = options?.body instanceof FormData;
   const headers: Record<string, string> = isMultipart ? {} : { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
+  const { headers: optionHeaders, ...requestOptions } = options ?? {};
 
   const resp = await fetch(`${BASE_URL}${path}`, {
-    headers: { ...headers, ...(options?.headers as Record<string, string>) },
-    ...options,
+    ...requestOptions,
+    headers: { ...headers, ...(optionHeaders as Record<string, string> | undefined) },
   });
 
   // 401 时自动跳转登录
@@ -1126,7 +1127,11 @@ function userRequest<T>(path: string, options?: RequestInit): Promise<T> {
   const isMultipart = options?.body instanceof FormData;
   const headers: Record<string, string> = isMultipart ? {} : { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  return fetch(`${BASE_URL}${path}`, { headers: { ...headers, ...(options?.headers as Record<string, string>) }, ...options })
+  const { headers: optionHeaders, ...requestOptions } = options ?? {};
+  return fetch(`${BASE_URL}${path}`, {
+    ...requestOptions,
+    headers: { ...headers, ...(optionHeaders as Record<string, string> | undefined) },
+  })
     .then(async (resp) => {
       if (resp.status === 401) {
         localStorage.removeItem(USER_TOKEN_KEY);
