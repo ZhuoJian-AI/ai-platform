@@ -18,7 +18,7 @@ from app.models.ontology import Ontology, OntologyFile, OntologyFolder
 from app.models.organization import Organization
 from app.models.rag import RagChunk, RagCollection, RagDocument, RagFolder
 from app.models.routing_policy import RoutingPolicy
-from app.models.skill import Skill, SkillFile, SkillFolder
+from app.models.skill import ScopeManagerAssignment, Skill, SkillExecution, SkillFile, SkillFolder, SkillVersion
 from app.models.task import Task, TaskMessage
 from app.models.team import Team
 from app.models.tool_call_log import ToolCallLog
@@ -58,6 +58,9 @@ __all__ = [
     "Skill",
     "SkillFolder",
     "SkillFile",
+    "SkillVersion",
+    "SkillExecution",
+    "ScopeManagerAssignment",
     "Ontology",
     "OntologyFolder",
     "OntologyFile",

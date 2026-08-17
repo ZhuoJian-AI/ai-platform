@@ -14,7 +14,7 @@ class AgentCreate(BaseModel):
     # 作用域：organization / department / team / user；scope_id 为对应 id（org 级为 None）
     scope_type: str = "organization"
     scope_id: UUID | None = None
-    system_prompt: str = ""
+    system_prompt: str = Field(..., min_length=1)
     model_alias: str = "default"
     workflow: list = Field(default_factory=list)
     memory_config: dict = Field(default_factory=dict)

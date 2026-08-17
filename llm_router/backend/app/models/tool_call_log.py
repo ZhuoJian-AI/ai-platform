@@ -22,9 +22,9 @@ class ToolCallLog(TimestampMixin, Base):
     endpoint_id: Mapped[str | None] = mapped_column(
         ForeignKey("tool_endpoints.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    skill_id: Mapped[str | None] = mapped_column(
-        ForeignKey("skills.id", ondelete="SET NULL"), nullable=True, index=True
-    )
+    # Runtime records SkillFolder ids. Migration 0025 intentionally removed the
+    # legacy FK to the dormant ``skills`` table; keep the ORM consistent.
+    skill_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
     method: Mapped[str | None] = mapped_column(String(10), nullable=True)
     path: Mapped[str | None] = mapped_column(String(1024), nullable=True)

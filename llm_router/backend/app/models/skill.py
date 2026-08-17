@@ -4,7 +4,7 @@
 ``SkillFolder`` + ``SkillFile``，agent ``_build_tools`` 改读 skill.md manifest。
 """
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -62,6 +62,9 @@ class SkillFolder(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     # 创建者（终端用户 id）：admin / 历史数据为 None；终端「仅可操作自己创建的技能」据此判定
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    active_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("skill_versions.id", ondelete="SET NULL", use_alter=True), nullable=True, index=True
+    )
 
     files = relationship("SkillFile", back_populates="folder", lazy="selectin")
 
@@ -82,3 +85,72 @@ class SkillFile(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
 
     folder = relationship("SkillFolder", back_populates="files")
+
+
+class SkillVersion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Immutable snapshot of an imported Skill package."""
+
+    __tablename__ = "skill_versions"
+    __table_args__ = (
+        UniqueConstraint("skill_folder_id", "version_no", name="uq_skill_version_number"),
+        UniqueConstraint("skill_folder_id", "package_hash", name="uq_skill_version_hash"),
+    )
+
+    skill_folder_id: Mapped[str] = mapped_column(
+        ForeignKey("skill_folders.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    package_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    archive: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    runtime: Mapped[str] = mapped_column(String(20), nullable=False, default="prompt")
+    entrypoint: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    is_executable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    install_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    install_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ScopeManagerAssignment(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
+    """Department/team management grant; deliberately separate from User.role."""
+
+    __tablename__ = "scope_manager_assignments"
+    __table_args__ = (
+        CheckConstraint("scope_type IN ('department','team')", name="ck_scope_manager_type"),
+        UniqueConstraint("user_id", "scope_type", "scope_id", name="uq_scope_manager_assignment"),
+    )
+
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    created_by_admin_id: Mapped[int | None] = mapped_column(
+        ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class SkillExecution(TimestampMixin, Base):
+    """Append-only audit trail for executable Skill runs."""
+
+    __tablename__ = "skill_executions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
+    agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.id", ondelete="SET NULL"), nullable=True, index=True)
+    skill_folder_id: Mapped[str] = mapped_column(
+        ForeignKey("skill_folders.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    skill_version_id: Mapped[str] = mapped_column(
+        ForeignKey("skill_versions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    input_file_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    output_file_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running", index=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)

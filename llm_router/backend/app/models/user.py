@@ -32,3 +32,14 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
 
     # 关系
     organization = relationship("Organization", back_populates="users")
+    manager_assignments = relationship(
+        "ScopeManagerAssignment", lazy="selectin", primaryjoin="User.id==ScopeManagerAssignment.user_id"
+    )
+
+    @property
+    def manager_scopes(self) -> list[dict]:
+        return [
+            {"scope_type": grant.scope_type, "scope_id": grant.scope_id}
+            for grant in (self.manager_assignments or [])
+            if grant.deleted_at is None
+        ]

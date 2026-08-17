@@ -1,6 +1,7 @@
 """Skill Pydantic schemas."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -73,6 +74,7 @@ class SkillFolderRead(OrmModel):
     name: str
     slug: str
     created_by: str | None = None
+    active_version_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -103,3 +105,48 @@ class SkillFileReadMeta(MetaReadModel):
 class SkillFileRead(SkillFileReadMeta):
     """单文件详情：含 content。"""
     content: str | None = None
+
+
+class SkillVersionRead(OrmModel):
+    id: UUID
+    skill_folder_id: UUID
+    version_no: int
+    package_hash: str
+    manifest: dict
+    runtime: str
+    entrypoint: str | None = None
+    is_executable: bool
+    install_status: Literal["pending", "installing", "ready", "failed"]
+    install_error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SkillImportRead(BaseModel):
+    folder: SkillFolderRead
+    version: SkillVersionRead
+
+
+class SkillScopeNode(BaseModel):
+    scope_type: Literal["organization", "department", "team", "user"]
+    scope_id: str | None
+    name: str
+    can_import: bool = False
+    can_manage: bool = False
+
+
+class SkillExecutionRead(OrmModel):
+    id: int
+    organization_id: UUID
+    user_id: UUID | None = None
+    task_id: UUID | None = None
+    agent_id: UUID | None = None
+    skill_folder_id: UUID
+    skill_version_id: UUID
+    input_file_ids: list[str]
+    output_file_ids: list[str]
+    params: dict
+    status: str
+    latency_ms: int | None = None
+    error: str | None = None
+    created_at: datetime

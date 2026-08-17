@@ -7,6 +7,11 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+class ManagerScopeGrant(BaseModel):
+    scope_type: Literal["department", "team"]
+    scope_id: UUID
+
+
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=1, max_length=320)
     display_name: str | None = Field(None, max_length=255)
@@ -15,6 +20,7 @@ class UserCreate(BaseModel):
     team_id: UUID | None = None
     is_active: bool = True
     password: str = Field(..., min_length=8, max_length=128)
+    manager_scopes: list[ManagerScopeGrant] = Field(default_factory=list)
 
 
 class UserUpdate(BaseModel):
@@ -25,6 +31,7 @@ class UserUpdate(BaseModel):
     team_id: UUID | None = None
     is_active: bool | None = None
     password: str | None = Field(None, min_length=8, max_length=128)
+    manager_scopes: list[ManagerScopeGrant] | None = None
 
 
 class UserPasswordReset(BaseModel):
@@ -55,6 +62,7 @@ class UserRead(BaseModel):
     team_id: UUID | None = None
     is_active: bool
     must_change_password: bool = False
+    manager_scopes: list[ManagerScopeGrant] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
