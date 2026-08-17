@@ -23,7 +23,7 @@ import remarkGfm from 'remark-gfm';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   terminal, type TaskConfig, type TerminalTask, type TerminalTaskMessage,
-  type TerminalResources, type TerminalMemoryItem, type TerminalModels, type TerminalAgent, type WorkspaceFile,
+  type TerminalResources, type TerminalMemoryItem, type TerminalModels, type TerminalAgent, type WorkspaceFileListItem,
   type TerminalTaskWithMessages,
   type SkillFolderSummary, type WorkspaceFileSummary,
 } from '../../api/client';
@@ -700,7 +700,7 @@ export default function Terminal() {
 
   const taskConfig = selectedTask?.config ?? config;
   // 当前任务工作空间的文件清单：用于把对话正文中提到的裸文件名自动链成可点击链接
-  const { data: wsFiles } = useQuery<WorkspaceFile[]>({
+  const { data: wsFiles } = useQuery<WorkspaceFileListItem[]>({
     queryKey: ['terminal-ws-files', taskConfig.workspace_id],
     queryFn: () => terminal.listWsFiles(taskConfig.workspace_id!),
     enabled: !!taskConfig.workspace_id,
@@ -749,12 +749,13 @@ export default function Terminal() {
     try { href = decodeURIComponent(rawHref); } catch { /* 非法转义，保留原值 */ }
     const wsId = taskConfig.workspace_id;
     if (!wsId) return { kind: 'unsupported', href, note: '该任务未绑定工作空间，无法解析文件路径' };
-    let files: WorkspaceFile[];
+    let files: WorkspaceFileListItem[];
     try { files = await terminal.listWsFiles(wsId); }
     catch { return { kind: 'unsupported', href, note: '工作空间文件读取失败' }; }
     const f = files.find((x) => x.path === href || x.path.endsWith('/' + href) || href.endsWith(x.path));
     if (!f) return { kind: 'unsupported', href, note: `工作空间中未找到该文件：${href}` };
-    return classifyFile(f);
+    try { return classifyFile(await terminal.getWsFile(f.id)); }
+    catch { return { kind: 'unsupported', href, note: '文件详情读取失败' }; }
   }, [taskConfig.workspace_id]);
 
   const openLink = useCallback((href: string) => {
@@ -2370,7 +2371,7 @@ function ResourcePanel({ taskConfig, resources }: { taskConfig: TaskConfig; reso
 }
 
 function FilePanel({ workspaceId }: { workspaceId: string | null }) {
-  const [files, setFiles] = useState<WorkspaceFile[]>([]);
+  const [files, setFiles] = useState<WorkspaceFileListItem[]>([]);
   // 复用 BrowserDrawer 预览（与「工作空间管理」页同一组件，消除两处功能差异）
   const [browserOpen, setBrowserOpen] = useState(false);
   const [browserHref, setBrowserHref] = useState<string | null>(null);
@@ -2389,12 +2390,13 @@ function FilePanel({ workspaceId }: { workspaceId: string | null }) {
     let href = rawHref;
     try { href = decodeURIComponent(rawHref); } catch { /* 非法转义，保留原值 */ }
     if (!workspaceId) return { kind: 'unsupported', href, note: '该任务未绑定工作空间' };
-    let list: WorkspaceFile[];
+    let list: WorkspaceFileListItem[];
     try { list = await terminal.listWsFiles(workspaceId); }
     catch { return { kind: 'unsupported', href, note: '工作空间文件读取失败' }; }
     const f = list.find((x) => x.path === href || x.path.endsWith('/' + href) || href.endsWith(x.path));
     if (!f) return { kind: 'unsupported', href, note: `未找到该文件：${href}` };
-    return classifyFile(f);
+    try { return classifyFile(await terminal.getWsFile(f.id)); }
+    catch { return { kind: 'unsupported', href, note: '文件详情读取失败' }; }
   }, [workspaceId]);
 
   if (!workspaceId) return <Empty description="该任务未绑定工作空间" image={Empty.PRESENTED_IMAGE_SIMPLE} />;

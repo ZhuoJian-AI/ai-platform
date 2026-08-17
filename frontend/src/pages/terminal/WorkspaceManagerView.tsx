@@ -9,7 +9,7 @@ import {
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  terminal, type Workspace, type WorkspaceFile, type WorkspaceFolder, type TerminalResources,
+  terminal, type Workspace, type WorkspaceFileListItem, type WorkspaceFolder, type TerminalResources,
 } from '../../api/client';
 import { ApiError } from '../../api/client';
 import BrowserDrawer, { classifyFile, classifyUrl, type Source } from './BrowserDrawer';
@@ -137,7 +137,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
       if (r.includes('/')) addFolder(r.split('/')[0], null);
       else addFolder(r, f);
     }
-    const directFiles: { file: WorkspaceFile; name: string }[] = [];
+    const directFiles: { file: WorkspaceFileListItem; name: string }[] = [];
     for (const f of files ?? []) {
       const r = relPath(f.path, cwd);
       if (!r) continue;
@@ -213,12 +213,13 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
     let href = rawHref;
     try { href = decodeURIComponent(rawHref); } catch { /* 非法转义，保留原值 */ }
     if (!wsId) return { kind: 'unsupported', href, note: '未选择工作空间' };
-    let list: WorkspaceFile[];
+    let list: WorkspaceFileListItem[];
     try { list = await terminal.listWsFiles(wsId); }
     catch { return { kind: 'unsupported', href, note: '工作空间文件读取失败' }; }
     const f = list.find((x) => x.path === href || x.path.endsWith('/' + href) || href.endsWith(x.path));
     if (!f) return { kind: 'unsupported', href, note: `未找到该文件：${href}` };
-    return classifyFile(f);
+    try { return classifyFile(await terminal.getWsFile(f.id)); }
+    catch { return { kind: 'unsupported', href, note: '文件详情读取失败' }; }
   }, [wsId]);
 
   const openFile = (path: string) => {

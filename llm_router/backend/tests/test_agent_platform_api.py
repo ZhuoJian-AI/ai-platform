@@ -34,7 +34,11 @@ async def test_workspace_and_files(client: AsyncClient):
 
     listed = await client.get(f"/api/v1/workspaces/{ws_id}/files")
     assert listed.status_code == 200
-    assert len(listed.json()) == 1
+    body = listed.json()
+    assert body["total"] == 1
+    assert len(body["items"]) == 1
+    assert body["items"][0]["path"] == "notes.md"
+    assert "content" not in body["items"][0]
 
 
 # ── Agent ──

@@ -512,6 +512,21 @@ export interface WorkspaceFile {
   created_at: string; updated_at: string;
 }
 
+export interface WorkspaceFileListItem {
+  id: string; workspace_id: string; path: string; original_filename: string; size: number;
+  mime_type: string | null; is_binary: boolean; content_hash: string | null;
+  parse_status: 'unparsed' | 'ready' | 'unsupported' | 'failed';
+  parse_kind: string | null; parse_error: string | null;
+  created_at: string; updated_at: string;
+}
+
+export interface WorkspaceFilePage {
+  items: WorkspaceFileListItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 export interface WorkspaceFilePreview {
   id: string; path: string; parse_status: WorkspaceFile['parse_status'];
   parse_kind: string | null; parse_error: string | null; extracted_text: string | null;
@@ -521,6 +536,18 @@ export interface WorkspaceUploadOptions {
   signal?: AbortSignal;
   onProgress?: (percent: number) => void;
   onUploadComplete?: () => void;
+}
+
+async function loadAllWorkspaceFilePages(
+  loadPage: (page: number, pageSize: number) => Promise<WorkspaceFilePage>,
+): Promise<WorkspaceFileListItem[]> {
+  const pageSize = 200;
+  const items: WorkspaceFileListItem[] = [];
+  for (let page = 1; ; page += 1) {
+    const result = await loadPage(page, pageSize);
+    items.push(...result.items);
+    if (items.length >= result.total || result.items.length === 0) return items;
+  }
 }
 
 function uploadWorkspaceFile(
@@ -590,7 +617,10 @@ export const workspaces = {
   update: (id: string, data: Partial<Workspace>) =>
     request<Workspace>(`/api/v1/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) => request<void>(`/api/v1/workspaces/${id}`, { method: 'DELETE' }),
-  listFiles: (wsId: string) => request<WorkspaceFile[]>(`/api/v1/workspaces/${wsId}/files`),
+  listFilesPage: (wsId: string, page = 1, pageSize = 100) =>
+    request<WorkspaceFilePage>(`/api/v1/workspaces/${wsId}/files?page=${page}&page_size=${pageSize}`),
+  listFiles: (wsId: string) => loadAllWorkspaceFilePages((page, pageSize) =>
+    request<WorkspaceFilePage>(`/api/v1/workspaces/${wsId}/files?page=${page}&page_size=${pageSize}`)),
   upsertFile: (wsId: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>
     request<WorkspaceFile>(`/api/v1/workspaces/${wsId}/files`, { method: 'POST', body: JSON.stringify(data) }),
   uploadFile: (wsId: string, file: File, path: string) =>
@@ -1255,7 +1285,10 @@ export const terminal = {
   /** 取消运行中的 run（真停后台 asyncio.Task，非仅断读端）。 */
   cancelTask: (id: string) =>
     userRequest<{ cancelled: boolean }>(`/api/v1/terminal/tasks/${id}/cancel`, { method: 'POST' }),
-  listWsFiles: (wsId: string) => userRequest<WorkspaceFile[]>(`/api/v1/terminal/workspaces/${wsId}/files`),
+  listWsFilesPage: (wsId: string, page = 1, pageSize = 100) =>
+    userRequest<WorkspaceFilePage>(`/api/v1/terminal/workspaces/${wsId}/files?page=${page}&page_size=${pageSize}`),
+  listWsFiles: (wsId: string) => loadAllWorkspaceFilePages((page, pageSize) =>
+    userRequest<WorkspaceFilePage>(`/api/v1/terminal/workspaces/${wsId}/files?page=${page}&page_size=${pageSize}`)),
   /** 用户可访问的全部工作空间文件（组织/部门/团队/个人并集），供任务输入框 @ 引用下拉。 */
   listAllWsFiles: () => userRequest<WorkspaceFileSummary[]>('/api/v1/terminal/workspace-files'),
   upsertWsFile: (wsId: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>

@@ -4,10 +4,12 @@ import base64
 import hashlib
 import mimetypes
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from app.models.department import Department
 from app.models.organization import Organization
@@ -17,6 +19,7 @@ from app.models.workspace import Workspace, WorkspaceFile, WorkspaceFolder
 from app.schemas.workspace import (
     WorkspaceCreate,
     WorkspaceFileCreate,
+    WorkspaceFileListItem,
     WorkspaceFileUpdate,
     WorkspaceFolderCreate,
     WorkspaceUpdate,
@@ -25,6 +28,7 @@ from app.services import doc_parser
 
 MAX_WORKSPACE_FILE_BYTES = 5 * 1024 * 1024
 MAX_LLM_FILE_CHARS = 100_000
+MAX_TOOL_FILE_BYTES = 50 * 1024
 
 
 class WorkspaceFileUploadError(ValueError):
@@ -160,12 +164,79 @@ async def upsert_file(db: AsyncSession, ws: Workspace, data: WorkspaceFileCreate
 
 
 async def list_files(db: AsyncSession, ws_id: UUID) -> list[WorkspaceFile]:
+    """List lightweight ORM rows for internal callers.
+
+    The Base64 payload and parsed text are intentionally deferred.  Internal
+    callers need identifiers/paths and may inspect the lightweight metadata
+    (for example ``is_binary`` in the terminal-wide file picker).
+    """
     result = await db.execute(
-        select(WorkspaceFile).where(
+        select(WorkspaceFile).options(load_only(
+            WorkspaceFile.id,
+            WorkspaceFile.workspace_id,
+            WorkspaceFile.path,
+            WorkspaceFile.metadata_,
+        )).where(
             WorkspaceFile.workspace_id == ws_id, WorkspaceFile.deleted_at.is_(None)
         ).order_by(WorkspaceFile.path)
     )
     return list(result.scalars().all())
+
+
+def _file_list_item(f: WorkspaceFile) -> WorkspaceFileListItem:
+    meta = f.metadata_ or {}
+    original_filename = str(meta.get("name") or PurePosixPath(f.path).name)
+    mime_type = str(meta.get("mime") or mimetypes.guess_type(original_filename)[0] or "") or None
+    return WorkspaceFileListItem(
+        id=f.id,
+        workspace_id=f.workspace_id,
+        path=f.path,
+        original_filename=original_filename,
+        size=f.size,
+        mime_type=mime_type,
+        is_binary=bool(meta.get("binary")),
+        content_hash=f.content_hash,
+        parse_status=f.parse_status,
+        parse_kind=f.parse_kind,
+        parse_error=f.parse_error,
+        created_at=f.created_at,
+        updated_at=f.updated_at,
+    )
+
+
+async def list_files_page(
+    db: AsyncSession,
+    ws_id: UUID,
+    *,
+    page: int = 1,
+    page_size: int = 100,
+) -> tuple[list[WorkspaceFileListItem], int]:
+    """Return a page of file summaries without loading content columns."""
+    filters = (WorkspaceFile.workspace_id == ws_id, WorkspaceFile.deleted_at.is_(None))
+    total = int((await db.execute(
+        select(func.count(WorkspaceFile.id)).where(*filters)
+    )).scalar_one())
+    result = await db.execute(
+        select(WorkspaceFile)
+        .options(load_only(
+            WorkspaceFile.id,
+            WorkspaceFile.workspace_id,
+            WorkspaceFile.path,
+            WorkspaceFile.size,
+            WorkspaceFile.content_hash,
+            WorkspaceFile.parse_status,
+            WorkspaceFile.parse_kind,
+            WorkspaceFile.parse_error,
+            WorkspaceFile.metadata_,
+            WorkspaceFile.created_at,
+            WorkspaceFile.updated_at,
+        ))
+        .where(*filters)
+        .order_by(WorkspaceFile.path)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return [_file_list_item(f) for f in result.scalars().all()], total
 
 
 async def get_file(db: AsyncSession, file_id: UUID) -> WorkspaceFile | None:
@@ -292,17 +363,113 @@ async def _parse_binary_file(
     await db.refresh(f)
 
 
-def resolve_file_content(f: WorkspaceFile, *, max_chars: int = MAX_LLM_FILE_CHARS) -> str:
-    """给智能体读取文件：文本返回原文，二进制返回解析结果，绝不返回 Base64。"""
+def _readable_file_text(f: WorkspaceFile) -> tuple[str | None, str | None]:
+    """Return readable text and an optional error without ever exposing Base64."""
     if not (f.metadata_ or {}).get("binary"):
-        return f.content or ""
+        return f.content or "", None
     if f.parse_status != "ready" or not (f.extracted_text or "").strip():
-        detail = f.parse_error or "尚未解析"
-        return f"[文件 {f.path} 无法读取正文：{detail}]"
-    text = f.extracted_text or ""
-    if len(text) <= max_chars:
+        return None, f.parse_error or "尚未解析"
+    return f.extracted_text or "", None
+
+
+def resolve_file_content(
+    f: WorkspaceFile,
+    *,
+    max_chars: int | None = MAX_LLM_FILE_CHARS,
+) -> str:
+    """给智能体读取文件：文本返回原文，二进制返回解析结果，绝不返回 Base64。"""
+    text, error = _readable_file_text(f)
+    if error is not None:
+        return f"[文件 {f.path} 无法读取正文：{error}]"
+    text = text or ""
+    if max_chars is None or len(text) <= max_chars:
         return text
     return text[:max_chars] + f"\n\n[内容已截断：原文 {len(text)} 字符，本轮最多注入 {max_chars} 字符]"
+
+
+def paginate_file_content(
+    f: WorkspaceFile,
+    *,
+    offset: int = 1,
+    limit: int = 200,
+    max_bytes: int = MAX_TOOL_FILE_BYTES,
+) -> dict:
+    """Return one explicit, model-safe line window from a workspace file."""
+    if offset < 1:
+        return {"status": "error", "error": "offset must be >= 1"}
+    if limit < 1 or limit > 1000:
+        return {"status": "error", "error": "limit must be between 1 and 1000"}
+
+    text, error = _readable_file_text(f)
+    base = {
+        "file_id": str(f.id),
+        "path": f.path,
+        "original_filename": str((f.metadata_ or {}).get("name") or PurePosixPath(f.path).name),
+    }
+    if error is not None:
+        return {**base, "status": "unavailable", "error": error}
+
+    lines = (text or "").splitlines()
+    total_lines = len(lines)
+    if total_lines == 0:
+        return {
+            **base,
+            "status": "ready",
+            "offset": 1,
+            "end_line": 0,
+            "total_lines": 0,
+            "has_more": False,
+            "next_offset": None,
+            "truncated_reason": None,
+            "content": "",
+        }
+    if offset > total_lines:
+        return {
+            **base,
+            "status": "error",
+            "error": f"offset {offset} is out of range ({total_lines} lines)",
+            "total_lines": total_lines,
+        }
+
+    selected: list[str] = []
+    used_bytes = 0
+    truncated_reason: str | None = None
+    for line in lines[offset - 1: offset - 1 + limit]:
+        encoded = line.encode("utf-8")
+        separator_bytes = 1 if selected else 0
+        if used_bytes + separator_bytes + len(encoded) > max_bytes:
+            if not selected:
+                # Keep UTF-8 valid and make the exceptional single-line loss explicit.
+                clipped = encoded[:max_bytes].decode("utf-8", errors="ignore")
+                selected.append(clipped)
+                used_bytes = len(clipped.encode("utf-8"))
+                truncated_reason = "line_exceeds_byte_limit"
+            else:
+                truncated_reason = "byte_limit"
+            break
+        selected.append(line)
+        used_bytes += separator_bytes + len(encoded)
+
+    end_line = offset + len(selected) - 1
+    has_more = end_line < total_lines
+    if truncated_reason == "line_exceeds_byte_limit":
+        # Advancing by line would hide the unread remainder, so do not advertise
+        # a false continuation point.
+        has_more = False
+        next_offset = None
+    else:
+        next_offset = end_line + 1 if has_more else None
+    return {
+        **base,
+        "status": "ready",
+        "offset": offset,
+        "end_line": end_line,
+        "total_lines": total_lines,
+        "has_more": has_more,
+        "next_offset": next_offset,
+        "truncated_reason": truncated_reason,
+        "content": "\n".join(selected),
+    }
 
 
 # ── WorkspaceFolder ────────────────────────────────────────────────────

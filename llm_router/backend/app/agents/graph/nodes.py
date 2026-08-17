@@ -79,7 +79,10 @@ TOOL_STRATEGY_PROMPT = (
     "后再试；连续失败则停止并向用户说明，不要继续盲目调用。\n"
     "5. 若上方[已解析的文件引用]已经提供文件内容，直接使用该内容完成任务；不要为了确认 UUID 再调用"
     "`workspace_list_files` 或 `workspace_read_file`，也不要自行读取、分析用户未引用的其他文件。只有用户明确"
-    "要求比较/遍历工作空间，或引用内容明确标记为不可用时，才调用文件工具。"
+    "要求比较/遍历工作空间，或引用内容明确标记为不可用时，才调用文件工具。\n"
+    "6. 对话历史中的[历史消息附件]只提供持久文件引用：用户要求继续分析时，使用其中 status=available 的"
+    "准确 file_id 调用 workspace_read_file，并按 has_more/next_offset 继续分页。存在多个候选且用户指代不清时"
+    "必须先询问，不得擅自读取全部文件；status=unavailable 时明确告知文件已删除或无权访问。"
 )
 
 # ── 输出协议（Craft 模式注入，场景无关 boilerplate，避免每个任务提示词重复）────
@@ -127,11 +130,16 @@ def _builtin_tool_defs() -> list[dict]:
             "name": "workspace_read_file",
             "description": (
                 "读取当前工作空间中的一个文件，可传 file_id 或 path。用户消息含 @UUID 时直接把 UUID 作为 file_id；"
-                "若[已解析的文件引用]已经注入内容，无需重复调用。"
+                "若[已解析的文件引用]已经注入内容，无需重复调用。大文件结果包含 has_more 与 next_offset，"
+                "必须按 next_offset 继续读取，不能把当前页当作完整文件。"
             ),
             "parameters": {"type": "object", "properties": {
                 "file_id": {"type": "string", "description": "工作空间文件 UUID"},
-                "path": {"type": "string", "description": "相对工作空间根的 POSIX 路径"}},
+                "path": {"type": "string", "description": "相对工作空间根的 POSIX 路径"},
+                "offset": {"type": "integer", "minimum": 1,
+                           "description": "从第几行开始读取（1-based，默认 1）"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 1000,
+                          "description": "最多读取多少行（默认 200，最大 1000）"}},
             },
         }},
         {"type": "function", "function": {
@@ -208,7 +216,18 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     return "file_id or path is required"
                 if f is None:
                     return "file not found"
-                return workspace_service.resolve_file_content(f)
+                try:
+                    offset = int(params.get("offset", 1))
+                    limit = int(params.get("limit", 200))
+                except (TypeError, ValueError):
+                    return json.dumps(
+                        {"status": "error", "error": "offset and limit must be integers"},
+                        ensure_ascii=False,
+                    )
+                return json.dumps(
+                    workspace_service.paginate_file_content(f, offset=offset, limit=limit),
+                    ensure_ascii=False,
+                )
             if name == "workspace_write_file":
                 # 标记产出文件归属的任务，供删除任务时一并清理工作空间输出。
                 meta: dict = {}
@@ -520,6 +539,7 @@ async def load_memory(state: AgentState) -> dict:
 
 async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
     from app.models.task import TaskMessage
+    from app.models.workspace import WorkspaceFile
 
     task_id = state.get("task_id")
     current = state.get("messages", [])
@@ -533,8 +553,63 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
         )
         history = list(rows.scalars().all())
         history.reverse()
-        past = [{"role": m.role, "content": m.content}
-                for m in history if m.role in ("user", "assistant")]
+        attachment_ids: set[UUID] = set()
+        for message in history:
+            if message.role != "user":
+                continue
+            for attachment in (message.metadata_ or {}).get("attachments", []):
+                try:
+                    attachment_ids.add(UUID(str(attachment.get("file_id") or "")))
+                except (ValueError, TypeError, AttributeError):
+                    continue
+
+        available_files: dict[str, WorkspaceFile] = {}
+        bound_workspace_id = str(state.get("workspace_id") or "")
+        user = deps.get("user")
+        workspace_visible = False
+        if bound_workspace_id and user is not None:
+            try:
+                workspace = await workspace_service.get_workspace(db, UUID(bound_workspace_id))
+            except (ValueError, TypeError, AttributeError):
+                workspace = None
+            workspace_visible = bool(
+                workspace is not None and scope_service.is_workspace_visible(workspace, user)
+            )
+        if attachment_ids and workspace_visible:
+            file_rows = await db.execute(
+                select(WorkspaceFile).where(
+                    WorkspaceFile.id.in_(attachment_ids),
+                    WorkspaceFile.deleted_at.is_(None),
+                )
+            )
+            available_files = {str(f.id): f for f in file_rows.scalars().all()}
+
+        past = []
+        for message in history:
+            if message.role not in ("user", "assistant"):
+                continue
+            content = message.content
+            if message.role == "user":
+                refs: list[dict] = []
+                for attachment in (message.metadata_ or {}).get("attachments", []):
+                    file_id = str(attachment.get("file_id") or "")
+                    if not file_id:
+                        continue
+                    expected_workspace_id = str(attachment.get("workspace_id") or "")
+                    file = available_files.get(file_id)
+                    available = bool(
+                        file is not None
+                        and str(file.workspace_id) == bound_workspace_id
+                        and expected_workspace_id == bound_workspace_id
+                    )
+                    refs.append({
+                        "file_id": file_id,
+                        "name": str(attachment.get("name") or attachment.get("path") or file_id),
+                        "status": "available" if available else "unavailable",
+                    })
+                if refs:
+                    content += "\n\n[历史消息附件]\n" + json.dumps(refs, ensure_ascii=False)
+            past.append({"role": message.role, "content": content})
 
     # 4 级长期记忆：按用户权限自动载入全集（组织 + 部门 + 团队 + 个人），无需任务配置。
     user = deps.get("user")
@@ -635,8 +710,20 @@ async def _execute_tool_call(
         result_text = await _execute_builtin_tool(state, name, params)
         ok = not result_text.startswith(("no ", "workspace ", "file not found",
                                          "tool error", "unknown builtin"))
-        return ({"role": "tool", "tool_call_id": tool_call_id, "content": result_text[:4000]},
-                result_text[:4000], ok)
+        if ok:
+            try:
+                structured_result = json.loads(result_text)
+            except (json.JSONDecodeError, TypeError):
+                structured_result = None
+            if isinstance(structured_result, dict) and structured_result.get("status") in {
+                "error", "unavailable",
+            }:
+                ok = False
+        preview = result_text
+        if len(preview) > 4000:
+            preview = preview[:4000] + "\n[工具结果预览已截断，模型已收到完整分页结果]"
+        return ({"role": "tool", "tool_call_id": tool_call_id, "content": result_text},
+                preview, ok)
 
     entry = registry.get(name)
     if entry is None:

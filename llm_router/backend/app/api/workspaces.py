@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ from app.database import get_db
 from app.schemas.workspace import (
     WorkspaceCreate,
     WorkspaceFileCreate,
+    WorkspaceFilePage,
     WorkspaceFilePreviewRead,
     WorkspaceFileRead,
     WorkspaceFileUpdate,
@@ -36,7 +37,7 @@ from app.services.workspace_service import (
     get_folder,
     get_workspace,
     ingest_uploaded_file,
-    list_files,
+    list_files_page,
     list_folders,
     list_workspaces,
     reparse_file,
@@ -173,15 +174,20 @@ async def upload_file_endpoint(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.get("/workspaces/{ws_id}/files", response_model=list[WorkspaceFileRead])
+@router.get("/workspaces/{ws_id}/files", response_model=WorkspaceFilePage)
 async def list_files_endpoint(
-    ws_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+    ws_id: UUID,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=200),
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
 ):
     ws = await get_workspace(db, ws_id)
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
     assert_org_access(auth, ws.organization_id)
-    return await list_files(db, ws.id)
+    items, total = await list_files_page(db, ws.id, page=page, page_size=page_size)
+    return WorkspaceFilePage(items=items, total=total, page=page, page_size=page_size)
 
 
 @router.get("/files/{file_id}", response_model=WorkspaceFileRead)

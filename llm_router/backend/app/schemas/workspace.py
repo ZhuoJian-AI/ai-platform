@@ -73,6 +73,35 @@ class WorkspaceFileRead(MetaReadModel):
     updated_at: datetime
 
 
+class WorkspaceFileListItem(BaseModel):
+    """Lightweight file metadata returned by workspace list endpoints.
+
+    Deliberately excludes ``content`` and ``extracted_text`` so listing a
+    workspace never transfers the stored Base64 payload or parsed document.
+    """
+
+    id: UUID
+    workspace_id: UUID
+    path: str
+    original_filename: str
+    size: int
+    mime_type: str | None = None
+    is_binary: bool = False
+    content_hash: str | None = None
+    parse_status: str = "unparsed"
+    parse_kind: str | None = None
+    parse_error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkspaceFilePage(BaseModel):
+    items: list[WorkspaceFileListItem]
+    total: int
+    page: int
+    page_size: int
+
+
 class WorkspaceFilePreviewRead(BaseModel):
     id: UUID
     path: str

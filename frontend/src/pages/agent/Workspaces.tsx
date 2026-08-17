@@ -13,7 +13,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { workspaces } from '../../api/client';
-import type { WorkspaceFile, WorkspaceFolder, WorkspaceTreeNode } from '../../api/client';
+import type { WorkspaceFile, WorkspaceFileListItem, WorkspaceFolder, WorkspaceTreeNode } from '../../api/client';
 import { ApiError } from '../../api/client';
 import OrgSelect from '../../components/OrgSelect';
 import {
@@ -128,7 +128,7 @@ export default function Workspaces() {
       if (r.includes('/')) addFolder(r.split('/')[0], null);
       else addFolder(r, f);
     }
-    const directFiles: { file: WorkspaceFile; name: string }[] = [];
+    const directFiles: { file: WorkspaceFileListItem; name: string }[] = [];
     for (const f of files ?? []) {
       const r = relPath(f.path, cwd);
       if (!r) continue;
@@ -240,10 +240,28 @@ export default function Workspaces() {
     setFileModalWs(ws); setCwd([]); setOpenFiles([]); setActiveFileId(null);
   };
 
-  /** 在抽屉中加载并直接呈现文件；已打开则切为活动。 */
-  const openFile = (f: WorkspaceFile) => {
-    setOpenFiles((prev) => (prev.some((x) => x.id === f.id) ? prev : [...prev, f]));
-    setActiveFileId(f.id);
+  /** 列表只含摘要；打开时按需拉取单文件正文。 */
+  const openFile = async (item: WorkspaceFileListItem) => {
+    if (openFiles.some((f) => f.id === item.id)) {
+      setActiveFileId(item.id);
+      return;
+    }
+    try {
+      const file = await workspaces.getFile(item.id);
+      setOpenFiles((prev) => (prev.some((f) => f.id === file.id) ? prev : [...prev, file]));
+      setActiveFileId(file.id);
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : '文件读取失败');
+    }
+  };
+
+  const downloadListFile = async (item: WorkspaceFileListItem) => {
+    try {
+      const file = await workspaces.getFile(item.id);
+      if (isBinary(file)) downloadBinary(file); else downloadText(file);
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : '下载失败');
+    }
   };
 
   const closeFile = (id: string) => {
@@ -410,12 +428,12 @@ export default function Workspaces() {
                               onClick={(e) => e.stopPropagation()}
                             >
                               <Tooltip title="查看文件">
-                                <IconActionButton icon={<EyeOutlined />} onClick={() => openFile(it.file)} />
+                                <IconActionButton icon={<EyeOutlined />} onClick={() => { void openFile(it.file); }} />
                               </Tooltip>
                               <Tooltip title="下载">
                                 <IconActionButton
                                   icon={<DownloadOutlined />}
-                                  onClick={() => isBinary(it.file) ? downloadBinary(it.file) : downloadText(it.file)}
+                                  onClick={() => { void downloadListFile(it.file); }}
                                 />
                               </Tooltip>
                               <IconActionButton
@@ -426,7 +444,7 @@ export default function Workspaces() {
                             </span>
                           ) : null}
                         >
-                          <div onClick={() => openFile(it.file)} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer' }}>
+                          <div onClick={() => { void openFile(it.file); }} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer' }}>
                             <FileTextOutlined style={{ fontSize: 42, color: WB.macFile }} />
                             <IconName>{basename(it.file.path)}</IconName>
                             <span style={{ fontSize: 10, color: WB.textMicro, marginTop: 1 }}>{it.file.size} B</span>

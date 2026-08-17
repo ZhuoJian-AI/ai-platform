@@ -73,6 +73,7 @@ from app.schemas.ontology import (
 from app.schemas.user import UserRead
 from app.schemas.workspace import (
     WorkspaceFileCreate,
+    WorkspaceFilePage,
     WorkspaceFilePreviewRead,
     WorkspaceFileRead,
     WorkspaceFolderCreate,
@@ -582,12 +583,19 @@ async def _get_visible_workspace(db: AsyncSession, ws_id: UUID, cu: CurrentUser)
     return ws
 
 
-@router.get("/terminal/workspaces/{ws_id}/files", response_model=list[WorkspaceFileRead])
+@router.get("/terminal/workspaces/{ws_id}/files", response_model=WorkspaceFilePage)
 async def list_ws_files_endpoint(
-    ws_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+    ws_id: UUID,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=200),
+    cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
 ):
     ws = await _get_visible_workspace(db, ws_id, cu)
-    return await workspace_service.list_files(db, ws.id)
+    items, total = await workspace_service.list_files_page(
+        db, ws.id, page=page, page_size=page_size,
+    )
+    return WorkspaceFilePage(items=items, total=total, page=page, page_size=page_size)
 
 
 @router.post("/terminal/workspaces/{ws_id}/files", response_model=WorkspaceFileRead, status_code=201)
