@@ -30,10 +30,22 @@ class Settings(BaseSettings):
 
     # Executable Skill runner (internal network only)
     code_skills_enabled: bool = False
+    agent_skills_org_allowlist: str = ""
     skill_runner_url: str = "http://localhost:8020"
     skill_runner_token: str = "skill-runner-dev-token-change-in-production"
     skill_runner_timeout_seconds: int = 120
     skill_package_max_bytes: int = 10 * 1024 * 1024
+
+    def agent_skills_enabled_for(self, organization_slug: str) -> bool:
+        """Gate the new Agent Skill host independently per staging tenant."""
+        if not self.code_skills_enabled:
+            return False
+        allowed = {
+            value.strip().lower()
+            for value in self.agent_skills_org_allowlist.split(",")
+            if value.strip()
+        }
+        return not allowed or organization_slug.lower() in allowed
 
     # API Key cache
     api_key_cache_ttl: int = 60

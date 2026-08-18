@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Input, Modal, Tooltip, Typography, Upload, message, Tag,
@@ -39,9 +39,10 @@ const NODE_ICON: Record<string, ReactNode> = {
 const iconForKey = (key: string): ReactNode => NODE_ICON[key.split(':')[0]] ?? <FolderOutlined />;
 
 /** 技能（文件夹）管理：Finder 风。左：组织架构树（节点作用域）；右：技能列表（可展开看文件）。
- *  一个技能 = 一个文件夹；上传 skill.md 即新建技能，skill.md 内 ```skill JSON 块定义 function-tool。 */
+ *  标准 Agent Skill 可通过文件夹或 ZIP 安装；旧版 Markdown/连接器 Skill 继续兼容。 */
 export default function Skills() {
   const qc = useQueryClient();
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const { treeData, nodeMap, isLoading: treeLoading } = useOrgTree();
   const [orgId, setOrgId] = useState<string | undefined>();
 
@@ -97,11 +98,12 @@ export default function Skills() {
   });
 
   const uploadSkill = useMutation({
-    mutationFn: (file: File) => {
+    mutationFn: (payload: { kind: 'archive'; file: File } | { kind: 'folder'; files: File[] }) => {
       if (!scope) return Promise.reject(new Error('no scope'));
-      return skillStore.importPackage(scope.orgId, file, {
-        scope_type: scope.scope_type, scope_id: scope.scope_id,
-      });
+      const target = { scope_type: scope.scope_type, scope_id: scope.scope_id };
+      return payload.kind === 'archive'
+        ? skillStore.importPackage(scope.orgId, payload.file, target)
+        : skillStore.importPackageFolder(scope.orgId, payload.files, target);
     },
     onSuccess: ({ version }) => {
       qc.invalidateQueries({ queryKey: ['skill-folders'] });
@@ -177,13 +179,28 @@ export default function Skills() {
         extra={
           <>
             <Input size="small" allowClear placeholder="搜索技能" prefix={<SearchOutlined style={{ color: WB.textAux }} />} style={{ width: 180 }} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+            <input
+              ref={folderInputRef} type="file" multiple
+              {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+              style={{ display: 'none' }}
+              onChange={(event) => {
+                const files = Array.from(event.target.files ?? []);
+                if (files.length) uploadSkill.mutate({ kind: 'folder', files });
+                event.target.value = '';
+              }}
+            />
+            <ToolButton
+              icon={<FolderOutlined style={{ fontSize: 13 }} />}
+              disabled={uploadSkill.isPending || !scope}
+              onClick={() => folderInputRef.current?.click()}
+            >选择 Skill 文件夹</ToolButton>
             <Upload showUploadList={false} accept=".zip,.md,.markdown"
               beforeUpload={(file) => {
-                uploadSkill.mutate(file as File);
+                uploadSkill.mutate({ kind: 'archive', file: file as File });
                 return false;
               }}
             >
-              <ToolButton primary icon={<UploadOutlined style={{ fontSize: 13 }} />} disabled={uploadSkill.isPending}>上传技能</ToolButton>
+              <ToolButton primary icon={<UploadOutlined style={{ fontSize: 13 }} />} disabled={uploadSkill.isPending}>上传 ZIP</ToolButton>
             </Upload>
           </>
         }
@@ -244,7 +261,11 @@ export default function Skills() {
                             <Tag color={version.install_status === 'ready' ? 'green' : version.install_status === 'failed' ? 'red' : 'blue'}>
                               v{version.version_no} · {version.install_status}
                             </Tag>
-                            <span>{version.runtime}{version.is_executable ? ' · 可执行' : ' · 说明型'}</span>
+                            <span>
+                              {version.package_format === 'agent_skill' ? 'Agent Skill' : version.runtime}
+                              {version.script_languages?.length ? ` · ${version.script_languages.join('/')}` : ''}
+                              {version.is_executable ? ' · 可执行' : ' · 说明型'}
+                            </span>
                             {f.active_version_id === version.id && <Tag color="purple">当前版本</Tag>}
                             <span style={{ flex: 1 }} />
                             {version.install_status === 'failed' && (
@@ -254,6 +275,9 @@ export default function Skills() {
                               <ToolButton onClick={() => activateVersion.mutate(version.id)}>切换版本</ToolButton>
                             )}
                             {version.install_error && <Tooltip title={version.install_error}><Tag color="red">查看错误</Tag></Tooltip>}
+                            {!!version.compatibility_warnings?.length && (
+                              <Tooltip title={version.compatibility_warnings.join('；')}><Tag color="orange">部分兼容</Tag></Tooltip>
+                            )}
                           </div>
                         ))}
                         {!f.active_version_id && <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>

@@ -7,6 +7,7 @@ import io
 import json
 import re
 import zipfile
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from uuid import UUID
 
@@ -15,8 +16,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models.skill import SkillFolder, SkillVersion
-from app.schemas.skill import SkillFileCreate, SkillFolderCreate
+from app.models.organization import Organization
+from app.models.skill import SkillFile, SkillFolder, SkillVersion
+from app.schemas.skill import SkillFolderCreate
 from app.services import skill_store_service
 from app.tools.skill_manifest import parse_skill_manifest, parse_skill_manifest_dict
 
@@ -25,6 +27,18 @@ MAX_ARCHIVE_FILES = 200
 MAX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 TEXT_FILE_LIMIT = 1024 * 1024
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_SCRIPT_LANGUAGES = {
+    ".py": "python",
+    ".js": "node",
+    ".mjs": "node",
+    ".cjs": "node",
+    ".sh": "bash",
+}
+_TEXT_SUFFIXES = {
+    ".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".toml",
+    ".py", ".js", ".mjs", ".cjs", ".sh", ".csv", ".tsv", ".xml", ".html", ".css",
+}
+_LEGACY_MANIFEST_KEYS = {"runtime", "entrypoint", "bound_endpoint_ids", "parameters", "arguments"}
 
 
 def _slugify(value: str, package_hash: str) -> str:
@@ -32,13 +46,54 @@ def _slugify(value: str, package_hash: str) -> str:
     return slug or f"skill-{package_hash[:10]}"
 
 
+def _normalize_files(files: dict[str, bytes]) -> tuple[bytes, dict[str, bytes], str]:
+    """Validate and canonicalize an Agent Skill directory tree.
+
+    A single wrapper directory (the normal result of zipping a folder) is
+    removed so ZIP and browser-directory uploads produce the same package
+    hash and the same immutable SkillVersion.
+    """
+    if not files or len(files) > MAX_ARCHIVE_FILES:
+        raise HTTPException(status_code=422, detail="Skill package must contain 1-200 files")
+    normalized_files: dict[str, bytes] = {}
+    total = 0
+    for raw_path, data in files.items():
+        normalized = raw_path.replace("\\", "/").lstrip("/")
+        path = PurePosixPath(normalized)
+        if not normalized or ".." in path.parts or path.is_absolute():
+            raise HTTPException(status_code=422, detail="Unsafe path in Skill package")
+        if normalized in normalized_files:
+            raise HTTPException(status_code=422, detail=f"Duplicate Skill path: {normalized}")
+        total += len(data)
+        if total > MAX_UNCOMPRESSED_BYTES:
+            raise HTTPException(status_code=413, detail="Expanded Skill package exceeds 50MB")
+        normalized_files[normalized] = data
+
+    skill_paths = [path for path in normalized_files if PurePosixPath(path).name.lower() == "skill.md"]
+    if len(skill_paths) != 1:
+        raise HTTPException(status_code=422, detail="Skill package must contain exactly one SKILL.md")
+    skill_path = skill_paths[0]
+    root = str(PurePosixPath(skill_path).parent)
+    if root not in {".", ""}:
+        prefix = root.rstrip("/") + "/"
+        if all(path.startswith(prefix) for path in normalized_files):
+            normalized_files = {path[len(prefix):]: data for path, data in normalized_files.items()}
+            skill_path = "SKILL.md"
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, data in sorted(normalized_files.items()):
+            info = zipfile.ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, data)
+    return out.getvalue(), normalized_files, skill_path
+
+
 def _safe_archive(raw: bytes, filename: str) -> tuple[bytes, dict[str, bytes], str]:
     suffix = PurePosixPath(filename.lower()).suffix
     if suffix in {".md", ".markdown"}:
-        out = io.BytesIO()
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("SKILL.md", raw)
-        return out.getvalue(), {"SKILL.md": raw}, "SKILL.md"
+        return _normalize_files({"SKILL.md": raw})
     if suffix != ".zip":
         raise HTTPException(status_code=415, detail="Only .zip and .md Skill packages are supported")
     try:
@@ -46,33 +101,36 @@ def _safe_archive(raw: bytes, filename: str) -> tuple[bytes, dict[str, bytes], s
             infos = [i for i in zf.infolist() if not i.is_dir()]
             if not infos or len(infos) > MAX_ARCHIVE_FILES:
                 raise HTTPException(status_code=422, detail="Skill archive must contain 1-200 files")
-            if sum(i.file_size for i in infos) > MAX_UNCOMPRESSED_BYTES:
+            if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
                 raise HTTPException(status_code=413, detail="Expanded Skill package exceeds 50MB")
             files: dict[str, bytes] = {}
             for info in infos:
                 normalized = info.filename.replace("\\", "/").lstrip("/")
-                path = PurePosixPath(normalized)
-                if not normalized or ".." in path.parts or path.is_absolute():
-                    raise HTTPException(status_code=422, detail="Unsafe path in Skill archive")
-                files[str(path)] = zf.read(info)
-    except zipfile.BadZipFile as exc:
+                if normalized in files:
+                    raise HTTPException(status_code=422, detail=f"Duplicate Skill path: {normalized}")
+                files[normalized] = zf.read(info)
+    except (zipfile.BadZipFile, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail="Invalid ZIP package") from exc
 
-    skill_paths = [path for path in files if PurePosixPath(path).name.lower() == "skill.md"]
-    if len(skill_paths) != 1:
-        raise HTTPException(status_code=422, detail="Skill package must contain exactly one SKILL.md")
-    skill_path = skill_paths[0]
-    root = str(PurePosixPath(skill_path).parent)
-    if root not in {".", ""}:
-        prefix = root.rstrip("/") + "/"
-        if all(path.startswith(prefix) for path in files):
-            files = {path[len(prefix):]: data for path, data in files.items()}
-            skill_path = "SKILL.md"
-    out = io.BytesIO()
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path, data in sorted(files.items()):
-            zf.writestr(path, data)
-    return out.getvalue(), files, skill_path
+    return _normalize_files(files)
+
+
+async def _folder_archive(
+    uploads: list[UploadFile], relative_paths: list[str],
+) -> tuple[bytes, dict[str, bytes], str]:
+    if not uploads or len(uploads) != len(relative_paths):
+        raise HTTPException(status_code=422, detail="files and relative_paths must have the same non-zero length")
+    if len(uploads) > MAX_ARCHIVE_FILES:
+        raise HTTPException(status_code=422, detail="Skill package must contain 1-200 files")
+    files: dict[str, bytes] = {}
+    total = 0
+    for upload, path in zip(uploads, relative_paths, strict=True):
+        raw = await upload.read(MAX_PACKAGE_BYTES + 1)
+        total += len(raw)
+        if total > MAX_PACKAGE_BYTES:
+            raise HTTPException(status_code=413, detail="Skill package exceeds 10MB")
+        files[path or upload.filename or ""] = raw
+    return _normalize_files(files)
 
 
 def _resolve_runtime(manifest: dict, files: dict[str, bytes]) -> tuple[str, str | None, bool]:
@@ -101,6 +159,86 @@ def _resolve_runtime(manifest: dict, files: dict[str, bytes]) -> tuple[str, str 
     return "prompt", None, False
 
 
+def _agent_skill_metadata(manifest: dict, files: dict[str, bytes], skill_md: str) -> dict:
+    scripts = []
+    unsupported_scripts = []
+    for path in sorted(files):
+        posix = PurePosixPath(path)
+        if not posix.parts or posix.parts[0].lower() != "scripts":
+            continue
+        language = _SCRIPT_LANGUAGES.get(posix.suffix.lower())
+        if language:
+            scripts.append({"path": path, "language": language})
+        elif posix.suffix:
+            unsupported_scripts.append(path)
+    warnings: list[str] = []
+    if unsupported_scripts:
+        warnings.append("不支持的脚本类型：" + "、".join(unsupported_scripts[:10]))
+    proprietary = sorted(key for key in ("allowed-tools", "context", "agent", "hooks") if key in manifest)
+    if proprietary:
+        warnings.append("已保留但不模拟的 Claude 扩展字段：" + "、".join(proprietary))
+    lowered = skill_md.lower()
+    if "computer use" in lowered or "computer_use" in lowered:
+        warnings.append("当前宿主不提供 Computer Use")
+    if "mcp" in lowered:
+        warnings.append("Skill 中的 MCP 能力不会由代码 Runner 自动提供")
+    if re.search(r"(^|\n)\s*!\S+", skill_md):
+        warnings.append("Claude !command 语法不会自动执行")
+    resources = [
+        {"path": path, "size": len(data), "kind": (PurePosixPath(path).parts[0].lower()
+         if len(PurePosixPath(path).parts) > 1 else "root")}
+        for path, data in sorted(files.items())
+    ]
+    languages = sorted({item["language"] for item in scripts})
+    dependency_names = ("requirements.txt", "pyproject.toml", "package.json", "package-lock.json")
+    dependencies = [path for path in dependency_names if path in files]
+    return {
+        "package_format": "agent_skill",
+        "scripts": scripts,
+        "resources": resources,
+        "script_languages": languages,
+        "dependencies": dependencies,
+        "compatibility_warnings": warnings,
+    }
+
+
+async def _persist_package(
+    db: AsyncSession, *, org_id: UUID, scope_type: str, scope_id: str | None,
+    archive: bytes, files: dict[str, bytes], skill_path: str, created_by: str | None,
+) -> tuple[SkillFolder, SkillVersion]:
+    try:
+        skill_md = files[skill_path].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=422, detail="SKILL.md must be UTF-8") from exc
+    raw_manifest = parse_skill_manifest_dict(skill_md)
+    parsed = parse_skill_manifest(skill_md)
+    if raw_manifest is None or parsed is None:
+        raise HTTPException(
+            status_code=422, detail="SKILL.md requires valid YAML frontmatter with name and description",
+        )
+    legacy = bool(_LEGACY_MANIFEST_KEYS.intersection(raw_manifest))
+    if not legacy and not str(raw_manifest.get("description") or "").strip():
+        raise HTTPException(status_code=422, detail="Standard Agent Skill requires frontmatter name and description")
+
+    manifest = dict(raw_manifest)
+    if legacy:
+        runtime, entrypoint, executable = _resolve_runtime(manifest, files)
+    else:
+        platform = _agent_skill_metadata(manifest, files, skill_md)
+        manifest["_platform"] = platform
+        runtime, entrypoint = "agent_skill", None
+        executable = bool(platform["scripts"])
+
+    package_hash = hashlib.sha256(archive).hexdigest()
+    slug = _slugify(str(manifest.get("command") or manifest.get("name") or parsed.name), package_hash)
+    return await _create_version(
+        db, org_id=org_id, scope_type=scope_type, scope_id=scope_id,
+        archive=archive, files=files, skill_md=skill_md, manifest=manifest,
+        parsed=parsed, package_hash=package_hash, slug=slug, runtime=runtime,
+        entrypoint=entrypoint, executable=executable, created_by=created_by,
+    )
+
+
 async def import_package(
     db: AsyncSession,
     *,
@@ -116,17 +254,29 @@ async def import_package(
     if len(raw) > MAX_PACKAGE_BYTES:
         raise HTTPException(status_code=413, detail="Skill package exceeds 10MB")
     archive, files, skill_path = _safe_archive(raw, upload.filename or "skill.zip")
-    try:
-        skill_md = files[skill_path].decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=422, detail="SKILL.md must be UTF-8") from exc
-    manifest = parse_skill_manifest_dict(skill_md)
-    parsed = parse_skill_manifest(skill_md)
-    if manifest is None or parsed is None:
-        raise HTTPException(status_code=422, detail="SKILL.md requires a valid name and manifest/frontmatter")
-    package_hash = hashlib.sha256(archive).hexdigest()
-    slug = _slugify(str(manifest.get("command") or manifest.get("name") or parsed.name), package_hash)
-    runtime, entrypoint, executable = _resolve_runtime(manifest, files)
+    return await _persist_package(
+        db, org_id=org_id, scope_type=scope_type, scope_id=scope_id,
+        archive=archive, files=files, skill_path=skill_path, created_by=created_by,
+    )
+
+
+async def import_package_folder(
+    db: AsyncSession, *, org_id: UUID, scope_type: str, scope_id: str | None,
+    uploads: list[UploadFile], relative_paths: list[str], created_by: str | None,
+) -> tuple[SkillFolder, SkillVersion]:
+    archive, files, skill_path = await _folder_archive(uploads, relative_paths)
+    return await _persist_package(
+        db, org_id=org_id, scope_type=scope_type, scope_id=scope_id,
+        archive=archive, files=files, skill_path=skill_path, created_by=created_by,
+    )
+
+
+async def _create_version(
+    db: AsyncSession, *, org_id: UUID, scope_type: str, scope_id: str | None,
+    archive: bytes, files: dict[str, bytes], skill_md: str, manifest: dict,
+    parsed, package_hash: str, slug: str, runtime: str, entrypoint: str | None,
+    executable: bool, created_by: str | None,
+) -> tuple[SkillFolder, SkillVersion]:
 
     folder = (await db.execute(select(SkillFolder).where(
         SkillFolder.organization_id == org_id,
@@ -151,7 +301,12 @@ async def import_package(
     next_no = int((await db.execute(select(func.max(SkillVersion.version_no)).where(
         SkillVersion.skill_folder_id == folder.id,
     ))).scalar_one_or_none() or 0) + 1
-    status = "pending" if executable and settings.code_skills_enabled else "ready"
+    organization = await db.get(Organization, org_id)
+    agent_package = manifest.get("_platform", {}).get("package_format") == "agent_skill"
+    enabled = settings.code_skills_enabled
+    if agent_package:
+        enabled = bool(organization and settings.agent_skills_enabled_for(organization.slug))
+    status = "pending" if executable and enabled else "ready"
     version = SkillVersion(
         skill_folder_id=folder.id,
         version_no=next_no,
@@ -175,15 +330,61 @@ async def activate_version(
 ) -> None:
     if version.install_status != "ready":
         raise HTTPException(status_code=409, detail="Only ready versions can be activated")
-    if skill_md is None:
-        with zipfile.ZipFile(io.BytesIO(version.archive)) as zf:
-            match = next(name for name in zf.namelist() if PurePosixPath(name).name.lower() == "skill.md")
-            skill_md = zf.read(match).decode("utf-8")
-    await skill_store_service.upsert_file(db, folder, SkillFileCreate(
-        path="skill.md", content=skill_md, metadata={"version_id": str(version.id)}
-    ))
+    with zipfile.ZipFile(io.BytesIO(version.archive)) as zf:
+        package_files = {name: zf.read(name) for name in zf.namelist() if not name.endswith("/")}
+    existing = list((await db.execute(select(SkillFile).where(
+        SkillFile.skill_folder_id == folder.id,
+    ))).scalars().all())
+    by_path = {item.path: item for item in existing}
+    active_paths: set[str] = set()
+    for path, raw in package_files.items():
+        normalized = str(PurePosixPath(path))
+        posix_path = PurePosixPath(normalized)
+        if posix_path.name.lower() == "skill.md" and posix_path.parent == PurePosixPath("."):
+            # Existing runtime and APIs use the historical lowercase manifest path.
+            normalized = "skill.md"
+        active_paths.add(normalized)
+        content: str | None = None
+        if len(raw) <= TEXT_FILE_LIMIT and PurePosixPath(path).suffix.lower() in _TEXT_SUFFIXES:
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                content = None
+        item = by_path.get(normalized)
+        meta = {
+            "version_id": str(version.id),
+            "binary": content is None,
+            "package_path": normalized,
+        }
+        if item is None:
+            item = SkillFile(skill_folder_id=folder.id, path=normalized)
+            db.add(item)
+        item.deleted_at = None
+        item.size = len(raw)
+        item.content_hash = hashlib.sha256(raw).hexdigest()
+        item.content = content
+        item.metadata_ = meta
+    for item in existing:
+        if item.path not in active_paths and item.deleted_at is None:
+            # Package activation is a complete immutable snapshot; resources
+            # removed by a newer version must not remain visible as stale files.
+            item.deleted_at = datetime.now(UTC)
     folder.active_version_id = version.id
     await db.flush()
+
+
+def read_version_resource(version: SkillVersion, path: str) -> bytes:
+    """Read one immutable package resource with traversal-safe exact matching."""
+    normalized = str(PurePosixPath(path.replace("\\", "/").lstrip("/")))
+    posix = PurePosixPath(normalized)
+    if not normalized or ".." in posix.parts or posix.is_absolute():
+        raise HTTPException(status_code=422, detail="Unsafe Skill resource path")
+    with zipfile.ZipFile(io.BytesIO(version.archive)) as zf:
+        names = {name: name for name in zf.namelist() if not name.endswith("/")}
+        actual = names.get(normalized)
+        if actual is None:
+            raise HTTPException(status_code=404, detail="Skill resource not found")
+        return zf.read(actual)
 
 
 async def list_versions(db: AsyncSession, folder_id: UUID) -> list[SkillVersion]:

@@ -61,10 +61,11 @@ type ConfirmTarget =
 
 /** 终端「技能」视图：左右两栏（参照工作空间样式）。
  *  左栏：用户可见作用域单链（组织/部门/团队/个人）；右栏：选中 scope 下的技能操作区。
- *  导入：在可管理 scope 上传 ZIP/MD；智能体绑定与技能安装相互独立。 */
+ *  导入：在可管理 scope 选择标准 Skill 文件夹或上传 ZIP/MD；智能体绑定与安装相互独立。 */
 export default function SkillManagerView() {
   const qc = useQueryClient();
   const composingRef = useRef(false);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const [scope, setScope] = useState<{
     type: string; id: string | null; name: string; canImport: boolean; canManage: boolean;
@@ -116,9 +117,12 @@ export default function SkillManagerView() {
 
   // 导入技能包：ZIP 可包含 SKILL.md、脚本、依赖和资源；MD 继续兼容说明型技能。
   const importSkill = useMutation({
-    mutationFn: (file: File) => {
+    mutationFn: (payload: { kind: 'archive'; file: File } | { kind: 'folder'; files: File[] }) => {
       if (!scope) return Promise.reject(new Error('no scope'));
-      return terminal.importSkill(file, { scope_type: scope.type, scope_id: scope.id });
+      const target = { scope_type: scope.type, scope_id: scope.id };
+      return payload.kind === 'archive'
+        ? terminal.importSkill(payload.file, target)
+        : terminal.importSkillFolder(payload.files, target);
     },
     onSuccess: ({ version }) => {
       qc.invalidateQueries({ queryKey: ['terminal-skills'] });
@@ -245,21 +249,41 @@ export default function SkillManagerView() {
                   prefix={<SearchOutlined style={{ color: '#9ca3af' }} />}
                   style={{ width: 220 }} value={keyword} onChange={(e) => setKeyword(e.target.value)}
                 />
-                <Upload
-                  showUploadList={false} accept=".zip,.md,.markdown"
-                  beforeUpload={(file) => {
-                    importSkill.mutate(file as File);
-                    return false;
+                <input
+                  ref={folderInputRef} type="file" multiple
+                  {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+                  style={{ display: 'none' }}
+                  onChange={(event) => {
+                    const files = Array.from(event.target.files ?? []);
+                    if (files.length) importSkill.mutate({ kind: 'folder', files });
+                    event.target.value = '';
                   }}
-                >
+                />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <button
-                    style={{ ...toolBtnStyle, background: scope.canImport ? WB.primary : '#eef0f3', color: scope.canImport ? '#fff' : '#86868b', border: 'none' }}
+                    style={toolBtnStyle}
                     disabled={!scope.canImport || importSkill.isPending}
-                    title={scope.canImport ? '上传 ZIP 或 SKILL.md' : '你没有该节点的技能管理权限'}
+                    onClick={() => folderInputRef.current?.click()}
+                    title={scope.canImport ? '选择包含唯一 SKILL.md 的文件夹' : '你没有该节点的技能管理权限'}
                   >
-                    <UploadOutlined style={{ fontSize: 13 }} /> {importSkill.isPending ? '导入中…' : '导入技能'}
+                    <FolderOutlined style={{ fontSize: 13 }} /> 选择 Skill 文件夹
                   </button>
-                </Upload>
+                  <Upload
+                    showUploadList={false} accept=".zip,.md,.markdown"
+                    beforeUpload={(file) => {
+                      importSkill.mutate({ kind: 'archive', file: file as File });
+                      return false;
+                    }}
+                  >
+                    <button
+                      style={{ ...toolBtnStyle, background: scope.canImport ? WB.primary : '#eef0f3', color: scope.canImport ? '#fff' : '#86868b', border: 'none' }}
+                      disabled={!scope.canImport || importSkill.isPending}
+                      title={scope.canImport ? '上传 Skill ZIP 或单独 SKILL.md' : '你没有该节点的技能管理权限'}
+                    >
+                      <UploadOutlined style={{ fontSize: 13 }} /> {importSkill.isPending ? '导入中…' : '上传 ZIP'}
+                    </button>
+                  </Upload>
+                </div>
               </div>
 
               {/* 技能列表（行内展开文件） */}
@@ -310,7 +334,11 @@ export default function SkillManagerView() {
                                 <Tag color={version.install_status === 'ready' ? 'green' : version.install_status === 'failed' ? 'red' : 'blue'}>
                                   v{version.version_no} · {version.install_status}
                                 </Tag>
-                                <span>{version.runtime}{version.is_executable ? ' · 可执行' : ' · 说明型'}</span>
+                                <span>
+                                  {version.package_format === 'agent_skill' ? 'Agent Skill' : version.runtime}
+                                  {version.script_languages?.length ? ` · ${version.script_languages.join('/')}` : ''}
+                                  {version.is_executable ? ' · 可执行' : ' · 说明型'}
+                                </span>
                                 {s.active_version_id === version.id && <Tag color="purple">当前版本</Tag>}
                                 <span style={{ flex: 1 }} />
                                 {owner && version.install_status === 'failed' && (
@@ -320,6 +348,9 @@ export default function SkillManagerView() {
                                   <button style={toolBtnStyle} onClick={() => activateVersion.mutate(version.id)}>切换到此版本</button>
                                 )}
                                 {version.install_error && <Tooltip title={version.install_error}><Tag color="red">查看错误</Tag></Tooltip>}
+                                {!!version.compatibility_warnings?.length && (
+                                  <Tooltip title={version.compatibility_warnings.join('；')}><Tag color="orange">部分兼容</Tag></Tooltip>
+                                )}
                               </div>
                             ))}
                             {!s.active_version_id && <Space style={{ marginBottom: 6 }}>

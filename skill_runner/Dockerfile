@@ -8,7 +8,7 @@ ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' \
         /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs npm \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

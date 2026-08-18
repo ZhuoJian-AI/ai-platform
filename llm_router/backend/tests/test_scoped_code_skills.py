@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import zipfile
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -161,6 +162,126 @@ Always validate the input workbook before processing.
     assert exc.value.status_code == 422
     disabled_tools, _ = await _build_tools(db_session, [str(folder.id)], None, user=cu)
     assert disabled_tools == []
+
+
+@pytest.mark.asyncio
+async def test_agent_skill_folder_and_zip_are_equivalent_and_progressively_loaded(db_session, monkeypatch):
+    org, _, _, _, _, user, cu = await _hierarchy(db_session)
+    skill_md = b"""---
+name: Workbook Cleaner
+description: Clean an uploaded workbook and create a normalized copy
+---
+
+# Workflow
+Read references/rules.md, then run scripts/clean.py with the input attachment.
+"""
+    package_files = {
+        "bank-skill/SKILL.md": skill_md,
+        "bank-skill/references/rules.md": b"Keep the first worksheet.",
+        "bank-skill/scripts/clean.py": b"print('ready')\n",
+    }
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, raw in package_files.items():
+            zf.writestr(path, raw)
+
+    monkeypatch.setattr(skill_import_service.settings, "code_skills_enabled", False)
+    zip_upload = UploadFile(filename="bank-skill.zip", file=io.BytesIO(archive.getvalue()))
+    folder, zip_version = await skill_import_service.import_package(
+        db_session, org_id=org.id, scope_type="user", scope_id=str(user.id),
+        upload=zip_upload, created_by=str(user.id),
+    )
+    folder_uploads = [
+        UploadFile(filename=path.rsplit("/", 1)[-1], file=io.BytesIO(raw))
+        for path, raw in package_files.items()
+    ]
+    same_folder, folder_version = await skill_import_service.import_package_folder(
+        db_session, org_id=org.id, scope_type="user", scope_id=str(user.id),
+        uploads=folder_uploads, relative_paths=list(package_files), created_by=str(user.id),
+    )
+    assert same_folder.id == folder.id
+    assert folder_version.id == zip_version.id
+    assert zip_version.runtime == "agent_skill"
+    assert zip_version.manifest["_platform"]["script_languages"] == ["python"]
+    assert {item["path"] for item in zip_version.manifest["_platform"]["resources"]} == {
+        "SKILL.md", "references/rules.md", "scripts/clean.py",
+    }
+
+    monkeypatch.setattr(skill_import_service.settings, "code_skills_enabled", True)
+    tools, registry = await _build_tools(db_session, [str(folder.id)], None, user=cu)
+    assert [item["function"]["name"] for item in tools] == [
+        "load_skill", "read_skill_resource", "run_skill_script",
+    ]
+    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": cu})
+    state = {"org_id": str(org.id)}
+    loaded = json.loads(await nodes._execute_agent_skill_tool(
+        state, registry["load_skill"], "load_skill", {"skill_slug": folder.slug},
+    ))
+    assert loaded["status"] == "success"
+    assert "scripts/clean.py" in {item["path"] for item in loaded["scripts"]}
+    resource = json.loads(await nodes._execute_agent_skill_tool(
+        state, registry["read_skill_resource"], "read_skill_resource",
+        {"skill_slug": folder.slug, "path": "references/rules.md"},
+    ))
+    assert resource["content"] == "Keep the first worksheet."
+    denied = json.loads(await nodes._execute_agent_skill_tool(
+        state, registry["load_skill"], "load_skill", {"skill_slug": "not-bound"},
+    ))
+    assert denied["status"] == "error"
+
+    workspace = Workspace(
+        organization_id=org.id,
+        name="Agent Skill workspace",
+        slug=f"agent-skill-{uuid4().hex[:8]}",
+        scope_type="user",
+        scope_id=str(user.id),
+        is_active=True,
+    )
+    db_session.add(workspace)
+    await db_session.flush()
+    input_file = await workspace_service.ingest_uploaded_file(
+        db_session,
+        workspace,
+        path="会话附件/test/input.txt",
+        filename="input.txt",
+        content_type="text/plain",
+        raw=b"source data",
+    )
+    runner = AsyncMock(return_value=({
+        "stdout": "normalized",
+        "outputs": [{
+            "name": "normalized.txt",
+            "content_base64": base64.b64encode(b"clean data").decode(),
+        }],
+    }, 23))
+    monkeypatch.setattr(nodes.skill_runner_client, "execute_version", runner)
+    run_state = {
+        "org_id": str(org.id),
+        "task_id": None,
+        "template_agent_id": None,
+        "workspace_id": str(workspace.id),
+        "exec_mode": "craft",
+        "referenced_file_ids": [str(input_file.id)],
+    }
+    executed = json.loads(await nodes._execute_agent_skill_tool(
+        run_state,
+        registry["run_skill_script"],
+        "run_skill_script",
+        {
+            "skill_slug": folder.slug,
+            "script_path": "scripts/clean.py",
+            "args": ["{input_file}", "{output_dir}/normalized.txt"],
+        },
+    ))
+    assert executed["status"] == "success"
+    assert executed["summary"] == "normalized"
+    assert executed["outputs"][0]["name"] == "normalized.txt"
+    assert executed["outputs"][0]["path"].startswith("技能输出/playground/")
+    runner.assert_awaited_once()
+    runner_call = runner.await_args.kwargs
+    assert runner_call["script_path"] == "scripts/clean.py"
+    assert runner_call["args"] == ["{input_file}", "{output_dir}/normalized.txt"]
+    assert runner_call["inputs"][0]["name"] == "input.txt"
 
 
 @pytest.mark.asyncio

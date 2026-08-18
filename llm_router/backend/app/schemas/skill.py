@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from app.schemas._base import MetaReadModel, OrmModel
 
@@ -123,6 +123,26 @@ class SkillVersionRead(OrmModel):
     install_error: str | None = None
     created_at: datetime
     updated_at: datetime
+
+    @computed_field
+    @property
+    def package_format(self) -> str:
+        platform = self.manifest.get("_platform") if isinstance(self.manifest, dict) else None
+        return str(platform.get("package_format")) if isinstance(platform, dict) else "legacy"
+
+    @computed_field
+    @property
+    def script_languages(self) -> list[str]:
+        platform = self.manifest.get("_platform") if isinstance(self.manifest, dict) else None
+        values = platform.get("script_languages") if isinstance(platform, dict) else []
+        return [str(value) for value in values] if isinstance(values, list) else []
+
+    @computed_field
+    @property
+    def compatibility_warnings(self) -> list[str]:
+        platform = self.manifest.get("_platform") if isinstance(self.manifest, dict) else None
+        values = platform.get("compatibility_warnings") if isinstance(platform, dict) else []
+        return [str(value) for value in values] if isinstance(values, list) else []
 
 
 class SkillImportRead(BaseModel):

@@ -36,10 +36,18 @@ from app.models.agent_run import AgentRun
 from app.models.audit_log import AuditLog
 from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.ontology import OntologyFile
+from app.models.organization import Organization
 from app.models.skill import SkillExecution, SkillFolder, SkillVersion
 from app.schemas.rag import RagRetrieveRequest
 from app.schemas.workspace import WorkspaceFileCreate
-from app.services import memory_service, scope_service, skill_runner_client, skill_scope_service, workspace_service
+from app.services import (
+    memory_service,
+    scope_service,
+    skill_import_service,
+    skill_runner_client,
+    skill_scope_service,
+    workspace_service,
+)
 from app.services.rag_service import retrieve as rag_retrieve
 from app.services.skill_store_service import SKILL_MANIFEST_PATH
 from app.services.skill_store_service import get_file_by_path as get_skill_file_by_path
@@ -648,19 +656,42 @@ async def _build_tools(
     """
     tools: list[dict] = []
     registry: dict[str, dict] = {}
+    agent_skills: dict[str, dict] = {}
     for sid in skill_ids:
         folder = await db.get(SkillFolder, UUID(sid))
         if folder is None or folder.deleted_at is not None or not folder.is_active:
             continue
         if user is not None and not skill_scope_service.user_can_use_folder(user, folder):
             continue
+        version = await db.get(SkillVersion, folder.active_version_id) if folder.active_version_id else None
+        if version is not None and version.install_status != "ready":
+            continue
+        platform = (
+            version.manifest.get("_platform")
+            if version is not None and isinstance(version.manifest, dict) else None
+        )
+        if isinstance(platform, dict) and platform.get("package_format") == "agent_skill":
+            organization = await db.get(Organization, folder.organization_id)
+            if organization is None or not settings.agent_skills_enabled_for(organization.slug):
+                continue
+            try:
+                skill_path = next(
+                    item["path"] for item in platform.get("resources", [])
+                    if PurePosixPath(str(item.get("path") or "")).name.lower() == "skill.md"
+                )
+                skill_content = skill_import_service.read_version_resource(version, skill_path).decode("utf-8")
+            except (StopIteration, UnicodeDecodeError, KeyError):
+                logger.warning("agent_skill_manifest_unavailable", skill_folder=str(folder.id), slug=folder.slug)
+                continue
+            agent_skills[folder.slug] = {
+                "folder": folder, "version": version, "content": skill_content,
+                "platform": platform,
+            }
+            continue
         manifest_file = await get_skill_file_by_path(db, folder.id, SKILL_MANIFEST_PATH)
         manifest = parse_skill_manifest(manifest_file.content if manifest_file else None)
         if manifest is None:
             logger.warning("skill_manifest_missing_or_invalid", skill_folder=str(folder.id), slug=folder.slug)
-            continue
-        version = await db.get(SkillVersion, folder.active_version_id) if folder.active_version_id else None
-        if version is not None and version.install_status != "ready":
             continue
         if version is not None and version.is_executable:
             if not settings.code_skills_enabled:
@@ -720,12 +751,63 @@ async def _build_tools(
                 },
             })
             registry[tool_name] = {"folder": folder, "endpoint": ep}
+    if agent_skills:
+        summaries = "; ".join(
+            f"{slug}: {entry['version'].manifest.get('description') or entry['folder'].name}"
+            for slug, entry in agent_skills.items()
+        )
+        slug_schema = {"type": "string", "enum": sorted(agent_skills)}
+        tools.extend([
+            {"type": "function", "function": {
+                "name": "load_skill",
+                "description": "按需载入已绑定标准 Skill 的完整 SKILL.md。可用技能：" + summaries,
+                "parameters": {"type": "object", "properties": {
+                    "skill_slug": {**slug_schema, "description": "要载入的技能 slug"},
+                }, "required": ["skill_slug"]},
+            }},
+            {"type": "function", "function": {
+                "name": "read_skill_resource",
+                "description": "读取已载入 Skill 中 references/、assets/ 或脚本说明等文本资源。",
+                "parameters": {"type": "object", "properties": {
+                    "skill_slug": slug_schema,
+                    "path": {"type": "string", "description": "资源索引中显示的相对路径"},
+                }, "required": ["skill_slug", "path"]},
+            }},
+        ])
+        if any(entry["version"].is_executable for entry in agent_skills.values()):
+            tools.append({"type": "function", "function": {
+                "name": "run_skill_script",
+                "description": (
+                    "在隔离 Runner 中执行已绑定 Skill 的 scripts/ 内 Python、Node 或 Bash 脚本。"
+                    "先调用 load_skill 并遵循其说明。"
+                ),
+                "parameters": {"type": "object", "properties": {
+                    "skill_slug": slug_schema,
+                    "script_path": {"type": "string", "description": "load_skill 返回的 scripts/ 相对路径"},
+                    "args": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "直接传给脚本的参数数组，不是 Shell 命令",
+                    },
+                    "input_file_ids": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "工作空间输入文件 UUID；省略时使用本轮附件",
+                    },
+                }, "required": ["skill_slug", "script_path"]},
+            }})
+        tool_names = ["load_skill", "read_skill_resource"]
+        if any(entry["version"].is_executable for entry in agent_skills.values()):
+            tool_names.append("run_skill_script")
+        for name in tool_names:
+            registry[name] = {"kind": name, "skills": agent_skills}
     if workspace_id:
         tools.extend(_builtin_tool_defs())
     return tools, registry
 
 
-async def _execute_code_skill(state: AgentState, entry: dict, params: dict) -> str:
+async def _execute_code_skill(
+    state: AgentState, entry: dict, params: dict, *,
+    script_path: str | None = None, script_args: list[str] | None = None,
+) -> str:
     deps = get_deps()
     db = deps["db"]
     user = deps.get("user")
@@ -742,6 +824,10 @@ async def _execute_code_skill(state: AgentState, entry: dict, params: dict) -> s
         return json.dumps({"status": "error", "error": "Skill is disabled or its active version changed"})
     if version.install_status != "ready" or not version.is_executable:
         return json.dumps({"status": "error", "error": "Skill version is not executable"})
+    if version.runtime == "agent_skill":
+        organization = await db.get(Organization, folder.organization_id)
+        if organization is None or not settings.agent_skills_enabled_for(organization.slug):
+            return json.dumps({"status": "error", "error": "Agent Skills are not enabled for this organization"})
     if state.get("exec_mode") != "craft":
         return json.dumps({"status": "error", "error": "请切换到 Craft 模式执行代码 Skill"}, ensure_ascii=False)
     ws_id = state.get("workspace_id")
@@ -750,7 +836,16 @@ async def _execute_code_skill(state: AgentState, entry: dict, params: dict) -> s
     ws = await workspace_service.get_workspace(db, UUID(ws_id))
     if ws is None or not scope_service.is_workspace_visible(ws, user):
         return json.dumps({"status": "error", "error": "Workspace is unavailable"})
+    params = dict(params)
     requested_ids = params.pop("input_file_ids", None) or state.get("referenced_file_ids") or []
+    if script_path is not None:
+        platform = version.manifest.get("_platform") if isinstance(version.manifest, dict) else None
+        allowed_scripts = {
+            str(item.get("path")) for item in (platform.get("scripts") if isinstance(platform, dict) else [])
+            if isinstance(item, dict) and item.get("path")
+        }
+        if script_path not in allowed_scripts:
+            return json.dumps({"status": "error", "error": "Script is not declared in this Skill version"})
     inputs: list[dict] = []
     valid_ids: list[str] = []
     for value in requested_ids:
@@ -788,6 +883,7 @@ async def _execute_code_skill(state: AgentState, entry: dict, params: dict) -> s
     try:
         result, latency = await skill_runner_client.execute_version(
             version, params=params, inputs=inputs, execution_id=execution.id,
+            script_path=script_path, args=script_args,
         )
         output_ids: list[str] = []
         output_items: list[dict] = []
@@ -819,6 +915,79 @@ async def _execute_code_skill(state: AgentState, entry: dict, params: dict) -> s
         execution.error = str(exc)[:2000]
         await db.flush()
         return json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False)
+
+
+async def _resolve_agent_skill(state: AgentState, entry: dict, slug: str) -> tuple[dict | None, str | None]:
+    selected = entry.get("skills", {}).get(slug)
+    if selected is None:
+        return None, "Skill is not bound to the current agent"
+    deps = get_deps()
+    db = deps["db"]
+    user = deps.get("user")
+    folder: SkillFolder = selected["folder"]
+    version: SkillVersion = selected["version"]
+    if user is None or not skill_scope_service.user_can_use_folder(user, folder):
+        return None, "Skill is outside the current user scope"
+    await db.refresh(folder)
+    await db.refresh(version)
+    if not folder.is_active or str(folder.active_version_id or "") != str(version.id):
+        return None, "Skill is disabled or its active version changed"
+    if version.install_status != "ready":
+        return None, "Skill version is not ready"
+    organization = await db.get(Organization, folder.organization_id)
+    if organization is None or not settings.agent_skills_enabled_for(organization.slug):
+        return None, "Agent Skills are not enabled for this organization"
+    return selected, None
+
+
+async def _execute_agent_skill_tool(state: AgentState, entry: dict, name: str, params: dict) -> str:
+    slug = str(params.get("skill_slug") or "")
+    selected, error = await _resolve_agent_skill(state, entry, slug)
+    if error or selected is None:
+        return json.dumps({"status": "error", "error": error or "Skill unavailable"}, ensure_ascii=False)
+    platform = selected["platform"]
+    if name == "load_skill":
+        return json.dumps({
+            "status": "success",
+            "skill": {"name": selected["folder"].name, "slug": slug},
+            "instructions": selected["content"],
+            "scripts": platform.get("scripts") or [],
+            "resources": platform.get("resources") or [],
+            "compatibility_warnings": platform.get("compatibility_warnings") or [],
+            "execution_contract": {
+                "input_dir": "SKILL_INPUT_DIR", "output_dir": "SKILL_OUTPUT_DIR",
+                "skill_dir": "SKILL_DIR", "params_json": "SKILL_PARAMS_JSON",
+                "argument_placeholders": ["{input_file}", "{input_dir}", "{output_dir}", "{params_json}"],
+            },
+        }, ensure_ascii=False)
+    if name == "read_skill_resource":
+        path = str(params.get("path") or "")
+        indexed = {str(item.get("path")) for item in platform.get("resources") or [] if isinstance(item, dict)}
+        if path not in indexed:
+            return json.dumps({"status": "error", "error": "Resource is not part of this Skill version"})
+        try:
+            raw = skill_import_service.read_version_resource(selected["version"], path)
+            if len(raw) > 200_000:
+                return json.dumps({"status": "error", "error": "Text resource exceeds 200KB"})
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return json.dumps({"status": "error", "error": "Binary assets cannot be injected into the model"})
+        except Exception as exc:  # noqa: BLE001
+            return json.dumps({"status": "error", "error": str(exc)})
+        return json.dumps({"status": "success", "path": path, "content": content}, ensure_ascii=False)
+    if name == "run_skill_script":
+        raw_args = params.get("args") or []
+        if not isinstance(raw_args, list) or not all(isinstance(value, str) for value in raw_args):
+            return json.dumps({"status": "error", "error": "args must be an array of strings"})
+        execution_params = {
+            key: value for key, value in params.items()
+            if key not in {"skill_slug", "script_path", "args"}
+        }
+        return await _execute_code_skill(
+            state, selected, execution_params,
+            script_path=str(params.get("script_path") or ""), script_args=raw_args,
+        )
+    return json.dumps({"status": "error", "error": "Unknown Agent Skill tool"})
 
 
 async def _execute_tool_call(
@@ -869,6 +1038,13 @@ async def _execute_tool_call(
         return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], True)
     if entry.get("kind") == "code":
         content = await _execute_code_skill(state, entry, params)
+        try:
+            ok = json.loads(content).get("status") == "success"
+        except (json.JSONDecodeError, AttributeError):
+            ok = False
+        return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
+    if entry.get("kind") in {"load_skill", "read_skill_resource", "run_skill_script"}:
+        content = await _execute_agent_skill_tool(state, entry, entry["kind"], params)
         try:
             ok = json.loads(content).get("status") == "success"
         except (json.JSONDecodeError, AttributeError):

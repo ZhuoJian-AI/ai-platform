@@ -53,7 +53,9 @@ async def _import_response(
 @router.post("/terminal/skills/import", response_model=SkillImportRead, status_code=202)
 async def terminal_import_skill(
     background: BackgroundTasks,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    files: list[UploadFile] | None = File(None),
+    relative_paths: list[str] | None = Form(None),
     scope_type: str = Form("user"),
     scope_id: str | None = Form(None),
     cu: CurrentUser = Depends(require_user),
@@ -61,10 +63,18 @@ async def terminal_import_skill(
 ):
     sid = cu.id if scope_type == "user" and not scope_id else scope_id
     sid = await assert_user_can_manage_scope(db, cu, scope_type, sid)
-    folder, version = await skill_import_service.import_package(
-        db, org_id=cu.organization_id, scope_type=scope_type, scope_id=sid,
-        upload=file, created_by=cu.id,
-    )
+    if files:
+        folder, version = await skill_import_service.import_package_folder(
+            db, org_id=cu.organization_id, scope_type=scope_type, scope_id=sid,
+            uploads=files, relative_paths=relative_paths or [], created_by=cu.id,
+        )
+    elif file:
+        folder, version = await skill_import_service.import_package(
+            db, org_id=cu.organization_id, scope_type=scope_type, scope_id=sid,
+            upload=file, created_by=cu.id,
+        )
+    else:
+        raise HTTPException(status_code=422, detail="Upload a Skill ZIP/MD or folder")
     await db.commit()
     if version.install_status == "pending":
         background.add_task(skill_runner_client.install_version, version.id)
@@ -75,16 +85,26 @@ async def terminal_import_skill(
 async def admin_import_skill(
     org_id: UUID,
     background: BackgroundTasks,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    files: list[UploadFile] | None = File(None),
+    relative_paths: list[str] | None = Form(None),
     scope_type: str = Form("organization"),
     scope_id: str | None = Form(None),
     _: CurrentAdmin = Depends(require_org_access_write),
     db: AsyncSession = Depends(get_db),
 ):
     sid = await validate_scope_target(db, org_id, scope_type, scope_id)
-    folder, version = await skill_import_service.import_package(
-        db, org_id=org_id, scope_type=scope_type, scope_id=sid, upload=file, created_by=None,
-    )
+    if files:
+        folder, version = await skill_import_service.import_package_folder(
+            db, org_id=org_id, scope_type=scope_type, scope_id=sid,
+            uploads=files, relative_paths=relative_paths or [], created_by=None,
+        )
+    elif file:
+        folder, version = await skill_import_service.import_package(
+            db, org_id=org_id, scope_type=scope_type, scope_id=sid, upload=file, created_by=None,
+        )
+    else:
+        raise HTTPException(status_code=422, detail="Upload a Skill ZIP/MD or folder")
     await db.commit()
     if version.install_status == "pending":
         background.add_task(skill_runner_client.install_version, version.id)

@@ -37,11 +37,16 @@ async def install_version(version_id: UUID | str) -> None:
             "entrypoint": version.entrypoint,
         }
         try:
-            async with httpx.AsyncClient(timeout=settings.skill_runner_timeout_seconds) as client:
+            async with httpx.AsyncClient(timeout=max(360, settings.skill_runner_timeout_seconds + 30)) as client:
                 response = await client.post(
                     f"{settings.skill_runner_url.rstrip('/')}/install", json=payload, headers=_headers()
                 )
-                response.raise_for_status()
+                if response.is_error:
+                    try:
+                        detail = response.json().get("detail")
+                    except (ValueError, AttributeError):
+                        detail = response.text
+                    raise RuntimeError(str(detail or f"Runner install failed ({response.status_code})"))
             version.install_status = "ready"
             folder = await db.get(SkillFolder, version.skill_folder_id)
             if folder is not None:
@@ -67,6 +72,7 @@ async def resume_pending_installs() -> None:
 
 async def execute_version(
     version: SkillVersion, *, params: dict, inputs: list[dict], execution_id: int,
+    script_path: str | None = None, args: list[str] | None = None,
 ) -> tuple[dict, int]:
     started = time.perf_counter()
     payload = {
@@ -77,6 +83,8 @@ async def execute_version(
         "params": params,
         "inputs": inputs,
         "arguments": version.manifest.get("arguments") or [],
+        "script_path": script_path,
+        "args": args or [],
         "execution_id": execution_id,
         "timeout_seconds": settings.skill_runner_timeout_seconds,
     }
@@ -84,5 +92,10 @@ async def execute_version(
         response = await client.post(
             f"{settings.skill_runner_url.rstrip('/')}/execute", json=payload, headers=_headers()
         )
-        response.raise_for_status()
+        if response.is_error:
+            try:
+                detail = response.json().get("detail")
+            except (ValueError, AttributeError):
+                detail = response.text
+            raise RuntimeError(str(detail or f"Runner execution failed ({response.status_code})"))
     return response.json(), int((time.perf_counter() - started) * 1000)

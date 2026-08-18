@@ -909,9 +909,11 @@ export interface SkillFolder {
 
 export interface SkillVersion {
   id: string; skill_folder_id: string; version_no: number; package_hash: string;
-  manifest: Record<string, unknown>; runtime: 'prompt' | 'python' | 'node';
+  manifest: Record<string, unknown>; runtime: 'prompt' | 'python' | 'node' | 'agent_skill';
   entrypoint: string | null; is_executable: boolean;
   install_status: 'pending' | 'installing' | 'ready' | 'failed';
+  package_format: 'legacy' | 'agent_skill'; script_languages: string[];
+  compatibility_warnings: string[];
   install_error: string | null; created_at: string; updated_at: string;
 }
 
@@ -963,6 +965,18 @@ export const skillStore = {
   importPackage: (orgId: string, file: File, scope: ScopeRef) => {
     const fd = new FormData();
     fd.append('file', file);
+    fd.append('scope_type', scope.scope_type);
+    if (scope.scope_id) fd.append('scope_id', scope.scope_id);
+    return request<SkillImportResult>(`/api/v1/organizations/${orgId}/skill-folders/import`, {
+      method: 'POST', body: fd, headers: {},
+    });
+  },
+  importPackageFolder: (orgId: string, files: File[], scope: ScopeRef) => {
+    const fd = new FormData();
+    files.forEach((file) => {
+      fd.append('files', file, file.name);
+      fd.append('relative_paths', file.webkitRelativePath || file.name);
+    });
     fd.append('scope_type', scope.scope_type);
     if (scope.scope_id) fd.append('scope_id', scope.scope_id);
     return request<SkillImportResult>(`/api/v1/organizations/${orgId}/skill-folders/import`, {
@@ -1268,6 +1282,16 @@ export const terminal = {
   importSkill: (file: File, scope: { scope_type: string; scope_id?: string | null }) => {
     const fd = new FormData();
     fd.append('file', file);
+    fd.append('scope_type', scope.scope_type);
+    if (scope.scope_id) fd.append('scope_id', scope.scope_id);
+    return userRequest<SkillImportResult>('/api/v1/terminal/skills/import', { method: 'POST', body: fd });
+  },
+  importSkillFolder: (files: File[], scope: { scope_type: string; scope_id?: string | null }) => {
+    const fd = new FormData();
+    files.forEach((file) => {
+      fd.append('files', file, file.name);
+      fd.append('relative_paths', file.webkitRelativePath || file.name);
+    });
     fd.append('scope_type', scope.scope_type);
     if (scope.scope_id) fd.append('scope_id', scope.scope_id);
     return userRequest<SkillImportResult>('/api/v1/terminal/skills/import', { method: 'POST', body: fd });
