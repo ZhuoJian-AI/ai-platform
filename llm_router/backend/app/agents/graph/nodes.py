@@ -61,7 +61,8 @@ MAX_STEPS = 8
 GENERAL_SYSTEM_PROMPT = (
     "你是组织智能助手。默认用 Markdown 直接回答；只有用户明确要求生成、编辑、转换或导出文件时，"
     "才调用相应的平台文件工具。你可以：按需调用当前用户有权使用的技能完成专业业务操作；使用平台"
-    "文件工具处理表格、文档、演示文稿、PDF 与文本；管理当前工作空间文件；参考组织本体与四级长期记忆。"
+    "文件工具处理表格、文档、演示文稿、PDF、文本、图片与压缩包；按需搜索和读取公开网页；"
+    "管理当前工作空间文件；参考组织本体与四级长期记忆。"
     "用户明确调用 Skill 或某个 Skill 明显匹配专业流程时优先遵循该 Skill，平台文件工具作为通用能力。只有系统实际提供了"
     "[知识库检索结果]时才能使用RAG内容，通用智能体不会自动加载知识库。"
     "请基于上述上下文完成用户任务，必要时分步调用工具，最终给出清晰的结果。"
@@ -100,7 +101,7 @@ TOOL_STRATEGY_PROMPT = (
     "准确 file_id 调用 workspace_read_file，并按 has_more/next_offset 继续分页。存在多个候选且用户指代不清时"
     "必须先询问，不得擅自读取全部文件；status=unavailable 时明确告知文件已删除或无权访问。\n"
     "7. 用户明确调用 Skill，或已载入 Skill 与当前专业流程匹配时，优先遵循 SKILL.md 并执行其脚本；"
-    "只有没有适用 Skill 时才使用 spreadsheet/document/presentation/pdf/text 平台通用工具兜底。"
+    "只有没有适用 Skill 时才使用 spreadsheet/document/presentation/pdf/text/image/archive/web 平台通用工具兜底。"
 )
 
 # ── 输出协议（Craft 模式注入，场景无关 boilerplate，避免每个任务提示词重复）────
@@ -127,20 +128,22 @@ def _emit(event: dict) -> None:
 
 # ── 内置工作空间文件工具 ─────────────────────────────────────────────────
 
-PLATFORM_FILE_TOOL_NAMES = {
+PLATFORM_TOOL_NAMES = {
     "spreadsheet_tool", "document_tool", "presentation_tool", "pdf_tool", "text_tool",
+    "image_tool", "archive_tool", "web_tool",
 }
+ALWAYS_AVAILABLE_TOOL_NAMES = {"web_tool"}
 BUILTIN_TOOL_NAMES = {
     "workspace_list_files", "workspace_read_file", "workspace_write_file", "workspace_delete_file",
-    *PLATFORM_FILE_TOOL_NAMES,
+    *PLATFORM_TOOL_NAMES,
 }
 # Kept executable for old persisted calls, but no longer advertised to new LLM rounds.
 LEGACY_BUILTIN_TOOL_NAMES = {"generate_docx"}
 
 
-def _builtin_tool_defs() -> list[dict]:
+def _builtin_tool_defs(*, include_workspace: bool = True) -> list[dict]:
     """内置工作空间文件工具的 OpenAI function-tool 定义。"""
-    return [
+    tools = [
         {"type": "function", "function": {
             "name": "workspace_list_files",
             "description": (
@@ -242,6 +245,57 @@ def _builtin_tool_defs() -> list[dict]:
                 "target_format": {"type": "string"},
             }, "required": ["action"]},
         }},
+        {"type": "function", "function": {
+            "name": "image_tool",
+            "description": "检查、转换、缩放、裁剪、压缩图片，或对图片/扫描 PDF 执行中英文 OCR。",
+            "parameters": {"type": "object", "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["inspect", "convert", "resize", "crop", "compress", "ocr"],
+                },
+                "input_file_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+                "output_name": {"type": "string"},
+                "target_format": {"type": "string", "enum": ["png", "jpg", "jpeg", "webp", "tiff", "bmp"]},
+                "width": {"type": "integer", "minimum": 1},
+                "height": {"type": "integer", "minimum": 1},
+                "keep_aspect": {"type": "boolean"},
+                "quality": {"type": "integer", "minimum": 1, "maximum": 100},
+                "box": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4},
+                "language": {"type": "string", "description": "Tesseract 语言，如 chi_sim+eng"},
+                "max_pages": {"type": "integer", "minimum": 1, "maximum": 20},
+            }, "required": ["action", "input_file_ids"]},
+        }},
+        {"type": "function", "function": {
+            "name": "archive_tool",
+            "description": "安全查看、解压或创建 ZIP/TAR/TAR.GZ；解压结果写回当前工作空间。",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list", "extract", "create"]},
+                "input_file_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 20},
+                "output_name": {"type": "string"},
+                "format": {"type": "string", "enum": ["zip", "tar", "tar.gz"]},
+            }, "required": ["action", "input_file_ids"]},
+        }},
+        {"type": "function", "function": {
+            "name": "web_tool",
+            "description": (
+                "搜索公开网页、提取指定网页正文，或把公开 URL 下载到工作空间。"
+                "禁止访问 localhost、内网与云元数据地址；涉及专业流程时仍优先使用已绑定 Skill。"
+            ),
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["search", "fetch", "download"]},
+                "query": {"type": "string"},
+                "url": {"type": "string"},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": 10},
+                "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000},
+                "output_name": {"type": "string"},
+            }, "required": ["action"]},
+        }},
+    ]
+    if include_workspace:
+        return tools
+    return [
+        tool for tool in tools
+        if tool.get("function", {}).get("name") in ALWAYS_AVAILABLE_TOOL_NAMES
     ]
 
 
@@ -257,16 +311,20 @@ async def _execute_platform_file_tool(
     action = str(params.get("action") or "").strip().lower()
     requested_ids = params.get("input_file_ids")
     if requested_ids is None:
-        requested_ids = state.get("referenced_file_ids") or []
+        requested_ids = [] if name == "web_tool" else (state.get("referenced_file_ids") or [])
     if not isinstance(requested_ids, list):
         return json.dumps({"status": "error", "error": "input_file_ids must be an array"})
+    if len(requested_ids) > 20:
+        return json.dumps({"status": "error", "error": "At most 20 input files are allowed"})
+    if requested_ids and ws is None:
+        return json.dumps({"status": "error", "error": "请先绑定工作空间"}, ensure_ascii=False)
     runner_inputs: list[dict] = []
     for value in requested_ids:
         try:
             file = await workspace_service.get_file(db, UUID(str(value)))
         except (ValueError, TypeError, AttributeError):
             file = None
-        if file is None or str(file.workspace_id) != str(ws.id):
+        if file is None or ws is None or str(file.workspace_id) != str(ws.id):
             return json.dumps({"status": "error", "error": f"Input file {value} is unavailable"})
         raw = await workspace_service.load_file_bytes(file)
         meta = file.metadata_ or {}
@@ -285,12 +343,17 @@ async def _execute_platform_file_tool(
             execution_id=f"{state.get('task_id') or 'playground'}-{uuid4().hex[:8]}",
         )
         output_items: list[dict] = []
+        if result.get("outputs") and ws is None:
+            return json.dumps({"status": "error", "error": "下载文件前请先绑定工作空间"}, ensure_ascii=False)
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         task_part = state.get("task_id") or "playground"
         for item in result.get("outputs") or []:
             raw = base64.b64decode(item.get("content_base64") or "", validate=True)
             original = PurePosixPath(str(item.get("name") or "output.bin")).name
-            path = f"平台工具输出/{task_part}/{stamp}-{uuid4().hex[:8]}-{original}"
+            relative = PurePosixPath(str(item.get("relative_path") or original).replace("\\", "/"))
+            safe_parts = [part for part in relative.parts if part not in {"", ".", ".."}]
+            relative_path = "/".join(safe_parts) or original
+            path = f"平台工具输出/{task_part}/{stamp}-{uuid4().hex[:8]}-{relative_path}"
             saved = await workspace_service.ingest_uploaded_file(
                 db,
                 ws,
@@ -332,13 +395,14 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
     deps = get_deps()
     db = deps["db"]
     ws_id = state.get("workspace_id")
-    if not ws_id:
-        return "no workspace bound to this task"
-    ws = await workspace_service.get_workspace(db, UUID(ws_id))
-    if ws is None:
-        return "workspace not found"
     user = deps.get("user")
-    if user is not None and not scope_service.is_workspace_visible(ws, user):
+    ws = await workspace_service.get_workspace(db, UUID(ws_id)) if ws_id else None
+    no_workspace_web_action = name == "web_tool" and str(params.get("action") or "").lower() in {
+        "search", "fetch",
+    }
+    if ws is None and not no_workspace_web_action:
+        return "no workspace bound to this task"
+    if ws is not None and user is not None and not scope_service.is_workspace_visible(ws, user):
         return "workspace out of your scope"
 
     # 用 SAVEPOINT 隔离本轮工具的 DB 写入：若 flush 失败（如唯一约束冲突），
@@ -348,7 +412,7 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
     # （仅在 save_memory 里 flush 未提交）被一并回滚，「任务回复消失」。
     try:
         async with db.begin_nested():
-            if name in PLATFORM_FILE_TOOL_NAMES:
+            if name in PLATFORM_TOOL_NAMES:
                 return await _execute_platform_file_tool(state, name, params, ws, user)
             if name == "workspace_list_files":
                 files = await workspace_service.list_files(db, ws.id)
@@ -1034,8 +1098,7 @@ async def _build_tools(
             registry[name] = {
                 "kind": name, "skills": agent_skills, "slug_index": agent_skill_slugs,
             }
-    if workspace_id:
-        tools.extend(_builtin_tool_defs())
+    tools.extend(_builtin_tool_defs(include_workspace=bool(workspace_id)))
     return tools, registry
 
 

@@ -150,10 +150,10 @@ Always validate the input workbook before processing.
 
     assert await assert_bound_skills_visible(db_session, cu, [str(folder.id)]) == [folder]
     empty_tools, empty_registry = await _build_tools(db_session, [], None, user=cu)
-    assert empty_tools == []
+    assert [tool["function"]["name"] for tool in empty_tools] == ["web_tool"]
     assert empty_registry == {}
     tools, registry = await _build_tools(db_session, [str(folder.id)], None, user=cu)
-    assert [tool["function"]["name"] for tool in tools] == ["load_bank-process"]
+    assert [tool["function"]["name"] for tool in tools] == ["load_bank-process", "web_tool"]
     assert set(registry) == {"load_bank-process"}
 
     folder.is_active = False
@@ -162,7 +162,7 @@ Always validate the input workbook before processing.
         await assert_bound_skills_visible(db_session, cu, [str(folder.id)])
     assert exc.value.status_code == 422
     disabled_tools, _ = await _build_tools(db_session, [str(folder.id)], None, user=cu)
-    assert disabled_tools == []
+    assert [tool["function"]["name"] for tool in disabled_tools] == ["web_tool"]
 
 
 @pytest.mark.asyncio
@@ -211,7 +211,7 @@ Read references/rules.md, then run scripts/clean.py with the input attachment.
     monkeypatch.setattr(skill_import_service.settings, "code_skills_enabled", True)
     tools, registry = await _build_tools(db_session, [str(folder.id)], None, user=cu)
     assert [item["function"]["name"] for item in tools] == [
-        "load_skill", "read_skill_resource", "run_skill_script",
+        "load_skill", "read_skill_resource", "run_skill_script", "web_tool",
     ]
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": cu})
     state = {"org_id": str(org.id)}
@@ -381,6 +381,7 @@ async def test_platform_file_tools_are_available_without_skills_and_persist_outp
     names = {item["function"]["name"] for item in tools}
     assert {
         "spreadsheet_tool", "document_tool", "presentation_tool", "pdf_tool", "text_tool",
+        "image_tool", "archive_tool", "web_tool",
     } <= names
     assert "generate_docx" not in names
     assert registry == {}
@@ -416,9 +417,32 @@ async def test_platform_file_tools_are_available_without_skills_and_persist_outp
 
 def test_platform_tool_registry_keeps_legacy_docx_hidden():
     names = {item["function"]["name"] for item in nodes._builtin_tool_defs()}
-    assert nodes.PLATFORM_FILE_TOOL_NAMES <= names
+    assert nodes.PLATFORM_TOOL_NAMES <= names
     assert "generate_docx" not in names
     assert "generate_docx" in nodes.LEGACY_BUILTIN_TOOL_NAMES
+
+
+@pytest.mark.asyncio
+async def test_web_tool_is_available_and_executable_without_workspace(db_session, monkeypatch):
+    _, _, _, _, _, _, cu = await _hierarchy(db_session)
+    tools, registry = await _build_tools(db_session, [], None, user=cu)
+    assert {item["function"]["name"] for item in tools} == {"web_tool"}
+    assert registry == {}
+
+    runner = AsyncMock(return_value=({
+        "summary": {"query": "AI", "results": [{"title": "Result", "url": "https://example.com"}]},
+        "outputs": [],
+    }, 8))
+    monkeypatch.setattr(nodes.skill_runner_client, "execute_builtin", runner)
+    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": cu})
+    result = json.loads(await nodes._execute_builtin_tool(
+        {"exec_mode": "craft", "referenced_file_ids": [str(uuid4())]},
+        "web_tool",
+        {"action": "search", "query": "AI"},
+    ))
+    assert result["status"] == "success"
+    assert result["summary"]["results"][0]["title"] == "Result"
+    assert runner.await_args.kwargs["inputs"] == []
 
 
 @pytest.mark.asyncio

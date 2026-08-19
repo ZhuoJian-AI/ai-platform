@@ -8,9 +8,10 @@ import json
 import zipfile
 from pathlib import Path
 
-import pytest
-
 import app as runner
+import builtin_tools as builtin
+import pytest
+from PIL import Image
 
 
 def _package(script_path: str, content: bytes) -> tuple[str, str]:
@@ -328,3 +329,165 @@ async def test_builtin_execution_requires_internal_token():
             None,
         )
     assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_builtin_web_fetch_extracts_readable_html(monkeypatch):
+    monkeypatch.setattr(
+        builtin,
+        "_http_get",
+        lambda *_args, **_kwargs: (
+            "https://example.com/article",
+            "<html><head><title>测试文章</title><script>bad()</script></head>"
+            "<body><h1>标题</h1><p>正文内容</p></body></html>".encode(),
+            "text/html",
+            "",
+        ),
+    )
+    result = await runner.execute_builtin_tool(
+        runner.BuiltinExecuteRequest(
+            tool_kind="web",
+            action="fetch",
+            params={"url": "https://example.com/article"},
+            execution_id="web-fetch",
+        ),
+        runner.RUNNER_TOKEN,
+    )
+    assert result["summary"]["title"] == "测试文章"
+    assert "正文内容" in result["summary"]["content"]
+    assert "bad()" not in result["summary"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_builtin_web_search_falls_back_to_bing(monkeypatch):
+    def fake_http_get(url, **_kwargs):
+        if "duckduckgo" in url:
+            return url, b"<html><body>challenge</body></html>", "text/html", ""
+        html = (
+            b'<html><body><ol><li class="b_algo"><h2><a href="https://example.com">'
+            b'Example result</a></h2><div class="b_caption"><p>Useful snippet</p></div>'
+            b"</li></ol></body></html>"
+        )
+        return (
+            url,
+            html,
+            "text/html",
+            "",
+        )
+
+    monkeypatch.setattr(builtin, "_http_get", fake_http_get)
+    result = await runner.execute_builtin_tool(
+        runner.BuiltinExecuteRequest(
+            tool_kind="web",
+            action="search",
+            params={"query": "example", "max_results": 3},
+            execution_id="web-search",
+        ),
+        runner.RUNNER_TOKEN,
+    )
+    assert result["summary"]["results"] == [{
+        "title": "Example result",
+        "url": "https://example.com",
+        "snippet": "Useful snippet",
+    }]
+
+
+def test_builtin_web_rejects_private_and_invalid_urls():
+    with pytest.raises(builtin.BuiltinToolError, match="private"):
+        builtin._validate_public_url("http://127.0.0.1/secret")
+    with pytest.raises(builtin.BuiltinToolError, match="port"):
+        builtin._validate_public_url("https://example.com:not-a-port/")
+
+
+@pytest.mark.asyncio
+async def test_builtin_image_resize_outputs_real_png():
+    stream = io.BytesIO()
+    Image.new("RGB", (120, 60), "red").save(stream, format="PNG")
+    result = await runner.execute_builtin_tool(
+        runner.BuiltinExecuteRequest(
+            tool_kind="image",
+            action="resize",
+            params={"width": 30, "height": 30, "output_name": "缩略图.png"},
+            inputs=[runner.InputFile(
+                file_id="image-1",
+                name="原图.png",
+                content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+            )],
+            execution_id="image-resize",
+        ),
+        runner.RUNNER_TOKEN,
+    )
+    output = result["outputs"][0]
+    with Image.open(io.BytesIO(base64.b64decode(output["content_base64"]))) as image:
+        assert image.size == (30, 15)
+
+
+@pytest.mark.asyncio
+async def test_builtin_archive_extract_preserves_relative_paths():
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("资料/说明.txt", "内容")
+        archive.writestr("数据.csv", "a,b\n1,2")
+    result = await runner.execute_builtin_tool(
+        runner.BuiltinExecuteRequest(
+            tool_kind="archive",
+            action="extract",
+            inputs=[runner.InputFile(
+                file_id="archive-1",
+                name="资料包.zip",
+                content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+            )],
+            execution_id="archive-extract",
+        ),
+        runner.RUNNER_TOKEN,
+    )
+    assert {item["relative_path"] for item in result["outputs"]} == {"资料/说明.txt", "数据.csv"}
+
+
+@pytest.mark.asyncio
+async def test_builtin_archive_rejects_path_traversal():
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        archive.writestr("../escape.txt", "blocked")
+    with pytest.raises(runner.HTTPException) as exc:
+        await runner.execute_builtin_tool(
+            runner.BuiltinExecuteRequest(
+                tool_kind="archive",
+                action="extract",
+                inputs=[runner.InputFile(
+                    file_id="archive-2",
+                    name="unsafe.zip",
+                    content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+                )],
+                execution_id="archive-unsafe",
+            ),
+            runner.RUNNER_TOKEN,
+        )
+    assert exc.value.status_code == 422
+    assert "Unsafe archive path" in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_builtin_archive_rejects_zip_links():
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        link = zipfile.ZipInfo("link.txt")
+        link.create_system = 3
+        link.external_attr = 0o120777 << 16
+        archive.writestr(link, "target.txt")
+    with pytest.raises(runner.HTTPException) as exc:
+        await runner.execute_builtin_tool(
+            runner.BuiltinExecuteRequest(
+                tool_kind="archive",
+                action="extract",
+                inputs=[runner.InputFile(
+                    file_id="archive-link",
+                    name="unsafe-link.zip",
+                    content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+                )],
+                execution_id="archive-link",
+            ),
+            runner.RUNNER_TOKEN,
+        )
+    assert exc.value.status_code == 422
+    assert "links" in str(exc.value.detail).lower()

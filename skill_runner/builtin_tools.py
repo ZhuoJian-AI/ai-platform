@@ -8,18 +8,30 @@ their package-specific virtualenv/node_modules in ``app.py``.
 from __future__ import annotations
 
 import csv
+import html
+import ipaddress
 import json
 import mimetypes
+import re
 import shutil
+import socket
+import stat
 import subprocess
+import tarfile
 import tempfile
-from pathlib import Path
-from typing import Any
+import urllib.parse
+import urllib.request
+import zipfile
+from html.parser import HTMLParser
+from pathlib import Path, PurePosixPath
+from typing import Any, ClassVar
 
+import fitz
 from docx import Document
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from PIL import Image, ImageOps
 from pptx import Presentation
 from pptx.util import Inches
 from pypdf import PdfReader, PdfWriter
@@ -27,6 +39,13 @@ from pypdf import PdfReader, PdfWriter
 
 class BuiltinToolError(ValueError):
     """A platform file operation could not be completed."""
+
+
+MAX_WEB_TEXT_BYTES = 2 * 1024 * 1024
+MAX_WEB_DOWNLOAD_BYTES = 5 * 1024 * 1024
+MAX_ARCHIVE_FILES = 20
+MAX_ARCHIVE_FILE_BYTES = 5 * 1024 * 1024
+Image.MAX_IMAGE_PIXELS = 40_000_000
 
 
 def _value(value: Any) -> Any:
@@ -446,6 +465,549 @@ def _text(action: str, inputs: list[Path], params: dict, output_dir: Path) -> di
     return {"summary": f"{action}d text file", "outputs": [output]}
 
 
+class _ReadableHTMLParser(HTMLParser):
+    """Extract a useful title and readable text without running page scripts."""
+
+    _SKIP_TAGS: ClassVar[set[str]] = {"script", "style", "noscript", "svg"}
+    _BLOCK_TAGS: ClassVar[set[str]] = {
+        "article", "aside", "blockquote", "br", "div", "footer", "h1", "h2",
+        "h3", "h4", "h5", "h6", "header", "li", "main", "nav", "p", "section",
+        "table", "td", "th", "tr",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self._in_title = False
+        self.title_parts: list[str] = []
+        self.text_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        tag = tag.lower()
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+        if self._skip_depth:
+            return
+        if tag == "title":
+            self._in_title = True
+        if tag in self._BLOCK_TAGS:
+            self.text_parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in self._SKIP_TAGS and self._skip_depth:
+            self._skip_depth -= 1
+            return
+        if self._skip_depth:
+            return
+        if tag == "title":
+            self._in_title = False
+        if tag in self._BLOCK_TAGS:
+            self.text_parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        value = data.strip()
+        if not value:
+            return
+        if self._in_title:
+            self.title_parts.append(value)
+        self.text_parts.append(value + " ")
+
+    def result(self) -> tuple[str, str]:
+        title = " ".join(self.title_parts).strip()
+        text = "".join(self.text_parts)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n+", "\n\n", text)
+        return title, text.strip()
+
+
+class _DuckDuckGoParser(HTMLParser):
+    """Parse the stable DuckDuckGo HTML result page without a browser."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.results: list[dict[str, str]] = []
+        self._capture: str | None = None
+        self._parts: list[str] = []
+        self._href = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key: value or "" for key, value in attrs}
+        classes = set(values.get("class", "").split())
+        if tag == "a" and "result__a" in classes:
+            self._capture = "title"
+            self._parts = []
+            self._href = values.get("href", "")
+        elif tag in {"a", "div"} and "result__snippet" in classes:
+            self._capture = "snippet"
+            self._parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._capture == "title" and tag == "a":
+            title = " ".join(self._parts).strip()
+            if title and self._href:
+                parsed = urllib.parse.urlparse(self._href)
+                query = urllib.parse.parse_qs(parsed.query)
+                href = query.get("uddg", [self._href])[0]
+                self.results.append({"title": title, "url": href, "snippet": ""})
+            self._capture = None
+        elif self._capture == "snippet" and tag in {"a", "div"}:
+            if self.results:
+                self.results[-1]["snippet"] = " ".join(self._parts).strip()
+            self._capture = None
+
+    def handle_data(self, data: str) -> None:
+        if self._capture and data.strip():
+            self._parts.append(data.strip())
+
+
+class _BingParser(HTMLParser):
+    """Parse Bing's non-JavaScript result markup as a search fallback."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.results: list[dict[str, str]] = []
+        self._current: dict[str, str] | None = None
+        self._in_heading = False
+        self._capture: str | None = None
+        self._parts: list[str] = []
+
+    def _finish_result(self) -> None:
+        if self._current and self._current.get("title") and self._current.get("url"):
+            self.results.append(self._current)
+        self._current = None
+        self._in_heading = False
+        self._capture = None
+        self._parts = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key: value or "" for key, value in attrs}
+        classes = set(values.get("class", "").split())
+        if tag == "li" and "b_algo" in classes:
+            self._finish_result()
+            self._current = {"title": "", "url": "", "snippet": ""}
+            return
+        if self._current is None:
+            return
+        if tag == "h2":
+            self._in_heading = True
+        elif tag == "a" and self._in_heading:
+            self._capture = "title"
+            self._parts = []
+            self._current["url"] = values.get("href", "")
+        elif tag == "p":
+            self._capture = "snippet"
+            self._parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._current is None:
+            return
+        if tag == "a" and self._capture == "title":
+            self._current["title"] = " ".join(self._parts).strip()
+            self._capture = None
+        elif tag == "p" and self._capture == "snippet":
+            self._current["snippet"] = " ".join(self._parts).strip()
+            self._capture = None
+        elif tag == "h2":
+            self._in_heading = False
+        elif tag == "li":
+            self._finish_result()
+
+    def handle_data(self, data: str) -> None:
+        if self._capture and data.strip():
+            self._parts.append(data.strip())
+
+    def close(self) -> None:
+        super().close()
+        self._finish_result()
+
+
+def _validate_public_url(url: str) -> urllib.parse.ParseResult:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise BuiltinToolError("web_tool only accepts absolute HTTP/HTTPS URLs")
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".local"):
+        raise BuiltinToolError("Local or private network URLs are not allowed")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        addresses = {item[4][0] for item in socket.getaddrinfo(hostname, port)}
+    except ValueError as exc:
+        raise BuiltinToolError("Invalid URL port") from exc
+    except socket.gaierror as exc:
+        raise BuiltinToolError(f"Unable to resolve host: {hostname}") from exc
+    for value in addresses:
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+        if (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_reserved
+            or address.is_unspecified
+        ):
+            raise BuiltinToolError("Local or private network URLs are not allowed")
+    return parsed
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_public_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _http_get(url: str, *, limit: int) -> tuple[str, bytes, str, str]:
+    _validate_public_url(url)
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "AI-Platform-WebTool/1.0 (+https://ai-platform.staging.zhuojianai.com)",
+            "Accept": "text/html,application/json,text/plain,*/*;q=0.5",
+        },
+    )
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
+    try:
+        with opener.open(request, timeout=20) as response:
+            raw = response.read(limit + 1)
+            if len(raw) > limit:
+                raise BuiltinToolError(f"Remote response exceeds {limit // (1024 * 1024)}MB")
+            content_type = response.headers.get_content_type() or "application/octet-stream"
+            disposition = response.headers.get("Content-Disposition", "")
+            return response.geturl(), raw, content_type, disposition
+    except BuiltinToolError:
+        raise
+    except Exception as exc:
+        raise BuiltinToolError(f"Web request failed: {exc}") from exc
+
+
+def _decode_web_text(raw: bytes, content_type: str) -> str:
+    del content_type
+    for encoding in ("utf-8", "gb18030", "big5"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _download_name(url: str, disposition: str, content_type: str) -> str:
+    match = re.search(
+        r"filename\*?=(?:UTF-8''|\")?([^\";]+)", disposition, flags=re.IGNORECASE
+    )
+    if match:
+        name = urllib.parse.unquote(match.group(1).strip())
+    else:
+        name = urllib.parse.unquote(PurePosixPath(urllib.parse.urlparse(url).path).name)
+    if not name:
+        name = "download" + (mimetypes.guess_extension(content_type) or ".bin")
+    return Path(name.replace("\\", "/")).name
+
+
+def _web(action: str, inputs: list[Path], params: dict, output_dir: Path) -> dict:
+    del inputs
+    if action == "search":
+        query = str(params.get("query") or "").strip()
+        if not query:
+            raise BuiltinToolError("web search requires query")
+        max_results = min(max(int(params.get("max_results", 5)), 1), 10)
+        url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+        _, raw, content_type, _ = _http_get(url, limit=MAX_WEB_TEXT_BYTES)
+        parser = _DuckDuckGoParser()
+        parser.feed(_decode_web_text(raw, content_type))
+        results = parser.results[:max_results]
+        if not results:
+            fallback_url = "https://www.bing.com/search?" + urllib.parse.urlencode(
+                {"q": query, "count": max_results}
+            )
+            _, raw, content_type, _ = _http_get(fallback_url, limit=MAX_WEB_TEXT_BYTES)
+            fallback = _BingParser()
+            fallback.feed(_decode_web_text(raw, content_type))
+            fallback.close()
+            results = fallback.results[:max_results]
+        if not results:
+            raise BuiltinToolError("Search providers returned no parseable results")
+        return {"summary": {"query": query, "results": results}, "outputs": []}
+    if action == "fetch":
+        url = str(params.get("url") or "").strip()
+        final_url, raw, content_type, _ = _http_get(url, limit=MAX_WEB_TEXT_BYTES)
+        text = _decode_web_text(raw, content_type)
+        title = ""
+        if content_type in {"text/html", "application/xhtml+xml"} or "<html" in text[:500].lower():
+            parser = _ReadableHTMLParser()
+            parser.feed(text)
+            title, text = parser.result()
+        max_chars = min(max(int(params.get("max_chars", 50_000)), 1_000), 100_000)
+        return {
+            "summary": {
+                "url": final_url,
+                "title": html.unescape(title),
+                "content_type": content_type,
+                "content": text[:max_chars],
+                "truncated": len(text) > max_chars,
+            },
+            "outputs": [],
+        }
+    if action == "download":
+        url = str(params.get("url") or "").strip()
+        final_url, raw, content_type, disposition = _http_get(
+            url,
+            limit=MAX_WEB_DOWNLOAD_BYTES,
+        )
+        name = _safe_output_name(
+            params.get("output_name"),
+            _download_name(final_url, disposition, content_type),
+            "",
+        )
+        output = output_dir / name
+        output.write_bytes(raw)
+        return {
+            "summary": {"url": final_url, "content_type": content_type, "size": len(raw)},
+            "outputs": [output],
+        }
+    raise BuiltinToolError(f"Unsupported web action: {action}")
+
+
+def _image_output_suffix(value: str | None, fallback: str = "png") -> tuple[str, str]:
+    normalized = str(value or fallback).lower().lstrip(".")
+    aliases = {"jpg": "jpeg", "tif": "tiff"}
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"png", "jpeg", "webp", "tiff", "bmp"}:
+        raise BuiltinToolError(f"Unsupported image format: {normalized}")
+    suffix = ".jpg" if normalized == "jpeg" else f".{normalized}"
+    return normalized.upper(), suffix
+
+
+def _save_image(image: Image.Image, output: Path, image_format: str, quality: int) -> None:
+    if image_format == "JPEG" and image.mode not in {"RGB", "L"}:
+        background = Image.new("RGB", image.size, "white")
+        if "A" in image.getbands():
+            background.paste(image, mask=image.getchannel("A"))
+        else:
+            background.paste(image.convert("RGB"))
+        image = background
+    kwargs: dict[str, Any] = {"format": image_format}
+    if image_format in {"JPEG", "WEBP"}:
+        kwargs.update({"quality": quality, "optimize": True})
+    elif image_format == "PNG":
+        kwargs["optimize"] = True
+    image.save(output, **kwargs)
+
+
+def _ocr_images(source: Path, max_pages: int) -> list[Image.Image]:
+    if source.suffix.lower() == ".pdf":
+        document = fitz.open(source)
+        images: list[Image.Image] = []
+        try:
+            for page in document[:max_pages]:
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                images.append(Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples))
+        finally:
+            document.close()
+        return images
+    with Image.open(source) as image:
+        return [ImageOps.exif_transpose(image).convert("RGB")]
+
+
+def _image(action: str, inputs: list[Path], params: dict, output_dir: Path) -> dict:
+    if not inputs:
+        raise BuiltinToolError(f"image {action} requires an input file")
+    source = inputs[0]
+    if action == "inspect":
+        if source.suffix.lower() == ".pdf":
+            document = fitz.open(source)
+            try:
+                return {
+                    "summary": {"kind": "scanned_document", "pages": document.page_count},
+                    "outputs": [],
+                }
+            finally:
+                document.close()
+        with Image.open(source) as image:
+            return {
+                "summary": {
+                    "kind": "image",
+                    "format": image.format,
+                    "width": image.width,
+                    "height": image.height,
+                    "mode": image.mode,
+                    "frames": getattr(image, "n_frames", 1),
+                },
+                "outputs": [],
+            }
+    if action == "ocr":
+        try:
+            import pytesseract
+        except ImportError as exc:  # pragma: no cover - production image includes it
+            raise BuiltinToolError("OCR runtime is unavailable") from exc
+        language = str(params.get("language") or "chi_sim+eng")
+        max_pages = min(max(int(params.get("max_pages", 10)), 1), 20)
+        texts = [pytesseract.image_to_string(image, lang=language) for image in _ocr_images(source, max_pages)]
+        content = "\n\n".join(text.strip() for text in texts).strip()
+        outputs: list[Path] = []
+        if params.get("output_name"):
+            output = output_dir / _safe_output_name(params.get("output_name"), "ocr.txt", ".txt")
+            output.write_text(content, encoding="utf-8")
+            outputs.append(output)
+        return {
+            "summary": {"language": language, "pages": len(texts), "content": content[:100_000]},
+            "outputs": outputs,
+        }
+    if source.suffix.lower() == ".pdf":
+        raise BuiltinToolError(f"image {action} does not accept PDF; use ocr for scanned PDFs")
+    with Image.open(source) as opened:
+        image = ImageOps.exif_transpose(opened).copy()
+    image_format, suffix = _image_output_suffix(
+        params.get("target_format"),
+        (source.suffix.lower().lstrip(".") or "png"),
+    )
+    if action == "resize":
+        width = int(params.get("width") or image.width)
+        height = int(params.get("height") or image.height)
+        if width < 1 or height < 1 or width * height > 40_000_000:
+            raise BuiltinToolError("Invalid or oversized image dimensions")
+        if params.get("keep_aspect", True):
+            image.thumbnail((width, height), Image.Resampling.LANCZOS)
+        else:
+            image = image.resize((width, height), Image.Resampling.LANCZOS)
+    elif action == "crop":
+        box = params.get("box") or []
+        if not isinstance(box, list) or len(box) != 4:
+            raise BuiltinToolError("image crop requires box=[left, top, right, bottom]")
+        coordinates = tuple(int(value) for value in box)
+        if coordinates[0] < 0 or coordinates[1] < 0 or coordinates[2] > image.width or coordinates[3] > image.height:
+            raise BuiltinToolError("Crop box is outside the image")
+        if coordinates[2] <= coordinates[0] or coordinates[3] <= coordinates[1]:
+            raise BuiltinToolError("Crop box has no area")
+        image = image.crop(coordinates)
+    elif action not in {"convert", "compress"}:
+        raise BuiltinToolError(f"Unsupported image action: {action}")
+    quality = min(max(int(params.get("quality", 85)), 1), 100)
+    output = output_dir / _safe_output_name(params.get("output_name"), "image" + suffix, suffix)
+    _save_image(image, output, image_format, quality)
+    return {
+        "summary": {"action": action, "width": image.width, "height": image.height},
+        "outputs": [output],
+    }
+
+
+def _safe_archive_path(name: str) -> PurePosixPath:
+    normalized = PurePosixPath(name.replace("\\", "/").lstrip("/"))
+    if not normalized.parts or ".." in normalized.parts or normalized.is_absolute():
+        raise BuiltinToolError(f"Unsafe archive path: {name}")
+    return normalized
+
+
+def _archive_kind(path: Path) -> str:
+    name = path.name.lower()
+    if name.endswith(".zip"):
+        return "zip"
+    if name.endswith((".tar.gz", ".tgz")):
+        return "tar.gz"
+    if name.endswith(".tar"):
+        return "tar"
+    raise BuiltinToolError("archive_tool supports ZIP, TAR and TAR.GZ files")
+
+
+def _archive_list(source: Path) -> list[dict[str, Any]]:
+    kind = _archive_kind(source)
+    if kind == "zip":
+        with zipfile.ZipFile(source) as archive:
+            return [
+                {"path": item.filename, "size": item.file_size, "is_dir": item.is_dir()}
+                for item in archive.infolist()
+            ]
+    with tarfile.open(source, "r:gz" if kind == "tar.gz" else "r:") as archive:
+        return [
+            {"path": item.name, "size": item.size, "is_dir": item.isdir()}
+            for item in archive.getmembers()
+        ]
+
+
+def _archive_extract(source: Path, output_dir: Path) -> list[Path]:
+    kind = _archive_kind(source)
+    outputs: list[Path] = []
+    if kind == "zip":
+        with zipfile.ZipFile(source) as archive:
+            members = [item for item in archive.infolist() if not item.is_dir()]
+            if len(members) > MAX_ARCHIVE_FILES:
+                raise BuiltinToolError(f"Archive contains more than {MAX_ARCHIVE_FILES} files")
+            for item in members:
+                if item.flag_bits & 0x1:
+                    raise BuiltinToolError("Encrypted ZIP files are not supported")
+                if stat.S_IFMT(item.external_attr >> 16) == stat.S_IFLNK:
+                    raise BuiltinToolError("Archive links are not supported")
+                if item.file_size > MAX_ARCHIVE_FILE_BYTES:
+                    raise BuiltinToolError(f"Archive member {item.filename} exceeds 5MB")
+                relative = _safe_archive_path(item.filename)
+                target = output_dir.joinpath(*relative.parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(item) as source_file, target.open("wb") as target_file:
+                    shutil.copyfileobj(source_file, target_file)
+                outputs.append(target)
+        return outputs
+    with tarfile.open(source, "r:gz" if kind == "tar.gz" else "r:") as archive:
+        members = [item for item in archive.getmembers() if item.isfile()]
+        if len(members) > MAX_ARCHIVE_FILES:
+            raise BuiltinToolError(f"Archive contains more than {MAX_ARCHIVE_FILES} files")
+        for item in members:
+            if item.issym() or item.islnk():
+                raise BuiltinToolError("Archive links are not supported")
+            if item.size > MAX_ARCHIVE_FILE_BYTES:
+                raise BuiltinToolError(f"Archive member {item.name} exceeds 5MB")
+            relative = _safe_archive_path(item.name)
+            target = output_dir.joinpath(*relative.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source_file = archive.extractfile(item)
+            if source_file is None:
+                continue
+            with source_file, target.open("wb") as target_file:
+                shutil.copyfileobj(source_file, target_file)
+            outputs.append(target)
+    return outputs
+
+
+def _archive(action: str, inputs: list[Path], params: dict, output_dir: Path) -> dict:
+    if action == "list":
+        if len(inputs) != 1:
+            raise BuiltinToolError("archive list requires one input file")
+        members = _archive_list(inputs[0])
+        return {
+            "summary": {
+                "format": _archive_kind(inputs[0]),
+                "total": len(members),
+                "members": members[:200],
+                "truncated": len(members) > 200,
+            },
+            "outputs": [],
+        }
+    if action == "extract":
+        if len(inputs) != 1:
+            raise BuiltinToolError("archive extract requires one input file")
+        outputs = _archive_extract(inputs[0], output_dir)
+        return {"summary": {"extracted": len(outputs)}, "outputs": outputs}
+    if action == "create":
+        if not inputs:
+            raise BuiltinToolError("archive create requires input files")
+        kind = str(params.get("format") or "zip").lower()
+        if kind not in {"zip", "tar", "tar.gz", "tgz"}:
+            raise BuiltinToolError("archive format must be zip, tar or tar.gz")
+        suffix = ".zip" if kind == "zip" else (".tar" if kind == "tar" else ".tar.gz")
+        output = output_dir / _safe_output_name(params.get("output_name"), "archive" + suffix, suffix)
+        if kind == "zip":
+            with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for source in inputs:
+                    archive.write(source, arcname=source.name)
+        else:
+            with tarfile.open(output, "w" if kind == "tar" else "w:gz") as archive:
+                for source in inputs:
+                    archive.add(source, arcname=source.name, recursive=False)
+        return {"summary": {"created": output.name, "files": len(inputs)}, "outputs": [output]}
+    raise BuiltinToolError(f"Unsupported archive action: {action}")
+
+
 def execute_builtin(tool_kind: str, action: str, inputs: list[Path], params: dict, output_dir: Path) -> dict:
     handlers = {
         "spreadsheet": _spreadsheet,
@@ -453,6 +1015,9 @@ def execute_builtin(tool_kind: str, action: str, inputs: list[Path], params: dic
         "presentation": _presentation,
         "pdf": _pdf,
         "text": _text,
+        "web": _web,
+        "image": _image,
+        "archive": _archive,
     }
     handler = handlers.get(tool_kind)
     if handler is None:

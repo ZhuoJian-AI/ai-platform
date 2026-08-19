@@ -36,7 +36,7 @@ MAX_OUTPUT_BYTES = 5 * 1024 * 1024
 MAX_OUTPUT_FILES = 20
 BASE_NODE_MODULES = Path(os.getenv("SKILL_BASE_NODE_MODULES", "/opt/skill-node/node_modules"))
 BUILTIN_PYTHON_PACKAGES = (
-    "openpyxl", "pandas", "python-docx", "python-pptx", "PyMuPDF", "pypdf",
+    "openpyxl", "pandas", "python-docx", "python-pptx", "PyMuPDF", "pypdf", "Pillow", "pytesseract",
 )
 BUILTIN_NODE_PACKAGES = ("exceljs",)
 
@@ -66,6 +66,10 @@ def _runtime_info() -> dict:
         "node_version": (_command_version(["node", "--version"]) or "").lstrip("v") or None,
         "bash_version": _command_version(["bash", "--version"]),
         "libreoffice_version": _command_version(["libreoffice", "--version"]),
+        "tesseract_version": _command_version(["tesseract", "--version"]),
+        "platform_tools": [
+            "spreadsheet", "document", "presentation", "pdf", "text", "web", "image", "archive",
+        ],
         "builtin_dependencies": {
             "python": {name: _package_version(name) for name in BUILTIN_PYTHON_PACKAGES},
             "node": {"exceljs": "4.4.0" if (BASE_NODE_MODULES / "exceljs").exists() else None},
@@ -97,8 +101,10 @@ class ExecuteRequest(InstallRequest):
 
 
 class BuiltinExecuteRequest(BaseModel):
-    tool_kind: Literal["spreadsheet", "document", "presentation", "pdf", "text"]
-    action: Literal["inspect", "create", "edit", "convert"]
+    tool_kind: Literal[
+        "spreadsheet", "document", "presentation", "pdf", "text", "web", "image", "archive",
+    ]
+    action: str = Field(min_length=1, max_length=32)
     params: dict = Field(default_factory=dict)
     inputs: list[InputFile] = Field(default_factory=list)
     execution_id: str
@@ -410,14 +416,21 @@ async def execute_builtin_tool(
 ) -> dict:
     """Execute a platform-owned file handler without loading a user Skill."""
     _auth(x_skill_runner_token)
+    if len(req.inputs) > 20:
+        raise HTTPException(status_code=422, detail="Builtin tools accept at most 20 input files")
     run_root = Path(tempfile.mkdtemp(prefix=f"builtin-{req.execution_id}-"))
     try:
         input_dir, output_dir = run_root / "input", run_root / "output"
         input_dir.mkdir()
         output_dir.mkdir()
         input_paths: list[Path] = []
-        for item in req.inputs:
-            path = input_dir / _safe_name(item.name)
+        used_names: set[str] = set()
+        for index, item in enumerate(req.inputs):
+            safe_name = _safe_name(item.name)
+            if safe_name in used_names:
+                safe_name = f"{index + 1}-{safe_name}"
+            used_names.add(safe_name)
+            path = input_dir / safe_name
             try:
                 raw = base64.b64decode(item.content_base64, validate=True)
             except ValueError as exc:
