@@ -6,7 +6,9 @@ import path from 'path';
 export default defineConfig({
   plugins: [
     react(),
-    fileViewerRenderers({ copyAssets: true }),
+    // Keep the Office renderers in one lazy chunk. Splitting Word and OFD
+    // independently creates a production-only circular-initialization error.
+    fileViewerRenderers({ copyAssets: true, chunkStrategy: 'none' }),
   ],
   resolve: {
     alias: {
