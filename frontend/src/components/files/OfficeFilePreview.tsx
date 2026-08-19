@@ -1,6 +1,10 @@
 import FileViewer from '@file-viewer/react';
 import officePreset from '@file-viewer/preset-office';
 
+const SPREADSHEET_EXTENSIONS = new Set([
+  'xls', 'xlsx', 'xlsm', 'xlsb', 'xlt', 'xltx', 'xltm', 'ods', 'csv', 'tsv',
+]);
+
 export interface OfficeFilePreviewProps {
   file: File;
   filename: string;
@@ -9,6 +13,8 @@ export interface OfficeFilePreviewProps {
 
 /** Lazily loaded so normal pages and native PDF/image previews stay lightweight. */
 export default function OfficeFilePreview({ file, filename, extension }: OfficeFilePreviewProps) {
+  const isSpreadsheet = SPREADSHEET_EXTENSIONS.has(extension);
+
   return (
     <div style={{ width: '100%', height: '100%', minHeight: 0, overflow: 'hidden', background: '#f5f6f8' }}>
       <FileViewer
@@ -22,7 +28,13 @@ export default function OfficeFilePreview({ file, filename, extension }: OfficeF
           theme: 'light',
           locale: 'zh-CN',
           styleIsolation: 'shadow',
-          fit: { mode: 'contain', resize: 'until-interaction' },
+          // Wide spreadsheets must open at a readable 100% scale with native
+          // horizontal scrolling. Fitting the entire sheet can shrink text to
+          // roughly 30%, while page-oriented Word/PPT previews still benefit
+          // from contain-to-view behaviour.
+          fit: isSpreadsheet
+            ? { mode: 'actual', resize: 'initial' }
+            : { mode: 'contain', resize: 'until-interaction' },
           toolbar: {
             position: 'bottom-right',
             download: false,
