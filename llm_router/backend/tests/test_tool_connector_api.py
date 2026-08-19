@@ -1,7 +1,9 @@
 """Tests for tool connector CRUD, spec import, ontology validation."""
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from httpx import AsyncClient
+from httpx import AsyncClient, Request, Response
 
 from app.tools.ontology_validator import validate_ontology
 from app.tools.spec_parser import endpoint_to_skill_definition, parse_spec
@@ -93,6 +95,105 @@ async def test_connector_and_spec_import(client: AsyncClient):
 
     eps = await client.get(f"/api/v1/connectors/{conn_id}/endpoints")
     assert len(eps.json()) >= 2
+
+
+@pytest.mark.asyncio
+async def test_manual_endpoint_test_and_publish_as_chat_skill(client: AsyncClient):
+    org_id = await _make_org(client, "publish-connector-org")
+    conn = await client.post(
+        f"/api/v1/organizations/{org_id}/connectors",
+        json={
+            "name": "库存 ERP",
+            "slug": "inventory-erp",
+            "type": "erp",
+            "base_url": "https://erp.example.com",
+            "auth_type": "apikey",
+            "auth_config": {"header_key": "X-API-Key", "api_key": "secret"},
+        },
+    )
+    assert conn.status_code == 201
+    conn_id = conn.json()["id"]
+
+    endpoint = await client.post(
+        f"/api/v1/connectors/{conn_id}/endpoints",
+        json={
+            "name": "query inventory",
+            "method": "GET",
+            "path": "/inventory/{sku}",
+            "description": "按 SKU 查询库存",
+            "params_schema": {
+                "type": "object",
+                "properties": {"sku": {"type": "string"}, "warehouse": {"type": "string"}},
+                "required": ["sku"],
+            },
+        },
+    )
+    assert endpoint.status_code == 201
+    endpoint_id = endpoint.json()["id"]
+
+    response = Response(
+        200,
+        json={"sku": "SKU001", "warehouse": "上海仓", "available_quantity": 120},
+        request=Request("GET", "https://erp.example.com/inventory/SKU001"),
+    )
+
+    request_mock = AsyncMock(return_value=response)
+
+    class ExternalClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        request = request_mock
+
+    with patch("app.tools.executor.httpx.AsyncClient", ExternalClient):
+        tested = await client.post(
+            f"/api/v1/endpoints/{endpoint_id}/test",
+            json={"params": {"sku": "SKU001", "warehouse": "上海仓"}},
+        )
+    assert tested.status_code == 200
+    assert tested.json()["body"]["available_quantity"] == 120
+    call = request_mock.await_args
+    assert call.args[0] == "GET"
+    assert call.args[1].endswith("/inventory/SKU001")
+    assert call.kwargs["params"] == {"warehouse": "上海仓"}
+    assert call.kwargs["headers"]["X-API-Key"] == "secret"
+
+    published = await client.post(
+        f"/api/v1/connectors/{conn_id}/publish-skill",
+        json={
+            "name": "库存查询助手",
+            "slug": "inventory-query",
+            "description": "查询 ERP 库存",
+            "endpoint_ids": [endpoint_id],
+        },
+    )
+    assert published.status_code == 201
+    folder = published.json()
+    assert folder["scope_type"] == "organization"
+    assert folder["is_installed"] is True
+
+    files = await client.get(f"/api/v1/skill-folders/{folder['id']}/files")
+    assert files.status_code == 200
+    skill_file = await client.get(f"/api/v1/skill-files/{files.json()[0]['id']}")
+    content = skill_file.json()["content"]
+    assert endpoint_id in content
+    assert "query inventory" in content
+
+    duplicate = await client.post(
+        f"/api/v1/connectors/{conn_id}/publish-skill",
+        json={
+            "name": "重复",
+            "slug": "inventory-query",
+            "endpoint_ids": [endpoint_id],
+        },
+    )
+    assert duplicate.status_code == 409
 
 
 # ── Skill + 本体 CRUD ──

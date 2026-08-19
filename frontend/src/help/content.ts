@@ -272,6 +272,15 @@ export const HELP_SECTIONS: HelpSection[] = [
     title: '工具连接器',
     items: [
       {
+        heading: '连接器',
+        paragraphs: ['真实连接 ERP、MES、CRM 等企业系统的 HTTP API。'],
+        bullets: [
+          '填写 Base URL 与鉴权配置，可粘贴 OpenAPI Spec 批量导入端点，也可手工填写方法、路径和参数 JSON Schema。',
+          '端点测试会真实发起请求并展示状态码、耗时与返回 JSON；鉴权密钥加密落库且不回显。',
+          '勾选端点并“发布为 Skill”后，组织成员的聊天智能体即可自动匹配或本轮明确调用。',
+        ],
+      },
+      {
         heading: '数据接口',
         paragraphs: ['独立的数据结构（系统 + 数据接口），按节点作用域管理。左中右三栏：组织架构树 · 系统 · 数据接口。'],
         bullets: [
@@ -286,7 +295,7 @@ export const HELP_SECTIONS: HelpSection[] = [
         bullets: [
           '标准目录包含唯一 SKILL.md，可选 scripts、references、assets 和依赖文件；脚本支持 Python、Node 与 Bash。',
           '支持选择整个 Skill 文件夹或上传 ZIP；安装状态、脚本语言和部分兼容警告会在列表中显示。',
-          '可见技能只进入绑定列表；只有智能体明确绑定后，模型才能按需加载说明并在 Craft 模式执行脚本。',
+          '可见技能进入用户的能力目录；智能体绑定的是默认推荐技能，聊天中仍可临时调用其他有权技能。脚本只在 Craft 模式执行。',
         ],
       },
       {

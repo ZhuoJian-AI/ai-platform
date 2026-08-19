@@ -814,8 +814,13 @@ async def _build_tools(
                 ep = None
             if not (ep and ep.is_active):
                 continue
-            # 命名空间防碰撞：manifest.name 跨技能唯一，ep.name 技能内唯一。
-            tool_name = f"{manifest.name}__{ep.name}"
+            # OpenAI-compatible providers only accept [a-zA-Z0-9_-] tool names.
+            # Imported operationIds are not guaranteed to follow that rule.
+            namespace = re.sub(r"[^a-zA-Z0-9_-]", "_", manifest.name)
+            endpoint_name = re.sub(r"[^a-zA-Z0-9_-]", "_", ep.name)
+            base_name = f"{namespace}__{endpoint_name}".strip("_") or "enterprise_endpoint"
+            endpoint_suffix = str(ep.id).replace("-", "")[:8]
+            tool_name = f"{base_name[:55]}_{endpoint_suffix}"
             # manifest.parameters 含手工策划的 properties 时优先；否则用端点自带 params_schema。
             # 注意 `{"type":"object","properties":{}}` 是 seed 脚本的占位空 schema，
             # 真值判定会把这种占位当成"有手工 schema"，导致端点 schema 被覆盖、LLM 不传参。

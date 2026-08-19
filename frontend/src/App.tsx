@@ -111,8 +111,7 @@ const SUBSYSTEMS: Subsystem[] = [
   {
     key: 'tool_connector', label: '工具连接器', icon: <ToolOutlined />, built: true,
     menu: [
-      // 连接器菜单已隐藏（路由保留供后续启用）；创建/导入/测试入口已下线，记于 TODO.md
-      { path: '/tools/connectors', label: '连接器', icon: <ApiOutlined />, hidden: true },
+      { path: '/tools/connectors', label: '连接器', icon: <ApiOutlined /> },
       { path: '/tools/data-interfaces', label: '数据接口', icon: <ApiOutlined /> },
       { path: '/tools/skills', label: '技能', icon: <ToolOutlined /> },
       { path: '/tools/ontology', label: '本体', icon: <PartitionOutlined /> },

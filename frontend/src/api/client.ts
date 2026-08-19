@@ -879,6 +879,10 @@ export const connectors = {
     request<ToolConnector>(`/api/v1/connectors/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) => request<void>(`/api/v1/connectors/${id}`, { method: 'DELETE' }),
   importSpec: (id: string) => request<ToolEndpoint[]>(`/api/v1/connectors/${id}/import-spec`, { method: 'POST' }),
+  publishSkill: (id: string, data: { name: string; slug: string; description?: string; endpoint_ids: string[] }) =>
+    request<SkillFolder>(`/api/v1/connectors/${id}/publish-skill`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
   listEndpoints: (id: string) => request<ToolEndpoint[]>(`/api/v1/connectors/${id}/endpoints`),
   createEndpoint: (connId: string, data: Partial<ToolEndpoint>) =>
     request<ToolEndpoint>(`/api/v1/connectors/${connId}/endpoints`, { method: 'POST', body: JSON.stringify(data) }),

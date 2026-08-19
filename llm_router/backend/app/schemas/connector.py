@@ -84,3 +84,12 @@ class ToolEndpointRead(OrmModel):
 
 class EndpointTestRequest(BaseModel):
     params: dict = Field(default_factory=dict)
+
+
+class ConnectorSkillPublishRequest(BaseModel):
+    """Publish selected connector endpoints as an organization-scoped Skill."""
+
+    name: str = Field(..., max_length=255)
+    slug: str = Field(..., max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    description: str | None = None
+    endpoint_ids: list[UUID] = Field(..., min_length=1)
