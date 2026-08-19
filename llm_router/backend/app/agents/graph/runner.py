@@ -15,7 +15,8 @@ import asyncio
 import json
 import time
 import uuid
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import structlog
 from sqlalchemy import select
@@ -58,8 +59,10 @@ def _initial_state(agent_id: str, org_id: str, message: str, session_id: str | N
 def _general_initial_state(
     *, org_id: str, user: CurrentUser, task_id: str, message: str, session_id: str | None,
     config: dict, attachment_files: list[dict] | None = None,
+    invoked_skills: list[dict] | None = None,
 ) -> AgentState:
-    """构造 general 模式 initial state：从任务 config 装配资源（空数组=自动匹配，由 load_config 解析）。"""
+    """构造 general 模式 initial state；本轮 Skill 与持久任务配置严格分离。"""
+    invoked = list(invoked_skills or [])
     return {
         "mode": "general",
         "org_id": org_id,
@@ -74,6 +77,10 @@ def _general_initial_state(
         "usage": {"input_tokens": 0, "output_tokens": 0},
         "workspace_id": config.get("workspace_id"),
         "skill_ids": list(config.get("skill_ids") or []),
+        "invoked_skill_ids": [str(item["id"]) for item in invoked],
+        "invoked_skills": invoked,
+        "loaded_skills": [],
+        "executed_skills": [],
         "ontology_ids": list(config.get("ontology_ids") or []),
         "rag_collection_ids": list(config.get("rag_collection_ids") or []),
         "model_alias": config.get("model_alias") or "default",
@@ -88,9 +95,15 @@ def _general_initial_state(
 
 
 def _user_message_metadata(initial: AgentState) -> dict:
-    """持久化本轮结构化附件快照；无附件时保持历史消息 metadata 为空。"""
+    """持久化本轮输入快照；历史记录不反向影响后续运行。"""
     attachments = list(initial.get("attachment_files") or [])
-    return {"attachments": attachments} if attachments else {}
+    invoked = list(initial.get("invoked_skills") or [])
+    metadata: dict = {}
+    if attachments:
+        metadata["attachments"] = attachments
+    if invoked:
+        metadata["invoked_skills"] = invoked
+    return metadata
 
 
 def _config(session_id: str) -> dict:
@@ -190,12 +203,14 @@ async def run_general_agent(
     db: Any,
     request: Any,
     attachment_files: list[dict] | None = None,
+    invoked_skills: list[dict] | None = None,
 ) -> dict:
     """非流式：终端通用智能体执行，返回最终 state 摘要。"""
     start = time.monotonic()
     initial = _general_initial_state(org_id=org_id, user=user, task_id=str(task.id),
                                      message=message, session_id=session_id, config=config,
-                                     attachment_files=attachment_files)
+                                     attachment_files=attachment_files,
+                                     invoked_skills=invoked_skills)
     lg_config = _config(initial["session_id"])
     ctx = _general_context(db, request, user, task)
 
@@ -239,6 +254,7 @@ async def stream_general_agent(
     db: Any,
     request: Any,
     attachment_files: list[dict] | None = None,
+    invoked_skills: list[dict] | None = None,
 ) -> Response:
     """流式：终端通用智能体执行——后台 detach 跑，SSE 回放 + 续接 live。
 
@@ -258,6 +274,7 @@ async def stream_general_agent(
             org_id=org_id, user=user, task_id=task_id,
             message=message, session_id=session_id_used, config=config,
             attachment_files=attachment_files,
+            invoked_skills=invoked_skills,
         )
         lg_config = _config(initial["session_id"])
         bg_task = asyncio.create_task(
@@ -275,7 +292,7 @@ async def stream_general_agent(
 
 
 async def _run_graph_bg(
-    handle: "run_registry.RunHandle", graph, *, initial: AgentState, lg_config: dict,
+    handle: run_registry.RunHandle, graph, *, initial: AgentState, lg_config: dict,
     org_id: str, user: CurrentUser, task: Any, session_id: str,
 ) -> None:
     """后台执行图：独立 session，消费 graph.astream 事件，publish + 落库 + 收口。
@@ -387,7 +404,7 @@ async def _persist_run_events(
 
 
 async def _finalize_bg_error(
-    handle: "run_registry.RunHandle", task: Any, run_id: int | None,
+    handle: run_registry.RunHandle, task: Any, run_id: int | None,
     msg: str, run_error: str, session_id: str, start: float,
 ) -> None:
     """后台 runner 异常/取消收口：投递 error + final，并把 agent_runs.status 改 error。
@@ -419,7 +436,7 @@ async def _finalize_bg_error(
     run_registry.mark_done(handle, final_evt, error=run_error)
 
 
-async def _sse_replay_and_tail(handle: "run_registry.RunHandle") -> AsyncIterator[str]:
+async def _sse_replay_and_tail(handle: run_registry.RunHandle) -> AsyncIterator[str]:
     """live handle 的 SSE body：回放历史 buffer → tail queue 到 done 哨兵。"""
     # 回放历史（含已 final，若 done）
     for payload in list(handle.buffer):
@@ -449,7 +466,8 @@ async def stream_persisted_run(db: Any, run_id: int, *, interrupted: bool = Fals
         for r in rows:
             yield f"data: {json.dumps(r.payload, ensure_ascii=False)}\n\n"
         if interrupted:
-            yield f"data: {json.dumps({'type': 'final', 'run_id': run_id, 'interrupted': True}, ensure_ascii=False)}\n\n"
+            final_payload = {"type": "final", "run_id": run_id, "interrupted": True}
+            yield f"data: {json.dumps(final_payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(body(), status_code=200, media_type="text/event-stream", headers=_SSE_HEADERS)
 

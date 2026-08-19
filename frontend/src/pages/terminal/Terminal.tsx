@@ -77,6 +77,14 @@ interface ChatMsg {
   // 该轮用户消息发送时选中的智能体名（逐次覆盖，不落库；仅本轮 live 气泡展示，历史回放无）。
   agentName?: string | null;
   attachments?: MessageAttachment[];
+  invokedSkills?: InvokedSkill[];
+}
+
+interface InvokedSkill {
+  id: string;
+  name: string;
+  slug: string;
+  scope_type?: string;
 }
 
 interface MessageAttachment {
@@ -130,6 +138,20 @@ function messageAttachments(metadata: Record<string, unknown> | undefined): Mess
   });
 }
 
+function messageInvokedSkills(metadata: Record<string, unknown> | undefined): InvokedSkill[] {
+  const raw = metadata?.invoked_skills;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const value = item as Record<string, unknown>;
+    const id = typeof value.id === 'string' ? value.id : '';
+    const name = typeof value.name === 'string' ? value.name : '';
+    const slug = typeof value.slug === 'string' ? value.slug : '';
+    if (!id || !name || !slug) return [];
+    return [{ id, name, slug, scope_type: typeof value.scope_type === 'string' ? value.scope_type : undefined }];
+  });
+}
+
 /** 把后端持久化的 traces 数组还原为执行过程 blocks（历史回放用）。
  *  skill → tool_call block（复用 ToolCard 展示）；其余四类 → trace block（TraceChip 展示）。
  *  仅还原资源调用痕迹；终答正文由调用方末尾补一条 text block（见上方回放 map）。 */
@@ -163,7 +185,11 @@ function restoreChat(messages: TerminalTaskMessage[]): ChatMsg[] {
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .map((m) => {
       if (m.role !== 'assistant') {
-        return { role: 'user', content: m.content, id: m.id, attachments: messageAttachments(m.metadata) };
+        return {
+          role: 'user', content: m.content, id: m.id,
+          attachments: messageAttachments(m.metadata),
+          invokedSkills: messageInvokedSkills(m.metadata),
+        };
       }
       const traces = (m.metadata?.traces as Record<string, unknown>[] | undefined) ?? [];
       const blocks = traces.length ? tracesToBlocks(traces) : undefined;
@@ -182,7 +208,7 @@ function dropTurnFromChat(chat: ChatMsg[], userMsgId: string): ChatMsg[] {
   return next;
 }
 
-const COMPOSER_PLACEHOLDER = '描述你要完成的任务…通用智能体将调用技能、读写工作空间文件、参考知识库与记忆来执行。';
+const COMPOSER_PLACEHOLDER = '描述你要完成的任务…通用智能体可按需调用技能、处理工作空间文件并使用记忆；RAG仅随专业智能体固定加载。';
 
 /** 执行模式：Craft 自主执行 / Ask 只读问答 / Plan 出方案不执行。 */
 const EXEC_MODES: { key: TaskConfig['exec_mode']; label: string; desc: string }[] = [
@@ -222,6 +248,7 @@ export default function Terminal() {
   // 新建任务作曲器
   const [composerOpen, setComposerOpen] = useState(true);
   const [input, setInput] = useState('');
+  const [inputSkills, setInputSkills] = useState<InvokedSkill[]>([]);
   const [inputAttachments, setInputAttachments] = useState<ComposerAttachment[]>([]);
   const [draftAttachmentKey, setDraftAttachmentKey] = useState(() => crypto.randomUUID());
   const [config, setConfig] = useState<TaskConfig>(DEFAULT_CONFIG);
@@ -234,6 +261,7 @@ export default function Terminal() {
 
   // 跟随输入（选中任务后的对话）
   const [followUp, setFollowUp] = useState('');
+  const [followUpSkills, setFollowUpSkills] = useState<InvokedSkill[]>([]);
   const [followUpAttachments, setFollowUpAttachments] = useState<ComposerAttachment[]>([]);
 
   // 浏览器抽屉：点击对话内容中的文件/链接时弹出，内嵌浏览器可预览网页与文档
@@ -446,13 +474,15 @@ export default function Terminal() {
     }
   }, [dispatchEvent]);
 
-  const runStream = useCallback(async (taskId: string, msg: string, attachments: MessageAttachment[] = []) => {
+  const runStream = useCallback(async (
+    taskId: string, msg: string, attachments: MessageAttachment[] = [], invokedSkills: InvokedSkill[] = [],
+  ) => {
     // 乐观载入：立即显示用户消息 + 一个「思考中」回合，第一时间给反馈
     // 该轮若选了智能体，把智能体名挂到用户消息上，气泡内按技能 chip 同款展示（逐次覆盖、不落库）。
     const turnAgentName = selectedAgentId ? agentLabel : null;
     setChat((c) => [
       ...c,
-      { role: 'user', content: msg, agentName: turnAgentName, attachments },
+      { role: 'user', content: msg, agentName: turnAgentName, attachments, invokedSkills },
       { role: 'assistant', content: '', blocks: [{ kind: 'phase', index: 0 }] },
     ]);
     setTraceLog([]);
@@ -462,6 +492,7 @@ export default function Terminal() {
     try {
       const resp = await terminal.runTaskStream(
         taskId, msg, controller.signal, selectedAgentId, attachments.map((item) => item.file_id),
+        invokedSkills.map((item) => item.id),
       );
       if (!resp.ok || !resp.body) {
         const err = await resp.json().catch(() => ({}));
@@ -545,7 +576,10 @@ export default function Terminal() {
   // 统一任务选择入口：切到不同任务前先断开当前 SSE 读端，保证切回运行中任务时可重连回放。
   const selectTask = useCallback(async (id: string | null) => {
     if (id !== selectedId) abortActiveStream();
-    if (id !== selectedId) setFollowUpAttachments([]);
+    if (id !== selectedId) {
+      setFollowUpAttachments([]);
+      setFollowUpSkills([]);
+    }
     if (id) {
       // 强制抓最新任务数据再切换，避免用 react-query 旧缓存回放：
       // 任务首次选中（createTask+runStream 起步瞬间）抓到的缓存里 run_status 尚非 running、
@@ -584,13 +618,15 @@ export default function Terminal() {
 
   const startTask = async () => {
     const readyAttachments = inputAttachments.filter((item) => item.status === 'ready' && item.file_id);
-    if ((!input.trim() && !readyAttachments.length) || streaming) return;
+    if ((!input.trim() && !readyAttachments.length && !inputSkills.length) || streaming) return;
     if (!config.model_alias) {
       message.warning('请先选择模型后再执行');
       setCfgContext('composer'); setCfgOpen(true);
       return;
     }
-    const msg = input.trim() || `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`;
+    const msg = input.trim() || (readyAttachments.length
+      ? `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`
+      : `请使用本轮选择的技能：${inputSkills.map((item) => item.name).join('、')}`);
     const attachmentSnapshots: MessageAttachment[] = readyAttachments.map(({ file_id, workspace_id, path, name }) => ({
       file_id, workspace_id, path, name,
     }));
@@ -604,8 +640,10 @@ export default function Terminal() {
       setComposerOpen(false);
       setSelectedId(task.id);
       setInput('');
+      const invokedSkills = [...inputSkills];
+      setInputSkills([]);
       setInputAttachments([]);
-      await runStream(task.id, msg, attachmentSnapshots);
+      await runStream(task.id, msg, attachmentSnapshots, invokedSkills);
     } catch (e) {
       message.error((e as Error).message);
     }
@@ -613,19 +651,23 @@ export default function Terminal() {
 
   const sendFollowUp = async () => {
     const readyAttachments = followUpAttachments.filter((item) => item.status === 'ready' && item.file_id);
-    if (!selectedId || (!followUp.trim() && !readyAttachments.length) || streaming) return;
+    if (!selectedId || (!followUp.trim() && !readyAttachments.length && !followUpSkills.length) || streaming) return;
     if (!taskConfig.model_alias) {
       message.warning('请先选择模型后再执行');
       setCfgContext('chat'); setCfgOpen(true);
       return;
     }
-    const msg = followUp.trim() || `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`;
+    const msg = followUp.trim() || (readyAttachments.length
+      ? `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`
+      : `请使用本轮选择的技能：${followUpSkills.map((item) => item.name).join('、')}`);
     const attachmentSnapshots: MessageAttachment[] = readyAttachments.map(({ file_id, workspace_id, path, name }) => ({
       file_id, workspace_id, path, name,
     }));
+    const invokedSkills = [...followUpSkills];
     setFollowUp('');
+    setFollowUpSkills([]);
     setFollowUpAttachments([]);
-    await runStream(selectedId, msg, attachmentSnapshots);
+    await runStream(selectedId, msg, attachmentSnapshots, invokedSkills);
   };
 
   const newTask = () => {
@@ -637,8 +679,10 @@ export default function Terminal() {
     setTraceLog([]);
     setComposerOpen(true);
     setInput('');
+    setInputSkills([]);
     setInputAttachments([]);
     setFollowUpAttachments([]);
+    setFollowUpSkills([]);
     setDraftAttachmentKey(crypto.randomUUID());
     setConfig(DEFAULT_CONFIG);
     setView('assistant');
@@ -929,6 +973,7 @@ export default function Terminal() {
             ) : composerOpen ? (
               <HomeView
                 input={input} setInput={setInput}
+                invokedSkills={inputSkills} setInvokedSkills={setInputSkills}
                 attachments={inputAttachments} setAttachments={setInputAttachments}
                 attachmentScopeKey={`草稿-${draftAttachmentKey}`}
                 placeholder={COMPOSER_PLACEHOLDER}
@@ -946,6 +991,7 @@ export default function Terminal() {
                 taskTitle={selectedTask?.title || '任务对话'}
                 chat={chat} streaming={streaming}
                 followUp={followUp} setFollowUp={setFollowUp}
+                invokedSkills={followUpSkills} setInvokedSkills={setFollowUpSkills}
                 attachments={followUpAttachments} setAttachments={setFollowUpAttachments}
                 onSend={sendFollowUp} onStop={stopStream}
                 onTogglePanel={() => setDrawerOpen(true)}
@@ -982,7 +1028,11 @@ export default function Terminal() {
               {
                 key: 'resources',
                 label: <span><SettingOutlined /> 资源</span>,
-                children: <ResourcePanel taskConfig={taskConfig} resources={resources} />,
+                children: <ResourcePanel
+                  taskConfig={taskConfig}
+                  resources={resources}
+                  agent={agentsList.find((item) => item.id === selectedAgentId)}
+                />,
               },
               {
                 key: 'files',
@@ -1068,7 +1118,7 @@ export default function Terminal() {
 
 export interface ComposerInputHandle {
   /** 插入一个技能引用 chip：有 pending / 则替换之，否则插在光标处 */
-  insertSkillChip: (slug: string, name: string) => void;
+  insertSkillChip: (id: string, slug: string, name: string) => void;
   /** 插入一个工作空间文件引用 chip：有 pending @ 则替换之，否则插在光标处 */
   insertFileChip: (fileId: string, label: string) => void;
   /** / 或 @ 触发后未选中即关闭：剥离那个孤立的触发符 */
@@ -1080,6 +1130,7 @@ type PendingMention = { node: Text; offset: number; ch: '/' | '@' };
 
 const MentionInput = forwardRef<ComposerInputHandle, {
   value: string; onChange: (v: string) => void; placeholder: string;
+  onSkillIdsChange: (ids: string[]) => void;
   onSlashTrigger: () => void; onAtTrigger: () => void; onSubmit: () => void; canSend: boolean;
 }>(function MentionInput(props, ref) {
   const { value, placeholder } = props;
@@ -1117,6 +1168,10 @@ const MentionInput = forwardRef<ComposerInputHandle, {
       el.textContent = '';
     }
     latest.current.onChange(text);
+    latest.current.onSkillIdsChange(Array.from(
+      el.querySelectorAll<HTMLElement>('[data-skill-id]'),
+      (chip) => chip.getAttribute('data-skill-id') || '',
+    ).filter((id, index, all) => !!id && all.indexOf(id) === index));
   };
 
   // 外部 value 变化（如发送后清空）→ 重建 DOM
@@ -1170,9 +1225,10 @@ const MentionInput = forwardRef<ComposerInputHandle, {
       el.normalize();
       syncToState();
     },
-    insertSkillChip: (slug, name) => {
+    insertSkillChip: (id, slug, name) => {
       const chip = document.createElement('span');
       chip.setAttribute('contenteditable', 'false');
+      chip.setAttribute('data-skill-id', id);
       chip.setAttribute('data-skill-slug', slug);
       chip.className = 'skill-ref-chip';
       chip.textContent = name;
@@ -1267,6 +1323,8 @@ const MentionInput = forwardRef<ComposerInputHandle, {
 
 function TaskInputBox(props: {
   value: string; setValue: (v: string) => void;
+  invokedSkills: InvokedSkill[];
+  setInvokedSkills: Dispatch<SetStateAction<InvokedSkill[]>>;
   attachments: ComposerAttachment[];
   setAttachments: Dispatch<SetStateAction<ComposerAttachment[]>>;
   attachmentScopeKey: string;
@@ -1281,7 +1339,7 @@ function TaskInputBox(props: {
   maxWidth?: number; sendLabel?: string;
 }) {
   const {
-    value, setValue, attachments, setAttachments, attachmentScopeKey,
+    value, setValue, invokedSkills, setInvokedSkills, attachments, setAttachments, attachmentScopeKey,
     onSend, onStop, streaming, placeholder, config, resources,
     onSetExecMode, onOpenConfig, onImportSkill, agentLabel, maxWidth = 800, sendLabel = '开始执行',
   } = props;
@@ -1289,11 +1347,10 @@ function TaskInputBox(props: {
   const wsName = (effectiveWorkspaceId && resources?.workspaces.find((w) => w.id === effectiveWorkspaceId)?.name) || null;
   const hasReadyAttachment = attachments.some((item) => item.status === 'ready');
   const attachmentsReady = attachments.every((item) => item.status === 'ready');
-  const canSend = (!!value.trim() || hasReadyAttachment) && attachmentsReady && !streaming;
+  const canSend = (!!value.trim() || hasReadyAttachment || invokedSkills.length > 0) && attachmentsReady && !streaming;
 
   // ── 引用下拉（向上）：技能（/ 或 chip）/ 工作空间文件（@）共用一个 Popover ──
   const inputRef = useRef<ComposerInputHandle>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const attachmentsRef = useRef(attachments);
   const uploadControllersRef = useRef(new Map<string, AbortController>());
   const activeUploadsRef = useRef(0);
@@ -1371,7 +1428,7 @@ function TaskInputBox(props: {
 
   const onPick = (s: SkillFolderSummary) => {
     setQuery(''); setPickerOpen(false);
-    inputRef.current?.insertSkillChip(s.slug, s.name);
+    inputRef.current?.insertSkillChip(s.id, s.slug, s.name);
   };
   const onPickFile = (f: WorkspaceFileSummary) => {
     setQuery(''); setPickerOpen(false);
@@ -1624,16 +1681,6 @@ function TaskInputBox(props: {
         }}
         style={{ position: 'relative', border: `1px solid ${dragActive ? WB.primary : WB.border}`, borderRadius: 12, boxShadow: dragActive ? '0 0 0 3px rgba(99,102,241,0.12)' : '0 1px 2px rgba(0,0,0,0.04)', background: '#fff', transition: 'border-color .15s, box-shadow .15s' }}
       >
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          hidden
-          onChange={(event: ChangeEvent<HTMLInputElement>) => {
-            if (event.target.files?.length) void queueFiles(event.target.files);
-            event.target.value = '';
-          }}
-        />
         {dragActive && (
           <div style={{ position: 'absolute', inset: 0, zIndex: 5, borderRadius: 11, background: 'rgba(238,240,247,0.94)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: WB.primary, fontSize: 14, fontWeight: 600, pointerEvents: 'none' }}>
             <UploadOutlined style={{ marginRight: 8 }} />松开上传到当前工作空间
@@ -1673,6 +1720,10 @@ function TaskInputBox(props: {
         <MentionInput
           ref={inputRef}
           value={value} onChange={setValue}
+          onSkillIdsChange={(ids) => setInvokedSkills(ids.flatMap((id) => {
+            const skill = skills.find((item) => item.id === id);
+            return skill ? [{ id: skill.id, name: skill.name, slug: skill.slug, scope_type: skill.scope_type }] : [];
+          }))}
           placeholder={placeholder}
           onSlashTrigger={() => openPicker('skill')}
           onAtTrigger={() => openPicker('file')}
@@ -1704,19 +1755,31 @@ function TaskInputBox(props: {
             <span style={{ width: 1, height: 14, background: WB.border }} />
             <span data-picker-trigger="skill" style={chipBtnStyle}
               onClick={() => { if (pickerOpen && pickerMode === 'skill') closePicker(false); else openPicker('skill'); }}
-              title="引用技能（输入 / 也可唤出，再次点击关闭）">
-              <AppstoreOutlined /> 技能
+              title="明确指定本轮使用的Skill；不修改智能体配置（输入 / 也可唤出）">
+              <AppstoreOutlined /> 本轮调用技能
             </span>
             <span data-picker-trigger="file" style={chipBtnStyle}
               onClick={() => { if (pickerOpen && pickerMode === 'file') closePicker(false); else openPicker('file'); }}
               title="引用工作空间文件（输入 @ 也可唤出，再次点击关闭）">
               <FileTextOutlined /> 文件
             </span>
-            <span style={chipBtnStyle}
-              onClick={() => fileInputRef.current?.click()}
-              title="上传附件到当前工作空间（可多选）">
+            <label style={{ ...chipBtnStyle, position: 'relative', overflow: 'hidden' }}
+              title="从电脑选择新文件并上传到当前工作空间（可多选）">
               <UploadOutlined /> 上传附件
-            </span>
+              <input
+                type="file"
+                multiple
+                aria-label="选择上传附件"
+                style={{
+                  position: 'absolute', inset: 0, width: '100%', height: '100%',
+                  opacity: 0, cursor: 'pointer', fontSize: 0,
+                }}
+                onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                  if (event.target.files?.length) void queueFiles(event.target.files);
+                  event.target.value = '';
+                }}
+              />
+            </label>
             <span
               onClick={onOpenConfig}
               title="任务资源配置"
@@ -1759,6 +1822,8 @@ function TaskInputBox(props: {
 
 function HomeView(props: {
   input: string; setInput: (v: string) => void; placeholder: string;
+  invokedSkills: InvokedSkill[];
+  setInvokedSkills: Dispatch<SetStateAction<InvokedSkill[]>>;
   attachments: ComposerAttachment[];
   setAttachments: Dispatch<SetStateAction<ComposerAttachment[]>>;
   attachmentScopeKey: string;
@@ -1769,7 +1834,7 @@ function HomeView(props: {
   agentLabel: string;
 }) {
   const {
-    input, setInput, attachments, setAttachments, attachmentScopeKey, placeholder,
+    input, setInput, invokedSkills, setInvokedSkills, attachments, setAttachments, attachmentScopeKey, placeholder,
     config, resources, onSetExecMode, onOpenConfig, onImportSkill, onStart, streaming, agentLabel,
   } = props;
   return (
@@ -1795,6 +1860,7 @@ function HomeView(props: {
         {/* 输入框 */}
         <TaskInputBox
           value={input} setValue={setInput}
+          invokedSkills={invokedSkills} setInvokedSkills={setInvokedSkills}
           attachments={attachments} setAttachments={setAttachments}
           attachmentScopeKey={attachmentScopeKey}
           onSend={onStart} streaming={streaming}
@@ -1878,6 +1944,8 @@ function ChatView(props: {
   taskTitle: string;
   chat: ChatMsg[]; streaming: boolean;
   followUp: string; setFollowUp: (v: string) => void;
+  invokedSkills: InvokedSkill[];
+  setInvokedSkills: Dispatch<SetStateAction<InvokedSkill[]>>;
   attachments: ComposerAttachment[];
   setAttachments: Dispatch<SetStateAction<ComposerAttachment[]>>;
   onSend: () => void; onStop: () => void;
@@ -1895,7 +1963,8 @@ function ChatView(props: {
   agentLabel: string;
 }) {
   const {
-    taskTitle, chat, streaming, followUp, setFollowUp, attachments, setAttachments,
+    taskTitle, chat, streaming, followUp, setFollowUp, invokedSkills, setInvokedSkills,
+    attachments, setAttachments,
     onSend, onStop, onNew, config, resources, onSetExecMode, onOpenConfig,
     onImportSkill, selectedId, onLink, fileLinks, fileRefMap, fileRefsLoaded, onDeleteTurn, agentLabel,
   } = props;
@@ -1930,6 +1999,8 @@ function ChatView(props: {
           {chat.map((m, i) => {
             const isUser = m.role === 'user';
             const isLast = i === chat.length - 1;
+            const messageSkillMap = new Map(skillRefMap);
+            (m.invokedSkills ?? []).forEach((skill) => messageSkillMap.set(skill.slug, skill.name));
             // 仅 user 消息且非流式进行中、且携带 DB id（历史回放或流式结束后回填）的轮次可删
             const canDelete = isUser && !!m.id && !streaming;
             const showDel = canDelete && hoveredTurn === i;
@@ -1977,7 +2048,7 @@ function ChatView(props: {
                           })}
                         </div>
                       )}
-                      <div style={{ fontSize: 14, color: '#1f2937', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{renderUserContent(m.content, skillRefMap, fileRefMap, m.agentName)}</div>
+                      <div style={{ fontSize: 14, color: '#1f2937', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{renderUserContent(m.content, messageSkillMap, fileRefMap, m.agentName)}</div>
                     </div>
                   </>
                 ) : (
@@ -1994,6 +2065,7 @@ function ChatView(props: {
         <div style={{ maxWidth: 820, margin: '0 auto' }}>
           <TaskInputBox
             value={followUp} setValue={setFollowUp}
+            invokedSkills={invokedSkills} setInvokedSkills={setInvokedSkills}
             attachments={attachments} setAttachments={setAttachments}
             attachmentScopeKey={selectedId || '任务未选择'}
             onSend={onSend} onStop={onStop} streaming={streaming}
@@ -2345,7 +2417,9 @@ function escapeRegExp(s: string): string {
 
 // ── 右栏子面板 ──────────────────────────────────────────────────────────
 
-function ResourcePanel({ taskConfig, resources }: { taskConfig: TaskConfig; resources?: TerminalResources }) {
+function ResourcePanel({ taskConfig, resources, agent }: {
+  taskConfig: TaskConfig; resources?: TerminalResources; agent?: TerminalAgent;
+}) {
   const ws = resources?.workspaces.find((w) => w.id === taskConfig.workspace_id);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -2354,16 +2428,18 @@ function ResourcePanel({ taskConfig, resources }: { taskConfig: TaskConfig; reso
         <div><Tag color={ws ? 'blue' : 'default'}>{ws ? ws.name : '未选择'}</Tag></div>
       </div>
       <div>
-        <Typography.Text type="secondary">技能</Typography.Text>
-        <div><Tag color="blue">由所选智能体显式绑定（可选库 {resources?.skills.length ?? 0}）</Tag></div>
+        <Typography.Text type="secondary">智能体默认 Skill</Typography.Text>
+        <div><Tag color="blue">默认推荐 {agent?.skill_ids.length ?? 0} · 用户可用 {resources?.skills.length ?? 0}</Tag></div>
       </div>
       <div>
         <Typography.Text type="secondary">本体</Typography.Text>
         <div><Tag color="blue">按权限自动注入 {resources?.ontologies.length ?? 0}</Tag></div>
       </div>
       <div>
-        <Typography.Text type="secondary">知识库</Typography.Text>
-        <div><Tag color="blue">由所选智能体显式绑定（可选库 {resources?.rags.length ?? 0}）</Tag></div>
+        <Typography.Text type="secondary">智能体固定 RAG</Typography.Text>
+        <div><Tag color={agent?.rag_collection_ids.length ? 'blue' : 'default'}>
+          {agent ? `固定绑定 ${agent.rag_collection_ids.length}` : '通用智能体不加载 RAG'}
+        </Tag></div>
       </div>
       <div>
         <Typography.Text type="secondary">长期记忆</Typography.Text>

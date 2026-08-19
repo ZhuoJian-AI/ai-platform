@@ -308,7 +308,7 @@ export default function Agents() {
                     options={ragList?.map((c) => ({ value: c.id, label: c.name })) ?? []}
                   />
                 </Form.Item>
-                <Form.Item name="skill_ids" label="绑定技能（可多选，仅此智能体可调用）">
+                <Form.Item name="skill_ids" label="默认推荐技能（模型可自动调用，聊天中仍可临时调用其他有权技能）">
                   <Select
                     mode="multiple" allowClear showSearch placeholder="无"
                     optionFilterProp="label"
@@ -352,7 +352,7 @@ export default function Agents() {
               options={ragList?.map((c) => ({ value: c.id, label: c.name })) ?? []}
             />
           </Form.Item>
-          <Form.Item name="skill_ids" label="绑定技能（可多选）">
+          <Form.Item name="skill_ids" label="默认推荐技能（可多选）">
             <Select
               mode="multiple" allowClear showSearch placeholder="无"
               optionFilterProp="label"

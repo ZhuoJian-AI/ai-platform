@@ -37,6 +37,17 @@ class AgentState(TypedDict, total=False):
     judge_config: dict
     judge_template_id: str | None
     skill_ids: list[str]
+    # 当前用户本轮可用的 Skill 精简目录；顺序为：明确调用、智能体默认、其他有权 Skill。
+    skill_catalog: list[dict]
+    # 智能体固定配置中的默认推荐 Skill（不构成排他白名单）。
+    default_skills: list[dict]
+    # 用户本轮通过选择器或唯一 /slug 明确调用的 Skill 快照。
+    invoked_skill_ids: list[str]
+    invoked_skills: list[dict]
+    skill_slug_ambiguities: list[str]
+    # 本轮模型实际载入说明与实际执行脚本/API 的记录，随 assistant 消息 metadata 持久化。
+    loaded_skills: list[dict]
+    executed_skills: list[dict]
     temperature: float | None
     max_tokens: int | None
     workspace_id: str | None
@@ -44,8 +55,7 @@ class AgentState(TypedDict, total=False):
     # general 模式多资源装配（空数组 = 按用户权限自动匹配全集，由 load_config 解析填充）
     ontology_ids: list[str]
     rag_collection_ids: list[str]
-    # general 模式：用户在消息中以 /slug 引用的技能（load_config 解析填充，[{name,slug}]）。
-    # agent_loop 据此注入「主动调用」指令——技能本身仍按用户权限全量装载为可调用工具。
+    # general 模式：当前轮明确调用的技能（结构化 UUID 优先，唯一 /slug 兼容）。
     referenced_skills: list[dict]
     # general 模式：用户在消息中以 @<file_id> 引用的工作空间文件 id（load_config 解析填充）。
     # agent_loop 读取这些文件内容注入 system prompt（仿本体/RAG），二进制文件只标注不内联。

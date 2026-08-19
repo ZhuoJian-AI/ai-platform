@@ -30,7 +30,7 @@ const SCOPE_LABEL: Record<string, string> = Object.fromEntries(
 
 /** 任务资源配置抽屉：工作空间 / 模型。
 
- * Skill / RAG 在智能体页面绑定；本体与长期记忆按用户权限自动装配。
+ * RAG 固定绑定在智能体；智能体 Skill 是默认推荐，聊天仍可按当前轮选择其他有权 Skill。
  */
 export default function TaskConfigDrawer({ open, onApply, resources, config, models, agents, agentId, onAgentChange }: Props) {
   const [local, setLocal] = useState<TaskConfig>(config);
@@ -81,7 +81,7 @@ export default function TaskConfigDrawer({ open, onApply, resources, config, mod
       styles={{ body: { padding: '18px 20px', background: '#fafafa' } }}
     >
       <Typography.Text>
-        工作空间与模型在这里选择；系统提示词、RAG 和 Skill 由所选智能体决定。未选择智能体时不会加载任何 Skill 或 RAG；本体与长期记忆仍按你的权限自动装配。
+        工作空间与模型在这里选择；系统提示词和固定 RAG 由所选智能体决定。Skill 可来自智能体默认推荐，也可在聊天中仅对当前轮明确调用；本体与长期记忆仍按你的权限自动装配。
       </Typography.Text>
 
       <Divider orientation="left">工作空间</Divider>
@@ -116,8 +116,8 @@ export default function TaskConfigDrawer({ open, onApply, resources, config, mod
       />
       <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
         {agentId
-          ? '该次执行将使用所选智能体的系统提示词、RAG 与已绑定 Skill（逐次覆盖，不写入任务配置）。'
-          : '不绑定智能体 → 走通用智能体（系统默认提示词 + 本体/记忆，不加载 Skill 或 RAG）。'}
+          ? '该次执行将使用所选智能体的系统提示词、固定 RAG 与默认推荐 Skill；聊天仍可临时调用其他有权 Skill。'
+          : `通用智能体不加载 RAG；仍可从 ${resources?.skills.length ?? 0} 个有权 Skill 中自动匹配或本轮明确调用。`}
       </Typography.Text>
     </Drawer>
   );

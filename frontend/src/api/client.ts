@@ -955,6 +955,10 @@ export interface SkillFile extends SkillFileMeta {
 export interface SkillFolderSummary {
   id: string; name: string; slug: string;
   scope_type: string; scope_id: string | null;
+  description: string;
+  is_executable: boolean;
+  install_status: string;
+  package_format: string;
 }
 
 /** /terminal/workspace-files 返回的工作空间文件轻量摘要（跨全部可访问工作空间，供 @ 引用下拉）。 */
@@ -1205,7 +1209,7 @@ export interface TerminalModels {
 
 export interface TaskConfig {
   workspace_id: string | null;
-  // Skill/RAG 由本次选中的智能体显式绑定；本体与长期记忆仍按用户权限装配。
+  // RAG 固定来自本次选中的智能体；Skill 绑定只是默认推荐，聊天可本轮调用其他有权 Skill。
   model_alias: string | null;
   /** 执行模式：craft（自主多步执行）/ ask（只读单轮问答）/ plan（出方案不执行） */
   exec_mode: 'craft' | 'ask' | 'plan';
@@ -1218,6 +1222,8 @@ export interface TerminalAgent {
   id: string; name: string; slug: string;
   scope_type: string; scope_id: string | null;
   model_alias: string; description: string | null;
+  skill_ids: string[];
+  rag_collection_ids: string[];
 }
 
 export interface TerminalTask {
@@ -1359,21 +1365,25 @@ export const terminal = {
   /** 删除一整轮对话（user+assistant 消息），并清理仅本轮产出、未被后续轮次覆盖的工作空间文件。 */
   deleteTaskMessage: (taskId: string, messageId: string) =>
     userRequest<void>(`/api/v1/terminal/tasks/${taskId}/messages/${messageId}`, { method: 'DELETE' }),
-  runTask: (id: string, message: string, template_agent_id?: string | null, attachment_file_ids: string[] = []) =>
+  runTask: (
+    id: string, message: string, template_agent_id?: string | null,
+    attachment_file_ids: string[] = [], invoked_skill_ids: string[] = [],
+  ) =>
     userRequest<{ assistant: string; steps: unknown[]; usage: Record<string, number>; run_id: number; latency_ms: number }>(
       `/api/v1/terminal/tasks/${id}/run`,
-      { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null, attachment_file_ids }) },
+      { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null, attachment_file_ids, invoked_skill_ids }) },
     ),
   /** 流式执行：返回原始 Response，由调用方解析 SSE（仿 AgentPlayground）。
    *  template_agent_id 逐次覆盖（不落库）：undefined=沿用 task.config；null=通用；UUID=该次用此智能体。 */
   runTaskStream: (
     id: string, message: string, signal: AbortSignal,
     template_agent_id?: string | null, attachment_file_ids: string[] = [],
+    invoked_skill_ids: string[] = [],
   ) =>
     fetch(`${BASE_URL}/api/v1/terminal/tasks/${id}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem(USER_TOKEN_KEY) || ''}` },
-      body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null, attachment_file_ids }),
+      body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null, attachment_file_ids, invoked_skill_ids }),
       signal,
     }),
   /** resume：重连/回放一个运行中或已完成的 run（后台 detach 执行，刷新不丢）。 */

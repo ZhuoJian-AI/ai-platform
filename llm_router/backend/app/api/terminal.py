@@ -45,7 +45,7 @@ from app.models.department import Department
 from app.models.ontology import OntologyFile, OntologyFolder
 from app.models.organization import Organization
 from app.models.rag import RagCollection, RagDocument, RagFolder
-from app.models.skill import SkillFolder
+from app.models.skill import SkillFolder, SkillVersion
 from app.models.task import Task
 from app.models.team import Team
 from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
@@ -185,8 +185,52 @@ from app.services.workspace_preview_service import (
     OriginalPreviewError,
     build_original_preview,
 )
+from app.tools.skill_manifest import parse_skill_manifest
 
 router = APIRouter()
+
+
+async def _skill_summaries(db: AsyncSession, folders: list[SkillFolder]) -> list[dict]:
+    """Build the compact, executable Skill catalog shared by the UI and runtime request snapshots."""
+    active_ids = [UUID(str(folder.active_version_id)) for folder in folders if folder.active_version_id]
+    versions = list((await db.execute(select(SkillVersion).where(
+        SkillVersion.id.in_(active_ids),
+    ))).scalars().all()) if active_ids else []
+    by_version = {str(version.id): version for version in versions}
+    summaries: list[dict] = []
+    for folder in folders:
+        version = by_version.get(str(folder.active_version_id)) if folder.active_version_id else None
+        description = ""
+        is_executable = False
+        install_status = "ready"
+        package_format = "legacy"
+        if folder.active_version_id:
+            if version is None or version.install_status != "ready":
+                continue
+            manifest = version.manifest if isinstance(version.manifest, dict) else {}
+            platform = manifest.get("_platform") if isinstance(manifest.get("_platform"), dict) else {}
+            description = str(manifest.get("description") or folder.name)
+            is_executable = bool(version.is_executable)
+            install_status = version.install_status
+            package_format = str(platform.get("package_format") or "package")
+        else:
+            manifest_file = next((
+                item for item in (folder.files or [])
+                if item.deleted_at is None and item.path.lower() == "skill.md"
+            ), None)
+            manifest = parse_skill_manifest(manifest_file.content if manifest_file else None)
+            if manifest is None:
+                continue
+            description = manifest.description or folder.name
+            is_executable = manifest.runtime in {"python", "node"}
+        summaries.append({
+            "id": str(folder.id), "name": folder.name, "slug": folder.slug,
+            "description": description, "scope_type": folder.scope_type,
+            "scope_id": str(folder.scope_id) if folder.scope_id else None,
+            "is_executable": is_executable, "install_status": install_status,
+            "package_format": package_format,
+        })
+    return summaries
 
 
 async def _get_owned_task(db: AsyncSession, task_id: UUID, cu: CurrentUser) -> Task:
@@ -274,12 +318,10 @@ async def resources_endpoint(
     ontologies = await scope_service.list_ontologies_for_user(db, cu)
     rags = await scope_service.list_rags_for_user(db, cu)
     defaults = await _user_defaults(db, cu)
+    skill_summaries = await _skill_summaries(db, skills)
     return {
         "workspaces": [WorkspaceRead.model_validate(w).model_dump() for w in workspaces],
-        "skills": [{
-            "id": str(s.id), "name": s.name, "slug": s.slug,
-            "scope_type": s.scope_type, "scope_id": s.scope_id,
-        } for s in skills],
+        "skills": skill_summaries,
         # 本体已文件化：返回轻量摘要（id / name=文件名 / path），供下拉与计数。
         "ontologies": [
             {"id": str(o.id), "name": o.path.rsplit("/", 1)[-1], "path": o.path}
@@ -566,6 +608,10 @@ async def run_task_endpoint(
     attachment_files = await _resolve_task_attachments(
         db, cu, cfg.get("workspace_id"), data.attachment_file_ids,
     )
+    invoked_folders = await skill_scope_service.assert_bound_skills_visible(
+        db, cu, [str(skill_id) for skill_id in data.invoked_skill_ids],
+    )
+    invoked_skills = await _skill_summaries(db, invoked_folders)
     # 模型必须在用户当前可用范围内（脏值如裸 "glm" 或已失效模型直接挡掉，避免跑到路由失败）。
     _available = await scope_service.list_available_models_for_user(db, cu)
     if cfg["model_alias"] != "default" and cfg["model_alias"] not in _available:
@@ -587,6 +633,7 @@ async def run_task_endpoint(
             message=data.message, config=cfg,
             session_id=task.session_id, db=db, request=request,
             attachment_files=attachment_files,
+            invoked_skills=invoked_skills,
         )
         # 流式响应内部完成图执行（含 save_memory/extract_memory/write_run_log）；
         # commit 由各节点 flush 后于响应结束时统一提交。
@@ -597,6 +644,7 @@ async def run_task_endpoint(
         message=data.message, config=cfg,
         session_id=task.session_id, db=db, request=request,
         attachment_files=attachment_files,
+        invoked_skills=invoked_skills,
     )
     await db.commit()
     return result

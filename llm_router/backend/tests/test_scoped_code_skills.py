@@ -16,6 +16,7 @@ from app.agents.graph import nodes
 from app.agents.graph.nodes import _build_tools
 from app.api.skill_packages import _import_response
 from app.auth.user_auth import CurrentUser
+from app.models.agent import Agent
 from app.models.department import Department
 from app.models.organization import Organization
 from app.models.rag import RagCollection
@@ -373,3 +374,70 @@ async def test_manager_grant_is_revoked_when_membership_no_longer_matches(db_ses
     await db_session.flush()
     cu.department_id = None
     assert ("department", str(department.id)) not in await managed_scopes(db_session, cu)
+
+
+@pytest.mark.asyncio
+async def test_general_agent_keeps_rag_fixed_and_prioritizes_explicit_skill_catalog(db_session):
+    org, _, _, _, _, user, cu = await _hierarchy(db_session)
+
+    async def import_prompt(name: str, description: str):
+        content = f"""---
+name: {name}
+description: {description}
+runtime: prompt
+---
+
+# {name}
+Follow these instructions.
+""".encode()
+        return await skill_import_service.import_package(
+            db_session, org_id=org.id, scope_type="user", scope_id=str(user.id),
+            upload=UploadFile(filename="SKILL.md", file=io.BytesIO(content)),
+            created_by=str(user.id),
+        )
+
+    default_folder, _ = await import_prompt("Default Finance", "Default finance workflow")
+    explicit_folder, _ = await import_prompt("Explicit Cleaner", "Clean the selected workbook")
+    rag = RagCollection(
+        organization_id=org.id, name="Finance RAG", slug=f"finance-rag-{uuid4().hex[:8]}",
+        scope_type="user", scope_id=str(user.id),
+    )
+    db_session.add(rag)
+    await db_session.flush()
+    agent = Agent(
+        organization_id=org.id, scope_type="user", scope_id=str(user.id), created_by=str(user.id),
+        name="Finance Agent", slug=f"finance-agent-{uuid4().hex[:8]}",
+        system_prompt="You are a finance agent.", model_alias="default",
+        skill_ids=[str(default_folder.id)], rag_collection_ids=[str(rag.id)], is_active=True,
+    )
+    db_session.add(agent)
+    await db_session.flush()
+
+    state = {
+        "org_id": str(org.id), "task_id": None, "user_id": str(user.id),
+        "session_id": f"sess-{uuid4()}", "request": "请用清洗技能处理文件",
+        "exec_mode": "craft", "template_agent_id": str(agent.id),
+        "model_alias": "default", "skill_ids": [], "ontology_ids": [],
+        "invoked_skill_ids": [str(explicit_folder.id)],
+        "invoked_skills": [{"id": str(explicit_folder.id)}],
+        "referenced_file_ids": [],
+    }
+    configured = await nodes._load_config_general(state, {"user": cu}, db_session)
+
+    assert configured["rag_collection_ids"] == [str(rag.id)]
+    assert configured["skill_ids"][:2] == [str(explicit_folder.id), str(default_folder.id)]
+    assert configured["skill_catalog"][0]["description"] == "Clean the selected workbook"
+    assert configured["default_skills"][0]["id"] == str(default_folder.id)
+    assert configured["referenced_skills"][0]["id"] == str(explicit_folder.id)
+    assert configured["referenced_skills"][0]["activation"] == "explicit"
+
+    general_state = {
+        **state,
+        "session_id": f"sess-{uuid4()}", "template_agent_id": None,
+        "invoked_skill_ids": [], "invoked_skills": [],
+    }
+    general = await nodes._load_config_general(general_state, {"user": cu}, db_session)
+    assert general["rag_collection_ids"] == []
+    assert {row["id"] for row in general["skill_catalog"]} == {
+        str(default_folder.id), str(explicit_folder.id),
+    }

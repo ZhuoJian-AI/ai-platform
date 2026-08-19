@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.department import Department
-from app.models.skill import ScopeManagerAssignment, SkillFile, SkillFolder
+from app.models.skill import ScopeManagerAssignment, SkillFile, SkillFolder, SkillVersion
 from app.models.team import Team
 from app.models.user import User
 from app.schemas.user import ManagerScopeGrant
@@ -167,14 +167,19 @@ async def assert_bound_skills_visible(
             raise HTTPException(status_code=403, detail="Skill is not available to this user")
         if not folder.is_active:
             raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is disabled")
-        if require_ready and not folder.active_version_id:
-            legacy = (await db.execute(select(SkillFile.id).where(
-                SkillFile.skill_folder_id == folder.id,
-                SkillFile.path == "skill.md",
-                SkillFile.deleted_at.is_(None),
-            ))).first()
-            if legacy is None:
-                raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is not installed")
+        if require_ready:
+            if folder.active_version_id:
+                version = await db.get(SkillVersion, folder.active_version_id)
+                if version is None or version.install_status != "ready":
+                    raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is not ready")
+            else:
+                legacy = (await db.execute(select(SkillFile.id).where(
+                    SkillFile.skill_folder_id == folder.id,
+                    SkillFile.path == "skill.md",
+                    SkillFile.deleted_at.is_(None),
+                ))).first()
+                if legacy is None:
+                    raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is not installed")
         ordered.append(folder)
     return ordered
 
@@ -199,13 +204,18 @@ async def assert_admin_bound_skills(
             raise HTTPException(status_code=403, detail="Skill belongs to another organization")
         if not folder.is_active:
             raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is disabled")
-        if require_ready and not folder.active_version_id:
-            legacy = (await db.execute(select(SkillFile.id).where(
-                SkillFile.skill_folder_id == folder.id,
-                SkillFile.path == "skill.md",
-                SkillFile.deleted_at.is_(None),
-            ))).first()
-            if legacy is None:
-                raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is not installed")
+        if require_ready:
+            if folder.active_version_id:
+                version = await db.get(SkillVersion, folder.active_version_id)
+                if version is None or version.install_status != "ready":
+                    raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is not ready")
+            else:
+                legacy = (await db.execute(select(SkillFile.id).where(
+                    SkillFile.skill_folder_id == folder.id,
+                    SkillFile.path == "skill.md",
+                    SkillFile.deleted_at.is_(None),
+                ))).first()
+                if legacy is None:
+                    raise HTTPException(status_code=422, detail=f"Skill '{folder.name}' is not installed")
         ordered.append(folder)
     return ordered

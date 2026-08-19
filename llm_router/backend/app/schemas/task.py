@@ -42,6 +42,9 @@ class TaskUpdate(BaseModel):
 class TaskRunRequest(BaseModel):
     message: str
     stream: bool = False
+    # 当前轮由用户明确选择的 Skill。只影响本次运行，不写回 Task.config，发送后由前端清空。
+    # /slug 仍由运行时解析以兼容历史和手动输入，但选择器必须传真实 UUID，避免同名 slug 歧义。
+    invoked_skill_ids: list[UUID] = Field(default_factory=list, max_length=20)
     # 聊天输入框拖入/选择的工作空间文件。与正文中的历史 ``@UUID`` 引用并行兼容；
     # 端点会校验文件属于任务当前工作空间且已解析完成，再把快照写入 user 消息 metadata。
     attachment_file_ids: list[UUID] = Field(default_factory=list, max_length=10)

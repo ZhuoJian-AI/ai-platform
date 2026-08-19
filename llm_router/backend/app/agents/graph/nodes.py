@@ -59,8 +59,9 @@ logger = structlog.get_logger()
 MAX_STEPS = 8
 
 GENERAL_SYSTEM_PROMPT = (
-    "你是组织智能助手。你可以：调用已授权的技能（外部工具）完成业务操作；读写当前工作空间中的"
-    "文件（list/read/write/delete）；参考注入的知识库检索结果、组织本体与四级长期记忆。"
+    "你是组织智能助手。你可以：按需调用当前用户有权使用的技能完成业务操作；读写当前工作空间中的"
+    "文件（list/read/write/delete）；参考组织本体与四级长期记忆。只有系统实际提供了"
+    "[知识库检索结果]时才能使用RAG内容，通用智能体不会自动加载知识库。"
     "请基于上述上下文完成用户任务，必要时分步调用工具，最终给出清晰的结果。"
 )
 
@@ -335,8 +336,35 @@ async def load_config(state: AgentState) -> dict:
     }
 
 
+async def _runtime_skill_summary(db, folder: SkillFolder) -> dict | None:
+    """Return a compact ready-to-use Skill catalog row without loading full instructions."""
+    version = await db.get(SkillVersion, folder.active_version_id) if folder.active_version_id else None
+    if folder.active_version_id:
+        if version is None or version.install_status != "ready":
+            return None
+        manifest = version.manifest if isinstance(version.manifest, dict) else {}
+        description = str(manifest.get("description") or folder.name)
+        executable = bool(version.is_executable)
+        platform = manifest.get("_platform") if isinstance(manifest.get("_platform"), dict) else {}
+        package_format = str(platform.get("package_format") or "package")
+    else:
+        manifest_file = await get_skill_file_by_path(db, folder.id, SKILL_MANIFEST_PATH)
+        manifest = parse_skill_manifest(manifest_file.content if manifest_file else None)
+        if manifest is None:
+            return None
+        description = manifest.description or folder.name
+        executable = manifest.runtime in {"python", "node"}
+        package_format = "legacy"
+    return {
+        "id": str(folder.id), "name": folder.name, "slug": folder.slug,
+        "description": description[:1000], "scope_type": folder.scope_type,
+        "scope_id": str(folder.scope_id) if folder.scope_id else None,
+        "is_executable": executable, "package_format": package_format,
+    }
+
+
 async def _load_config_general(state: AgentState, deps, db) -> dict:
-    """General mode: assemble only capabilities explicitly bound to the selected Agent."""
+    """General mode: fixed Agent RAG plus a prioritized catalog of every authorized Skill."""
     user = deps.get("user")
     org_id = state["org_id"]
 
@@ -359,31 +387,75 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
                 if tpl.model_alias and tpl.model_alias != "default":
                     state["model_alias"] = tpl.model_alias
 
-    # Skills and RAG are capabilities explicitly bound to the selected Agent.
-    # A general/unbound Agent intentionally receives neither.
-    skill_ids = [str(s) for s in (tpl.skill_ids or [])] if tpl_id and tpl is not None else []
+    # RAG remains fixed to the selected Agent. Skill bindings are recommendations, not an allowlist.
+    default_skill_ids = [str(s) for s in (tpl.skill_ids or [])] if tpl_id and tpl is not None else []
+    # Preserve old task configs as additional recommendations while new UI selections use invoked_skill_ids.
+    for legacy_id in state.get("skill_ids") or []:
+        if str(legacy_id) not in default_skill_ids:
+            default_skill_ids.append(str(legacy_id))
+    skill_ids: list[str] = []
+    skill_catalog: list[dict] = []
+    default_skills: list[dict] = []
     ontology_ids = list(state.get("ontology_ids") or [])
     rag_ids = [str(r) for r in (tpl.rag_collection_ids or [])] if tpl_id and tpl is not None else []
-    referenced_skills: list[dict] = []
+    referenced_skills: list[dict] = list(state.get("invoked_skills") or [])
+    slug_ambiguities: list[str] = []
     # 结构化附件优先进入 state；正文中的历史 @UUID 再补充，按出现顺序去重。
     referenced_file_ids: list[str] = []
 
     if user is not None:
-        bound_skills = await skill_scope_service.assert_bound_skills_visible(db, user, skill_ids)
-        skill_ids = [str(s.id) for s in bound_skills]
+        visible_folders = await scope_service.list_skills_for_user(db, user)
+        visible_rows: list[tuple[SkillFolder, dict]] = []
+        for folder in visible_folders:
+            summary = await _runtime_skill_summary(db, folder)
+            if summary is not None:
+                visible_rows.append((folder, summary))
+        visible_by_id = {str(folder.id): (folder, summary) for folder, summary in visible_rows}
+
+        default_folders = await skill_scope_service.assert_bound_skills_visible(
+            db, user, default_skill_ids,
+        )
+        invoked_folders = await skill_scope_service.assert_bound_skills_visible(
+            db, user, list(state.get("invoked_skill_ids") or []),
+        )
+        invoked_id_order = [str(folder.id) for folder in invoked_folders]
+        default_id_order = [str(folder.id) for folder in default_folders]
+        ordered_ids = list(dict.fromkeys([
+            *invoked_id_order, *default_id_order, *(str(folder.id) for folder, _ in visible_rows),
+        ]))
+        skill_catalog = [visible_by_id[sid][1] for sid in ordered_ids if sid in visible_by_id]
+        skill_ids = [row["id"] for row in skill_catalog]
+        default_skills = [
+            {**visible_by_id[sid][1], "is_default": True}
+            for sid in default_id_order if sid in visible_by_id
+        ]
+        # Trust server-side snapshots, not client names/descriptions, after UUID authorization succeeds.
+        explicit_ids = set(invoked_id_order)
+        referenced_skills = [
+            {**visible_by_id[sid][1], "activation": "explicit"}
+            for sid in invoked_id_order if sid in visible_by_id
+        ]
         bound_rags = await scope_service.assert_bound_rags_visible(db, user, rag_ids)
         rag_ids = [str(r.id) for r in bound_rags]
         if not ontology_ids:
             ontology_ids = [str(o.id) for o in await scope_service.list_ontologies_for_user(db, user)]
-        # /slug can only force a Skill already bound to this Agent.
-        slug_to_skill = {s.slug: s for s in bound_skills}
+        # /slug remains current-turn compatibility. A duplicate visible slug is deliberately ambiguous.
+        slug_to_rows: dict[str, list[dict]] = {}
+        for row in skill_catalog:
+            slug_to_rows.setdefault(row["slug"], []).append(row)
         seen_slugs: set[str] = set()
         for m in re.finditer(r'(?<![\w/])/([a-z0-9][a-z0-9-]*)', state.get("request", "") or ""):
             slug = m.group(1)
-            s = slug_to_skill.get(slug)
-            if s and slug not in seen_slugs:
+            matches = slug_to_rows.get(slug, [])
+            if len(matches) > 1:
+                if slug not in slug_ambiguities:
+                    slug_ambiguities.append(slug)
+                continue
+            if matches and slug not in seen_slugs:
                 seen_slugs.add(slug)
-                referenced_skills.append({"name": s.name, "slug": s.slug})
+                row = matches[0]
+                if row["id"] not in explicit_ids:
+                    referenced_skills.append({**row, "activation": "slash"})
         # 解析用户消息中 @<file_id> 引用的工作空间文件（精确 UUID，避免误命中邮件等）。
         # agent_loop 读取这些文件内容注入 system prompt；越权文件在 agent_loop 校验时跳过。
         seen_fids: set[str] = set()
@@ -422,6 +494,7 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
 
     _emit({"type": "step", "step": "load_config", "mode": "general",
            "skills": len(skill_ids), "ontologies": len(ontology_ids), "rags": len(rag_ids),
+           "default_skills": len(default_skills),
            "referenced_skills": len(referenced_skills),
            "referenced_files": len(referenced_file_ids),
            "template": bool(tpl_traces),
@@ -436,6 +509,13 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
         "judge_config": {},
         "judge_template_id": None,
         "skill_ids": skill_ids,
+        "skill_catalog": skill_catalog,
+        "default_skills": default_skills,
+        "invoked_skills": referenced_skills,
+        "invoked_skill_ids": [row["id"] for row in referenced_skills],
+        "loaded_skills": [],
+        "executed_skills": [],
+        "skill_slug_ambiguities": slug_ambiguities,
         "ontology_ids": ontology_ids,
         "rag_collection_ids": rag_ids,
         "referenced_skills": referenced_skills,
@@ -657,6 +737,7 @@ async def _build_tools(
     tools: list[dict] = []
     registry: dict[str, dict] = {}
     agent_skills: dict[str, dict] = {}
+    agent_skill_slugs: dict[str, list[str]] = {}
     for sid in skill_ids:
         folder = await db.get(SkillFolder, UUID(sid))
         if folder is None or folder.deleted_at is not None or not folder.is_active:
@@ -683,10 +764,12 @@ async def _build_tools(
             except (StopIteration, UnicodeDecodeError, KeyError):
                 logger.warning("agent_skill_manifest_unavailable", skill_folder=str(folder.id), slug=folder.slug)
                 continue
-            agent_skills[folder.slug] = {
+            folder_id = str(folder.id)
+            agent_skills[folder_id] = {
                 "folder": folder, "version": version, "content": skill_content,
                 "platform": platform,
             }
+            agent_skill_slugs.setdefault(folder.slug, []).append(folder_id)
             continue
         manifest_file = await get_skill_file_by_path(db, folder.id, SKILL_MANIFEST_PATH)
         manifest = parse_skill_manifest(manifest_file.content if manifest_file else None)
@@ -720,7 +803,7 @@ async def _build_tools(
                 "parameters": {"type": "object", "properties": {}},
             }})
             registry[tool_name] = {
-                "kind": "prompt", "folder": folder,
+                "kind": "prompt", "folder": folder, "version": version,
                 "content": manifest_file.content or "",
             }
             continue
@@ -753,36 +836,37 @@ async def _build_tools(
             registry[tool_name] = {"folder": folder, "endpoint": ep}
     if agent_skills:
         summaries = "; ".join(
-            f"{slug}: {entry['version'].manifest.get('description') or entry['folder'].name}"
-            for slug, entry in agent_skills.items()
+            f"{skill_id} ({entry['folder'].slug}): "
+            f"{entry['version'].manifest.get('description') or entry['folder'].name}"
+            for skill_id, entry in agent_skills.items()
         )
-        slug_schema = {"type": "string", "enum": sorted(agent_skills)}
+        id_schema = {"type": "string", "enum": list(agent_skills)}
         tools.extend([
             {"type": "function", "function": {
                 "name": "load_skill",
-                "description": "按需载入已绑定标准 Skill 的完整 SKILL.md。可用技能：" + summaries,
+                "description": "按需载入当前用户可用标准 Skill 的完整 SKILL.md。可用技能：" + summaries,
                 "parameters": {"type": "object", "properties": {
-                    "skill_slug": {**slug_schema, "description": "要载入的技能 slug"},
-                }, "required": ["skill_slug"]},
+                    "skill_id": {**id_schema, "description": "技能 UUID（来自 Skill 目录）"},
+                }, "required": ["skill_id"]},
             }},
             {"type": "function", "function": {
                 "name": "read_skill_resource",
                 "description": "读取已载入 Skill 中 references/、assets/ 或脚本说明等文本资源。",
                 "parameters": {"type": "object", "properties": {
-                    "skill_slug": slug_schema,
+                    "skill_id": id_schema,
                     "path": {"type": "string", "description": "资源索引中显示的相对路径"},
-                }, "required": ["skill_slug", "path"]},
+                }, "required": ["skill_id", "path"]},
             }},
         ])
         if any(entry["version"].is_executable for entry in agent_skills.values()):
             tools.append({"type": "function", "function": {
                 "name": "run_skill_script",
                 "description": (
-                    "在隔离 Runner 中执行已绑定 Skill 的 scripts/ 内 Python、Node 或 Bash 脚本。"
+                    "在隔离 Runner 中执行当前用户可用 Skill 的 scripts/ 内 Python、Node 或 Bash 脚本。"
                     "先调用 load_skill 并遵循其说明。"
                 ),
                 "parameters": {"type": "object", "properties": {
-                    "skill_slug": slug_schema,
+                    "skill_id": id_schema,
                     "script_path": {"type": "string", "description": "load_skill 返回的 scripts/ 相对路径"},
                     "args": {
                         "type": "array", "items": {"type": "string"},
@@ -792,13 +876,15 @@ async def _build_tools(
                         "type": "array", "items": {"type": "string"},
                         "description": "工作空间输入文件 UUID；省略时使用本轮附件",
                     },
-                }, "required": ["skill_slug", "script_path"]},
+                }, "required": ["skill_id", "script_path"]},
             }})
         tool_names = ["load_skill", "read_skill_resource"]
         if any(entry["version"].is_executable for entry in agent_skills.values()):
             tool_names.append("run_skill_script")
         for name in tool_names:
-            registry[name] = {"kind": name, "skills": agent_skills}
+            registry[name] = {
+                "kind": name, "skills": agent_skills, "slug_index": agent_skill_slugs,
+            }
     if workspace_id:
         tools.extend(_builtin_tool_defs())
     return tools, registry
@@ -918,10 +1004,38 @@ async def _execute_code_skill(
         return json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False)
 
 
-async def _resolve_agent_skill(state: AgentState, entry: dict, slug: str) -> tuple[dict | None, str | None]:
-    selected = entry.get("skills", {}).get(slug)
+def _skill_record(folder: SkillFolder, version: SkillVersion | None, action: str) -> dict:
+    return {
+        "id": str(folder.id), "name": folder.name, "slug": folder.slug,
+        "scope_type": folder.scope_type,
+        "scope_id": str(folder.scope_id) if folder.scope_id else None,
+        "version_id": str(version.id) if version is not None else None,
+        "action": action,
+    }
+
+
+def _append_skill_record(
+    state: AgentState, key: str, folder: SkillFolder, version: SkillVersion | None, action: str,
+) -> None:
+    records = state.setdefault(key, [])
+    record = _skill_record(folder, version, action)
+    marker = (record["id"], record["version_id"], record["action"])
+    if marker not in {(item.get("id"), item.get("version_id"), item.get("action")) for item in records}:
+        records.append(record)
+
+
+async def _resolve_agent_skill(state: AgentState, entry: dict, params: dict) -> tuple[dict | None, str | None]:
+    skill_id = str(params.get("skill_id") or "")
+    if not skill_id:
+        # Backward compatibility for persisted/older model tool calls. Duplicate slugs must use UUID.
+        slug = str(params.get("skill_slug") or "")
+        matches = entry.get("slug_index", {}).get(slug, [])
+        if len(matches) > 1:
+            return None, "Skill slug is ambiguous; choose it from the picker so a UUID is supplied"
+        skill_id = matches[0] if matches else ""
+    selected = entry.get("skills", {}).get(skill_id)
     if selected is None:
-        return None, "Skill is not bound to the current agent"
+        return None, "Skill is not available in the current user's catalog"
     deps = get_deps()
     db = deps["db"]
     user = deps.get("user")
@@ -942,15 +1056,17 @@ async def _resolve_agent_skill(state: AgentState, entry: dict, slug: str) -> tup
 
 
 async def _execute_agent_skill_tool(state: AgentState, entry: dict, name: str, params: dict) -> str:
-    slug = str(params.get("skill_slug") or "")
-    selected, error = await _resolve_agent_skill(state, entry, slug)
+    selected, error = await _resolve_agent_skill(state, entry, params)
     if error or selected is None:
         return json.dumps({"status": "error", "error": error or "Skill unavailable"}, ensure_ascii=False)
     platform = selected["platform"]
+    folder: SkillFolder = selected["folder"]
+    version: SkillVersion = selected["version"]
     if name == "load_skill":
+        _append_skill_record(state, "loaded_skills", folder, version, "load_skill")
         return json.dumps({
             "status": "success",
-            "skill": {"name": selected["folder"].name, "slug": slug},
+            "skill": {"id": str(folder.id), "name": folder.name, "slug": folder.slug},
             "instructions": selected["content"],
             "scripts": platform.get("scripts") or [],
             "resources": platform.get("resources") or [],
@@ -962,6 +1078,7 @@ async def _execute_agent_skill_tool(state: AgentState, entry: dict, name: str, p
             },
         }, ensure_ascii=False)
     if name == "read_skill_resource":
+        _append_skill_record(state, "loaded_skills", folder, version, "read_skill_resource")
         path = str(params.get("path") or "")
         indexed = {str(item.get("path")) for item in platform.get("resources") or [] if isinstance(item, dict)}
         if path not in indexed:
@@ -982,12 +1099,18 @@ async def _execute_agent_skill_tool(state: AgentState, entry: dict, name: str, p
             return json.dumps({"status": "error", "error": "args must be an array of strings"})
         execution_params = {
             key: value for key, value in params.items()
-            if key not in {"skill_slug", "script_path", "args"}
+            if key not in {"skill_id", "skill_slug", "script_path", "args"}
         }
-        return await _execute_code_skill(
+        result = await _execute_code_skill(
             state, selected, execution_params,
             script_path=str(params.get("script_path") or ""), script_args=raw_args,
         )
+        try:
+            if json.loads(result).get("status") == "success":
+                _append_skill_record(state, "executed_skills", folder, version, "runner_script")
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        return result
     return json.dumps({"status": "error", "error": "Unknown Agent Skill tool"})
 
 
@@ -1036,6 +1159,7 @@ async def _execute_tool_call(
 
     if entry.get("kind") == "prompt":
         content = entry.get("content") or ""
+        _append_skill_record(state, "loaded_skills", entry["folder"], entry.get("version"), "load_skill")
         return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], True)
     if entry.get("kind") == "code":
         content = await _execute_code_skill(state, entry, params)
@@ -1043,6 +1167,10 @@ async def _execute_tool_call(
             ok = json.loads(content).get("status") == "success"
         except (json.JSONDecodeError, AttributeError):
             ok = False
+        if ok:
+            _append_skill_record(
+                state, "executed_skills", entry["folder"], entry.get("version"), "runner_script",
+            )
         return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
     if entry.get("kind") in {"load_skill", "read_skill_resource", "run_skill_script"}:
         content = await _execute_agent_skill_tool(state, entry, entry["kind"], params)
@@ -1051,7 +1179,6 @@ async def _execute_tool_call(
         except (json.JSONDecodeError, AttributeError):
             ok = False
         return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
-
     folder: SkillFolder = entry["folder"]
     ep: ToolEndpoint = entry["endpoint"]
     conn = await db.get(ToolConnector, ep.connector_id)
@@ -1190,6 +1317,37 @@ async def agent_loop(state: AgentState) -> dict:
         ctx_text = "\n\n---\n".join(c["content"] for c in rag_ctx)
         system_prompt = f"{system_prompt}\n\n[知识库检索结果]\n{ctx_text}"
 
+    # Codex-style progressive disclosure: every turn sees only a compact authorized catalog.
+    # Full SKILL.md/references are loaded only after the model selects load_skill/read_skill_resource.
+    skill_catalog = list(state.get("skill_catalog") or [])
+    if skill_catalog:
+        default_ids = {item.get("id") for item in state.get("default_skills") or []}
+        invoked_ids = {item.get("id") for item in state.get("invoked_skills") or []}
+        catalog_lines = []
+        for item in skill_catalog[:80]:
+            priority = "本轮明确" if item.get("id") in invoked_ids else (
+                "智能体默认" if item.get("id") in default_ids else "可用"
+            )
+            executable = "可执行" if item.get("is_executable") else "说明/API"
+            description = str(item.get("description") or "").replace("\n", " ")[:240]
+            catalog_lines.append(
+                f"- [{priority}] id={item.get('id')} /{item.get('slug')} "
+                f"{item.get('name')} | {item.get('scope_type')} | {executable} | {description}"
+            )
+        if len(skill_catalog) > 80:
+            catalog_lines.append(f"- 其余 {len(skill_catalog) - 80} 个技能未展开；请让用户用选择器明确指定。")
+        system_prompt = (
+            f"{system_prompt}\n\n[当前用户可用 Skill 目录]\n"
+            "此目录仅用于发现能力。不要把目录内容当作已执行结果；需要说明时调用 load_skill，"
+            "需要脚本或企业操作时必须实际调用相应工具。\n" + "\n".join(catalog_lines)
+        )
+    ambiguities = state.get("skill_slug_ambiguities") or []
+    if ambiguities:
+        system_prompt = (
+            f"{system_prompt}\n\n[Skill 引用歧义]\n以下 /slug 对应多个作用域，不能自动选择："
+            f"{', '.join('/' + slug for slug in ambiguities)}。请让用户通过‘本轮调用技能’选择器指定。"
+        )
+
     # 用户通过结构化附件或 @<file_id> 引用的工作空间文件：读取内容注入 system prompt。
     # Office/PDF 二进制文件使用工作空间已提取文本，绝不把 Base64 注入模型。
     # 越权（不在用户 scope 内）文件跳过。文件是上下文，Ask/Plan 也注入。
@@ -1248,17 +1406,21 @@ async def agent_loop(state: AgentState) -> dict:
         # 输出协议（场景无关）：先 text 流式分析后 generate_docx + 不臆造数据。
         # 上提到 runtime 后任务提示词不必再重复这两段 boilerplate。
         system_prompt = f"{system_prompt}{OUTPUT_PROTOCOL_PROMPT}"
-        # 用户在消息中以 /slug 引用了具体技能 → 注入「主动调用」指令（仅 Craft 挂工具时生效）。
+        # 用户本轮通过真实 UUID 或唯一 /slug 明确调用 → 强制本轮实际加载/执行，不写入任务配置。
         referenced = state.get("referenced_skills") or []
         if referenced:
-            lines = "\n".join(f"- {s['name']} (/{s['slug']})" for s in referenced)
+            lines = "\n".join(
+                f"- id={s.get('id')} {s['name']} (/{s['slug']}, {s.get('activation', 'explicit')})"
+                for s in referenced
+            )
             system_prompt = (
-                f"{system_prompt}\n\n[用户引用的技能] 用户在消息中以 /slug 引用了以下技能，"
-                "执行任务时请主动调用这些技能完成相关操作（在相关步骤务必实际调用，而非仅提及）：\n"
+                f"{system_prompt}\n\n[用户本轮明确调用的 Skill] 以下选择仅对当前轮有效。"
+                "请先加载其完整说明，并在任务需要操作时务必实际调用脚本或接口，不得仅声称完成：\n"
                 f"{lines}"
             )
-            skill_trace = {"category": "skill", "title": "引用技能",
-                           "skills": [{"name": s["name"], "slug": s["slug"]} for s in referenced]}
+            skill_trace = {"category": "skill", "title": "用户明确调用",
+                           "skills": [{"id": s.get("id"), "name": s["name"], "slug": s["slug"]}
+                                      for s in referenced]}
             _emit({"type": "trace", **skill_trace})
             traces.append(skill_trace)
 
@@ -1348,10 +1510,21 @@ async def agent_loop(state: AgentState) -> dict:
                        "content": preview[:4000], "ok": ok})
                 messages.append(tool_msg)
                 steps.append({"step": "tool", "name": tc.get("name"), "ok": ok})
-                # 技能调用痕迹：仅落 state.traces 供保存/回放，不另发 trace 事件
-                # （实时展示已由上方 tool_call/tool_result + 前端 ToolCard 承担，避免重复）。
-                traces.append({"category": "skill", "title": tc.get("name", ""),
-                               "id": tc.get("id", ""), "name": tc.get("name", ""),
+                # Persist a semantically distinct trace for history playback. Live display already uses
+                # tool_call/tool_result, so no extra trace SSE is emitted here.
+                tool_name = tc.get("name", "")
+                tool_entry = registry.get(tool_name) or {}
+                kind = tool_entry.get("kind")
+                if tool_name in BUILTIN_TOOL_NAMES:
+                    category, title = "file", "文件解析与引用"
+                elif kind in {"code", "run_skill_script"}:
+                    category, title = "skill", "Runner脚本执行"
+                elif kind in {"load_skill", "read_skill_resource", "prompt"}:
+                    category, title = "skill", "Skill自动匹配"
+                else:
+                    category, title = "skill", tool_name
+                traces.append({"category": category, "title": title,
+                               "id": tc.get("id", ""), "name": tool_name,
                                "arguments": tc.get("arguments", ""),
                                "result": preview[:4000], "ok": ok})
             continue
@@ -1371,6 +1544,8 @@ async def agent_loop(state: AgentState) -> dict:
         "assistant_final": assistant_final,
         "steps": steps,
         "traces": traces,
+        "loaded_skills": list(state.get("loaded_skills") or []),
+        "executed_skills": list(state.get("executed_skills") or []),
         "usage": {"input_tokens": usage_in, "output_tokens": usage_out},
     }
 
@@ -1395,7 +1570,11 @@ async def save_memory(state: AgentState) -> dict:
         # （让 run 期间 GET /tasks 能带回提示词、重连回放时前面有用户消息）。
         db.add(TaskMessage(task_id=UUID(task_id), role="assistant",
                            content=state.get("assistant_final", ""),
-                           metadata_={"traces": state.get("traces", [])}))
+                           metadata_={
+                               "traces": state.get("traces", []),
+                               "loaded_skills": state.get("loaded_skills", []),
+                               "executed_skills": state.get("executed_skills", []),
+                           }))
         await db.flush()
         # **立即提交**：让 assistant 回复（及本轮工具写入的工作空间文件）当场持久化，
         # 不再依赖 _run_graph_bg 末尾的统一 commit。这样即使后续 extract_memory /

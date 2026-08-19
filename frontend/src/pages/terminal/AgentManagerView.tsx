@@ -313,11 +313,11 @@ export default function AgentManagerView() {
                   <Form.Item name="rag_collection_ids" label="绑定 RAG 集合（可多选，仅此智能体使用）">
                     <Select mode="multiple" allowClear showSearch placeholder="无" optionFilterProp="label" options={ragOptions} />
                   </Form.Item>
-                  <Form.Item name="skill_ids" label="绑定技能（可多选，仅此智能体可调用）">
+                  <Form.Item name="skill_ids" label="默认推荐技能（模型可自动调用，聊天中仍可临时调用其他有权技能）">
                     <Select mode="multiple" allowClear showSearch placeholder="无" optionFilterProp="label" options={skillOptions} />
                   </Form.Item>
                   <Typography.Text type="secondary" style={{ display: 'block', marginTop: -16, marginBottom: 16, fontSize: 12 }}>
-                    未绑定的技能不会暴露给模型，自动调用和 /command 都不可使用。
+                    此处用于设定智能体的默认能力，不构成排他白名单；用户在聊天中可按当前轮选择其他有权技能。
                   </Typography.Text>
                   <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
                     <Form.Item name="temperature" label="Temperature"><InputNumber min={0} max={2} step={0.1} /></Form.Item>
@@ -354,7 +354,7 @@ export default function AgentManagerView() {
             <Form.Item name="rag_collection_ids" label="绑定 RAG 集合（可多选）">
               <Select mode="multiple" allowClear showSearch placeholder="无" optionFilterProp="label" options={ragOptions} />
             </Form.Item>
-            <Form.Item name="skill_ids" label="绑定技能（可多选）">
+            <Form.Item name="skill_ids" label="默认推荐技能（可多选）">
               <Select mode="multiple" allowClear showSearch placeholder="无" optionFilterProp="label" options={skillOptions} />
             </Form.Item>
           </Form>

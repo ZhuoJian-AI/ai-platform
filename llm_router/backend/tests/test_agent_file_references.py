@@ -271,6 +271,10 @@ def test_general_state_and_message_metadata_preserve_attachment_snapshot():
         "path": "会话附件/draft/report.xlsx",
         "name": "report.xlsx",
     }
+    invoked_skill = {
+        "id": str(uuid4()), "name": "Workbook Cleaner", "slug": "workbook-cleaner",
+        "scope_type": "user", "is_executable": True,
+    }
     user = SimpleNamespace(id=str(uuid4()), department_id=None, team_id=None)
 
     state = runner._general_initial_state(
@@ -281,10 +285,14 @@ def test_general_state_and_message_metadata_preserve_attachment_snapshot():
         session_id=None,
         config={"workspace_id": workspace_id, "model_alias": "test"},
         attachment_files=[snapshot],
+        invoked_skills=[invoked_skill],
     )
 
     assert state["referenced_file_ids"] == [file_id]
-    assert runner._user_message_metadata(state) == {"attachments": [snapshot]}
+    assert state["invoked_skill_ids"] == [invoked_skill["id"]]
+    assert runner._user_message_metadata(state) == {
+        "attachments": [snapshot], "invoked_skills": [invoked_skill],
+    }
 
 
 @pytest.mark.asyncio
