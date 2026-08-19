@@ -138,6 +138,14 @@ function messageAttachments(metadata: Record<string, unknown> | undefined): Mess
   });
 }
 
+interface BrowserFileHandle {
+  getFile: () => Promise<File>;
+}
+
+type BrowserWindowWithFilePicker = Window & typeof globalThis & {
+  showOpenFilePicker?: (options?: { multiple?: boolean }) => Promise<BrowserFileHandle[]>;
+};
+
 function messageInvokedSkills(metadata: Record<string, unknown> | undefined): InvokedSkill[] {
   const raw = metadata?.invoked_skills;
   if (!Array.isArray(raw)) return [];
@@ -1355,6 +1363,7 @@ function TaskInputBox(props: {
   const uploadControllersRef = useRef(new Map<string, AbortController>());
   const activeUploadsRef = useRef(0);
   const uploadWaitersRef = useRef<Array<() => void>>([]);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   const previousWorkspaceRef = useRef<string | null>(effectiveWorkspaceId);
   const searchRef = useRef<{ focus: (opts?: unknown) => void } | null>(null);
   const qc = useQueryClient();
@@ -1537,6 +1546,24 @@ function TaskInputBox(props: {
       () => worker(),
     ));
   }, [attachmentScopeKey, effectiveWorkspaceId, onOpenConfig, setAttachments, uploadOne]);
+
+  const openAttachmentPicker = useCallback(async () => {
+    const browserWindow = window as BrowserWindowWithFilePicker;
+    if (typeof browserWindow.showOpenFilePicker === 'function') {
+      try {
+        const handles = await browserWindow.showOpenFilePicker({ multiple: true });
+        const files = await Promise.all(handles.map((handle) => handle.getFile()));
+        if (files.length) await queueFiles(files);
+        return;
+      } catch (error) {
+        if ((error as Error).name === 'AbortError') return;
+        // Fall through for browsers or embedded contexts that reject this API.
+      }
+    }
+    const input = attachmentInputRef.current;
+    if (!input) return;
+    input.click();
+  }, [queueFiles]);
 
   const retryAttachment = useCallback(async (item: ComposerAttachment) => {
     if (item.file.size > MAX_ATTACHMENT_BYTES) {
@@ -1763,23 +1790,29 @@ function TaskInputBox(props: {
               title="引用工作空间文件（输入 @ 也可唤出，再次点击关闭）">
               <FileTextOutlined /> 文件
             </span>
-            <label style={{ ...chipBtnStyle, position: 'relative', overflow: 'hidden' }}
-              title="从电脑选择新文件并上传到当前工作空间（可多选）">
+            <button
+              type="button"
+              style={chipBtnStyle}
+              title="从电脑选择新文件并上传到当前工作空间（可多选）"
+              onClick={() => { void openAttachmentPicker(); }}
+            >
               <UploadOutlined /> 上传附件
-              <input
-                type="file"
-                multiple
-                aria-label="选择上传附件"
-                style={{
-                  position: 'absolute', inset: 0, width: '100%', height: '100%',
-                  opacity: 0, cursor: 'pointer', fontSize: 0,
-                }}
-                onChange={(event: ChangeEvent<HTMLInputElement>) => {
-                  if (event.target.files?.length) void queueFiles(event.target.files);
-                  event.target.value = '';
-                }}
-              />
-            </label>
+            </button>
+            <input
+              ref={attachmentInputRef}
+              type="file"
+              multiple
+              aria-label="选择上传附件"
+              tabIndex={-1}
+              style={{
+                position: 'fixed', left: -10000, top: 0,
+                width: 1, height: 1, opacity: 0,
+              }}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                if (event.target.files?.length) void queueFiles(event.target.files);
+                event.target.value = '';
+              }}
+            />
             <span
               onClick={onOpenConfig}
               title="任务资源配置"
