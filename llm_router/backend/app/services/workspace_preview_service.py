@@ -25,6 +25,10 @@ OFFICE_EXTENSIONS = {
     "xls", "xlsx", "xlsm", "xlsb", "xlt", "xltx", "xltm", "ods",
     "ppt", "pptx", "pptm", "pps", "ppsx", "ppsm", "pot", "potx", "potm", "odp",
 }
+
+# Increment when the LibreOffice rendering environment changes so persisted
+# previews are regenerated instead of serving artifacts from an older image.
+PREVIEW_CACHE_VERSION = "v2-cjk-fonts"
 IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "avif"}
 
 
@@ -58,7 +62,8 @@ def _convert_office_to_pdf(raw: bytes, filename: str, content_hash: str | None) 
     cache_root = Path(settings.original_preview_cache_root).resolve()
     cache_root.mkdir(parents=True, exist_ok=True)
     digest = content_hash if content_hash and len(content_hash) >= 32 else hashlib.sha256(raw).hexdigest()
-    cache_file = cache_root / f"{digest}.pdf"
+    cache_key = f"{PREVIEW_CACHE_VERSION}-{digest}"
+    cache_file = cache_root / f"{cache_key}.pdf"
     if cache_file.is_file() and cache_file.stat().st_size:
         return cache_file.read_bytes()
 
@@ -88,7 +93,7 @@ def _convert_office_to_pdf(raw: bytes, filename: str, content_hash: str | None) 
         if result.returncode != 0 or converted is None or not converted.stat().st_size:
             detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
             raise OriginalPreviewError(f"原文件预览转换失败：{detail[:300] or '未知错误'}")
-        temp_cache = cache_root / f".{digest}-{os.getpid()}.pdf"
+        temp_cache = cache_root / f".{cache_key}-{os.getpid()}.pdf"
         shutil.copyfile(converted, temp_cache)
         try:
             temp_cache.replace(cache_file)

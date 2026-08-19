@@ -17,9 +17,12 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors
         /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        fontconfig \
+        fonts-noto-cjk \
         libreoffice-writer-nogui \
         libreoffice-calc-nogui \
         libreoffice-impress-nogui \
+    && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
