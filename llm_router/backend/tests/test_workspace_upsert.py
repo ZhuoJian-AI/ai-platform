@@ -136,3 +136,38 @@ async def test_upsert_overwrites_live_same_path(session: AsyncSession):
         WorkspaceFile.workspace_id == ws.id, WorkspaceFile.path == "notes.md"
     ))).scalars().all()
     assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_binary_upload_uses_object_reference_when_enabled(
+    session: AsyncSession, monkeypatch,
+):
+    db = session
+    ws = await _make_workspace(db)
+    raw = "工作空间 OSS 内容".encode()
+
+    async def fake_upload(payload: bytes, *, filename: str, content_type: str) -> str:
+        assert payload == raw
+        assert filename == "说明.txt"
+        assert content_type == "text/plain"
+        return "oss://projects/7/assets/test.txt"
+
+    monkeypatch.setattr(settings, "workspace_object_storage_enabled", True)
+    monkeypatch.setattr(settings, "storage_gateway_url", "https://storage.example.test")
+    monkeypatch.setattr(settings, "storage_project_token", "test-token")
+    monkeypatch.setattr(workspace_service.storage_gateway_service, "upload_bytes", fake_upload)
+
+    file = await workspace_service.ingest_uploaded_file(
+        db,
+        ws,
+        path="说明.txt",
+        filename="说明.txt",
+        content_type="text/plain",
+        raw=raw,
+    )
+
+    assert file.content is None
+    assert file.content_ref == "oss://projects/7/assets/test.txt"
+    assert file.size == len(raw)
+    assert file.metadata_["storage_backend"] == "oss_gateway"
+    assert file.extracted_text == "工作空间 OSS 内容"

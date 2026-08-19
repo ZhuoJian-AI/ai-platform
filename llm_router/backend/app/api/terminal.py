@@ -757,13 +757,39 @@ async def original_preview_ws_file_endpoint(
     if organization is None or not settings.original_preview_enabled_for(organization.slug):
         raise HTTPException(status_code=404, detail="Original preview is not enabled")
     try:
-        content, media_type, filename = await asyncio.to_thread(build_original_preview, f)
+        raw = await workspace_service.load_file_bytes(f)
+        content, media_type, filename = await asyncio.to_thread(build_original_preview, f, raw)
+    except workspace_service.WorkspaceFileUploadError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except OriginalPreviewError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return Response(content=content, media_type=media_type, headers={
         "Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}",
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "sandbox",
+    })
+
+
+@router.get("/terminal/files/{file_id}/download")
+async def download_ws_file_endpoint(
+    file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        raw = await workspace_service.load_file_bytes(f)
+    except workspace_service.WorkspaceFileUploadError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    metadata = f.metadata_ or {}
+    filename = str(metadata.get("name") or f.path.rsplit("/", 1)[-1])
+    media_type = str(metadata.get("mime") or "application/octet-stream")
+    return Response(content=raw, media_type=media_type, headers={
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        "X-Content-Type-Options": "nosniff",
     })
 
 

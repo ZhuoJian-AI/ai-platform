@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
+from app.config import settings
 from app.models.department import Department
 from app.models.organization import Organization
 from app.models.team import Team
@@ -24,7 +25,7 @@ from app.schemas.workspace import (
     WorkspaceFolderCreate,
     WorkspaceUpdate,
 )
-from app.services import doc_parser
+from app.services import doc_parser, storage_gateway_service
 
 MAX_WORKSPACE_FILE_BYTES = 5 * 1024 * 1024
 MAX_LLM_FILE_CHARS = 100_000
@@ -98,13 +99,24 @@ def _sanitize_content(content: str) -> str:
     return content.replace("\x00", "")
 
 
-async def upsert_file(db: AsyncSession, ws: Workspace, data: WorkspaceFileCreate) -> WorkspaceFile:
+async def upsert_file(
+    db: AsyncSession,
+    ws: Workspace,
+    data: WorkspaceFileCreate,
+    *,
+    content_ref: str | None = None,
+    raw_size: int | None = None,
+    raw_content_hash: str | None = None,
+) -> WorkspaceFile:
     path = _normalize_path(data.path)
     content = _sanitize_content(data.content)
     meta = dict(data.metadata or {})
     # 二进制文件：前端以 base64 编码写入 content，并以 metadata.binary 标记。
     # size / content_hash 按解码后的原始字节计算，content 列存 base64 文本（PG TEXT 不允许 NUL）。
-    if meta.get("binary"):
+    if meta.get("binary") and raw_size is not None and raw_content_hash is not None:
+        size = raw_size
+        content_hash = raw_content_hash
+    elif meta.get("binary"):
         try:
             raw = base64.b64decode(content, validate=False)
         except ValueError:  # binascii.Error 是 ValueError 子类
@@ -136,7 +148,7 @@ async def upsert_file(db: AsyncSession, ws: Workspace, data: WorkspaceFileCreate
             size=size,
             content_hash=content_hash,
             content=content,
-            content_ref=path,
+            content_ref=content_ref or path,
             parse_status=parse_status,
             parse_kind=parse_kind,
             metadata_=meta,
@@ -144,6 +156,8 @@ async def upsert_file(db: AsyncSession, ws: Workspace, data: WorkspaceFileCreate
         db.add(f)
     else:
         f.content = content
+        if content_ref is not None:
+            f.content_ref = content_ref
         f.size = size
         f.content_hash = content_hash
         f.extracted_text = None
@@ -298,14 +312,65 @@ async def ingest_uploaded_file(
             f"文件过大（{len(raw)} 字节），上限 {MAX_WORKSPACE_FILE_BYTES // (1024 * 1024)}MB"
         )
     mime = content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    encoded = base64.b64encode(raw).decode("ascii")
-    f = await upsert_file(db, ws, WorkspaceFileCreate(
-        path=path,
-        content=encoded,
-        metadata={"binary": True, "mime": mime, "name": filename},
-    ))
+    digest = hashlib.sha256(raw).hexdigest()
+    content_ref: str | None = None
+    metadata = {"binary": True, "mime": mime, "name": filename}
+    if settings.workspace_object_storage_enabled:
+        if not settings.workspace_object_storage_configured:
+            raise WorkspaceFileUploadError("对象存储已启用，但存储网关配置不完整")
+        try:
+            content_ref = await storage_gateway_service.upload_bytes(
+                raw, filename=filename, content_type=mime,
+            )
+        except storage_gateway_service.StorageGatewayError as exc:
+            raise WorkspaceFileUploadError(str(exc)) from exc
+        encoded = ""
+        metadata["storage_backend"] = "oss_gateway"
+    else:
+        encoded = base64.b64encode(raw).decode("ascii")
+        metadata["storage_backend"] = "postgres_base64"
+    try:
+        f = await upsert_file(
+            db,
+            ws,
+            WorkspaceFileCreate(path=path, content=encoded, metadata=metadata),
+            content_ref=content_ref,
+            raw_size=len(raw),
+            raw_content_hash=digest,
+        )
+        if content_ref is not None:
+            f.content = None
+            await db.flush()
+    except Exception:
+        if content_ref is not None:
+            try:
+                await storage_gateway_service.delete_object(content_ref)
+            except storage_gateway_service.StorageGatewayError:
+                pass
+        raise
     await _parse_binary_file(db, f, filename=filename, content_type=mime, raw=raw)
     return f
+
+
+async def load_file_bytes(f: WorkspaceFile) -> bytes:
+    """Load original file bytes from OSS or the legacy PostgreSQL payload."""
+    if storage_gateway_service.is_object_ref(f.content_ref):
+        try:
+            raw = await storage_gateway_service.download_bytes(str(f.content_ref))
+        except storage_gateway_service.StorageGatewayError as exc:
+            raise WorkspaceFileUploadError(str(exc)) from exc
+    elif (f.metadata_ or {}).get("binary"):
+        try:
+            raw = base64.b64decode(f.content or "", validate=False)
+        except ValueError as exc:
+            raise WorkspaceFileUploadError(f"原文件 Base64 损坏：{exc}") from exc
+    else:
+        raw = (f.content or "").encode("utf-8")
+    if not raw:
+        raise WorkspaceFileUploadError("原文件为空")
+    if f.content_hash and hashlib.sha256(raw).hexdigest() != f.content_hash:
+        raise WorkspaceFileUploadError("原文件完整性校验失败")
+    return raw
 
 
 async def reparse_file(db: AsyncSession, f: WorkspaceFile) -> WorkspaceFile:
@@ -319,10 +384,10 @@ async def reparse_file(db: AsyncSession, f: WorkspaceFile) -> WorkspaceFile:
         await db.refresh(f)
         return f
     try:
-        raw = base64.b64decode(f.content or "", validate=False)
-    except ValueError as exc:
+        raw = await load_file_bytes(f)
+    except (WorkspaceFileUploadError, storage_gateway_service.StorageGatewayError) as exc:
         f.parse_status = "failed"
-        f.parse_error = f"原文件 Base64 损坏：{exc}"
+        f.parse_error = str(exc)[:1000]
         await db.flush()
         await db.refresh(f)
         return f

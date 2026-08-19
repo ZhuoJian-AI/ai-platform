@@ -69,7 +69,7 @@ export function classifyFile(f: {
   const ext = extOf(f.path);
   const meta = (f.metadata ?? {}) as { binary?: boolean; mime?: string };
   // 图片：二进制（base64）图片按 metadata.mime；无 metadata 时按扩展名兜底
-  if ((meta.binary && (meta.mime || '').startsWith('image/')) || IMAGE_EXTS.has(ext)) {
+  if (((meta.binary && (meta.mime || '').startsWith('image/')) || IMAGE_EXTS.has(ext)) && (!meta.binary || !!content)) {
     const mime = meta.mime || imgMimeOf(ext);
     return { kind: 'image', src: `data:${mime};base64,${content}`, href: f.path, path: f.path, fileId: f.id };
   }
@@ -161,10 +161,12 @@ export interface BrowserDrawerProps {
   onReparse?: (fileId: string) => Promise<void>;
   /** 鉴权获取原文件预览。Office 返回派生 PDF，PDF/图片返回原始字节。 */
   loadOriginalPreview?: (fileId: string) => Promise<Blob>;
+  /** 鉴权下载未经转换的原始文件。 */
+  loadOriginalFile?: (fileId: string) => Promise<Blob>;
 }
 
 export default function BrowserDrawer({
-  open, initialHref, onClose, resolveHref, onReparse, loadOriginalPreview,
+  open, initialHref, onClose, resolveHref, onReparse, loadOriginalPreview, loadOriginalFile,
 }: BrowserDrawerProps) {
   const [history, setHistory] = useState<Source[]>([]);
   const [index, setIndex] = useState(-1);
@@ -353,7 +355,16 @@ export default function BrowserDrawer({
   };
 
   // 下载当前预览内容：工作空间文件→内容 blob 下载；外部 URL→新标签打开由浏览器处理
-  const download = () => {
+  const saveBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
+
+  const download = async () => {
     if (!current) return;
     if (current.kind === 'image') {
       // data: URL 直接作为下载锚点；http URL 退化为新标签打开（跨域限制）
@@ -393,14 +404,14 @@ export default function BrowserDrawer({
       return;
     }
     if (current.kind === 'parsed' || current.kind === 'binary') {
-      const raw = current.kind === 'parsed' ? current.originalContent : current.content;
-      const blob = new Blob([b64ToUint8(raw)], { type: current.mime });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = current.path.split('/').pop() || current.path;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      try {
+        const blob = loadOriginalFile
+          ? await loadOriginalFile(current.fileId)
+          : new Blob([b64ToUint8(current.kind === 'parsed' ? current.originalContent : current.content)], { type: current.mime });
+        saveBlob(blob, current.path.split('/').pop() || current.path);
+      } catch (error) {
+        message.error((error as Error)?.message || '原文件下载失败');
+      }
     }
   };
 

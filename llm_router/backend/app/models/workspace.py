@@ -45,11 +45,11 @@ class WorkspaceFile(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     path: Mapped[str] = mapped_column(String(1024), nullable=False)  # 相对 workspace root 的 POSIX 路径
     size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     content_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    # local 后端：相对 workspace root 的文件路径；小文本亦可内联存 content 字段。
+    # legacy local 为相对路径；对象存储为 oss://<project-scoped-object-key>。
     content_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 内联文本内容（小文件直接落库，便于在线编辑与 agent 即时读取）。
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Office/PDF 等二进制文件的结构化文本解析结果；原文件仍保存在 content(base64)。
+    # Office/PDF 等二进制文件的结构化文本解析结果；原文件由 content_ref 定位。
     extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     parse_status: Mapped[str] = mapped_column(String(20), nullable=False, default="unparsed")
     parse_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)

@@ -39,6 +39,24 @@ class Settings(BaseSettings):
     original_preview_org_allowlist: str = ""
     original_preview_cache_root: str = "/preview-cache"
 
+    # Workspace binary object storage (authorized ZhuoJian Storage Gateway).
+    # Text workspace files stay inline for editing; Office/PDF/images use this
+    # gateway when enabled.  No OSS AccessKey is held by this application.
+    workspace_object_storage_enabled: bool = False
+    storage_gateway_url: str = ""
+    storage_project_token: str = ""
+    storage_public_endpoint: str = ""
+    storage_internal_endpoint: str = ""
+    storage_gateway_timeout_seconds: int = 60
+
+    @property
+    def workspace_object_storage_configured(self) -> bool:
+        return bool(
+            self.workspace_object_storage_enabled
+            and self.storage_gateway_url.strip()
+            and self.storage_project_token.strip()
+        )
+
     def original_preview_enabled_for(self, organization_slug: str) -> bool:
         if not self.original_preview_enabled:
             return False

@@ -412,6 +412,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
         resolveHref={resolveHref}
         onReparse={reparseFile}
         loadOriginalPreview={terminal.getWsFileOriginalPreview}
+        loadOriginalFile={terminal.downloadWsFile}
       />
 
       {/* 新建文件夹 */}

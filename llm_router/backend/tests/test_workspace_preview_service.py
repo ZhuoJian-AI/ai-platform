@@ -10,6 +10,12 @@ from app.config import settings
 from app.services import workspace_preview_service as preview
 
 
+@pytest.fixture(autouse=True)
+def db_engine():
+    """Pure preview tests do not need the PostgreSQL autouse fixture."""
+    yield
+
+
 def _file(raw: bytes, filename: str, mime: str, content_hash: str = "a" * 64):
     return SimpleNamespace(
         content=base64.b64encode(raw).decode("ascii"),
@@ -22,7 +28,7 @@ def _file(raw: bytes, filename: str, mime: str, content_hash: str = "a" * 64):
 def test_pdf_original_preview_returns_unchanged_bytes():
     raw = b"%PDF-1.4\npreview"
     content, media_type, filename = preview.build_original_preview(
-        _file(raw, "report.pdf", "application/pdf"),
+        _file(raw, "report.pdf", "application/pdf"), raw,
     )
     assert content == raw
     assert media_type == "application/pdf"
@@ -43,8 +49,8 @@ def test_office_preview_converts_once_and_reuses_hash_cache(tmp_path: Path, monk
 
     monkeypatch.setattr(preview.subprocess, "run", fake_run)
     source = _file(b"xlsx-bytes", "财务表.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    first = preview.build_original_preview(source)
-    second = preview.build_original_preview(source)
+    first = preview.build_original_preview(source, b"xlsx-bytes")
+    second = preview.build_original_preview(source, b"xlsx-bytes")
     assert first[0] == second[0] == b"%PDF-converted"
     assert first[1] == "application/pdf"
     assert calls == 1
@@ -52,4 +58,4 @@ def test_office_preview_converts_once_and_reuses_hash_cache(tmp_path: Path, monk
 
 def test_unsupported_original_preview_has_explicit_error():
     with pytest.raises(preview.OriginalPreviewError, match="暂不支持"):
-        preview.build_original_preview(_file(b"data", "archive.zip", "application/zip"))
+        preview.build_original_preview(_file(b"data", "archive.zip", "application/zip"), b"data")

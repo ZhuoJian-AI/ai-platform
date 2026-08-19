@@ -57,6 +57,7 @@ from app.services.workspace_service import (
     list_files_page,
     list_folders,
     list_workspaces,
+    load_file_bytes,
     reparse_file,
     soft_delete_file,
     soft_delete_folder,
@@ -244,13 +245,37 @@ async def original_preview_file_endpoint(
     if organization is None or not settings.original_preview_enabled_for(organization.slug):
         raise HTTPException(status_code=404, detail="Original preview is not enabled")
     try:
-        content, media_type, filename = await asyncio.to_thread(build_original_preview, f)
+        raw = await load_file_bytes(f)
+        content, media_type, filename = await asyncio.to_thread(build_original_preview, f, raw)
+    except WorkspaceFileUploadError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except OriginalPreviewError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return Response(content=content, media_type=media_type, headers={
         "Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}",
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "sandbox",
+    })
+
+
+@router.get("/files/{file_id}/download")
+async def download_file_endpoint(
+    file_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+):
+    f = await get_file(db, file_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+    assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
+    try:
+        raw = await load_file_bytes(f)
+    except WorkspaceFileUploadError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    metadata = f.metadata_ or {}
+    filename = str(metadata.get("name") or f.path.rsplit("/", 1)[-1])
+    media_type = str(metadata.get("mime") or "application/octet-stream")
+    return Response(content=raw, media_type=media_type, headers={
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        "X-Content-Type-Options": "nosniff",
     })
 
 

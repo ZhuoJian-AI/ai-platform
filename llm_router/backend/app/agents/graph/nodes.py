@@ -857,7 +857,8 @@ async def _execute_code_skill(
             return json.dumps({"status": "error", "error": f"Input file {value} is unavailable"})
         meta = file.metadata_ or {}
         if meta.get("binary"):
-            content = file.content or ""
+            raw = await workspace_service.load_file_bytes(file)
+            content = base64.b64encode(raw).decode("ascii")
         else:
             content = base64.b64encode((file.content or "").encode("utf-8")).decode("ascii")
         inputs.append({

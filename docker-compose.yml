@@ -70,4 +70,3 @@ volumes:
   pgdata:
   redisdata:
   skillcache:
-  previewcache:

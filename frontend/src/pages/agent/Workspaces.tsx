@@ -161,22 +161,19 @@ export default function Workspaces() {
     onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '重新解析失败'),
   });
 
-  /** 把二进制文件的 base64 content 解码为 Blob 并触发下载。 */
-  const downloadBinary = (f: WorkspaceFile) => {
+  /** 从鉴权下载端点取得原始二进制，兼容 OSS 与历史 Base64 文件。 */
+  const downloadBinary = async (f: WorkspaceFile) => {
     try {
-      const bin = atob(f.content ?? '');
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       const meta = (f.metadata ?? {}) as { mime?: string; name?: string };
-      const blob = new Blob([bytes], { type: meta.mime || 'application/octet-stream' });
+      const blob = await workspaces.downloadFile(f.id);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = meta.name || basename(f.path);
       a.click();
       URL.revokeObjectURL(url);
-    } catch {
-      message.error('下载失败');
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : '下载失败');
     }
   };
 
@@ -257,7 +254,7 @@ export default function Workspaces() {
   const downloadListFile = async (item: WorkspaceFileListItem) => {
     try {
       const file = await workspaces.getFile(item.id);
-      if (isBinary(file)) downloadBinary(file); else downloadText(file);
+      if (isBinary(file)) await downloadBinary(file); else downloadText(file);
     } catch (e) {
       message.error(e instanceof ApiError ? e.message : '下载失败');
     }

@@ -1,13 +1,12 @@
 """Authenticated original-file previews for workspace binaries.
 
-The source bytes remain unchanged in PostgreSQL.  PDF/images are streamed as
-stored; Office documents are converted to a derived PDF in a hash-addressed
-cache using an isolated LibreOffice profile.
+The caller supplies source bytes loaded through the workspace storage layer.
+PDF/images are streamed unchanged; Office documents are converted to a derived
+PDF in a hash-addressed cache using an isolated LibreOffice profile.
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import mimetypes
 import os
@@ -40,19 +39,13 @@ def _extension(filename: str) -> str:
     return PurePosixPath(filename).suffix.lower().lstrip(".")
 
 
-def _source_bytes(file: WorkspaceFile) -> tuple[bytes, str, str]:
+def _source_metadata(file: WorkspaceFile) -> tuple[str, str]:
     metadata = file.metadata_ or {}
     if not metadata.get("binary"):
         raise OriginalPreviewError("文本文件请使用 AI 解析内容视图")
     filename = str(metadata.get("name") or PurePosixPath(file.path).name)
     mime = str(metadata.get("mime") or mimetypes.guess_type(filename)[0] or "application/octet-stream")
-    try:
-        raw = base64.b64decode(file.content or "", validate=True)
-    except (ValueError, TypeError) as exc:
-        raise OriginalPreviewError("原文件 Base64 内容损坏") from exc
-    if not raw:
-        raise OriginalPreviewError("原文件为空")
-    return raw, filename, mime
+    return filename, mime
 
 
 def _convert_office_to_pdf(raw: bytes, filename: str, content_hash: str | None) -> bytes:
@@ -104,9 +97,11 @@ def _convert_office_to_pdf(raw: bytes, filename: str, content_hash: str | None) 
         return cache_file.read_bytes()
 
 
-def build_original_preview(file: WorkspaceFile) -> tuple[bytes, str, str]:
+def build_original_preview(file: WorkspaceFile, raw: bytes) -> tuple[bytes, str, str]:
     """Return preview bytes, media type and display filename."""
-    raw, filename, mime = _source_bytes(file)
+    if not raw:
+        raise OriginalPreviewError("原文件为空")
+    filename, mime = _source_metadata(file)
     ext = _extension(filename)
     if ext == "pdf" or mime == "application/pdf":
         return raw, "application/pdf", filename

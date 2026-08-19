@@ -649,6 +649,7 @@ export const workspaces = {
   getFile: (id: string) => request<WorkspaceFile>(`/api/v1/files/${id}`),
   getFilePreview: (id: string) => request<WorkspaceFilePreview>(`/api/v1/files/${id}/preview`),
   getFileOriginalPreview: (id: string) => requestBlob(`/api/v1/files/${id}/original-preview`, 'ai_infra_token'),
+  downloadFile: (id: string) => requestBlob(`/api/v1/files/${id}/download`, 'ai_infra_token'),
   reparseFile: (id: string) => request<WorkspaceFile>(`/api/v1/files/${id}/reparse`, { method: 'POST' }),
   updateFile: (id: string, data: { content?: string; metadata?: Record<string, unknown> }) =>
     request<WorkspaceFile>(`/api/v1/files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -1398,6 +1399,7 @@ export const terminal = {
   getWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}`),
   getWsFilePreview: (id: string) => userRequest<WorkspaceFilePreview>(`/api/v1/terminal/files/${id}/preview`),
   getWsFileOriginalPreview: (id: string) => requestBlob(`/api/v1/terminal/files/${id}/original-preview`, USER_TOKEN_KEY),
+  downloadWsFile: (id: string) => requestBlob(`/api/v1/terminal/files/${id}/download`, USER_TOKEN_KEY),
   reparseWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}/reparse`, { method: 'POST' }),
   updateWsFile: (id: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>
     userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

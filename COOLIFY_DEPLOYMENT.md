@@ -41,6 +41,16 @@ Path 留空。不要给 PostgreSQL、Redis、Mock 或 backend 配置公网域名
 - `CODE_SKILLS_ENABLED=true`
 - `SKILL_RUNNER_TOKEN=<随机长字符串>`
 - `SKILL_RUNNER_TIMEOUT_SECONDS=120`
+- `WORKSPACE_OBJECT_STORAGE_ENABLED=true`
+- `STORAGE_GATEWAY_URL=https://storage.staging.zhuojianai.com`
+- `STORAGE_PROJECT_TOKEN=<由平台 Provisioner 按仓库签发的项目令牌>`
+- `STORAGE_PUBLIC_ENDPOINT=https://oss-cn-hongkong.aliyuncs.com`
+- `STORAGE_INTERNAL_ENDPOINT=https://oss-cn-hongkong-internal.aliyuncs.com`
+- `STORAGE_GATEWAY_TIMEOUT_SECONDS=60`
+
+工作空间二进制原文件通过 Storage Gateway 写入项目隔离前缀，AI Platform 不持有 OSS
+AccessKey。ECS 与香港 OSS 之间使用 internal endpoint；浏览器下载仍先经过后端鉴权，
+不会向终端用户暴露长期凭证或公开 Bucket。小型可编辑文本与 AI 提取文本继续存 PostgreSQL。
 
 `MASTER_ENCRYPTION_KEY` 必须使用 Fernet 格式，可由服务器管理员在安全终端生成：
 
