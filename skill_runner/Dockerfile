@@ -32,6 +32,7 @@ RUN mkdir -p /opt/skill-node \
     && npm install --prefix /opt/skill-node --omit=dev --no-audit --no-fund exceljs@4.4.0 \
     && npm cache clean --force
 COPY app.py .
+COPY builtin_tools.py .
 
 EXPOSE 8020
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8020"]

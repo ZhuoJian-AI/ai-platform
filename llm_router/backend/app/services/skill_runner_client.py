@@ -116,3 +116,32 @@ async def execute_version(
                 detail = response.text
             raise RuntimeError(str(detail or f"Runner execution failed ({response.status_code})"))
     return response.json(), int((time.perf_counter() - started) * 1000)
+
+
+async def execute_builtin(
+    *, tool_kind: str, action: str, params: dict, inputs: list[dict],
+    execution_id: str, timeout_seconds: int | None = None,
+) -> tuple[dict, int]:
+    """Execute a platform-owned file handler in Runner's immutable base environment."""
+    started = time.perf_counter()
+    payload = {
+        "tool_kind": tool_kind,
+        "action": action,
+        "params": params,
+        "inputs": inputs,
+        "execution_id": execution_id,
+        "timeout_seconds": timeout_seconds or settings.skill_runner_timeout_seconds,
+    }
+    async with httpx.AsyncClient(timeout=(timeout_seconds or settings.skill_runner_timeout_seconds) + 15) as client:
+        response = await client.post(
+            f"{settings.skill_runner_url.rstrip('/')}/execute-builtin",
+            json=payload,
+            headers=_headers(),
+        )
+        if response.is_error:
+            try:
+                detail = response.json().get("detail")
+            except (ValueError, AttributeError):
+                detail = response.text
+            raise RuntimeError(str(detail or f"Runner builtin execution failed ({response.status_code})"))
+    return response.json(), int((time.perf_counter() - started) * 1000)

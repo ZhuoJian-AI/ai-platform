@@ -16,7 +16,9 @@ import subprocess
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
+from builtin_tools import BuiltinToolError, execute_builtin
 from fastapi import FastAPI, Header, HTTPException
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
@@ -92,6 +94,15 @@ class ExecuteRequest(InstallRequest):
     arguments: list[str] = Field(default_factory=list)
     script_path: str | None = None
     args: list[str] = Field(default_factory=list)
+
+
+class BuiltinExecuteRequest(BaseModel):
+    tool_kind: Literal["spreadsheet", "document", "presentation", "pdf", "text"]
+    action: Literal["inspect", "create", "edit", "convert"]
+    params: dict = Field(default_factory=dict)
+    inputs: list[InputFile] = Field(default_factory=list)
+    execution_id: str
+    timeout_seconds: int = Field(120, ge=1, le=600)
 
 
 def _auth(token: str | None) -> None:
@@ -258,7 +269,11 @@ def _dependency_declarations(root: Path) -> dict[str, list[str]]:
 def _validate_runtime_compatibility(root: Path) -> list[str]:
     info = _runtime_info()
     warnings: list[str] = []
-    uses_python = _uses_language(root, {".py"}) or (root / "pyproject.toml").exists() or (root / "requirements.txt").exists()
+    uses_python = (
+        _uses_language(root, {".py"})
+        or (root / "pyproject.toml").exists()
+        or (root / "requirements.txt").exists()
+    )
     uses_node = _uses_language(root, {".js", ".mjs", ".cjs"}) or (root / "package.json").exists()
     if uses_python:
         spec = _python_spec(root)
@@ -280,7 +295,10 @@ def _validate_runtime_compatibility(root: Path) -> list[str]:
         if not actual:
             raise HTTPException(status_code=422, detail="Runner Node runtime is unavailable")
         if spec and not _node_version_matches(spec, actual):
-            raise HTTPException(status_code=422, detail=f"Skill requires Node {spec}, but Runner provides Node {actual}")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Skill requires Node {spec}, but Runner provides Node {actual}",
+            )
         if not spec:
             warnings.append(f"Skill 未声明 package.json engines.node；当前使用 Node {actual}")
     return warnings
@@ -383,6 +401,76 @@ async def install(req: InstallRequest, x_skill_runner_token: str | None = Header
     _auth(x_skill_runner_token)
     path, metadata = await _ensure_installed(req)
     return {"status": "ready", "package_hash": req.package_hash, "path": str(path), **metadata}
+
+
+@app.post("/execute-builtin")
+async def execute_builtin_tool(
+    req: BuiltinExecuteRequest,
+    x_skill_runner_token: str | None = Header(None),
+) -> dict:
+    """Execute a platform-owned file handler without loading a user Skill."""
+    _auth(x_skill_runner_token)
+    run_root = Path(tempfile.mkdtemp(prefix=f"builtin-{req.execution_id}-"))
+    try:
+        input_dir, output_dir = run_root / "input", run_root / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        input_paths: list[Path] = []
+        for item in req.inputs:
+            path = input_dir / _safe_name(item.name)
+            try:
+                raw = base64.b64decode(item.content_base64, validate=True)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=f"Invalid input {item.name}") from exc
+            if len(raw) > MAX_OUTPUT_BYTES:
+                raise HTTPException(status_code=413, detail=f"Input {item.name} exceeds 5MB")
+            path.write_bytes(raw)
+            path.chmod(0o444)
+            input_paths.append(path)
+        input_dir.chmod(0o555)
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    execute_builtin,
+                    req.tool_kind,
+                    req.action,
+                    input_paths,
+                    req.params,
+                    output_dir,
+                ),
+                timeout=req.timeout_seconds,
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=408,
+                detail=f"Builtin tool execution exceeded {req.timeout_seconds}s",
+            ) from exc
+        except BuiltinToolError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        files = [path for path in output_dir.rglob("*") if path.is_file()]
+        if len(files) > MAX_OUTPUT_FILES:
+            raise HTTPException(status_code=422, detail="Builtin tool produced more than 20 files")
+        outputs = []
+        for path in files:
+            raw = path.read_bytes()
+            if len(raw) > MAX_OUTPUT_BYTES:
+                raise HTTPException(status_code=413, detail=f"Output {path.name} exceeds 5MB")
+            outputs.append({
+                "name": path.name,
+                "relative_path": path.relative_to(output_dir).as_posix(),
+                "content_base64": base64.b64encode(raw).decode("ascii"),
+                "size": len(raw),
+                "mime_type": (result.get("mime_types") or {}).get(path.name),
+            })
+        return {
+            "status": "success",
+            "tool_kind": req.tool_kind,
+            "action": req.action,
+            "summary": result.get("summary"),
+            "outputs": outputs,
+        }
+    finally:
+        shutil.rmtree(run_root, ignore_errors=True)
 
 
 @app.post("/execute")

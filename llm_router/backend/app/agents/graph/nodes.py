@@ -59,8 +59,10 @@ logger = structlog.get_logger()
 MAX_STEPS = 8
 
 GENERAL_SYSTEM_PROMPT = (
-    "你是组织智能助手。你可以：按需调用当前用户有权使用的技能完成业务操作；读写当前工作空间中的"
-    "文件（list/read/write/delete）；参考组织本体与四级长期记忆。只有系统实际提供了"
+    "你是组织智能助手。默认用 Markdown 直接回答；只有用户明确要求生成、编辑、转换或导出文件时，"
+    "才调用相应的平台文件工具。你可以：按需调用当前用户有权使用的技能完成专业业务操作；使用平台"
+    "文件工具处理表格、文档、演示文稿、PDF 与文本；管理当前工作空间文件；参考组织本体与四级长期记忆。"
+    "用户明确调用 Skill 或某个 Skill 明显匹配专业流程时优先遵循该 Skill，平台文件工具作为通用能力。只有系统实际提供了"
     "[知识库检索结果]时才能使用RAG内容，通用智能体不会自动加载知识库。"
     "请基于上述上下文完成用户任务，必要时分步调用工具，最终给出清晰的结果。"
 )
@@ -96,7 +98,9 @@ TOOL_STRATEGY_PROMPT = (
     "要求比较/遍历工作空间，或引用内容明确标记为不可用时，才调用文件工具。\n"
     "6. 对话历史中的[历史消息附件]只提供持久文件引用：用户要求继续分析时，使用其中 status=available 的"
     "准确 file_id 调用 workspace_read_file，并按 has_more/next_offset 继续分页。存在多个候选且用户指代不清时"
-    "必须先询问，不得擅自读取全部文件；status=unavailable 时明确告知文件已删除或无权访问。"
+    "必须先询问，不得擅自读取全部文件；status=unavailable 时明确告知文件已删除或无权访问。\n"
+    "7. 用户明确调用 Skill，或已载入 Skill 与当前专业流程匹配时，优先遵循 SKILL.md 并执行其脚本；"
+    "只有没有适用 Skill 时才使用 spreadsheet/document/presentation/pdf/text 平台通用工具兜底。"
 )
 
 # ── 输出协议（Craft 模式注入，场景无关 boilerplate，避免每个任务提示词重复）────
@@ -104,9 +108,8 @@ TOOL_STRATEGY_PROMPT = (
 # 任务提示词只需写业务目标、对象和期望交付物，不必重复这两段。
 OUTPUT_PROTOCOL_PROMPT = (
     "\n\n[输出协议]\n"
-    "1. 先在文本里流式输出完整分析。仅当用户请求或智能体任务说明明确要求生成、导出、下载、归档报告/附件时，"
-    "才在分析完成后调用 `generate_docx`；普通问答、解释或文件分析不得擅自生成附件。需要生成时，不要直接"
-    "跳到 docx，让屏幕只显示一句\"现在生成报告文档\"。\n"
+    "1. 默认以 Markdown 返回结果。仅当用户请求或智能体任务说明明确要求生成、编辑、转换、导出、下载或归档附件时，"
+    "才调用与目标格式对应的平台文件工具或已匹配 Skill；普通问答、解释或文件分析不得擅自生成附件。\n"
     "2. 不要臆造数据：所有编码 / 工单号 / 款号 / 数值 / 结论必须来自已注入的数据接口返回、"
     "本体、知识库检索命中或用户给定，不可拼凑不存在的标识符。"
 )
@@ -124,9 +127,15 @@ def _emit(event: dict) -> None:
 
 # ── 内置工作空间文件工具 ─────────────────────────────────────────────────
 
-BUILTIN_TOOL_NAMES = {"workspace_list_files", "workspace_read_file",
-                       "workspace_write_file", "workspace_delete_file",
-                       "generate_docx"}
+PLATFORM_FILE_TOOL_NAMES = {
+    "spreadsheet_tool", "document_tool", "presentation_tool", "pdf_tool", "text_tool",
+}
+BUILTIN_TOOL_NAMES = {
+    "workspace_list_files", "workspace_read_file", "workspace_write_file", "workspace_delete_file",
+    *PLATFORM_FILE_TOOL_NAMES,
+}
+# Kept executable for old persisted calls, but no longer advertised to new LLM rounds.
+LEGACY_BUILTIN_TOOL_NAMES = {"generate_docx"}
 
 
 def _builtin_tool_defs() -> list[dict]:
@@ -158,7 +167,7 @@ def _builtin_tool_defs() -> list[dict]:
         }},
         {"type": "function", "function": {
             "name": "workspace_write_file",
-            "description": "向当前工作空间写入（创建或覆盖）一个文件。",
+            "description": "向当前工作空间写入纯文本文件。Office、PDF 等二进制格式必须使用对应平台文件工具。",
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"}, "content": {"type": "string"}},
                 "required": ["path", "content"]},
@@ -170,19 +179,152 @@ def _builtin_tool_defs() -> list[dict]:
                 "path": {"type": "string"}}, "required": ["path"]},
         }},
         {"type": "function", "function": {
-            "name": "generate_docx",
-            "description": (
-                "生成一份真正的 Word(.docx) 二进制文档并写入当前工作空间（可下载）。"
-                "需要产出 Word 文档时务必用此工具，不要用 workspace_write_file 写 HTML 冒充 .docx。"
-                "正文用 markdown：# / ## / ### 为标题，段落可含 **加粗**，- 无序列表，1. 有序列表，"
-                "| a | b | 为表格。"
-            ),
+            "name": "spreadsheet_tool",
+            "description": "检查、创建、编辑或转换 Excel/CSV/TSV/ODS 表格。没有专业 Skill 时使用此通用工具。",
             "parameters": {"type": "object", "properties": {
-                "filename": {"type": "string", "description": "文件名，含 .docx 后缀，如 请假条.docx"},
-                "markdown": {"type": "string", "description": "文档正文 markdown"}},
-                "required": ["filename", "markdown"]},
+                "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
+                "input_file_ids": {"type": "array", "items": {"type": "string"}},
+                "output_name": {"type": "string"},
+                "sheets": {"type": "array", "items": {"type": "object", "properties": {
+                    "name": {"type": "string"},
+                    "rows": {"type": "array", "items": {"type": "array", "items": {}}},
+                }}},
+                "operations": {"type": "array", "items": {"type": "object"}},
+                "target_format": {"type": "string"},
+                "max_rows": {"type": "integer"}, "max_columns": {"type": "integer"},
+            }, "required": ["action"]},
+        }},
+        {"type": "function", "function": {
+            "name": "document_tool",
+            "description": "检查、创建、编辑或转换 Word/DOCX/DOC/ODT/RTF 文档；正文使用 Markdown。",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
+                "input_file_ids": {"type": "array", "items": {"type": "string"}},
+                "output_name": {"type": "string"}, "markdown": {"type": "string"},
+                "replace": {"type": "boolean"}, "target_format": {"type": "string"},
+            }, "required": ["action"]},
+        }},
+        {"type": "function", "function": {
+            "name": "presentation_tool",
+            "description": "检查、创建、追加编辑或转换 PowerPoint/PPTX/PPT/ODP 演示文稿。",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
+                "input_file_ids": {"type": "array", "items": {"type": "string"}},
+                "output_name": {"type": "string"},
+                "slides": {"type": "array", "items": {"type": "object", "properties": {
+                    "title": {"type": "string"},
+                    "bullets": {"type": "array", "items": {"type": "string"}},
+                    "notes": {"type": "string"},
+                }}},
+                "target_format": {"type": "string"},
+            }, "required": ["action"]},
+        }},
+        {"type": "function", "function": {
+            "name": "pdf_tool",
+            "description": "检查、创建、合并、提取页面或转换 PDF。edit 时 operation 可为 merge、split、extract_pages。",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
+                "input_file_ids": {"type": "array", "items": {"type": "string"}},
+                "output_name": {"type": "string"}, "markdown": {"type": "string"},
+                "operation": {"type": "string", "enum": ["merge", "split", "extract_pages"]},
+                "pages": {"type": "array", "items": {"type": "integer"}},
+                "target_format": {"type": "string"}, "max_pages": {"type": "integer"},
+            }, "required": ["action"]},
+        }},
+        {"type": "function", "function": {
+            "name": "text_tool",
+            "description": "检查、创建、编辑或转换 UTF-8 TXT/Markdown 文本文件。",
+            "parameters": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
+                "input_file_ids": {"type": "array", "items": {"type": "string"}},
+                "output_name": {"type": "string"}, "content": {"type": "string"},
+                "replace": {"type": "boolean"}, "format": {"type": "string"},
+                "target_format": {"type": "string"},
+            }, "required": ["action"]},
         }},
     ]
+
+
+async def _execute_platform_file_tool(
+    state: AgentState, name: str, params: dict, ws, user,
+) -> str:
+    """Authorize files, call Runner's immutable builtin lane, and persist outputs."""
+    if state.get("exec_mode") != "craft":
+        return json.dumps({"status": "error", "error": "请切换到 Craft 模式执行文件工具"}, ensure_ascii=False)
+    deps = get_deps()
+    db = deps["db"]
+    tool_kind = name.removesuffix("_tool")
+    action = str(params.get("action") or "").strip().lower()
+    requested_ids = params.get("input_file_ids")
+    if requested_ids is None:
+        requested_ids = state.get("referenced_file_ids") or []
+    if not isinstance(requested_ids, list):
+        return json.dumps({"status": "error", "error": "input_file_ids must be an array"})
+    runner_inputs: list[dict] = []
+    for value in requested_ids:
+        try:
+            file = await workspace_service.get_file(db, UUID(str(value)))
+        except (ValueError, TypeError, AttributeError):
+            file = None
+        if file is None or str(file.workspace_id) != str(ws.id):
+            return json.dumps({"status": "error", "error": f"Input file {value} is unavailable"})
+        raw = await workspace_service.load_file_bytes(file)
+        meta = file.metadata_ or {}
+        runner_inputs.append({
+            "file_id": str(file.id),
+            "name": str(meta.get("name") or PurePosixPath(file.path).name),
+            "content_base64": base64.b64encode(raw).decode("ascii"),
+        })
+    runner_params = {key: value for key, value in params.items() if key != "input_file_ids"}
+    try:
+        result, latency = await skill_runner_client.execute_builtin(
+            tool_kind=tool_kind,
+            action=action,
+            params=runner_params,
+            inputs=runner_inputs,
+            execution_id=f"{state.get('task_id') or 'playground'}-{uuid4().hex[:8]}",
+        )
+        output_items: list[dict] = []
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        task_part = state.get("task_id") or "playground"
+        for item in result.get("outputs") or []:
+            raw = base64.b64decode(item.get("content_base64") or "", validate=True)
+            original = PurePosixPath(str(item.get("name") or "output.bin")).name
+            path = f"平台工具输出/{task_part}/{stamp}-{uuid4().hex[:8]}-{original}"
+            saved = await workspace_service.ingest_uploaded_file(
+                db,
+                ws,
+                path=path,
+                filename=original,
+                content_type=item.get("mime_type") or mimetypes.guess_type(original)[0],
+                raw=raw,
+            )
+            output_meta = {
+                **(saved.metadata_ or {}),
+                "generated_by": "platform_file_tool",
+                "platform_tool": name,
+            }
+            if state.get("task_id"):
+                output_meta["task_id"] = str(state["task_id"])
+            saved.metadata_ = output_meta
+            await db.flush()
+            output_items.append({
+                "file_id": str(saved.id),
+                "name": original,
+                "path": saved.path,
+                "parse_status": saved.parse_status,
+            })
+        return json.dumps({
+            "status": "success",
+            "tool": name,
+            "action": action,
+            "summary": result.get("summary"),
+            "outputs": output_items,
+            "latency_ms": latency,
+        }, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("platform_file_tool_failed", tool=name, action=action, error=str(exc))
+        return json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False)
 
 
 async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> str:
@@ -206,6 +348,8 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
     # （仅在 save_memory 里 flush 未提交）被一并回滚，「任务回复消失」。
     try:
         async with db.begin_nested():
+            if name in PLATFORM_FILE_TOOL_NAMES:
+                return await _execute_platform_file_tool(state, name, params, ws, user)
             if name == "workspace_list_files":
                 files = await workspace_service.list_files(db, ws.id)
                 return json.dumps(
@@ -1138,7 +1282,7 @@ async def _execute_tool_call(
     tool_call_id = tool_call.get("id", "")
 
     # 内置工作空间文件工具
-    if name in BUILTIN_TOOL_NAMES:
+    if name in BUILTIN_TOOL_NAMES | LEGACY_BUILTIN_TOOL_NAMES:
         result_text = await _execute_builtin_tool(state, name, params)
         ok = not result_text.startswith(("no ", "workspace ", "file not found",
                                          "tool error", "unknown builtin"))
@@ -1408,8 +1552,7 @@ async def agent_loop(state: AgentState) -> dict:
         # 挂载了工具 → 注入「先分析再调用」策略，约束 agent 结合本体/数据接口规划最少端点集，
         # 而非盲目把所有端点试一遍。
         system_prompt = f"{system_prompt}{TOOL_STRATEGY_PROMPT}"
-        # 输出协议（场景无关）：先 text 流式分析后 generate_docx + 不臆造数据。
-        # 上提到 runtime 后任务提示词不必再重复这两段 boilerplate。
+        # 输出协议（场景无关）：默认 Markdown；明确要求附件时再选择对应工具。
         system_prompt = f"{system_prompt}{OUTPUT_PROTOCOL_PROMPT}"
         # 用户本轮通过真实 UUID 或唯一 /slug 明确调用 → 强制本轮实际加载/执行，不写入任务配置。
         referenced = state.get("referenced_skills") or []
@@ -1520,7 +1663,7 @@ async def agent_loop(state: AgentState) -> dict:
                 tool_name = tc.get("name", "")
                 tool_entry = registry.get(tool_name) or {}
                 kind = tool_entry.get("kind")
-                if tool_name in BUILTIN_TOOL_NAMES:
+                if tool_name in BUILTIN_TOOL_NAMES | LEGACY_BUILTIN_TOOL_NAMES:
                     category, title = "file", "文件解析与引用"
                 elif kind in {"code", "run_skill_script"}:
                     category, title = "skill", "Runner脚本执行"

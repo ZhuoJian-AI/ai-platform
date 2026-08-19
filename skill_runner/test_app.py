@@ -263,3 +263,68 @@ Path(os.environ["SKILL_OUTPUT_DIR"], "result.txt").write_text(
     assert base64.b64decode(output["content_base64"]) == b"1,234,567"
     metadata = json.loads((tmp_path / "cache" / package_hash / ".install.json").read_text())
     assert metadata["installed_dependencies"]["python"] == ["humanize==4.12.1"]
+
+
+@pytest.mark.asyncio
+async def test_builtin_spreadsheet_create_does_not_load_skill_package(monkeypatch):
+    async def fail_install(*_args, **_kwargs):
+        raise AssertionError("builtin execution must not install or load a Skill package")
+
+    monkeypatch.setattr(runner, "_ensure_installed", fail_install)
+    result = await runner.execute_builtin_tool(
+        runner.BuiltinExecuteRequest(
+            tool_kind="spreadsheet",
+            action="create",
+            params={
+                "output_name": "测试表.xlsx",
+                "sheets": [{"name": "数据", "rows": [["名称", "金额"], ["样例", 123.45]]}],
+            },
+            execution_id="builtin-create",
+        ),
+        runner.RUNNER_TOKEN,
+    )
+    assert result["status"] == "success"
+    assert result["tool_kind"] == "spreadsheet"
+    output = result["outputs"][0]
+    assert output["name"] == "测试表.xlsx"
+    assert base64.b64decode(output["content_base64"]).startswith(b"PK")
+
+
+@pytest.mark.asyncio
+async def test_builtin_spreadsheet_inspects_original_input():
+    from openpyxl import Workbook
+
+    stream = io.BytesIO()
+    book = Workbook()
+    book.active.title = "明细"
+    book.active.append(["姓名", "金额"])
+    book.active.append(["张三", 88])
+    book.save(stream)
+    result = await runner.execute_builtin_tool(
+        runner.BuiltinExecuteRequest(
+            tool_kind="spreadsheet",
+            action="inspect",
+            inputs=[runner.InputFile(
+                file_id="file-1",
+                name="明细.xlsx",
+                content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+            )],
+            execution_id="builtin-inspect",
+        ),
+        runner.RUNNER_TOKEN,
+    )
+    assert result["outputs"] == []
+    assert result["summary"]["sheets"][0]["name"] == "明细"
+    assert result["summary"]["sheets"][0]["rows"][1] == ["张三", 88]
+
+
+@pytest.mark.asyncio
+async def test_builtin_execution_requires_internal_token():
+    with pytest.raises(runner.HTTPException) as exc:
+        await runner.execute_builtin_tool(
+            runner.BuiltinExecuteRequest(
+                tool_kind="text", action="create", params={"content": "x"}, execution_id="no-auth",
+            ),
+            None,
+        )
+    assert exc.value.status_code == 401

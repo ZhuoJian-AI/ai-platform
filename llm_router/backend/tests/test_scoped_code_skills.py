@@ -362,6 +362,66 @@ async def test_executable_skill_output_is_ingested_into_workspace(db_session, mo
 
 
 @pytest.mark.asyncio
+async def test_platform_file_tools_are_available_without_skills_and_persist_outputs(
+    db_session, monkeypatch,
+):
+    org, _, _, _, _, user, cu = await _hierarchy(db_session)
+    workspace = Workspace(
+        organization_id=org.id,
+        name="Builtin tools workspace",
+        slug=f"builtin-{uuid4().hex[:8]}",
+        scope_type="user",
+        scope_id=str(user.id),
+        is_active=True,
+    )
+    db_session.add(workspace)
+    await db_session.flush()
+
+    tools, registry = await _build_tools(db_session, [], str(workspace.id), user=cu)
+    names = {item["function"]["name"] for item in tools}
+    assert {
+        "spreadsheet_tool", "document_tool", "presentation_tool", "pdf_tool", "text_tool",
+    } <= names
+    assert "generate_docx" not in names
+    assert registry == {}
+
+    runner = AsyncMock(return_value=({
+        "summary": "created text file",
+        "outputs": [{
+            "name": "result.md",
+            "mime_type": "text/markdown",
+            "content_base64": base64.b64encode("# 完成".encode()).decode(),
+        }],
+    }, 12))
+    monkeypatch.setattr(nodes.skill_runner_client, "execute_builtin", runner)
+    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": cu})
+    state = {
+        "org_id": str(org.id),
+        "workspace_id": str(workspace.id),
+        "exec_mode": "craft",
+        "task_id": None,
+        "referenced_file_ids": [],
+    }
+    result = json.loads(await nodes._execute_builtin_tool(
+        state,
+        "text_tool",
+        {"action": "create", "output_name": "result.md", "content": "# 完成"},
+    ))
+    assert result["status"] == "success"
+    assert result["outputs"][0]["name"] == "result.md"
+    assert result["outputs"][0]["path"].startswith("平台工具输出/playground/")
+    runner.assert_awaited_once()
+    assert runner.await_args.kwargs["tool_kind"] == "text"
+
+
+def test_platform_tool_registry_keeps_legacy_docx_hidden():
+    names = {item["function"]["name"] for item in nodes._builtin_tool_defs()}
+    assert nodes.PLATFORM_FILE_TOOL_NAMES <= names
+    assert "generate_docx" not in names
+    assert "generate_docx" in nodes.LEGACY_BUILTIN_TOOL_NAMES
+
+
+@pytest.mark.asyncio
 async def test_manager_grant_is_revoked_when_membership_no_longer_matches(db_session):
     _, _, department, _, _, user, cu = await _hierarchy(db_session)
     await replace_manager_grants(db_session, user, [
