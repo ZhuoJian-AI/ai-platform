@@ -137,7 +137,7 @@ async def execute_endpoint(
                 organization_id=str(org_id),
                 connector_id=str(connector.id),
                 endpoint_id=str(endpoint.id),
-                skill_id=str(skill_id) if skill_id else None,
+                skill_id=skill_id,
                 method=method,
                 path=endpoint.path,
                 params=params,

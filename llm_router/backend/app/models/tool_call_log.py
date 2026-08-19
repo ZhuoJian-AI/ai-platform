@@ -1,7 +1,9 @@
 """ToolCallLog ORM model — append-only record of tool invocations (for monitoring)."""
 
+from uuid import UUID
+
 from sqlalchemy import BigInteger, ForeignKey, Integer, String, Text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -23,8 +25,9 @@ class ToolCallLog(TimestampMixin, Base):
         ForeignKey("tool_endpoints.id", ondelete="SET NULL"), nullable=True, index=True
     )
     # Runtime records SkillFolder ids. Migration 0025 intentionally removed the
-    # legacy FK to the dormant ``skills`` table; keep the ORM consistent.
-    skill_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # legacy FK to the dormant ``skills`` table, but the physical column remains
+    # PostgreSQL UUID.  Keep it as a loose UUID reference without an FK.
+    skill_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True, index=True)
 
     method: Mapped[str | None] = mapped_column(String(10), nullable=True)
     path: Mapped[str | None] = mapped_column(String(1024), nullable=True)

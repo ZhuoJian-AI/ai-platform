@@ -4,7 +4,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient, Request, Response
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.tool_call_log import ToolCallLog
 from app.tools.ontology_validator import validate_ontology
 from app.tools.spec_parser import endpoint_to_skill_definition, parse_spec
 
@@ -98,7 +101,9 @@ async def test_connector_and_spec_import(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_manual_endpoint_test_and_publish_as_chat_skill(client: AsyncClient):
+async def test_manual_endpoint_test_and_publish_as_chat_skill(
+    client: AsyncClient, db_session: AsyncSession,
+):
     org_id = await _make_org(client, "publish-connector-org")
     conn = await client.post(
         f"/api/v1/organizations/{org_id}/connectors",
@@ -158,6 +163,10 @@ async def test_manual_endpoint_test_and_publish_as_chat_skill(client: AsyncClien
         )
     assert tested.status_code == 200
     assert tested.json()["body"]["available_quantity"] == 120
+    log = (await db_session.execute(select(ToolCallLog))).scalar_one()
+    assert str(log.endpoint_id) == endpoint_id
+    assert log.skill_id is None
+    assert log.status_code == 200
     call = request_mock.await_args
     assert call.args[0] == "GET"
     assert call.args[1].endswith("/inventory/SKU001")
