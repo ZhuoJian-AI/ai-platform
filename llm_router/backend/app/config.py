@@ -35,6 +35,19 @@ class Settings(BaseSettings):
     skill_runner_token: str = "skill-runner-dev-token-change-in-production"
     skill_runner_timeout_seconds: int = 120
     skill_package_max_bytes: int = 10 * 1024 * 1024
+    original_preview_enabled: bool = False
+    original_preview_org_allowlist: str = ""
+    original_preview_cache_root: str = "/preview-cache"
+
+    def original_preview_enabled_for(self, organization_slug: str) -> bool:
+        if not self.original_preview_enabled:
+            return False
+        allowed = {
+            value.strip().lower()
+            for value in self.original_preview_org_allowlist.split(",")
+            if value.strip()
+        }
+        return not allowed or organization_slug.lower() in allowed
 
     def agent_skills_enabled_for(self, organization_slug: str) -> bool:
         """Gate the new Agent Skill host independently per staging tenant."""

@@ -266,6 +266,22 @@ export default function Skills() {
                               {version.script_languages?.length ? ` · ${version.script_languages.join('/')}` : ''}
                               {version.is_executable ? ' · 可执行' : ' · 说明型'}
                             </span>
+                            {version.python_version && <Tag>Python {version.python_version}</Tag>}
+                            {version.node_version && <Tag>Node {version.node_version}</Tag>}
+                            {Object.keys(version.builtin_dependencies ?? {}).length > 0 && (
+                              <Tooltip title={Object.entries(version.builtin_dependencies)
+                                .map(([runtime, items]) => `${runtime}: ${Object.entries(items).map(([name, value]) => `${name}${value ? ` ${value}` : ''}`).join(', ')}`)
+                                .join('；')}>
+                                <Tag color="geekblue">内置 Office 库</Tag>
+                              </Tooltip>
+                            )}
+                            {Object.values(version.installed_dependencies ?? {}).some((items) => items.length > 0) && (
+                              <Tooltip title={Object.entries(version.installed_dependencies)
+                                .filter(([, items]) => items.length > 0)
+                                .map(([runtime, items]) => `${runtime}: ${items.join(', ')}`).join('；')}>
+                                <Tag color="cyan">额外依赖</Tag>
+                              </Tooltip>
+                            )}
                             {f.active_version_id === version.id && <Tag color="purple">当前版本</Tag>}
                             <span style={{ flex: 1 }} />
                             {version.install_status === 'failed' && (

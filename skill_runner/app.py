@@ -4,25 +4,71 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.metadata
 import io
 import json
 import os
+import platform
+import re
 import shutil
 import signal
+import subprocess
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI, Header, HTTPException
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, Field
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - production Runner is Python 3.12
+    import tomli as tomllib
 
 CACHE_ROOT = Path(os.getenv("SKILL_CACHE_ROOT", "/cache")).resolve()
 RUNNER_TOKEN = os.getenv("SKILL_RUNNER_TOKEN", "skill-runner-dev-token-change-in-production")
 MAX_PACKAGE_BYTES = 10 * 1024 * 1024
 MAX_OUTPUT_BYTES = 5 * 1024 * 1024
 MAX_OUTPUT_FILES = 20
+BASE_NODE_MODULES = Path(os.getenv("SKILL_BASE_NODE_MODULES", "/opt/skill-node/node_modules"))
+BUILTIN_PYTHON_PACKAGES = (
+    "openpyxl", "pandas", "python-docx", "python-pptx", "PyMuPDF", "pypdf",
+)
+BUILTIN_NODE_PACKAGES = ("exceljs",)
 
 app = FastAPI(title="AI Platform Skill Runner")
+
+
+def _command_version(argv: list[str]) -> str | None:
+    try:
+        result = subprocess.run(argv, capture_output=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    raw = result.stdout or result.stderr or b""
+    value = raw.decode("utf-8", errors="replace").strip().splitlines()
+    return value[0] if value else None
+
+
+def _package_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _runtime_info() -> dict:
+    return {
+        "python_version": platform.python_version(),
+        "node_version": (_command_version(["node", "--version"]) or "").lstrip("v") or None,
+        "bash_version": _command_version(["bash", "--version"]),
+        "libreoffice_version": _command_version(["libreoffice", "--version"]),
+        "builtin_dependencies": {
+            "python": {name: _package_version(name) for name in BUILTIN_PYTHON_PACKAGES},
+            "node": {"exceljs": "4.4.0" if (BASE_NODE_MODULES / "exceljs").exists() else None},
+        },
+    }
 
 
 class InstallRequest(BaseModel):
@@ -105,15 +151,155 @@ async def _run(argv: list[str], cwd: Path, timeout: int, env: dict[str, str] | N
     return process.returncode or 0, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
 
 
-async def _ensure_installed(req: InstallRequest) -> Path:
+def _uses_language(root: Path, suffixes: set[str]) -> bool:
+    scripts = root / "scripts"
+    return scripts.is_dir() and any(path.suffix.lower() in suffixes for path in scripts.rglob("*"))
+
+
+def _python_spec(root: Path) -> str | None:
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid pyproject.toml: {exc}") from exc
+    project = data.get("project")
+    return str(project.get("requires-python")) if isinstance(project, dict) and project.get("requires-python") else None
+
+
+def _node_spec(root: Path) -> str | None:
+    package_json = root / "package.json"
+    if not package_json.exists():
+        return None
+    try:
+        data = json.loads(package_json.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid package.json: {exc}") from exc
+    engines = data.get("engines")
+    return str(engines.get("node")) if isinstance(engines, dict) and engines.get("node") else None
+
+
+def _node_version_matches(spec: str, actual: str) -> bool:
+    """Evaluate the common subset of npm engine ranges used by Skills.
+
+    Supports exact/major versions, comparison ranges, caret/tilde ranges and
+    `x` wildcards.  `||` alternatives are accepted.  Invalid ranges are
+    rejected explicitly instead of silently claiming compatibility.
+    """
+    try:
+        current = Version(actual)
+    except InvalidVersion as exc:
+        raise HTTPException(status_code=422, detail=f"Runner Node version is invalid: {actual}") from exc
+    for alternative in spec.split("||"):
+        tokens = [token for token in re.split(r"[ ,]+", alternative.strip()) if token]
+        ok = True
+        for token in tokens:
+            token = token.strip()
+            if token in {"*", "x", "X"}:
+                continue
+            match = re.fullmatch(r"(>=|<=|>|<|=)?v?(\d+)(?:\.(\d+|x|X|\*))?(?:\.(\d+|x|X|\*))?", token)
+            if token.startswith(("^", "~")):
+                operator, raw = token[0], token[1:].lstrip("v")
+                parts = [int(p) for p in raw.split(".") if p.isdigit()]
+                if not parts:
+                    raise HTTPException(status_code=422, detail=f"Unsupported Node engine range: {spec}")
+                low = Version(".".join(map(str, parts + [0] * (3 - len(parts)))))
+                high = Version(f"{low.major + 1}.0.0") if operator == "^" else Version(f"{low.major}.{low.minor + 1}.0")
+                ok = ok and current >= low and current < high
+                continue
+            if not match:
+                raise HTTPException(status_code=422, detail=f"Unsupported Node engine range: {spec}")
+            op, major, minor, patch = match.groups()
+            if minor in {None, "x", "X", "*"}:
+                if op:
+                    target = Version(f"{major}.0.0")
+                else:
+                    ok = ok and current.major == int(major)
+                    continue
+            elif patch in {None, "x", "X", "*"} and not op:
+                ok = ok and current.major == int(major) and current.minor == int(minor)
+                continue
+            else:
+                target = Version(f"{major}.{minor}.{patch or 0}")
+            ok = ok and {
+                ">=": current >= target, "<=": current <= target, ">": current > target,
+                "<": current < target, "=": current == target, None: current == target,
+            }[op]
+        if ok:
+            return True
+    return False
+
+
+def _dependency_declarations(root: Path) -> dict[str, list[str]]:
+    python_deps: list[str] = []
+    node_deps: list[str] = []
+    pyproject = root / "pyproject.toml"
+    requirements = root / "requirements.txt"
+    if pyproject.exists():
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        project = data.get("project")
+        values = project.get("dependencies") if isinstance(project, dict) else []
+        python_deps = [str(value) for value in values] if isinstance(values, list) else []
+    elif requirements.exists():
+        python_deps = [
+            line.strip() for line in requirements.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    package_json = root / "package.json"
+    if package_json.exists():
+        data = json.loads(package_json.read_text(encoding="utf-8"))
+        dependencies = data.get("dependencies")
+        if isinstance(dependencies, dict):
+            node_deps = [f"{name}@{version}" for name, version in sorted(dependencies.items())]
+    return {"python": python_deps, "node": node_deps}
+
+
+def _validate_runtime_compatibility(root: Path) -> list[str]:
+    info = _runtime_info()
+    warnings: list[str] = []
+    uses_python = _uses_language(root, {".py"}) or (root / "pyproject.toml").exists() or (root / "requirements.txt").exists()
+    uses_node = _uses_language(root, {".js", ".mjs", ".cjs"}) or (root / "package.json").exists()
+    if uses_python:
+        spec = _python_spec(root)
+        if spec:
+            try:
+                compatible = Version(info["python_version"]) in SpecifierSet(spec)
+            except (InvalidSpecifier, InvalidVersion) as exc:
+                raise HTTPException(status_code=422, detail=f"Invalid requires-python value: {spec}") from exc
+            if not compatible:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Skill requires Python {spec}, but Runner provides Python {info['python_version']}",
+                )
+        else:
+            warnings.append(f"Skill 未声明 requires-python；当前使用 Python {info['python_version']}")
+    if uses_node:
+        spec = _node_spec(root)
+        actual = info.get("node_version")
+        if not actual:
+            raise HTTPException(status_code=422, detail="Runner Node runtime is unavailable")
+        if spec and not _node_version_matches(spec, actual):
+            raise HTTPException(status_code=422, detail=f"Skill requires Node {spec}, but Runner provides Node {actual}")
+        if not spec:
+            warnings.append(f"Skill 未声明 package.json engines.node；当前使用 Node {actual}")
+    return warnings
+
+
+async def _ensure_installed(req: InstallRequest) -> tuple[Path, dict]:
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     package_dir = (CACHE_ROOT / req.package_hash).resolve()
     marker = package_dir / ".ready"
     if marker.exists():
-        return package_dir
+        metadata_file = package_dir / ".install.json"
+        metadata = json.loads(metadata_file.read_text(encoding="utf-8")) if metadata_file.exists() else {
+            **_runtime_info(), "installed_dependencies": {"python": [], "node": []}, "compatibility_warnings": [],
+        }
+        return package_dir, metadata
     temp = Path(tempfile.mkdtemp(prefix=f"install-{req.package_hash[:8]}-", dir=CACHE_ROOT))
     try:
         _extract(_decode_archive(req.archive_base64), temp)
+        warnings = _validate_runtime_compatibility(temp)
         needs_python = req.runtime == "python" or (
             req.runtime == "agent_skill"
             and any((temp / name).exists() for name in ("requirements.txt", "pyproject.toml"))
@@ -121,18 +307,18 @@ async def _ensure_installed(req: InstallRequest) -> Path:
         needs_node = req.runtime == "node" or (req.runtime == "agent_skill" and (temp / "package.json").exists())
         if needs_python:
             venv = temp / ".venv"
-            code, _, err = await _run(["python", "-m", "venv", str(venv)], temp, 120)
+            code, _, err = await _run(["python", "-m", "venv", "--system-site-packages", str(venv)], temp, 120)
             if code:
                 raise HTTPException(status_code=422, detail=err[-2000:])
-            requirements = temp / "requirements.txt"
-            if requirements.exists():
-                python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-                code, _, err = await _run([str(python), "-m", "pip", "install", "-r", str(requirements)], temp, 300)
+            python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            if (temp / "pyproject.toml").exists():
+                code, _, err = await _run([str(python), "-m", "pip", "install", "."], temp, 300)
                 if code:
                     raise HTTPException(status_code=422, detail=err[-2000:])
-            if (temp / "pyproject.toml").exists():
-                python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-                code, _, err = await _run([str(python), "-m", "pip", "install", "."], temp, 300)
+            elif (temp / "requirements.txt").exists():
+                code, _, err = await _run(
+                    [str(python), "-m", "pip", "install", "-r", str(temp / "requirements.txt")], temp, 300,
+                )
                 if code:
                     raise HTTPException(status_code=422, detail=err[-2000:])
         if needs_node and (temp / "package.json").exists():
@@ -144,14 +330,20 @@ async def _ensure_installed(req: InstallRequest) -> Path:
             code, _, err = await _run(command, temp, 300)
             if code:
                 raise HTTPException(status_code=422, detail=err[-2000:])
+        metadata = {
+            **_runtime_info(),
+            "installed_dependencies": _dependency_declarations(temp),
+            "compatibility_warnings": warnings,
+        }
         # The cache entry does not exist until the atomically prepared temp
         # directory is renamed into place. Write the marker inside that temp
         # directory so a partially installed package can never look ready.
+        (temp / ".install.json").write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
         (temp / ".ready").write_text("ready", encoding="utf-8")
         if package_dir.exists():
             shutil.rmtree(package_dir)
         temp.replace(package_dir)
-        return package_dir
+        return package_dir, metadata
     except Exception:
         shutil.rmtree(temp, ignore_errors=True)
         raise
@@ -182,21 +374,21 @@ def _script(package: Path, requested: str | None, legacy_entrypoint: str | None)
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict:
+    return {"status": "ok", **_runtime_info()}
 
 
 @app.post("/install")
 async def install(req: InstallRequest, x_skill_runner_token: str | None = Header(None)) -> dict:
     _auth(x_skill_runner_token)
-    path = await _ensure_installed(req)
-    return {"status": "ready", "package_hash": req.package_hash, "path": str(path)}
+    path, metadata = await _ensure_installed(req)
+    return {"status": "ready", "package_hash": req.package_hash, "path": str(path), **metadata}
 
 
 @app.post("/execute")
 async def execute(req: ExecuteRequest, x_skill_runner_token: str | None = Header(None)) -> dict:
     _auth(x_skill_runner_token)
-    package = await _ensure_installed(req)
+    package, _ = await _ensure_installed(req)
     if req.runtime not in {"python", "node", "agent_skill"}:
         raise HTTPException(status_code=422, detail="Skill is not executable")
     entrypoint, language = _script(package, req.script_path, req.entrypoint)
@@ -217,9 +409,12 @@ async def execute(req: ExecuteRequest, x_skill_runner_token: str | None = Header
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=f"Invalid input {item.name}") from exc
             path.write_bytes(raw)
+            path.chmod(0o444)
             input_paths.append(path)
+        input_dir.chmod(0o555)
         params_path = run_root / "params.json"
         params_path.write_text(json.dumps(req.params, ensure_ascii=False), encoding="utf-8")
+        params_path.chmod(0o444)
         replacements = {
             "{input_dir}": str(input_dir), "{output_dir}": str(output_dir), "{params_json}": str(params_path),
             "{input_file}": str(input_paths[0]) if input_paths else "",
@@ -244,11 +439,14 @@ async def execute(req: ExecuteRequest, x_skill_runner_token: str | None = Header
             if not bash:
                 raise HTTPException(status_code=422, detail="Bash interpreter is unavailable")
             argv = [bash, str(copied_entrypoint), *args]
+        node_paths = [str(package / "node_modules")]
+        if BASE_NODE_MODULES.exists():
+            node_paths.append(str(BASE_NODE_MODULES))
         code, stdout, stderr = await _run(argv, skill_dir, req.timeout_seconds, {
             "SKILL_INPUT_DIR": str(input_dir), "SKILL_OUTPUT_DIR": str(output_dir),
             "SKILL_PARAMS_JSON": str(params_path),
             "SKILL_DIR": str(skill_dir), "SKILL_ROOT": str(skill_dir),
-            "NODE_PATH": str(package / "node_modules"),
+            "NODE_PATH": os.pathsep.join(node_paths),
         })
         if code:
             raise HTTPException(status_code=422, detail=(stderr or stdout)[-4000:])

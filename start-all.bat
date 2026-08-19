@@ -111,6 +111,8 @@ echo.
 echo   Admin console: http://localhost:5173
 echo   Backend health: http://localhost:8000/health
 echo   Mock API health: http://localhost:8010/health
+echo   Skill Runner capabilities: http://localhost:8020/health
+echo   Office preview cache: Docker volume previewcache
 echo.
 echo   Frontend logs:
 echo     %FRONTEND_DIR%\vite.out.log

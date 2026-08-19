@@ -1,7 +1,6 @@
-import { useMemo, useRef, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
-  Drawer, Upload, message, Tooltip, Typography, Button, Empty,
+  Drawer, Upload, message, Tooltip, Typography, Button, Empty, Segmented, Spin, Tag,
 } from 'antd';
 import {
   DeleteOutlined, BankOutlined, ApartmentOutlined,
@@ -555,41 +554,79 @@ function FileViewer({ file, onDownload, onReparse, reparsing }: {
   const meta = (file.metadata ?? {}) as { binary?: boolean; mime?: string; name?: string };
   const ext = extOf(file.path);
   const content = file.content ?? '';
+  const [view, setView] = useState<'original' | 'ai'>('original');
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewType, setPreviewType] = useState('application/pdf');
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  useEffect(() => {
+    setView('original');
+    setPreviewUrl(null);
+    setPreviewError(null);
+    if (!meta.binary) return;
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setPreviewLoading(true);
+    workspaces.getFileOriginalPreview(file.id)
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setPreviewType(blob.type || 'application/pdf');
+        setPreviewUrl(objectUrl);
+      })
+      .catch((error) => { if (!cancelled) setPreviewError((error as Error)?.message || '原文件预览加载失败'); })
+      .finally(() => { if (!cancelled) setPreviewLoading(false); });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [file.id, meta.binary]);
 
   // 二进制文件
   if (meta.binary) {
-    if (file.parse_status === 'ready' && file.extracted_text) {
-      return (
-        <div style={{ height: '100%', overflowY: 'auto', padding: '16px 20px' }}>
-          <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: FS.aux }}>
-            已解析为 {file.parse_kind || '文本'} · 原文件可通过右上角下载
-          </Typography.Text>
-          <div className="wb-md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{file.extracted_text}</ReactMarkdown></div>
-        </div>
-      );
-    }
-    const mime = meta.mime || 'application/octet-stream';
-    if (mime.startsWith('image/')) {
-      return (
-        <div style={viewerCenter}>
-          <img src={`data:${mime};base64,${content}`} alt={file.path}
-            style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', borderRadius: 4 }} />
-        </div>
-      );
-    }
-    if (mime === 'application/pdf' || ext === 'pdf') {
-      return <iframe title="pdf" src={`data:application/pdf;base64,${content}`} style={{ width: '100%', height: '100%', border: 'none' }} />;
-    }
+    const hasAiContent = file.parse_status === 'ready' && !!file.extracted_text;
     return (
-      <div style={viewerCenter}>
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description={<>
-            <div>{file.parse_error || `该二进制文件（${mime}）尚无可预览文本`}</div>
-            <Typography.Text type="secondary" style={{ fontSize: FS.aux }}>{file.path}</Typography.Text>
-          </>} />
-        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <Button icon={<ReloadOutlined />} onClick={onReparse} loading={reparsing}>重新解析</Button>
-          <Button icon={<DownloadOutlined />} onClick={onDownload}>下载</Button>
+      <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+          padding: '8px 14px', borderBottom: `1px solid ${WB.border}`, background: '#FAFAFB',
+        }}>
+          <Segmented size="small" value={view} onChange={(value) => setView(value as 'original' | 'ai')}
+            options={[
+              { label: '原文件预览', value: 'original' },
+              { label: 'AI 解析内容', value: 'ai', disabled: !hasAiContent },
+            ]} />
+          <div><Tag color="blue">原文件</Tag>{hasAiContent && <Tag color="green">AI 已解析</Tag>}</div>
+        </div>
+        <div style={{ flex: 1, minHeight: 0 }}>
+          {view === 'original' && (
+            previewLoading ? <div style={viewerCenter}><Spin tip="正在生成原文件预览…" /></div>
+              : previewUrl ? (
+                previewType.startsWith('image/')
+                  ? <div style={viewerCenter}><img src={previewUrl} alt={file.path} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} /></div>
+                  : <iframe title="原文件预览" src={previewUrl} style={{ width: '100%', height: '100%', border: 'none' }} />
+              ) : (
+                <div style={viewerCenter}>
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={previewError || '原文件预览暂不可用，可下载后查看'} />
+                  <Button icon={<DownloadOutlined />} onClick={onDownload}>下载原文件</Button>
+                </div>
+              )
+          )}
+          {view === 'ai' && hasAiContent && (
+            <div style={{ height: '100%', overflowY: 'auto', padding: '16px 20px' }}>
+              <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: FS.aux }}>
+                这是提供给 AI 检索和分析的结构化文本，不代表原文件排版。
+              </Typography.Text>
+              <div className="wb-md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{file.extracted_text}</ReactMarkdown></div>
+            </div>
+          )}
+          {view === 'ai' && !hasAiContent && (
+            <div style={viewerCenter}>
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={file.parse_error || '该文件尚未生成 AI 可读内容'} />
+              <Button icon={<ReloadOutlined />} onClick={onReparse} loading={reparsing}>重新解析</Button>
+            </div>
+          )}
         </div>
       </div>
     );

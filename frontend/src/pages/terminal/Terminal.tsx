@@ -1034,6 +1034,7 @@ export default function Terminal() {
         initialHref={browserHref}
         onClose={() => setBrowserOpen(false)}
         resolveHref={resolveHref}
+        loadOriginalPreview={terminal.getWsFileOriginalPreview}
       />
 
       {/* 删除任务确认：界面正中模态框 */}
@@ -2422,6 +2423,7 @@ function FilePanel({ workspaceId }: { workspaceId: string | null }) {
         initialHref={browserHref}
         onClose={() => setBrowserOpen(false)}
         resolveHref={resolveHref}
+        loadOriginalPreview={terminal.getWsFileOriginalPreview}
       />
     </div>
   );

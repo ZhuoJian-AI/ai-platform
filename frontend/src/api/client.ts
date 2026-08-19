@@ -341,6 +341,18 @@ export interface User {
   updated_at: string;
 }
 
+async function requestBlob(path: string, tokenKey: string): Promise<Blob> {
+  const token = localStorage.getItem(tokenKey);
+  const resp = await fetch(`${BASE_URL}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new ApiError(resp.status, body.detail || resp.statusText, body);
+  }
+  return resp.blob();
+}
+
 export interface ManagerScopeGrant {
   scope_type: 'department' | 'team';
   scope_id: string;
@@ -636,6 +648,7 @@ export const workspaces = {
     uploadWorkspaceFile(`/api/v1/workspaces/${wsId}/files/upload`, file, path, 'ai_infra_token'),
   getFile: (id: string) => request<WorkspaceFile>(`/api/v1/files/${id}`),
   getFilePreview: (id: string) => request<WorkspaceFilePreview>(`/api/v1/files/${id}/preview`),
+  getFileOriginalPreview: (id: string) => requestBlob(`/api/v1/files/${id}/original-preview`, 'ai_infra_token'),
   reparseFile: (id: string) => request<WorkspaceFile>(`/api/v1/files/${id}/reparse`, { method: 'POST' }),
   updateFile: (id: string, data: { content?: string; metadata?: Record<string, unknown> }) =>
     request<WorkspaceFile>(`/api/v1/files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
@@ -914,6 +927,9 @@ export interface SkillVersion {
   install_status: 'pending' | 'installing' | 'ready' | 'failed';
   package_format: 'legacy' | 'agent_skill'; script_languages: string[];
   compatibility_warnings: string[];
+  python_version: string | null; node_version: string | null;
+  builtin_dependencies: Record<string, Record<string, string | null>>;
+  installed_dependencies: Record<string, string[]>;
   install_error: string | null; created_at: string; updated_at: string;
 }
 
@@ -1381,6 +1397,7 @@ export const terminal = {
     uploadWorkspaceFile(`/api/v1/terminal/workspaces/${wsId}/files/upload`, file, path, USER_TOKEN_KEY, options),
   getWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}`),
   getWsFilePreview: (id: string) => userRequest<WorkspaceFilePreview>(`/api/v1/terminal/files/${id}/preview`),
+  getWsFileOriginalPreview: (id: string) => requestBlob(`/api/v1/terminal/files/${id}/original-preview`, USER_TOKEN_KEY),
   reparseWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}/reparse`, { method: 'POST' }),
   updateWsFile: (id: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>
     userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

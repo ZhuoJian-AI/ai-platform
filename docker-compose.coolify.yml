@@ -111,6 +111,11 @@ services:
       SKILL_RUNNER_URL: http://skill-runner:8020
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
       SKILL_RUNNER_TIMEOUT_SECONDS: "${SKILL_RUNNER_TIMEOUT_SECONDS:-120}"
+      ORIGINAL_PREVIEW_ENABLED: "${ORIGINAL_PREVIEW_ENABLED:-true}"
+      ORIGINAL_PREVIEW_ORG_ALLOWLIST: "${ORIGINAL_PREVIEW_ORG_ALLOWLIST:-aifabei}"
+      ORIGINAL_PREVIEW_CACHE_ROOT: /preview-cache
+    volumes:
+      - preview_cache:/preview-cache
     expose:
       - "8000"
     command:
@@ -157,3 +162,4 @@ volumes:
   postgres_data:
   redis_data:
   skill_cache:
+  preview_cache:

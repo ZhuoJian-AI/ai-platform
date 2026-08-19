@@ -1,8 +1,19 @@
 """Workspace & workspace files CRUD API."""
 
+import asyncio
+from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,7 +25,9 @@ from app.auth.admin_auth import (
     require_org_access,
     require_org_access_write,
 )
+from app.config import settings
 from app.database import get_db
+from app.models.organization import Organization
 from app.schemas.workspace import (
     WorkspaceCreate,
     WorkspaceFileCreate,
@@ -28,6 +41,10 @@ from app.schemas.workspace import (
     WorkspaceUpdate,
 )
 from app.services.organization_service import list_organizations
+from app.services.workspace_preview_service import (
+    OriginalPreviewError,
+    build_original_preview,
+)
 from app.services.workspace_service import (
     WorkspaceFileUploadError,
     build_workspace_tree,
@@ -210,6 +227,31 @@ async def preview_file_endpoint(
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
     return f
+
+
+@router.get("/files/{file_id}/original-preview")
+async def original_preview_file_endpoint(
+    file_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+):
+    f = await get_file(db, file_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await get_workspace(db, f.workspace_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_access(auth, ws.organization_id)
+    organization = await db.get(Organization, ws.organization_id)
+    if organization is None or not settings.original_preview_enabled_for(organization.slug):
+        raise HTTPException(status_code=404, detail="Original preview is not enabled")
+    try:
+        content, media_type, filename = await asyncio.to_thread(build_original_preview, f)
+    except OriginalPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(content=content, media_type=media_type, headers={
+        "Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox",
+    })
 
 
 @router.post("/files/{file_id}/reparse", response_model=WorkspaceFileRead)

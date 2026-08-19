@@ -4,17 +4,40 @@
 通用智能体执行复用编译图 ``get_agent_graph()`` 的 general 模式分支。
 """
 
+import asyncio
+from urllib.parse import quote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.graph import get_agent_graph, run_general_agent, run_registry, stream_general_agent
+from app.agents.graph import (
+    get_agent_graph,
+    run_general_agent,
+    run_registry,
+    stream_general_agent,
+)
 from app.agents.graph.runner import stream_persisted_run
-from app.auth.user_auth import CurrentUser, assert_user_org_access, assert_user_write, require_user
+from app.auth.user_auth import (
+    CurrentUser,
+    assert_user_org_access,
+    assert_user_write,
+    require_user,
+)
+from app.config import settings
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
@@ -157,6 +180,10 @@ from app.services.skill_store_service import (
 )
 from app.services.skill_store_service import (
     upsert_file as upsert_skill_file,
+)
+from app.services.workspace_preview_service import (
+    OriginalPreviewError,
+    build_original_preview,
 )
 
 router = APIRouter()
@@ -714,6 +741,30 @@ async def preview_ws_file_endpoint(
     if ws is None or not scope_service.is_workspace_visible(ws, cu):
         raise HTTPException(status_code=404, detail="File not found")
     return f
+
+
+@router.get("/terminal/files/{file_id}/original-preview")
+async def original_preview_ws_file_endpoint(
+    file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+        raise HTTPException(status_code=404, detail="File not found")
+    organization = await db.get(Organization, ws.organization_id)
+    if organization is None or not settings.original_preview_enabled_for(organization.slug):
+        raise HTTPException(status_code=404, detail="Original preview is not enabled")
+    try:
+        content, media_type, filename = await asyncio.to_thread(build_original_preview, f)
+    except OriginalPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(content=content, media_type=media_type, headers={
+        "Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox",
+    })
 
 
 @router.post("/terminal/files/{file_id}/reparse", response_model=WorkspaceFileRead)

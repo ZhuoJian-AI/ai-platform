@@ -47,6 +47,23 @@ async def install_version(version_id: UUID | str) -> None:
                     except (ValueError, AttributeError):
                         detail = response.text
                     raise RuntimeError(str(detail or f"Runner install failed ({response.status_code})"))
+            runner_metadata = response.json()
+            manifest = dict(version.manifest or {})
+            platform = dict(manifest.get("_platform") or {})
+            existing_warnings = list(platform.get("compatibility_warnings") or [])
+            runner_warnings = list(runner_metadata.get("compatibility_warnings") or [])
+            platform.update({
+                "python_version": runner_metadata.get("python_version"),
+                "node_version": runner_metadata.get("node_version"),
+                "bash_version": runner_metadata.get("bash_version"),
+                "libreoffice_version": runner_metadata.get("libreoffice_version"),
+                "builtin_dependencies": runner_metadata.get("builtin_dependencies") or {},
+                "installed_dependencies": runner_metadata.get("installed_dependencies") or {},
+                "compatibility_warnings": list(dict.fromkeys([*existing_warnings, *runner_warnings])),
+            })
+            manifest["_platform"] = platform
+            # Assign a new JSON object so SQLAlchemy persists the JSONB change.
+            version.manifest = manifest
             version.install_status = "ready"
             folder = await db.get(SkillFolder, version.skill_folder_id)
             if folder is not None:

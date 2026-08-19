@@ -28,6 +28,11 @@ services:
       SKILL_RUNNER_URL: http://skill-runner:8020
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:-skill-runner-local-dev-token}
       SKILL_RUNNER_TIMEOUT_SECONDS: "120"
+      ORIGINAL_PREVIEW_ENABLED: "true"
+      ORIGINAL_PREVIEW_ORG_ALLOWLIST: "${ORIGINAL_PREVIEW_ORG_ALLOWLIST:-}"
+      ORIGINAL_PREVIEW_CACHE_ROOT: /preview-cache
+    volumes:
+      - previewcache:/preview-cache
     ports:
       - "127.0.0.1:8000:8000"
     command:

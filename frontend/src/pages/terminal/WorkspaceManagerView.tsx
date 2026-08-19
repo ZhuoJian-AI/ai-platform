@@ -411,6 +411,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
         onClose={() => setBrowserOpen(false)}
         resolveHref={resolveHref}
         onReparse={reparseFile}
+        loadOriginalPreview={terminal.getWsFileOriginalPreview}
       />
 
       {/* 新建文件夹 */}

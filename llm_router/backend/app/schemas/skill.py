@@ -144,6 +144,34 @@ class SkillVersionRead(OrmModel):
         values = platform.get("compatibility_warnings") if isinstance(platform, dict) else []
         return [str(value) for value in values] if isinstance(values, list) else []
 
+    @computed_field
+    @property
+    def python_version(self) -> str | None:
+        platform = self.manifest.get("_platform") if isinstance(self.manifest, dict) else None
+        value = platform.get("python_version") if isinstance(platform, dict) else None
+        return str(value) if value else None
+
+    @computed_field
+    @property
+    def node_version(self) -> str | None:
+        platform = self.manifest.get("_platform") if isinstance(self.manifest, dict) else None
+        value = platform.get("node_version") if isinstance(platform, dict) else None
+        return str(value) if value else None
+
+    @computed_field
+    @property
+    def builtin_dependencies(self) -> dict:
+        platform = self.manifest.get("_platform") if isinstance(self.manifest, dict) else None
+        value = platform.get("builtin_dependencies") if isinstance(platform, dict) else None
+        return value if isinstance(value, dict) else {}
+
+    @computed_field
+    @property
+    def installed_dependencies(self) -> dict:
+        platform = self.manifest.get("_platform") if isinstance(self.manifest, dict) else None
+        value = platform.get("installed_dependencies") if isinstance(platform, dict) else None
+        return value if isinstance(value, dict) else {}
+
 
 class SkillImportRead(BaseModel):
     folder: SkillFolderRead

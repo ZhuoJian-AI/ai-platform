@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { Drawer, Tooltip, Spin, Empty, Typography, Button, message } from 'antd';
+import { Drawer, Tooltip, Spin, Empty, Typography, Button, message, Segmented, Tag } from 'antd';
 import {
   ArrowLeftOutlined, ArrowRightOutlined, ReloadOutlined, SelectOutlined,
   FileTextOutlined, GlobalOutlined, FileWordOutlined, FilePdfOutlined,
@@ -159,14 +159,23 @@ export interface BrowserDrawerProps {
   /** 把任意 href（http URL 或工作空间路径）解析为可渲染的 Source。 */
   resolveHref: (href: string) => Promise<Source>;
   onReparse?: (fileId: string) => Promise<void>;
+  /** 鉴权获取原文件预览。Office 返回派生 PDF，PDF/图片返回原始字节。 */
+  loadOriginalPreview?: (fileId: string) => Promise<Blob>;
 }
 
-export default function BrowserDrawer({ open, initialHref, onClose, resolveHref, onReparse }: BrowserDrawerProps) {
+export default function BrowserDrawer({
+  open, initialHref, onClose, resolveHref, onReparse, loadOriginalPreview,
+}: BrowserDrawerProps) {
   const [history, setHistory] = useState<Source[]>([]);
   const [index, setIndex] = useState(-1);
   const [loading, setLoading] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [binaryView, setBinaryView] = useState<'original' | 'ai'>('original');
+  const [originalPreviewUrl, setOriginalPreviewUrl] = useState<string | null>(null);
+  const [originalPreviewType, setOriginalPreviewType] = useState<string>('application/pdf');
+  const [originalPreviewError, setOriginalPreviewError] = useState<string | null>(null);
+  const [originalPreviewLoading, setOriginalPreviewLoading] = useState(false);
   // 标记某次 resolve 是否由"刷新"触发——刷新失败时回退展示旧内容，避免清屏。
   const refreshTickRef = useRef(0);
   // index 的 ref 镜像：异步 navigate/refresh 完成后读取最新游标，避免闭包 stale 值。
@@ -185,6 +194,31 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref,
   const current = index >= 0 ? history[index] : null;
   const canBack = index > 0;
   const canForward = index >= 0 && index < history.length - 1;
+
+  useEffect(() => {
+    setBinaryView('original');
+    setOriginalPreviewError(null);
+    setOriginalPreviewUrl(null);
+    if (!current || (current.kind !== 'parsed' && current.kind !== 'binary') || !loadOriginalPreview) return;
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setOriginalPreviewLoading(true);
+    loadOriginalPreview(current.fileId)
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setOriginalPreviewType(blob.type || 'application/pdf');
+        setOriginalPreviewUrl(objectUrl);
+      })
+      .catch((error) => {
+        if (!cancelled) setOriginalPreviewError((error as Error)?.message || '原文件预览加载失败');
+      })
+      .finally(() => { if (!cancelled) setOriginalPreviewLoading(false); });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [current, loadOriginalPreview]);
 
   useEffect(() => {
     if (current?.kind !== 'docx-bin') { setDocxHtml(null); setDocxError(null); return; }
@@ -262,7 +296,7 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref,
   };
 
   const reparse = async () => {
-    if (!current || current.kind !== 'binary' || !onReparse) return;
+    if (!current || (current.kind !== 'binary' && current.kind !== 'parsed') || !onReparse) return;
     setLoading(true);
     try {
       await onReparse(current.fileId);
@@ -280,6 +314,10 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref,
   // 在新标签页打开：URL 直接打开；文件类生成 blob 预览
   const openInNewTab = () => {
     if (!current) return;
+    if ((current.kind === 'parsed' || current.kind === 'binary') && binaryView === 'original' && originalPreviewUrl) {
+      window.open(originalPreviewUrl, '_blank', 'noopener');
+      return;
+    }
     if (current.kind === 'web' || current.kind === 'pdf' || current.kind === 'docx') {
       window.open(current.url, '_blank', 'noopener');
       return;
@@ -398,7 +436,7 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref,
     current?.kind === 'pdf' ? <FilePdfOutlined /> :
     current?.kind === 'docx' || current?.kind === 'docx-bin' ? <FileWordOutlined /> :
     current?.kind === 'image' ? <FileImageOutlined /> :
-    current?.kind === 'md' || current?.kind === 'text' || current?.kind === 'html' || current?.kind === 'parsed' ? <FileTextOutlined /> :
+    current?.kind === 'md' || current?.kind === 'text' || current?.kind === 'html' || current?.kind === 'parsed' || current?.kind === 'binary' ? <FileTextOutlined /> :
     <SelectOutlined />;
 
   return (
@@ -485,19 +523,60 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref,
             <MdNav content={current.content} onLink={navigate} />
           </div>
         )}
-        {current?.kind === 'parsed' && (
-          <div className="wb-md" style={{ height: '100%', overflowY: 'auto', padding: '20px 24px' }}>
-            <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
-              已解析为 {current.parseKind || '文本'} · 下载按钮保留原文件
-            </Typography.Text>
-            <MdNav content={current.content} onLink={navigate} />
-          </div>
-        )}
-        {current?.kind === 'binary' && (
-          <div style={{ padding: 40, textAlign: 'center' }}>
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={current.note} />
-            {onReparse && <Button type="primary" onClick={reparse} style={{ marginRight: 8 }}>重新解析</Button>}
-            <Button icon={<DownloadOutlined />} onClick={download}>下载原文件</Button>
+        {(current?.kind === 'parsed' || current?.kind === 'binary') && (
+          <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            <div style={{
+              flex: '0 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              gap: 12, padding: '8px 14px', borderBottom: `1px solid ${WB.border}`, background: '#FAFAFB',
+            }}>
+              <Segmented
+                size="small"
+                value={binaryView}
+                onChange={(value) => setBinaryView(value as 'original' | 'ai')}
+                options={[
+                  { label: '原文件预览', value: 'original' },
+                  { label: 'AI 解析内容', value: 'ai', disabled: current.kind !== 'parsed' },
+                ]}
+              />
+              <div style={{ display: 'flex', gap: 6 }}>
+                <Tag color="blue">原文件</Tag>
+                {current.kind === 'parsed' && <Tag color="green">AI 已解析</Tag>}
+              </div>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+              {binaryView === 'original' && (
+                originalPreviewLoading ? (
+                  <div style={previewCenter}><Spin tip="正在生成原文件预览…" /></div>
+                ) : originalPreviewUrl ? (
+                  originalPreviewType.startsWith('image/') ? (
+                    <div style={previewCenter}><img src={originalPreviewUrl} alt={current.path} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} /></div>
+                  ) : (
+                    <iframe key={`${refreshKey}-${originalPreviewUrl}`} src={originalPreviewUrl} title="原文件预览"
+                      style={{ width: '100%', height: '100%', border: 'none' }} />
+                  )
+                ) : (
+                  <div style={previewCenter}>
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      description={originalPreviewError || '原文件预览暂不可用，可下载后查看'} />
+                    <Button icon={<DownloadOutlined />} onClick={download}>下载原文件</Button>
+                  </div>
+                )
+              )}
+              {binaryView === 'ai' && current.kind === 'parsed' && (
+                <div className="wb-md" style={{ height: '100%', overflowY: 'auto', padding: '20px 24px' }}>
+                  <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
+                    这是提供给 AI 检索和分析的结构化文本，不代表原文件排版。
+                  </Typography.Text>
+                  <MdNav content={current.content} onLink={navigate} />
+                </div>
+              )}
+              {binaryView === 'ai' && current.kind === 'binary' && (
+                <div style={previewCenter}>
+                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={current.note} />
+                  {onReparse && <Button type="primary" onClick={reparse}>重新解析</Button>}
+                </div>
+              )}
+            </div>
           </div>
         )}
         {current?.kind === 'html' && (
@@ -539,6 +618,11 @@ export default function BrowserDrawer({ open, initialHref, onClose, resolveHref,
     </Drawer>
   );
 }
+
+const previewCenter: CSSProperties = {
+  height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center',
+  justifyContent: 'center', gap: 12, padding: 24, background: '#fafafa',
+};
 
 function navBtnStyle(disabled: boolean): CSSProperties {
   return {
