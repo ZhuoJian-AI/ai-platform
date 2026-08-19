@@ -174,6 +174,20 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
     onError: () => message.error('删除失败'),
   });
 
+  const delFolderPath = useMutation({
+    mutationFn: (path: string) => {
+      if (!wsId) return Promise.reject(new Error('no ws'));
+      return terminal.deleteWsFolderPath(wsId, path);
+    },
+    onSuccess: (result, path) => {
+      qc.invalidateQueries({ queryKey: ['ws-mgr-folders'] });
+      qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+      if (cwd.join('/') === path) setCwd((current) => current.slice(0, -1));
+      message.success(`文件夹已删除（${result.files} 个文件，${result.folders} 个显式文件夹）`);
+    },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '删除文件夹失败'),
+  });
+
   const uploadFile = useMutation({
     mutationFn: (v: { path: string; file: File }) => {
       if (!wsId) return Promise.reject(new Error('no ws'));
@@ -197,11 +211,20 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
   });
 
   // 删除确认弹窗：不再用悬浮 Popconfirm，改为界面正中的模态框（字体与终端一致）。
-  const [confirm, setConfirm] = useState<{ kind: 'folder' | 'file'; id: string; title: string; desc?: string } | null>(null);
-  const confirmLoading = confirm?.kind === 'folder' ? delFolder.isPending : confirm?.kind === 'file' ? delFile.isPending : false;
+  const [confirm, setConfirm] = useState<{
+    kind: 'folder' | 'folderPath' | 'file'; id: string; title: string; desc?: string;
+  } | null>(null);
+  const confirmLoading = confirm?.kind === 'folder'
+    ? delFolder.isPending
+    : confirm?.kind === 'folderPath'
+      ? delFolderPath.isPending
+      : confirm?.kind === 'file'
+        ? delFile.isPending
+        : false;
   const confirmOk = () => {
     if (!confirm) return;
     if (confirm.kind === 'folder') delFolder.mutate(confirm.id);
+    else if (confirm.kind === 'folderPath') delFolderPath.mutate(confirm.id);
     else delFile.mutate(confirm.id);
     setConfirm(null);
   };
@@ -293,6 +316,18 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
+                  {cwd.length > 0 && (
+                    <button
+                      style={{ ...toolBtnStyle, color: '#dc2626' }}
+                      onClick={() => setConfirm({
+                        kind: 'folderPath', id: cwd.join('/'),
+                        title: `删除“${cwd[cwd.length - 1]}”文件夹？`,
+                        desc: '将一并删除当前文件夹、全部子文件夹和其中所有文件；此操作不可撤销。',
+                      })}
+                    >
+                      <DeleteOutlined style={{ fontSize: 13 }} /> 删除当前文件夹
+                    </button>
+                  )}
                   <button style={toolBtnStyle} onClick={() => { setFolderName(''); setFolderModalOpen(true); }}>
                     <FolderAddOutlined style={{ fontSize: 13 }} /> 新建文件夹
                   </button>
@@ -336,7 +371,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                           style={iconCardStyle(isHover)}
                         >
                           <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', width: 92, cursor: 'pointer' }}>
-                            {it.record && isHover && (
+                            {isHover && (
                               <span
                                 style={{ position: 'absolute', top: -6, right: -6, zIndex: 2 }}
                                 onClick={(e) => e.stopPropagation()}
@@ -344,7 +379,8 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                                 <button
                                   style={iconActionBtnStyle('danger')}
                                   onClick={() => setConfirm({
-                                    kind: 'folder', id: it.record!.id,
+                                    kind: it.record ? 'folder' : 'folderPath',
+                                    id: it.record ? it.record.id : [...cwd, it.name].join('/'),
                                     title: '删除该文件夹？',
                                     desc: '将一并删除其下所有子文件夹与文件',
                                   })}

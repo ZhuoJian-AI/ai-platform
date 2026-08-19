@@ -262,6 +262,55 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
     assert result["assistant_final"] == "已分析附件"
 
 
+@pytest.mark.asyncio
+async def test_agent_retracts_unverified_tool_success_and_retries(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls = 0
+    events: list[dict] = []
+    fake_id = str(uuid4())
+
+    async def fake_stream_chat(_db, _org_id, _alias, messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield "text", f"已真实调用 image_tool，执行成功，file_id={fake_id}", None
+        else:
+            assert "系统执行校验" in messages[-1]["content"]
+            yield "text", "未能产生真实工具调用，任务尚未执行。", None
+
+    async def fake_build_tools(_db, _skill_ids, _workspace_id, _user=None):
+        return nodes._builtin_tool_defs(), {}
+
+    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session})
+    monkeypatch.setattr(nodes.llm_client, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr(nodes, "_build_tools", fake_build_tools)
+    monkeypatch.setattr(nodes, "_emit", lambda event: events.append(event))
+
+    result = await nodes.agent_loop({
+        "mode": "general",
+        "org_id": str(uuid4()),
+        "workspace_id": None,
+        "system_prompt": "你是测试助手。",
+        "messages": [{"role": "user", "content": "请真实调用 image_tool 处理附件"}],
+        "referenced_file_ids": [],
+        "skill_ids": [],
+        "exec_mode": "craft",
+        "memory_context": [],
+        "rag_context": [],
+        "steps": [],
+        "traces": [],
+        "usage": {},
+    })
+
+    assert calls == 2
+    assert result["assistant_final"] == "未能产生真实工具调用，任务尚未执行。"
+    assert fake_id not in result["assistant_final"]
+    assert any(event.get("type") == "text_retract" for event in events)
+    assert any(step.get("step") == "tool_claim_rejected" for step in result["steps"])
+
+
 def test_general_state_and_message_metadata_preserve_attachment_snapshot():
     file_id = str(uuid4())
     workspace_id = str(uuid4())
@@ -343,6 +392,51 @@ async def test_attachment_validation_rejects_cross_workspace_and_unready(
         await terminal_api._resolve_task_attachments(db_session, cu, str(workspace_id), [file_id])
     assert exc_info.value.status_code == 422
     assert "文档已加密" in exc_info.value.detail
+
+    async def raw_png_file(_db, _file_id):
+        return SimpleNamespace(
+            id=file_id,
+            workspace_id=workspace_id,
+            path="会话附件/task/screenshot.png",
+            parse_status="unsupported",
+            parse_error="不支持的文件类型",
+            metadata_={"name": "截图.png", "binary": True, "mime": "image/png"},
+        )
+
+    monkeypatch.setattr(terminal_api.workspace_service, "get_file", raw_png_file)
+    snapshots = await terminal_api._resolve_task_attachments(
+        db_session, cu, str(workspace_id), [file_id],
+    )
+    assert snapshots[0]["name"] == "截图.png"
+
+
+@pytest.mark.asyncio
+async def test_delete_inferred_workspace_folder_path_recursively(db_session: AsyncSession):
+    _, ws, first = await _make_workspace_with_file(
+        db_session,
+        path="平台工具输出/task-a/result.xlsx",
+        content="a",
+    )
+    second = await workspace_service.upsert_file(
+        db_session,
+        ws,
+        WorkspaceFileCreate(path="平台工具输出/task-b/report.docx", content="b"),
+    )
+    keep = await workspace_service.upsert_file(
+        db_session,
+        ws,
+        WorkspaceFileCreate(path="会话附件/task-c/input.xlsx", content="c"),
+    )
+    await db_session.flush()
+
+    deleted = await workspace_service.soft_delete_folder_path(
+        db_session, ws.id, "平台工具输出",
+    )
+
+    assert deleted == {"folders": 0, "files": 2}
+    assert first.deleted_at is not None
+    assert second.deleted_at is not None
+    assert keep.deleted_at is None
 
 
 @pytest.mark.asyncio

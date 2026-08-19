@@ -4,7 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services.workspace_service import paginate_file_content, resolve_file_content
+from app.services.workspace_service import (
+    paginate_file_content,
+    raw_tool_file_kind,
+    resolve_file_content,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +70,23 @@ def test_failed_binary_returns_reason_not_base64() -> None:
 
     assert "文件已加密" in result
     assert "UEsDB" not in result
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("截图.PNG", "image_tool"),
+        ("扫描件.pdf", "image_tool"),
+        ("资料.tar.gz", "archive_tool"),
+        ("材料.zip", "archive_tool"),
+        ("失败的表格.xlsx", None),
+        ("视频.mp4", None),
+    ],
+)
+def test_raw_tool_file_kind_only_allows_supported_platform_inputs(name: str, expected: str | None) -> None:
+    file = SimpleNamespace(metadata_={"name": name}, path=f"会话附件/{name}")
+
+    assert raw_tool_file_kind(file) == expected
 
 
 def test_paginated_content_reports_continuation() -> None:

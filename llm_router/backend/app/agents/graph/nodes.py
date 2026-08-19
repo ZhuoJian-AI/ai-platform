@@ -112,8 +112,32 @@ OUTPUT_PROTOCOL_PROMPT = (
     "1. 默认以 Markdown 返回结果。仅当用户请求或智能体任务说明明确要求生成、编辑、转换、导出、下载或归档附件时，"
     "才调用与目标格式对应的平台文件工具或已匹配 Skill；普通问答、解释或文件分析不得擅自生成附件。\n"
     "2. 不要臆造数据：所有编码 / 工单号 / 款号 / 数值 / 结论必须来自已注入的数据接口返回、"
-    "本体、知识库检索命中或用户给定，不可拼凑不存在的标识符。"
+    "本体、知识库检索命中或用户给定，不可拼凑不存在的标识符。\n"
+    "3. 任何‘已调用工具 / 执行成功 / 已生成文件’的声明，以及 file_id、输出路径和处理结果，都必须来自"
+    "本轮真实 tool_result。若本轮没有真实 tool_call，只能如实说明尚未执行，严禁编造 UUID、路径或成功状态。"
 )
+
+_TOOL_SUCCESS_CLAIM_RE = re.compile(
+    r"(?:已(?:经)?(?:真实)?调用|调用成功|执行成功|处理成功|已(?:经)?(?:生成|创建|写入|保存|导出)|"
+    r"(?:处理|生成|转换|缩放|裁剪|压缩|解压|识别)?已?完成|工具(?:均|全部)?已|全部[^。；\n]{0,20}成功)",
+    re.IGNORECASE,
+)
+_TOOL_ARTIFACT_CLAIM_RE = re.compile(
+    r"(?:file[_\s-]?id|文件\s*(?:id|ID)|平台工具输出/|"
+    r"(?:spreadsheet|document|presentation|pdf|text|image|archive|web)_tool|"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
+
+
+def _contains_unverified_tool_success_claim(text: str) -> bool:
+    """Detect high-confidence claims that require a real tool result this turn."""
+    value = (text or "").strip()
+    return bool(
+        value
+        and _TOOL_SUCCESS_CLAIM_RE.search(value)
+        and _TOOL_ARTIFACT_CLAIM_RE.search(value)
+    )
 
 
 
@@ -1582,7 +1606,14 @@ async def agent_loop(state: AgentState) -> dict:
             file_names.append(f.path)
             file_refs.append({"file_id": fid, "path": f.path})
             content = workspace_service.resolve_file_content(f)
-            rendered = content if content.strip() else "（文件内容为空或尚未解析，无法直接分析）"
+            raw_tool = workspace_service.raw_tool_file_kind(f)
+            if f.parse_status != "ready" and raw_tool:
+                rendered = (
+                    f"（原始二进制附件无需正文解析；请使用 {raw_tool} 并把 file_id={fid} "
+                    "作为 input_file_ids 实际读取。不得声称附件不可用，也不得编造处理结果。）"
+                )
+            else:
+                rendered = content if content.strip() else "（文件内容为空或尚未解析，无法直接分析）"
             file_parts.append(f"[引用文件 file_id={fid} path={f.path}]\n{rendered}")
         if file_refs:
             mapping = "\n".join(f"- @{r['file_id']} → {r['path']}" for r in file_refs)
@@ -1636,6 +1667,7 @@ async def agent_loop(state: AgentState) -> dict:
             traces.append(skill_trace)
 
     assistant_final = ""
+    verification_retries = 0
     for step_idx in range(MAX_STEPS):
         _emit({"type": "phase", "phase": "llm", "index": step_idx})
         round_text = ""
@@ -1692,12 +1724,10 @@ async def agent_loop(state: AgentState) -> dict:
                         "assistant_final": f"(执行出错: {exc})",
                         "usage": {"input_tokens": usage_in, "output_tokens": usage_out}}
 
-        # 累计本轮文本到终答：工具调用轮里输出的中间说明/正文也要持久化，
-        # 否则只有最后一轮文本落库，重开任务时会丢失此前已实时展示的内容。
-        if round_text:
-            assistant_final += round_text
-
         if round_tool_calls:
+            # 累计工具调用轮的中间说明，重开任务时仍可完整回放。
+            if round_text:
+                assistant_final += round_text
             # 重新发给上游的 assistant 工具调用消息须用 OpenAI 嵌套格式
             # {"id","type":"function","function":{"name","arguments"}}；扁平格式会被严格上游
             # （如阿里云 MaaS）以 ``tool_calls.0.function Field required`` 拒绝，且与
@@ -1740,7 +1770,32 @@ async def agent_loop(state: AgentState) -> dict:
                                "result": preview[:4000], "ok": ok})
             continue
 
-        # 无 tool_calls → 终答（文本已逐 token 下发，且本轮文本已累计到 assistant_final）
+        # 无 tool_calls 却声称工具成功时，撤回本轮流式文本并要求模型真实调用一次。
+        # 这不是提示词层面的软约束：高置信度虚假 file_id/路径不会被持久化为终答。
+        has_successful_tool = any(
+            step.get("step") == "tool" and step.get("ok") is True for step in steps
+        )
+        if not has_successful_tool and _contains_unverified_tool_success_claim(round_text):
+            if round_text:
+                _emit({"type": "text_retract", "chars": len(round_text)})
+            steps.append({"step": "tool_claim_rejected"})
+            if verification_retries < 1 and tools:
+                verification_retries += 1
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "[系统执行校验] 上一答复声称已经调用或执行工具，但本轮没有产生任何真实 tool_call，"
+                        "因此结果无效。请重新处理原始用户请求：必须实际调用可用工具；如果无法调用，只能如实"
+                        "说明失败，禁止输出虚构的 file_id、路径或成功状态。"
+                    ),
+                })
+                continue
+            round_text = "本轮未产生真实工具调用，因此无法确认任务已执行。请重试或检查当前模型的工具调用能力。"
+            _emit({"type": "text", "delta": round_text})
+
+        # 无 tool_calls → 终答。
+        if round_text:
+            assistant_final += round_text
         messages.append({"role": "assistant", "content": round_text})
         steps.append({"step": "llm_final"})
         break

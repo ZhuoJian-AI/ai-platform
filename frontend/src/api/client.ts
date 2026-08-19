@@ -1422,6 +1422,11 @@ export const terminal = {
   createWsFolder: (wsId: string, data: { path: string }) =>
     userRequest<WorkspaceFolder>(`/api/v1/terminal/workspaces/${wsId}/folders`, { method: 'POST', body: JSON.stringify(data) }),
   deleteWsFolder: (folderId: string) => userRequest<void>(`/api/v1/terminal/folders/${folderId}`, { method: 'DELETE' }),
+  deleteWsFolderPath: (wsId: string, path: string) =>
+    userRequest<{ folders: number; files: number }>(
+      `/api/v1/terminal/workspaces/${wsId}/folder-path?path=${encodeURIComponent(path)}`,
+      { method: 'DELETE' },
+    ),
 
   // ── 知识库（RAG）：终端用户 scope 内可见；删除/重命名/编辑仅限自己创建 ──
   kbNodes: () => userRequest<KbNode[]>('/api/v1/terminal/kb-nodes'),

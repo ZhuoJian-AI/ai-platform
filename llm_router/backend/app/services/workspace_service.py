@@ -31,9 +31,31 @@ MAX_WORKSPACE_FILE_BYTES = 5 * 1024 * 1024
 MAX_LLM_FILE_CHARS = 100_000
 MAX_TOOL_FILE_BYTES = 50 * 1024
 
+_RAW_IMAGE_TOOL_SUFFIXES = (
+    ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".pdf",
+)
+_RAW_ARCHIVE_TOOL_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz")
+
 
 class WorkspaceFileUploadError(ValueError):
     """工作空间原文件上传校验失败。"""
+
+
+def raw_tool_file_kind(f: WorkspaceFile) -> str | None:
+    """Return the platform tool that can consume an unparsed raw binary file.
+
+    Images/scanned PDFs and archives do not need a text extraction result before
+    they can be passed to the immutable Runner lane.  Keep this allow-list aligned
+    with ``image_tool`` and ``archive_tool`` rather than accepting arbitrary binary
+    uploads as chat-ready.
+    """
+    meta = f.metadata_ or {}
+    name = str(meta.get("name") or PurePosixPath(f.path).name).strip().lower()
+    if name.endswith(_RAW_IMAGE_TOOL_SUFFIXES):
+        return "image_tool"
+    if name.endswith(_RAW_ARCHIVE_TOOL_SUFFIXES):
+        return "archive_tool"
+    return None
 
 
 # ── Workspace ──────────────────────────────────────────────────────────
@@ -608,6 +630,47 @@ async def soft_delete_folder(db: AsyncSession, folder: WorkspaceFolder) -> None:
 
     folder.deleted_at = now
     await db.flush()
+
+
+async def soft_delete_folder_path(db: AsyncSession, ws_id: UUID, path: str) -> dict[str, int]:
+    """Delete an explicit or path-inferred folder and everything below it.
+
+    Generated tool/attachment directories often exist only as path prefixes and
+    therefore have no ``WorkspaceFolder`` row.  Treat the path tree as the source
+    of truth so users can clean those directories without deleting every file.
+    The workspace root is intentionally not deletable through this operation.
+    """
+    normalized = _normalize_path(path)
+    if not normalized:
+        raise ValueError("不能删除工作空间根目录")
+    prefix = f"{normalized}/"
+    now = datetime.now(UTC)
+
+    folder_rows = (await db.execute(
+        select(WorkspaceFolder).where(
+            WorkspaceFolder.workspace_id == ws_id,
+            WorkspaceFolder.deleted_at.is_(None),
+        )
+    )).scalars().all()
+    matched_folders = [
+        item for item in folder_rows
+        if item.path == normalized or item.path.startswith(prefix)
+    ]
+    for item in matched_folders:
+        item.deleted_at = now
+
+    file_rows = (await db.execute(
+        select(WorkspaceFile).where(
+            WorkspaceFile.workspace_id == ws_id,
+            WorkspaceFile.path.startswith(prefix),
+            WorkspaceFile.deleted_at.is_(None),
+        )
+    )).scalars().all()
+    for item in file_rows:
+        item.deleted_at = now
+
+    await db.flush()
+    return {"folders": len(matched_folders), "files": len(file_rows)}
 
 
 # ── Workspace Tree（随组织架构逐级嵌套）──────────────────────────────────

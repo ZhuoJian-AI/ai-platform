@@ -268,7 +268,8 @@ async def _resolve_task_attachments(
         ws = await workspace_service.get_workspace(db, f.workspace_id)
         if ws is None or not scope_service.is_workspace_visible(ws, cu):
             raise HTTPException(status_code=404, detail=f"附件不存在或无权访问：{fid}")
-        if f.parse_status != "ready":
+        raw_tool = workspace_service.raw_tool_file_kind(f)
+        if f.parse_status != "ready" and raw_tool is None:
             detail = f.parse_error or "文件尚未解析完成"
             raise HTTPException(status_code=422, detail=f"附件无法用于对话：{f.path}（{detail}）")
         meta = f.metadata_ or {}
@@ -945,6 +946,24 @@ async def delete_ws_folder_endpoint(
         raise HTTPException(status_code=404, detail="Folder not found")
     await workspace_service.soft_delete_folder(db, folder)
     await db.commit()
+
+
+@router.delete("/terminal/workspaces/{ws_id}/folder-path")
+async def delete_ws_folder_path_endpoint(
+    ws_id: UUID,
+    path: str = Query(..., min_length=1, max_length=1024),
+    cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a real or inferred folder path recursively."""
+    assert_user_write(cu)
+    ws = await _get_visible_workspace(db, ws_id, cu)
+    try:
+        deleted = await workspace_service.soft_delete_folder_path(db, ws.id, path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return deleted
 
 
 # ── 知识库（RAG）：用户 scope 内可见；删除/重命名/编辑仅限自己创建 ──

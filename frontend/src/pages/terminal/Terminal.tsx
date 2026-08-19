@@ -103,11 +103,19 @@ interface ComposerAttachment extends MessageAttachment {
   status: ComposerAttachmentStatus;
   progress: number;
   error?: string;
+  raw_tool?: 'image_tool' | 'archive_tool';
 }
 
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_ATTACHMENTS = 10;
 const MAX_UPLOAD_CONCURRENCY = 3;
+
+function rawAttachmentTool(name: string): ComposerAttachment['raw_tool'] {
+  const lower = name.trim().toLowerCase();
+  if (/\.(?:png|jpe?g|webp|tiff?|bmp|pdf)$/.test(lower)) return 'image_tool';
+  if (/\.(?:zip|tar|tgz|tar\.gz)$/.test(lower)) return 'archive_tool';
+  return undefined;
+}
 
 function safeAttachmentName(name: string): string {
   const cleaned = name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim() || '未命名文件';
@@ -412,6 +420,25 @@ export default function Terminal() {
             next[next.length - 1] = { ...last, content: last.content + delta };
           } else {
             next.push({ kind: 'text', content: delta });
+          }
+          return next;
+        });
+        break;
+      }
+      case 'text_retract': {
+        updateTurn((bs) => {
+          let remaining = Math.max(0, Number(evt.chars) || 0);
+          const next = [...bs];
+          for (let j = next.length - 1; j >= 0 && remaining > 0; j--) {
+            const block = next[j];
+            if (block.kind !== 'text') continue;
+            if (block.content.length <= remaining) {
+              remaining -= block.content.length;
+              next.splice(j, 1);
+            } else {
+              next[j] = { ...block, content: block.content.slice(0, block.content.length - remaining) };
+              remaining = 0;
+            }
           }
           return next;
         });
@@ -1478,12 +1505,14 @@ function TaskInputBox(props: {
         onProgress: (progress) => updateAttachment(draft.client_id, { progress }),
         onUploadComplete: () => updateAttachment(draft.client_id, { status: 'parsing', progress: 100 }),
       });
-      const nextStatus: ComposerAttachmentStatus = uploaded.parse_status === 'ready' ? 'ready' : 'failed';
+      const rawTool = rawAttachmentTool(draft.name);
+      const nextStatus: ComposerAttachmentStatus = uploaded.parse_status === 'ready' || rawTool ? 'ready' : 'failed';
       updateAttachment(draft.client_id, {
         file_id: uploaded.id,
         workspace_id: uploaded.workspace_id,
         path: uploaded.path,
         status: nextStatus,
+        raw_tool: uploaded.parse_status === 'ready' ? undefined : rawTool,
         progress: 100,
         error: nextStatus === 'failed'
           ? (uploaded.parse_error || (uploaded.parse_status === 'unsupported' ? '暂不支持该文件格式' : '文件解析失败'))
@@ -1571,6 +1600,13 @@ function TaskInputBox(props: {
       return;
     }
     if (item.file_id) {
+      const rawTool = rawAttachmentTool(item.name);
+      if (rawTool) {
+        updateAttachment(item.client_id, {
+          status: 'ready', raw_tool: rawTool, error: undefined, progress: 100,
+        });
+        return;
+      }
       updateAttachment(item.client_id, { status: 'parsing', error: undefined, progress: 100 });
       try {
         const reparsed = await terminal.reparseWsFile(item.file_id);
@@ -1722,7 +1758,10 @@ function TaskInputBox(props: {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div title={item.name} style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</div>
                     <div style={{ fontSize: 11, color: item.status === 'failed' ? '#dc2626' : '#6b7280', marginTop: 2 }}>
-                      {statusLabel[item.status]}{item.status === 'uploading' ? ` ${item.progress}%` : ''}
+                      {item.status === 'ready' && item.raw_tool
+                        ? `可以发送（${item.raw_tool === 'image_tool' ? '图片工具' : '压缩包工具'}读取）`
+                        : statusLabel[item.status]}
+                      {item.status === 'uploading' ? ` ${item.progress}%` : ''}
                     </div>
                   </div>
                   {(item.status === 'uploading' || item.status === 'parsing') && <Spin size="small" />}
