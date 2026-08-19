@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
-  Drawer, Upload, message, Tooltip, Typography, Button, Empty, Segmented, Spin, Tag,
+  Drawer, Upload, message, Tooltip, Typography, Button, Empty, Segmented, Tag,
 } from 'antd';
 import {
   DeleteOutlined, BankOutlined, ApartmentOutlined,
@@ -22,6 +22,7 @@ import {
 } from '../../components/finder/primitives';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import { WB, WB_FONT, FS } from '../../components/finder/theme';
+import OriginalFilePreview from '../../components/files/OriginalFilePreview';
 
 const SCOPE_LABEL: Record<string, string> = {
   organization: '组织级',
@@ -552,32 +553,25 @@ function FileViewer({ file, onDownload, onReparse, reparsing }: {
   const ext = extOf(file.path);
   const content = file.content ?? '';
   const [view, setView] = useState<'original' | 'ai'>('original');
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [previewType, setPreviewType] = useState('application/pdf');
+  const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
   useEffect(() => {
     setView('original');
-    setPreviewUrl(null);
+    setPreviewBlob(null);
     setPreviewError(null);
     if (!meta.binary) return;
     let cancelled = false;
-    let objectUrl: string | null = null;
     setPreviewLoading(true);
     workspaces.getFileOriginalPreview(file.id)
       .then((blob) => {
         if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setPreviewType(blob.type || 'application/pdf');
-        setPreviewUrl(objectUrl);
+        setPreviewBlob(blob);
       })
       .catch((error) => { if (!cancelled) setPreviewError((error as Error)?.message || '原文件预览加载失败'); })
       .finally(() => { if (!cancelled) setPreviewLoading(false); });
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
+    return () => { cancelled = true; };
   }, [file.id, meta.binary]);
 
   // 二进制文件
@@ -598,17 +592,13 @@ function FileViewer({ file, onDownload, onReparse, reparsing }: {
         </div>
         <div style={{ flex: 1, minHeight: 0 }}>
           {view === 'original' && (
-            previewLoading ? <div style={viewerCenter}><Spin tip="正在生成原文件预览…" /></div>
-              : previewUrl ? (
-                previewType.startsWith('image/')
-                  ? <div style={viewerCenter}><img src={previewUrl} alt={file.path} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} /></div>
-                  : <iframe title="原文件预览" src={previewUrl} style={{ width: '100%', height: '100%', border: 'none' }} />
-              ) : (
-                <div style={viewerCenter}>
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={previewError || '原文件预览暂不可用，可下载后查看'} />
-                  <Button icon={<DownloadOutlined />} onClick={onDownload}>下载原文件</Button>
-                </div>
-              )
+            <OriginalFilePreview
+              blob={previewBlob}
+              filename={basename(file.path)}
+              loading={previewLoading}
+              error={previewError}
+              onDownload={onDownload}
+            />
           )}
           {view === 'ai' && hasAiContent && (
             <div style={{ height: '100%', overflowY: 'auto', padding: '16px 20px' }}>

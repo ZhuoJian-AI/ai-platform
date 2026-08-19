@@ -36,6 +36,8 @@ htmlcov/
 node_modules/
 frontend/dist/
 frontend/build/
+frontend/public/flyfish-viewer-assets.json
+frontend/public/vendor/
 *.tsbuildinfo
 .vite/
 npm-debug.log*

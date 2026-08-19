@@ -37,7 +37,6 @@ class Settings(BaseSettings):
     skill_package_max_bytes: int = 10 * 1024 * 1024
     original_preview_enabled: bool = False
     original_preview_org_allowlist: str = ""
-    original_preview_cache_root: str = "/preview-cache"
 
     # Workspace binary object storage (authorized ZhuoJian Storage Gateway).
     # Text workspace files stay inline for editing; Office/PDF/images use this

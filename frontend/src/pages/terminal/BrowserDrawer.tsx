@@ -8,6 +8,7 @@ import {
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import OriginalFilePreview from '../../components/files/OriginalFilePreview';
 // mammoth 仅在打开 .docx 时按需动态加载（见下方 useEffect），不进主包。
 
 /** WorkBuddy 配色（与 Terminal.tsx 保持一致）。 */
@@ -159,7 +160,7 @@ export interface BrowserDrawerProps {
   /** 把任意 href（http URL 或工作空间路径）解析为可渲染的 Source。 */
   resolveHref: (href: string) => Promise<Source>;
   onReparse?: (fileId: string) => Promise<void>;
-  /** 鉴权获取原文件预览。Office 返回派生 PDF，PDF/图片返回原始字节。 */
+  /** 鉴权获取未经转换的原始文件，由浏览器按实际格式选择查看器。 */
   loadOriginalPreview?: (fileId: string) => Promise<Blob>;
   /** 鉴权下载未经转换的原始文件。 */
   loadOriginalFile?: (fileId: string) => Promise<Blob>;
@@ -174,8 +175,8 @@ export default function BrowserDrawer({
   const [refreshKey, setRefreshKey] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [binaryView, setBinaryView] = useState<'original' | 'ai'>('original');
+  const [originalPreviewBlob, setOriginalPreviewBlob] = useState<Blob | null>(null);
   const [originalPreviewUrl, setOriginalPreviewUrl] = useState<string | null>(null);
-  const [originalPreviewType, setOriginalPreviewType] = useState<string>('application/pdf');
   const [originalPreviewError, setOriginalPreviewError] = useState<string | null>(null);
   const [originalPreviewLoading, setOriginalPreviewLoading] = useState(false);
   // 标记某次 resolve 是否由"刷新"触发——刷新失败时回退展示旧内容，避免清屏。
@@ -200,6 +201,7 @@ export default function BrowserDrawer({
   useEffect(() => {
     setBinaryView('original');
     setOriginalPreviewError(null);
+    setOriginalPreviewBlob(null);
     setOriginalPreviewUrl(null);
     if (!current || (current.kind !== 'parsed' && current.kind !== 'binary') || !loadOriginalPreview) return;
     let cancelled = false;
@@ -209,7 +211,7 @@ export default function BrowserDrawer({
       .then((blob) => {
         if (cancelled) return;
         objectUrl = URL.createObjectURL(blob);
-        setOriginalPreviewType(blob.type || 'application/pdf');
+        setOriginalPreviewBlob(blob);
         setOriginalPreviewUrl(objectUrl);
       })
       .catch((error) => {
@@ -556,22 +558,13 @@ export default function BrowserDrawer({
             </div>
             <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
               {binaryView === 'original' && (
-                originalPreviewLoading ? (
-                  <div style={previewCenter}><Spin tip="正在生成原文件预览…" /></div>
-                ) : originalPreviewUrl ? (
-                  originalPreviewType.startsWith('image/') ? (
-                    <div style={previewCenter}><img src={originalPreviewUrl} alt={current.path} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} /></div>
-                  ) : (
-                    <iframe key={`${refreshKey}-${originalPreviewUrl}`} src={originalPreviewUrl} title="原文件预览"
-                      style={{ width: '100%', height: '100%', border: 'none' }} />
-                  )
-                ) : (
-                  <div style={previewCenter}>
-                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
-                      description={originalPreviewError || '原文件预览暂不可用，可下载后查看'} />
-                    <Button icon={<DownloadOutlined />} onClick={download}>下载原文件</Button>
-                  </div>
-                )
+                <OriginalFilePreview
+                  blob={originalPreviewBlob}
+                  filename={current.path.split('/').pop() || current.path}
+                  loading={originalPreviewLoading}
+                  error={originalPreviewError}
+                  onDownload={download}
+                />
               )}
               {binaryView === 'ai' && current.kind === 'parsed' && (
                 <div className="wb-md" style={{ height: '100%', overflowY: 'auto', padding: '20px 24px' }}>
