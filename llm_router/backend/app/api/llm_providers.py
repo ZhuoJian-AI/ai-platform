@@ -36,7 +36,7 @@ from app.services.llm_provider_service import (
     update_model_deployment,
     update_provider,
 )
-from app.services.model_gateway import test_deployment, test_provider_connection
+from app.services.model_gateway import classify_gateway_error, test_deployment, test_provider_connection
 from app.services.organization_service import get_department, get_team
 
 router = APIRouter()
@@ -252,9 +252,22 @@ async def test_model_deployment_endpoint(
         # Upstream bodies can echo request headers or vendor diagnostics.  Persist
         # only a stable category so encrypted credentials never leak through an
         # admin response, audit export or database support dump.
-        deployment.last_error = "capability_test_failed"
+        category = classify_gateway_error(exc)
+        deployment.last_error = category
         await db.flush()
-        raise HTTPException(status_code=400, detail="模型测试失败：请检查模型ID、权限、余额和能力类型") from exc
+        labels = {
+            "invalid_credentials_or_permission": "凭证无效，或该 Key 没有模型访问权限",
+            "model_not_found": "模型 ID 不存在，或当前地域/业务空间不可用",
+            "quota_or_rate_limit": "余额或配额不足，或请求被限流",
+            "capability_mismatch": "模型能力、向量维度或生图参数与部署配置不匹配",
+            "network_timeout": "供应商响应超时，请检查端点、地域或稍后重试",
+            "network_failure": "无法连接供应商，请检查 Base URL 和网络",
+            "provider_service_unavailable": "供应商服务暂不可用",
+            "invalid_provider_response": "供应商返回了无法识别的响应",
+            "invalid_endpoint_configuration": "模型接口路径配置无效",
+            "invalid_image_size": "生图尺寸格式无效",
+        }
+        raise HTTPException(status_code=400, detail=labels.get(category, "模型测试失败：供应商拒绝了请求")) from exc
     verified = set((deployment.config or {}).get("verified_capabilities") or [])
     verified.add(capability)
     deployment.config = {**(deployment.config or {}), "verified_capabilities": sorted(verified)}

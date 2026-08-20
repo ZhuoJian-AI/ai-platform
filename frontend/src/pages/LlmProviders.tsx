@@ -358,7 +358,7 @@ export default function LlmProviders() {
                           <Descriptions.Item label="健康状态">{r.health_status}</Descriptions.Item>
                         </Descriptions>
                         <Space>
-                          <Button size="small" icon={<ApiOutlined />} loading={testProvider.isPending} onClick={() => testProvider.mutate(r.id)}>测试供应商连接</Button>
+                          <Button size="small" icon={<ApiOutlined />} loading={testProvider.isPending && testProvider.variables === r.id} onClick={() => testProvider.mutate(r.id)}>测试供应商连接</Button>
                           <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => {
                             setModelProvider(r);
                             modelForm.setFieldsValue({ adapter: 'openai_chat_completions', capabilities: ['chat'], routing_priority: 0 });
@@ -378,7 +378,13 @@ export default function LlmProviders() {
                               title: '操作', render: (_value: unknown, model) => (
                                 <Space wrap>
                                   {(model.capabilities as ModelCapability[]).map((capability) => (
-                                    <Button key={capability} size="small" icon={<ThunderboltOutlined />} loading={testModel.isPending} onClick={() => testModel.mutate({ providerId: r.id, modelId: model.id, capability })}>
+                                    <Button
+                                      key={capability}
+                                      size="small"
+                                      icon={<ThunderboltOutlined />}
+                                      loading={testModel.isPending && testModel.variables?.modelId === model.id && testModel.variables?.capability === capability}
+                                      onClick={() => testModel.mutate({ providerId: r.id, modelId: model.id, capability })}
+                                    >
                                       测试{CAPABILITY_LABELS[capability]}
                                     </Button>
                                   ))}
@@ -496,7 +502,15 @@ export default function LlmProviders() {
                 </Form.Item>
               </Col>
               {vendor === 'aliyun_bailian' && (
-                <Col span={12}><Form.Item name="workspace_id" label="业务空间 ID" extra="生产建议填写；日本和德国地域必须填写"><Input /></Form.Item></Col>
+                <Col span={12}>
+                  <Form.Item
+                    name="workspace_id"
+                    label="业务空间 ID / API Host"
+                    extra="可填写 ws-...，也可直接粘贴控制台显示的 API Host；平台会自动提取业务空间 ID"
+                  >
+                    <Input placeholder="ws-... 或 ws-....cn-beijing.maas.aliyuncs.com" />
+                  </Form.Item>
+                </Col>
               )}
             </Row>
           )}
@@ -533,7 +547,20 @@ export default function LlmProviders() {
                     <div key={key} style={{ padding: 12, border: '1px solid #e5e7eb', borderRadius: 8 }}>
                       <Row gutter={12}>
                         <Col span={10}><Form.Item {...rest} name={[name, 'model_id']} label="供应商模型ID" rules={[{ required: true }]}><Input placeholder="例如 qwen-plus / ep-..." /></Form.Item></Col>
-                        <Col span={10}><Form.Item {...rest} name={[name, 'adapter']} label="调用适配器" rules={[{ required: true }]}><Select options={ADAPTER_OPTIONS} /></Form.Item></Col>
+                        <Col span={10}>
+                          <Form.Item {...rest} name={[name, 'adapter']} label="调用适配器" rules={[{ required: true }]}>
+                            <Select options={ADAPTER_OPTIONS} onChange={(value) => {
+                              if (value === 'bailian_multimodal_generation') {
+                                form.setFieldValue(['model_deployments', name, 'capabilities'], ['image_generation']);
+                                form.setFieldValue(['model_deployments', name, 'endpoint_path'], '/api/v1/services/aigc/multimodal-generation/generation');
+                                form.setFieldValue(['model_deployments', name, 'config', 'default_size'], '1024x1024');
+                              } else if (value === 'openai_embeddings') {
+                                form.setFieldValue(['model_deployments', name, 'capabilities'], ['embedding']);
+                                form.setFieldValue(['model_deployments', name, 'embedding_dimensions'], 1024);
+                              }
+                            }} />
+                          </Form.Item>
+                        </Col>
                         <Col span={4}><Button danger style={{ marginTop: 30 }} onClick={() => remove(name)} disabled={fields.length === 1}>移除</Button></Col>
                       </Row>
                       <Row gutter={12}>
@@ -541,6 +568,20 @@ export default function LlmProviders() {
                         <Col span={6}><Form.Item {...rest} name={[name, 'endpoint_path']} label="接口路径"><Input placeholder={providerType === 'anthropic' ? '/v1/messages' : '通常留空'} /></Form.Item></Col>
                         <Col span={6}><Form.Item {...rest} name={[name, 'embedding_dimensions']} label="向量维度"><InputNumber min={1} style={{ width: '100%' }} /></Form.Item></Col>
                       </Row>
+                      <Form.Item noStyle shouldUpdate={(previous, current) => (
+                        previous.model_deployments?.[name]?.adapter !== current.model_deployments?.[name]?.adapter
+                      )}>
+                        {() => form.getFieldValue(['model_deployments', name, 'adapter']) === 'bailian_multimodal_generation' ? (
+                          <Row gutter={12}>
+                            <Col span={12}>
+                              <Form.Item name={[name, 'config', 'default_size']} label="默认生图尺寸" extra="界面使用 1024x1024；调用百炼时自动转换成 1024*1024">
+                                <Input placeholder="1024x1024" />
+                              </Form.Item>
+                            </Col>
+                            <Col span={12}><Form.Item name={[name, 'config', 'watermark']} label="水印" valuePropName="checked"><Switch /></Form.Item></Col>
+                          </Row>
+                        ) : null}
+                      </Form.Item>
                     </div>
                   ))}
                   <Button block icon={<PlusOutlined />} onClick={() => add({ adapter: 'openai_chat_completions', capabilities: ['chat'], routing_priority: 0 })}>增加模型部署</Button>
@@ -583,7 +624,19 @@ export default function LlmProviders() {
             <Col span={12}><Form.Item name="model_id" label="供应商模型ID" rules={[{ required: true }]}><Input /></Form.Item></Col>
             <Col span={12}><Form.Item name="display_name" label="显示名称"><Input /></Form.Item></Col>
           </Row>
-          <Form.Item name="adapter" label="调用适配器" rules={[{ required: true }]}><Select options={ADAPTER_OPTIONS} /></Form.Item>
+          <Form.Item name="adapter" label="调用适配器" rules={[{ required: true }]}>
+            <Select options={ADAPTER_OPTIONS} onChange={(value) => {
+              if (value === 'bailian_multimodal_generation') {
+                modelForm.setFieldsValue({
+                  capabilities: ['image_generation'],
+                  endpoint_path: '/api/v1/services/aigc/multimodal-generation/generation',
+                  config: { default_size: '1024x1024', watermark: false },
+                });
+              } else if (value === 'openai_embeddings') {
+                modelForm.setFieldsValue({ capabilities: ['embedding'], embedding_dimensions: 1024 });
+              }
+            }} />
+          </Form.Item>
           <Form.Item name="capabilities" label="能力" rules={[{ required: true }]}>
             <Select mode="multiple" options={(Object.entries(CAPABILITY_LABELS) as [ModelCapability, string][]).map(([value, label]) => ({ value, label }))} />
           </Form.Item>
@@ -592,6 +645,18 @@ export default function LlmProviders() {
             <Col span={6}><Form.Item name="embedding_dimensions" label="向量维度"><InputNumber min={1} style={{ width: '100%' }} /></Form.Item></Col>
             <Col span={6}><Form.Item name="routing_priority" label="路由优先级"><InputNumber style={{ width: '100%' }} /></Form.Item></Col>
           </Row>
+          <Form.Item noStyle shouldUpdate={(previous, current) => previous.adapter !== current.adapter}>
+            {() => modelForm.getFieldValue('adapter') === 'bailian_multimodal_generation' ? (
+              <Row gutter={16}>
+                <Col span={12}>
+                  <Form.Item name={['config', 'default_size']} label="默认生图尺寸" extra="界面使用 1024x1024；平台调用百炼时会转换为 1024*1024">
+                    <Input placeholder="1024x1024" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}><Form.Item name={['config', 'watermark']} label="水印" valuePropName="checked"><Switch /></Form.Item></Col>
+              </Row>
+            ) : null}
+          </Form.Item>
         </Form>
       </Modal>
 

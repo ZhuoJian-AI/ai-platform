@@ -208,8 +208,49 @@ def _to_anthropic_messages(messages: list[dict]) -> list[dict]:
                                 "input": _safe_json(tc["function"].get("arguments", "{}"))})
             out.append({"role": "assistant", "content": content})
         else:
-            out.append({"role": role, "content": m.get("content", "")})
+            out.append({"role": role, "content": _to_anthropic_content(m.get("content", ""))})
     return out
+
+
+def _to_anthropic_content(content: Any) -> Any:
+    """Convert OpenAI multimodal content blocks to Anthropic Messages blocks."""
+    if not isinstance(content, list):
+        return content
+    converted: list[dict] = []
+    for part in content:
+        if not isinstance(part, dict):
+            raise RuntimeError("invalid multimodal message content")
+        if part.get("type") == "text":
+            converted.append({"type": "text", "text": str(part.get("text", ""))})
+            continue
+        if part.get("type") != "image_url":
+            converted.append(part)
+            continue
+        image_url = part.get("image_url") or {}
+        url = str(image_url.get("url") or "")
+        if url.startswith("data:"):
+            header, separator, encoded = url.partition(",")
+            media_type = header[5:].split(";", 1)[0].lower()
+            if separator != "," or ";base64" not in header.lower():
+                raise RuntimeError("Anthropic image data URL must use base64 encoding")
+            if media_type == "image/jpg":
+                media_type = "image/jpeg"
+            if media_type not in {"image/jpeg", "image/png", "image/gif", "image/webp"}:
+                raise RuntimeError("Anthropic image type is not supported")
+            try:
+                base64.b64decode(encoded, validate=True)
+            except (ValueError, TypeError) as exc:
+                raise RuntimeError("Anthropic image data is not valid base64") from exc
+            converted.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": encoded},
+            })
+            continue
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise RuntimeError("Anthropic image URL is invalid")
+        converted.append({"type": "image", "source": {"type": "url", "url": url}})
+    return converted
 
 
 def _safe_json(s: str) -> Any:

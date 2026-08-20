@@ -1,5 +1,6 @@
 """Provider credentials, endpoint presets and model deployment CRUD."""
 
+import re
 from copy import copy
 from datetime import UTC
 from urllib.parse import urlparse
@@ -28,6 +29,42 @@ def _validate_base_url(value: str) -> str:
     return normalized
 
 
+_BAILIAN_WORKSPACE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_BAILIAN_REGION_HOSTS = {
+    "cn-beijing": "cn-beijing",
+    "ap-southeast-1": "ap-southeast-1",
+    "ap-northeast-1": "ap-northeast-1",
+    "eu-central-1": "eu-central-1",
+}
+
+
+def normalize_bailian_workspace_id(value: str | None, region: str | None) -> str | None:
+    """Accept either a Bailian workspace ID or its API host and store only the ID.
+
+    The console prominently displays an ``API Host``.  Treating that host as an
+    ID used to produce duplicated hosts such as
+    ``<host>.cn-beijing.maas.aliyuncs.com``.  Being liberal at this UI boundary
+    prevents a valid credential from becoming an invalid endpoint.
+    """
+    if value is None or not value.strip():
+        return None
+    selected = region or "cn-beijing"
+    host_region = _BAILIAN_REGION_HOSTS.get(selected)
+    if host_region is None:
+        raise ValueError("Unsupported Bailian region")
+    raw = value.strip().rstrip("/")
+    parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    hostname = parsed.hostname
+    suffix = f".{host_region}.maas.aliyuncs.com"
+    if hostname and hostname.lower().endswith(suffix):
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("Bailian workspace must be an ID or API Host without a path")
+        raw = hostname[: -len(suffix)]
+    if not _BAILIAN_WORKSPACE_ID.fullmatch(raw):
+        raise ValueError("Bailian workspace ID contains unsupported characters")
+    return raw
+
+
 def provider_base_url(
     vendor: str, *, region: str | None, workspace_id: str | None,
     provider_type: str, explicit: str | None,
@@ -47,16 +84,11 @@ def provider_base_url(
         return "https://ark.cn-beijing.volces.com/api/v3"
     if vendor == "aliyun_bailian":
         selected = region or "cn-beijing"
+        workspace_id = normalize_bailian_workspace_id(workspace_id, selected)
         if workspace_id:
-            hosts = {
-                "cn-beijing": "cn-beijing",
-                "ap-southeast-1": "ap-southeast-1",
-                "ap-northeast-1": "ap-northeast-1",
-                "eu-central-1": "eu-central-1",
-            }
-            if selected not in hosts:
+            if selected not in _BAILIAN_REGION_HOSTS:
                 raise ValueError("Unsupported Bailian region")
-            root = f"https://{workspace_id}.{hosts[selected]}.maas.aliyuncs.com"
+            root = f"https://{workspace_id}.{_BAILIAN_REGION_HOSTS[selected]}.maas.aliyuncs.com"
             return f"{root}/apps/anthropic" if provider_type == "anthropic" else f"{root}/compatible-mode/v1"
         if selected == "cn-beijing":
             return (
@@ -134,6 +166,10 @@ async def create_provider(
     dept_id: UUID | None = None,
     team_id: UUID | None = None,
 ) -> LlmProvider:
+    workspace_id = (
+        normalize_bailian_workspace_id(data.workspace_id, data.region)
+        if data.vendor == "aliyun_bailian" else data.workspace_id
+    )
     deployments = _legacy_deployments(data)
     declared_models = list(dict.fromkeys([*data.supported_models, *(d.model_id for d in deployments)]))
     normalized_config = validate_provider_config(
@@ -141,7 +177,7 @@ async def create_provider(
     )
     encrypted_key = encrypt_provider_api_key(data.api_key)
     base_url = provider_base_url(
-        data.vendor, region=data.region, workspace_id=data.workspace_id,
+        data.vendor, region=data.region, workspace_id=workspace_id,
         provider_type=data.provider_type, explicit=data.base_url,
     )
     provider = LlmProvider(
@@ -150,7 +186,7 @@ async def create_provider(
         vendor=data.vendor,
         provider_type=data.provider_type,
         region=data.region,
-        workspace_id=data.workspace_id,
+        workspace_id=workspace_id,
         scope_type=data.scope_type,
         department_id=dept_id,
         team_id=team_id,
@@ -196,6 +232,11 @@ async def get_provider(db: AsyncSession, provider_id: UUID) -> LlmProvider | Non
 
 async def update_provider(db: AsyncSession, provider: LlmProvider, data: LlmProviderUpdate) -> LlmProvider:
     update_data = data.model_dump(exclude_unset=True)
+    if provider.vendor == "aliyun_bailian" and ({"workspace_id", "region"} & update_data.keys()):
+        update_data["workspace_id"] = normalize_bailian_workspace_id(
+            update_data.get("workspace_id", provider.workspace_id),
+            update_data.get("region", provider.region),
+        )
     if "api_key" in update_data:
         update_data["api_key_encrypted"] = encrypt_provider_api_key(update_data.pop("api_key"))
         provider.api_key_version += 1

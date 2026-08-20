@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 from httpx import AsyncClient
 
+from app.agents import llm_client
 from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.schemas.llm_provider import ModelDeploymentCreate
 from app.services import model_gateway
@@ -16,6 +17,11 @@ from app.utils.crypto import encrypt_provider_api_key
 def test_bailian_and_ark_endpoint_presets():
     assert provider_base_url(
         "aliyun_bailian", region="cn-beijing", workspace_id="llm-demo",
+        provider_type="openai", explicit=None,
+    ) == "https://llm-demo.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    assert provider_base_url(
+        "aliyun_bailian", region="cn-beijing",
+        workspace_id="llm-demo.cn-beijing.maas.aliyuncs.com",
         provider_type="openai", explicit=None,
     ) == "https://llm-demo.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
     assert provider_base_url(
@@ -31,6 +37,26 @@ def test_bailian_and_ark_endpoint_presets():
             "custom", region=None, workspace_id=None, provider_type="openai",
             explicit="https://user:pass@example.com/v1",
         )
+
+
+def test_anthropic_multimodal_content_conversion():
+    encoded = base64.b64encode(b"test-image").decode()
+    converted = llm_client._to_anthropic_messages([{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "What is shown?"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}},
+            {"type": "image_url", "image_url": {"url": "https://example.com/test.webp"}},
+        ],
+    }])
+    assert converted[0]["content"][1] == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": encoded},
+    }
+    assert converted[0]["content"][2] == {
+        "type": "image",
+        "source": {"type": "url", "url": "https://example.com/test.webp"},
+    }
 
 
 def test_deployment_schema_rejects_capability_adapter_mismatch():
@@ -56,7 +82,7 @@ async def test_create_bailian_provider_and_mask_secret(client: AsyncClient, monk
             "vendor": "aliyun_bailian",
             "provider_type": "openai",
             "region": "cn-beijing",
-            "workspace_id": "llm-demo",
+            "workspace_id": "llm-demo.cn-beijing.maas.aliyuncs.com",
             "access_mode": "payg",
             "api_key": "sk-test-never-return",
             "scope_type": "organization",
@@ -78,6 +104,7 @@ async def test_create_bailian_provider_and_mask_secret(client: AsyncClient, monk
     assert response.status_code == 201, response.text
     data = response.json()
     assert data["vendor"] == "aliyun_bailian"
+    assert data["workspace_id"] == "llm-demo"
     assert data["base_url"] == "https://llm-demo.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
     assert data["api_key_masked"]
     assert "api_key_encrypted" not in data
@@ -99,6 +126,23 @@ async def test_create_bailian_provider_and_mask_secret(client: AsyncClient, monk
     )
     assert vision_check.status_code == 200, vision_check.text
     assert vision_check.json()["status"] == "verified"
+
+    async def quota_failure(*_args, **_kwargs):
+        raise model_gateway.GatewayError("quota_or_rate_limit")
+
+    monkeypatch.setattr("app.api.llm_providers.test_deployment", quota_failure)
+    embedding_model = next(item for item in data["model_deployments"] if "embedding" in item["capabilities"])
+    quota_check = await client.post(
+        f"/api/v1/providers/{data['id']}/models/{embedding_model['id']}/test/embedding"
+    )
+    assert quota_check.status_code == 400
+    assert "余额或配额不足" in quota_check.json()["detail"]
+    provider_after_failure = (await client.get(f"/api/v1/providers/{data['id']}")).json()
+    failed_embedding = next(
+        item for item in provider_after_failure["model_deployments"]
+        if item["id"] == embedding_model["id"]
+    )
+    assert failed_embedding["last_error"] == "quota_or_rate_limit"
 
 
 class _FakeResponse:
@@ -130,7 +174,13 @@ class _FakeClient:
                 "usage": {"input_tokens": 3, "output_tokens": 1},
             })
         if url.endswith("/embeddings"):
-            return _FakeResponse({"data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]})
+            dimensions = json.get("dimensions") or 3
+            return _FakeResponse({
+                "data": [
+                    {"index": index, "embedding": [0.1] * dimensions}
+                    for index, _value in enumerate(json.get("input") or [])
+                ],
+            })
         if url.endswith("/images/generations"):
             return _FakeResponse({"data": [{"b64_json": base64.b64encode(b"fake-png").decode()}]})
         raise AssertionError(f"unexpected URL: {url}")
@@ -165,6 +215,7 @@ async def test_mock_gateway_chat_vision_embedding_image_and_stream(monkeypatch, 
     embedding = _deployment(
         provider, model_id="ep-embedding", adapter="openai_embeddings", capabilities=["embedding"],
     )
+    embedding.embedding_dimensions = 4
     image = _deployment(
         provider, model_id="ep-image", adapter="volcengine_images", capabilities=["image_generation"],
         path="/images/generations",
@@ -177,10 +228,82 @@ async def test_mock_gateway_chat_vision_embedding_image_and_stream(monkeypatch, 
 
     assert chat_result["output"] == "OK"
     assert vision_result["output"] == "OK"
-    assert embedding_result["dimensions"] == 3
+    assert embedding_result["dimensions"] == 4
     assert image_result["bytes"] == len(b"fake-png")
     vision_bodies = [body for url, body in _FakeClient.calls if url.endswith("/responses")]
     assert any("input_image" in str(body) for body in vision_bodies)
+    embedding_body = next(body for url, body in _FakeClient.calls if url.endswith("/embeddings"))
+    assert embedding_body["dimensions"] == 4
+
+
+class _FakeImageStream:
+    status_code = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def aiter_bytes(self):
+        yield b"fake-bailian-png"
+
+
+class _FakeBailianClient:
+    calls: list[tuple[str, dict]] = []
+
+    def __init__(self, **_kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+    async def post(self, url, *, json, **_kwargs):
+        self.calls.append((url, json))
+        return _FakeResponse({
+            "output": {
+                "choices": [{"message": {"content": [{"image": "https://example.com/image.png"}]}}]
+            }
+        })
+
+    def stream(self, method, url):
+        assert method == "GET"
+        assert url == "https://example.com/image.png"
+        return _FakeImageStream()
+
+
+@pytest.mark.asyncio
+async def test_bailian_image_uses_dashscope_endpoint_and_star_size(monkeypatch):
+    _FakeBailianClient.calls = []
+    monkeypatch.setattr(model_gateway.httpx, "AsyncClient", _FakeBailianClient)
+    monkeypatch.setattr(llm_client, "_assert_public_image_url", lambda _url: None)
+    provider = LlmProvider(
+        id=uuid4(), organization_id=uuid4(), name="Bailian", vendor="aliyun_bailian",
+        provider_type="openai", scope_type="organization",
+        base_url="https://llm-demo.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        api_key_encrypted=encrypt_provider_api_key("mock-secret"), supported_models=[], config={},
+        timeout_seconds=30, priority=0, weight=1, max_retries=2, is_active=True,
+    )
+    deployment = _deployment(
+        provider, model_id="qwen-image-2.0", adapter="bailian_multimodal_generation",
+        capabilities=["image_generation"],
+    )
+    deployment.config = {"default_size": "1024x1024"}
+
+    result = await model_gateway._bailian_generate_image(
+        provider, deployment, prompt="blue circle", size="1024x1024", max_bytes=1024,
+    )
+
+    assert result.raw == b"fake-bailian-png"
+    url, body = _FakeBailianClient.calls[0]
+    assert url == (
+        "https://llm-demo.cn-beijing.maas.aliyuncs.com"
+        "/api/v1/services/aigc/multimodal-generation/generation"
+    )
+    assert body["parameters"]["size"] == "1024*1024"
 
 
 @pytest.mark.asyncio

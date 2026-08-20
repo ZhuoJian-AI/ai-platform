@@ -8,6 +8,7 @@ client so the rollout is backwards compatible.
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID
@@ -28,6 +29,81 @@ ImageGenerationResult = legacy_client.ImageGenerationResult
 _SCOPE_RANK = {"team": 3, "department": 2, "organization": 1}
 _ROUTABLE_STATES = {"verified", "legacy"}
 _RETRYABLE_MARKERS = (" 429", " 500", " 502", " 503", " 504", "timeout", "timed out", "connect")
+_TEST_IMAGE_DATA_URL = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR4nGNQqLhAU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULAEuXoEzmj87AAAAAAElFTkSuQmCC"
+)
+
+
+class GatewayError(RuntimeError):
+    """A credential-safe upstream failure category."""
+
+    def __init__(self, category: str):
+        self.category = category
+        super().__init__(category)
+
+
+def _upstream_error_category(status_code: int, payload: Any = None) -> str:
+    if status_code in {401, 403}:
+        return "invalid_credentials_or_permission"
+    if status_code == 404:
+        return "model_not_found"
+    if status_code == 429:
+        return "quota_or_rate_limit"
+    if status_code >= 500:
+        return "provider_service_unavailable"
+    lowered = str(payload or "").lower()[:4000]
+    if any(marker in lowered for marker in ("quota", "balance", "insufficient", "余额", "配额")):
+        return "quota_or_rate_limit"
+    if any(marker in lowered for marker in ("model_not_found", "model not found", "unknown model")):
+        return "model_not_found"
+    if status_code == 400 and any(
+        marker in lowered
+        for marker in ("unsupported", "capability", "dimension", "image", "vision", "size")
+    ):
+        return "capability_mismatch"
+    return "provider_rejected_request"
+
+
+def classify_gateway_error(exc: Exception) -> str:
+    """Return a stable category without exposing an upstream response body."""
+    if isinstance(exc, GatewayError):
+        return exc.category
+    if isinstance(exc, httpx.TimeoutException):
+        return "network_timeout"
+    if isinstance(exc, httpx.NetworkError):
+        return "network_failure"
+    lowered = str(exc).lower()
+    if any(marker in lowered for marker in ("401", "403", "unauthorized", "forbidden")):
+        return "invalid_credentials_or_permission"
+    if any(marker in lowered for marker in ("429", "quota", "balance", "insufficient")):
+        return "quota_or_rate_limit"
+    if "404" in lowered or "model not found" in lowered:
+        return "model_not_found"
+    if any(marker in lowered for marker in ("timeout", "timed out")):
+        return "network_timeout"
+    if any(marker in lowered for marker in ("connect", "network", "dns")):
+        return "network_failure"
+    if any(marker in lowered for marker in ("500", "502", "503", "504")):
+        return "provider_service_unavailable"
+    return "capability_test_failed"
+
+
+def _safe_endpoint_path(path: str, label: str) -> str:
+    if not path.startswith("/") or "://" in path or ".." in path:
+        raise GatewayError("invalid_endpoint_configuration")
+    return path
+
+
+def _normalize_bailian_image_size(value: str) -> str:
+    """Convert the platform's canonical ``WIDTHxHEIGHT`` into Bailian ``WIDTH*HEIGHT``."""
+    match = re.fullmatch(r"\s*(\d+)\s*[xX*]\s*(\d+)\s*", value)
+    if not match:
+        raise GatewayError("invalid_image_size")
+    width, height = (int(match.group(1)), int(match.group(2)))
+    if width <= 0 or height <= 0:
+        raise GatewayError("invalid_image_size")
+    return f"{width}*{height}"
 
 
 def _scope_clause(dept_id: str | UUID | None, team_id: str | UUID | None):
@@ -256,9 +332,7 @@ async def _responses_chat(
     tools: list[dict] | None,
 ) -> LlmResult:
     api_key = await get_decrypted_api_key(provider)
-    path = deployment.endpoint_path or "/responses"
-    if not path.startswith("/") or "://" in path or ".." in path:
-        raise RuntimeError("invalid Responses API endpoint path")
+    path = _safe_endpoint_path(deployment.endpoint_path or "/responses", "Responses API")
     body: dict[str, Any] = {
         "model": deployment.model_id,
         "input": _responses_input(messages),
@@ -281,9 +355,9 @@ async def _responses_chat(
     try:
         data = response.json()
     except ValueError as exc:
-        raise RuntimeError(f"upstream Responses API error {response.status_code}: invalid JSON") from exc
+        raise GatewayError("invalid_provider_response") from exc
     if response.status_code >= 400:
-        raise RuntimeError(f"upstream Responses API error {response.status_code}: {data}")
+        raise GatewayError(_upstream_error_category(response.status_code, data))
     text_parts: list[str] = []
     tool_calls: list[dict] = []
     for item in data.get("output") or []:
@@ -503,11 +577,53 @@ async def embed(
             db, org_id, model, texts, dept_id=dept_id, team_id=team_id,
         )
     provider, deployment = resolved
-    return await legacy_client.embed(
-        db, org_id, deployment.model_id, texts,
-        provider_override=effective_provider(provider, deployment),
-        model_override=deployment.model_id,
-    )
+    return await _embed_with_deployment(effective_provider(provider, deployment), deployment, texts)
+
+
+async def _embed_with_deployment(
+    provider: LlmProvider,
+    deployment: ModelDeployment,
+    texts: list[str],
+) -> list[list[float]]:
+    """Call one explicit embedding deployment and enforce its declared dimensions."""
+    if provider.provider_type == "anthropic":
+        raise GatewayError("capability_mismatch")
+    api_key = await get_decrypted_api_key(provider)
+    path = _safe_endpoint_path(deployment.endpoint_path or "/embeddings", "Embeddings API")
+    body: dict[str, Any] = {"model": deployment.model_id, "input": texts}
+    if deployment.embedding_dimensions:
+        body["dimensions"] = deployment.embedding_dimensions
+    try:
+        async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
+            response = await client.post(
+                f"{provider.base_url.rstrip('/')}{path}",
+                headers={"authorization": f"Bearer {api_key}", "content-type": "application/json"},
+                json=body,
+            )
+    except httpx.TimeoutException as exc:
+        raise GatewayError("network_timeout") from exc
+    except httpx.NetworkError as exc:
+        raise GatewayError("network_failure") from exc
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise GatewayError("invalid_provider_response") from exc
+    if response.status_code >= 400:
+        raise GatewayError(_upstream_error_category(response.status_code, data))
+    items = sorted(data.get("data") or [], key=lambda item: item.get("index", 0))
+    if len(items) != len(texts):
+        raise GatewayError("invalid_provider_response")
+    vectors: list[list[float]] = []
+    for item in items:
+        vector = item.get("embedding")
+        if not isinstance(vector, list) or not vector or any(
+            not isinstance(value, (int, float)) or isinstance(value, bool) for value in vector
+        ):
+            raise GatewayError("invalid_provider_response")
+        if deployment.embedding_dimensions and len(vector) != deployment.embedding_dimensions:
+            raise GatewayError("capability_mismatch")
+        vectors.append(vector)
+    return vectors
 
 
 async def generate_image(
@@ -563,14 +679,16 @@ async def _bailian_generate_image(
         if base.endswith(suffix):
             base = base[: -len(suffix)]
             break
-    path = deployment.endpoint_path or "/api/v1/services/aigc/multimodal-generation/generation"
-    if not path.startswith("/") or "://" in path or ".." in path:
-        raise RuntimeError("invalid Bailian image endpoint path")
+    path = _safe_endpoint_path(
+        deployment.endpoint_path or "/api/v1/services/aigc/multimodal-generation/generation",
+        "Bailian image API",
+    )
+    requested_size = str((deployment.config or {}).get("default_size") or size)
     body = {
         "model": deployment.model_id,
         "input": {"messages": [{"role": "user", "content": [{"text": prompt}]}]},
         "parameters": {
-            "size": str((deployment.config or {}).get("default_size") or size),
+            "size": _normalize_bailian_image_size(requested_size),
             "n": 1,
             "watermark": bool((deployment.config or {}).get("watermark", False)),
         },
@@ -584,9 +702,9 @@ async def _bailian_generate_image(
         try:
             data = response.json()
         except ValueError as exc:
-            raise RuntimeError(f"upstream Bailian image error {response.status_code}: invalid JSON") from exc
+            raise GatewayError("invalid_provider_response") from exc
         if response.status_code >= 400:
-            raise RuntimeError(f"upstream Bailian image error {response.status_code}")
+            raise GatewayError(_upstream_error_category(response.status_code, data))
         image_url = ""
         for choice in (data.get("output") or {}).get("choices") or []:
             for item in ((choice.get("message") or {}).get("content") or []):
@@ -596,11 +714,11 @@ async def _bailian_generate_image(
             if image_url:
                 break
         if not image_url:
-            raise RuntimeError("Bailian image generation returned no image URL")
+            raise GatewayError("invalid_provider_response")
         legacy_client._assert_public_image_url(image_url)
         async with client.stream("GET", image_url) as image_response:
             if image_response.status_code >= 300:
-                raise RuntimeError(f"generated image download failed ({image_response.status_code})")
+                raise GatewayError(_upstream_error_category(image_response.status_code))
             chunks: list[bytes] = []
             total = 0
             async for chunk in image_response.aiter_bytes():
@@ -610,7 +728,7 @@ async def _bailian_generate_image(
                 chunks.append(chunk)
             raw = b"".join(chunks)
     if not raw:
-        raise RuntimeError("generated image is empty")
+        raise GatewayError("invalid_provider_response")
     return ImageGenerationResult(
         raw=raw, provider_id=str(provider.id), model_served=deployment.model_id,
     )
@@ -627,13 +745,9 @@ async def test_deployment(
     if capability in {"chat", "vision"}:
         content: Any = "Reply with OK only."
         if capability == "vision":
-            test_image = (
-                "data:image/png;base64,"
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-            )
             content = [
                 {"type": "text", "text": "Reply with OK only."},
-                {"type": "image_url", "image_url": {"url": test_image}},
+                {"type": "image_url", "image_url": {"url": _TEST_IMAGE_DATA_URL}},
             ]
         result = await _chat_with_deployment(
             db, provider.organization_id, provider, deployment,
@@ -642,10 +756,7 @@ async def test_deployment(
         )
         return {"output": result.content[:200], "provider_id": result.provider_id}
     if capability == "embedding":
-        vectors = await legacy_client.embed(
-            db, provider.organization_id, deployment.model_id, ["gateway health check"],
-            provider_override=effective, model_override=deployment.model_id,
-        )
+        vectors = await _embed_with_deployment(effective, deployment, ["gateway health check"])
         return {"dimensions": len(vectors[0]) if vectors else 0}
     if capability == "image_generation":
         if deployment.adapter == "bailian_multimodal_generation":
