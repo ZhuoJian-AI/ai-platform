@@ -120,6 +120,11 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [selecting, setSelecting] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const fileAreaRef = useRef<HTMLDivElement>(null);
+  const dragSelectionRef = useRef<{
+    pointerId: number; startX: number; startY: number; baseSelection: Set<string>;
+  } | null>(null);
+  const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [trashOpen, setTrashOpen] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
   const [versionFile, setVersionFile] = useState<WorkspaceFileListItem | null>(null);
@@ -196,6 +201,80 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
     if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
+
+  const pointerInFileArea = (event: { clientX: number; clientY: number }) => {
+    const area = fileAreaRef.current;
+    if (!area) return null;
+    const bounds = area.getBoundingClientRect();
+    return {
+      x: event.clientX - bounds.left + area.scrollLeft,
+      y: event.clientY - bounds.top + area.scrollTop,
+      bounds,
+    };
+  };
+
+  const beginMarqueeSelection = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!selecting || event.button !== 0) return;
+    const target = event.target as HTMLElement;
+    if (target.closest('[data-workspace-item], button, input, [role="menu"]')) return;
+    const point = pointerInFileArea(event);
+    const area = fileAreaRef.current;
+    if (!point || !area) return;
+    const baseSelection = event.ctrlKey || event.metaKey || event.shiftKey
+      ? new Set(selectedKeys)
+      : new Set<string>();
+    dragSelectionRef.current = {
+      pointerId: event.pointerId,
+      startX: point.x,
+      startY: point.y,
+      baseSelection,
+    };
+    setSelectedKeys(baseSelection);
+    setMarquee({ left: point.x, top: point.y, width: 0, height: 0 });
+    area.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  };
+
+  const updateMarqueeSelection = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragSelectionRef.current;
+    const area = fileAreaRef.current;
+    const point = pointerInFileArea(event);
+    if (!drag || drag.pointerId !== event.pointerId || !area || !point) return;
+    const box = {
+      left: Math.min(drag.startX, point.x),
+      top: Math.min(drag.startY, point.y),
+      width: Math.abs(point.x - drag.startX),
+      height: Math.abs(point.y - drag.startY),
+    };
+    const next = new Set(drag.baseSelection);
+    area.querySelectorAll<HTMLElement>('[data-workspace-key]').forEach((item) => {
+      const itemBounds = item.getBoundingClientRect();
+      const itemBox = {
+        left: itemBounds.left - point.bounds.left + area.scrollLeft,
+        top: itemBounds.top - point.bounds.top + area.scrollTop,
+        right: itemBounds.right - point.bounds.left + area.scrollLeft,
+        bottom: itemBounds.bottom - point.bounds.top + area.scrollTop,
+      };
+      const intersects = box.left < itemBox.right
+        && box.left + box.width > itemBox.left
+        && box.top < itemBox.bottom
+        && box.top + box.height > itemBox.top;
+      if (intersects) next.add(item.dataset.workspaceKey!);
+    });
+    setMarquee(box);
+    setSelectedKeys(next);
+    event.preventDefault();
+  };
+
+  const endMarqueeSelection = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragSelectionRef.current;
+    const area = fileAreaRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragSelectionRef.current = null;
+    setMarquee(null);
+    if (area?.hasPointerCapture(event.pointerId)) area.releasePointerCapture(event.pointerId);
+    event.preventDefault();
+  };
   const { data: trash = [], isLoading: trashLoading } = useQuery({
     queryKey: ['ws-mgr-trash', wsId], queryFn: () => terminal.listWsTrash(wsId!),
     enabled: !!wsId && trashOpen && canManage,
@@ -454,7 +533,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                   <button style={toolBtnStyle} title={viewMode === 'grid' ? '切换列表视图' : '切换网格视图'} onClick={() => setViewMode((mode) => mode === 'grid' ? 'list' : 'grid')}>
                     {viewMode === 'grid' ? <UnorderedListOutlined /> : <AppstoreOutlined />}
                   </button>
-                  <button style={{ ...toolBtnStyle, color: selecting ? WB.primary : '#1d1d1f' }} onClick={() => { setSelecting((value) => !value); setSelectedKeys(new Set()); }}>
+                  <button style={{ ...toolBtnStyle, color: selecting ? WB.primary : '#1d1d1f' }} onClick={() => { setSelecting((value) => !value); setSelectedKeys(new Set()); setMarquee(null); dragSelectionRef.current = null; }}>
                     <CheckSquareOutlined /> {selecting ? '退出多选' : '多选'}
                   </button>
                   {selecting && canManage && (
@@ -507,7 +586,16 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
               </div>
 
               {/* 文件网格 / 列表 */}
-              <div style={{ flex: 1, overflowY: 'auto', padding: '18px 20px' }} className="wb-scroll-hide">
+              <div
+                ref={fileAreaRef}
+                style={{ flex: 1, overflowY: 'auto', padding: '18px 20px', position: 'relative', userSelect: selecting ? 'none' : undefined, touchAction: selecting ? 'none' : undefined }}
+                className="wb-scroll-hide"
+                onPointerDown={beginMarqueeSelection}
+                onPointerMove={updateMarqueeSelection}
+                onPointerUp={endMarqueeSelection}
+                onPointerCancel={endMarqueeSelection}
+              >
+                {selecting && marquee && <div aria-hidden style={marqueeStyle(marquee)} />}
                 {filesLoading ? (
                   <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}><Spin /></div>
                 ) : (folderItems.length === 0 && fileItems.length === 0) ? (
@@ -525,6 +613,8 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                       return (
                         <div
                           key={key}
+                          data-workspace-item
+                          data-workspace-key={key}
                           role="button"
                           tabIndex={0}
                           aria-label={`打开文件夹 ${it.name}`}
@@ -581,6 +671,8 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                       return (
                         <div
                           key={key}
+                          data-workspace-item
+                          data-workspace-key={key}
                           role="button"
                           tabIndex={0}
                           aria-label={`打开文件 ${it.name}`}
@@ -906,6 +998,20 @@ const moreActionBtnStyle = (viewMode: 'grid' | 'list', visible: boolean): CSSPro
   color: '#1d1d1f', opacity: visible ? 1 : 0, pointerEvents: visible ? 'auto' : 'none',
   transition: 'opacity .12s ease, background .12s ease',
   ...(viewMode === 'grid' ? { position: 'absolute', top: -6, right: -6, zIndex: 1 } : {}),
+});
+
+const marqueeStyle = (box: { left: number; top: number; width: number; height: number }): CSSProperties => ({
+  position: 'absolute',
+  left: box.left,
+  top: box.top,
+  width: box.width,
+  height: box.height,
+  zIndex: 2,
+  boxSizing: 'border-box',
+  border: `1px solid ${WB.primary}`,
+  borderRadius: 4,
+  background: 'rgba(99, 102, 241, 0.12)',
+  pointerEvents: 'none',
 });
 
 const modalOverlayStyle: CSSProperties = {
