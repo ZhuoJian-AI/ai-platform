@@ -44,6 +44,25 @@ class GatewayError(RuntimeError):
 
 
 def _upstream_error_category(status_code: int, payload: Any = None) -> str:
+    lowered = str(payload or "").lower()[:4000]
+    # Bailian returns HTTP 403 when a model's free tier is exhausted. Inspect
+    # stable provider error fields before treating every 403 as a bad key, or
+    # administrators are sent to rotate a credential that is working correctly.
+    if any(
+        marker in lowered
+        for marker in (
+            "quota",
+            "balance",
+            "insufficient",
+            "free tier",
+            "freetier",
+            "余额",
+            "配额",
+        )
+    ):
+        return "quota_or_rate_limit"
+    if any(marker in lowered for marker in ("model_not_found", "model not found", "unknown model")):
+        return "model_not_found"
     if status_code in {401, 403}:
         return "invalid_credentials_or_permission"
     if status_code == 404:
@@ -52,11 +71,6 @@ def _upstream_error_category(status_code: int, payload: Any = None) -> str:
         return "quota_or_rate_limit"
     if status_code >= 500:
         return "provider_service_unavailable"
-    lowered = str(payload or "").lower()[:4000]
-    if any(marker in lowered for marker in ("quota", "balance", "insufficient", "余额", "配额")):
-        return "quota_or_rate_limit"
-    if any(marker in lowered for marker in ("model_not_found", "model not found", "unknown model")):
-        return "model_not_found"
     if status_code == 400 and any(
         marker in lowered
         for marker in ("unsupported", "capability", "dimension", "image", "vision", "size")

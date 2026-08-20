@@ -70,6 +70,21 @@ def test_deployment_schema_rejects_capability_adapter_mismatch():
         )
 
 
+def test_bailian_free_tier_403_is_classified_as_quota_error():
+    payload = {
+        "error": {
+            "code": "insufficient_quota",
+            "type": "insufficient_quota",
+            "message": (
+                "Free quota exhausted. To continue accessing the model on a paid basis, "
+                'please disable the "use free tier only" mode.'
+            ),
+        }
+    }
+
+    assert model_gateway._upstream_error_category(403, payload) == "quota_or_rate_limit"
+
+
 @pytest.mark.asyncio
 async def test_create_bailian_provider_and_mask_secret(client: AsyncClient, monkeypatch):
     organization = (await client.post(
