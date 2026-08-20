@@ -3,12 +3,15 @@ from __future__ import annotations
 import base64
 import io
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 import pytest
 from PIL import Image
 
 from app.agents import llm_client
+from app.models.llm_provider import LlmProvider, ModelDeployment
+from app.services import model_gateway, multimodal_service
 from app.services.multimodal_service import (
     ensure_image_batch_limits,
     normalize_generated_png,
@@ -93,6 +96,54 @@ def test_provider_vision_capability_is_explicit() -> None:
     provider = SimpleNamespace(config={"model_capabilities": {"vision": {"vision": True}}})
     assert provider_model_supports_vision(provider, "vision") is True
     assert provider_model_supports_vision(provider, "legacy") is False
+
+
+@pytest.mark.asyncio
+async def test_resolved_image_model_keeps_gateway_deployment_routable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = LlmProvider(
+        id=uuid4(), organization_id=uuid4(), name="Bailian", vendor="aliyun_bailian",
+        provider_type="openai", scope_type="organization",
+        base_url="https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        api_key_encrypted="encrypted", supported_models=["qwen-image-2.0"], config={},
+        timeout_seconds=30, priority=0, weight=1, max_retries=2, is_active=True,
+    )
+    deployment = ModelDeployment(
+        id=uuid4(), provider_id=provider.id, model_id="qwen-image-2.0",
+        adapter="bailian_multimodal_generation", capabilities=["image_generation"],
+        routing_priority=10, is_active=True, verification_status="verified", config={},
+    )
+    provider.model_deployments = [deployment]
+
+    async def fake_flags(_db, _org_id):
+        return True, True
+
+    async def fake_providers(_db, _org_id, **_kwargs):
+        return [provider]
+
+    monkeypatch.setattr(multimodal_service, "organization_feature_flags", fake_flags)
+    monkeypatch.setattr(multimodal_service, "visible_providers", fake_providers)
+    scoped = await multimodal_service.resolve_image_generation(None, uuid4())
+
+    assert scoped is not None
+    assert scoped.provider is provider
+    assert scoped.provider.model_deployments == [deployment]
+
+    called = False
+
+    async def fake_bailian(_provider, selected, **_kwargs):
+        nonlocal called
+        called = True
+        assert selected is deployment
+        return SimpleNamespace(raw=_image_bytes("PNG"))
+
+    monkeypatch.setattr(model_gateway, "_bailian_generate_image", fake_bailian)
+    result = await model_gateway.generate_image(
+        scoped.provider, scoped.model, prompt="blue circle", size="1024x1024",
+    )
+    assert called is True
+    assert result.raw.startswith(b"\x89PNG")
 
 
 def test_openai_chat_body_preserves_image_content_parts() -> None:

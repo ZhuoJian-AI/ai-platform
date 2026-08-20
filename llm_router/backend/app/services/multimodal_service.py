@@ -203,9 +203,14 @@ async def resolve_image_generation(
             reverse=True,
         )
         if deployments:
-            from app.services.llm_provider_service import effective_provider
             return ScopedModel(
-                provider=effective_provider(provider, deployments[0]),
+                # Keep the provider together with its loaded deployment list.
+                # ``model_gateway.generate_image`` selects the capability adapter
+                # from that relationship and applies the deployment-specific
+                # endpoint itself.  Returning an already-effective transient
+                # provider here drops the relationship and incorrectly falls
+                # back to the legacy OpenAI Images endpoint.
+                provider=provider,
                 model=deployments[0].model_id,
             )
         if provider.provider_type == "anthropic":
