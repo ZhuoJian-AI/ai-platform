@@ -17,6 +17,7 @@ import {
   RightOutlined, DownOutlined,
   LoadingOutlined, CloseOutlined, DeleteOutlined,
   SearchOutlined, UploadOutlined, EditOutlined, DownloadOutlined,
+  PictureOutlined, EyeOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -94,6 +95,28 @@ interface MessageAttachment {
   workspace_id: string;
   path: string;
   name: string;
+}
+
+interface ChatFileLink {
+  id: string;
+  path: string;
+  name: string;
+  originalName: string;
+  size: number;
+  mimeType: string | null;
+  parseStatus: WorkspaceFileListItem['parse_status'];
+  updatedAt: string;
+}
+
+interface ArtifactOutput {
+  fileId: string;
+  path: string;
+  name: string;
+  mimeType: string;
+  size?: number;
+  width?: number;
+  height?: number;
+  parseStatus?: string;
 }
 
 type ComposerAttachmentStatus = 'uploading' | 'validating' | 'parsing' | 'ready' | 'failed';
@@ -178,7 +201,10 @@ function tracesToBlocks(traces: Record<string, unknown>[]): Block[] {
   for (const t of traces) {
     const category = t.category as TraceCategory;
     const title = (t.title as string) || category;
-    if (category === 'skill' && (t.name as string)) {
+    // 所有真实工具轨迹都携带 name。平台文件工具使用 file 分类，Skill/连接器
+    // 使用 skill 分类；二者都必须还原为 tool_call，才能从持久化 result 中恢复
+    // 图片和文档交付物。仅按 skill 分类会让刷新后的文件输出退化成普通轨迹。
+    if (t.name as string) {
       blocks.push({
         kind: 'tool_call',
         id: (t.id as string) || '',
@@ -814,8 +840,14 @@ export default function Terminal() {
   });
   // 文件名 → 路径映射，供 linkifyFiles 在消息正文里识别裸文件名
   const fileLinks = (wsFiles ?? []).map((f) => ({
+    id: f.id,
     path: f.path,
     name: f.path.split('/').pop() || f.path,
+    originalName: f.original_filename,
+    size: f.size,
+    mimeType: f.mime_type,
+    parseStatus: f.parse_status,
+    updatedAt: f.updated_at,
   }));
   // 跨工作空间文件清单（与 @ 选择器同源），供用户消息气泡把 @fileId 还原为文件路径
   const { data: allWsFiles } = useQuery<WorkspaceFileSummary[]>({
@@ -2075,7 +2107,7 @@ function ChatView(props: {
   onImportSkill: () => void;
   selectedId: string | null;
   onLink: (href: string) => void;
-  fileLinks: { path: string; name: string }[];
+  fileLinks: ChatFileLink[];
   fileRefMap: Map<string, string>;
   fileRefsLoaded: boolean;
   onDeleteTurn: (messageId: string) => void;
@@ -2240,7 +2272,7 @@ function ExecutionStatus({ verification, streaming }: { verification: ExecutionV
   );
 }
 
-function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; streaming: boolean; onLink: (href: string) => void; fileLinks: { path: string; name: string }[] }) {
+function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; streaming: boolean; onLink: (href: string) => void; fileLinks: ChatFileLink[] }) {
   const blocks = msg.blocks;
   const hasLiveBlocks = blocks && blocks.length > 0;
   const verification = msg.executionVerification ?? verificationFromBlocks(blocks);
@@ -2259,6 +2291,9 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
 
   const lastBlock = blocks![blocks!.length - 1];
   const thinking = streaming && (lastBlock.kind === 'phase' || (lastBlock.kind === 'tool_call' && lastBlock.running));
+  const artifacts = extractArtifacts(blocks);
+  const artifactPaths = new Set(artifacts.map((artifact) => artifact.path).filter(Boolean));
+  const legacyChanges = extractFileChanges(blocks).filter((file) => !artifactPaths.has(file.path));
 
   return (
     <div style={{ maxWidth: '92%' }}>
@@ -2312,9 +2347,243 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
             <LoadingOutlined /> 智能体工作中…
           </div>
         )}
-        <ChangesBox files={extractFileChanges(blocks)} onLink={onLink} />
+        <ArtifactGallery
+          artifacts={artifacts}
+          fileLinks={fileLinks}
+          streaming={streaming}
+          onLink={onLink}
+        />
+        <ChangesBox files={legacyChanges} onLink={onLink} />
       </div>
     </div>
+  );
+}
+
+function extractArtifacts(blocks?: Block[]): ArtifactOutput[] {
+  if (!blocks) return [];
+  const ordered: ArtifactOutput[] = [];
+  for (const block of blocks) {
+    if (block.kind !== 'tool_call' || block.running || block.result?.ok === false) continue;
+    if (!FILE_WRITE_TOOLS.has(block.name)) continue;
+    let value: Record<string, unknown>;
+    try {
+      value = JSON.parse(block.result?.content || '{}') as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const rawOutputs = Array.isArray(value.outputs)
+      ? value.outputs
+      : (value.file_id || value.path ? [value] : []);
+    for (const raw of rawOutputs) {
+      if (!raw || typeof raw !== 'object') continue;
+      const output = raw as Record<string, unknown>;
+      const fileId = typeof output.file_id === 'string' ? output.file_id : '';
+      const path = typeof output.path === 'string' ? output.path : '';
+      if (!fileId && !path) continue;
+      const name = typeof output.name === 'string' && output.name
+        ? output.name
+        : (typeof output.filename === 'string' && output.filename
+            ? output.filename
+            : (path.split('/').pop() || '生成文件'));
+      ordered.push({
+        fileId,
+        path,
+        name,
+        mimeType: typeof output.mime_type === 'string'
+          ? output.mime_type
+          : (typeof output.content_type === 'string' ? output.content_type : ''),
+        size: typeof output.size === 'number' ? output.size : undefined,
+        width: typeof output.width === 'number' ? output.width : undefined,
+        height: typeof output.height === 'number' ? output.height : undefined,
+        parseStatus: typeof output.parse_status === 'string' ? output.parse_status : undefined,
+      });
+    }
+  }
+  const seen = new Set<string>();
+  const deduped: ArtifactOutput[] = [];
+  for (let index = ordered.length - 1; index >= 0; index -= 1) {
+    const artifact = ordered[index];
+    const key = artifact.fileId || artifact.path;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.unshift(artifact);
+  }
+  return deduped;
+}
+
+function ArtifactGallery({
+  artifacts, fileLinks, streaming, onLink,
+}: {
+  artifacts: ArtifactOutput[];
+  fileLinks: ChatFileLink[];
+  streaming: boolean;
+  onLink: (href: string) => void;
+}) {
+  if (!artifacts.length) return null;
+  return (
+    <section style={{ marginTop: 12 }} aria-label="本轮交付文件">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 8, color: '#374151', fontSize: 12, fontWeight: 600 }}>
+        <CheckCircleOutlined style={{ color: '#16a34a' }} />
+        本轮交付
+        <Tag color="green" style={{ margin: 0, fontSize: 10, lineHeight: '18px' }}>{artifacts.length}</Tag>
+      </div>
+      <div style={{ display: 'grid', gap: 10 }}>
+        {artifacts.map((artifact) => (
+          <InlineArtifactCard
+            key={artifact.fileId || artifact.path}
+            artifact={artifact}
+            fileLinks={fileLinks}
+            streaming={streaming}
+            onLink={onLink}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+const CHAT_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif']);
+
+function artifactExtension(name: string): string {
+  const index = name.lastIndexOf('.');
+  return index >= 0 ? name.slice(index + 1).toLowerCase() : '';
+}
+
+function formatArtifactSize(size?: number): string {
+  if (size === undefined || !Number.isFinite(size)) return '';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function InlineArtifactCard({
+  artifact, fileLinks, streaming, onLink,
+}: {
+  artifact: ArtifactOutput;
+  fileLinks: ChatFileLink[];
+  streaming: boolean;
+  onLink: (href: string) => void;
+}) {
+  const resolved = fileLinks.find((file) => (
+    (!!artifact.fileId && file.id === artifact.fileId) || (!!artifact.path && file.path === artifact.path)
+  ));
+  const fileId = artifact.fileId || resolved?.id || '';
+  const path = artifact.path || resolved?.path || '';
+  const name = artifact.name || resolved?.originalName || resolved?.name || path.split('/').pop() || '生成文件';
+  const mimeType = artifact.mimeType || resolved?.mimeType || '';
+  const size = artifact.size ?? resolved?.size;
+  const extension = artifactExtension(name);
+  const isImage = mimeType.startsWith('image/') || CHAT_IMAGE_EXTENSIONS.has(extension);
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [imageLoading, setImageLoading] = useState(false);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
+
+  useEffect(() => {
+    if (!isImage || !fileId || streaming) return;
+    let cancelled = false;
+    let objectUrl = '';
+    setImageUrl(null);
+    setImageLoading(true);
+    setImageError(null);
+    terminal.getWsFileOriginalPreview(fileId)
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setImageUrl(objectUrl);
+      })
+      .catch((reason) => {
+        if (!cancelled) setImageError((reason as Error)?.message || '图片读取失败');
+      })
+      .finally(() => { if (!cancelled) setImageLoading(false); });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [fileId, isImage, reloadToken, streaming, resolved?.updatedAt]);
+
+  const openPreview = () => {
+    if (path) onLink(path);
+    else message.warning('文件路径尚未保存，请稍后重试');
+  };
+
+  const download = async () => {
+    if (!fileId) {
+      message.warning('文件尚未保存，暂时无法下载');
+      return;
+    }
+    try {
+      const blob = await terminal.downloadWsFile(fileId);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (reason) {
+      message.error((reason as Error)?.message || '下载失败');
+    }
+  };
+
+  if (isImage) {
+    return (
+      <article style={{ width: 'min(480px, 100%)', overflow: 'hidden', border: '1px solid #dfe3ee', borderRadius: 12, background: '#fff', boxShadow: '0 1px 3px rgba(15,23,42,0.06)' }}>
+        <div
+          role="button"
+          tabIndex={path ? 0 : -1}
+          onClick={openPreview}
+          onKeyDown={(event) => {
+            if (!path || (event.key !== 'Enter' && event.key !== ' ')) return;
+            event.preventDefault();
+            openPreview();
+          }}
+          style={{ display: 'block', width: '100%', minHeight: 180, maxHeight: 420, padding: 0, border: 0, background: '#f3f4f6', cursor: path ? 'zoom-in' : 'default', overflow: 'hidden' }}
+        >
+          {streaming ? (
+            <div style={{ height: 220, display: 'grid', placeItems: 'center', color: '#6b7280', fontSize: 12 }}><Spin size="small" /> 正在保存图片…</div>
+          ) : imageLoading ? (
+            <div style={{ height: 220, display: 'grid', placeItems: 'center' }}><Spin /></div>
+          ) : imageUrl ? (
+            <img src={imageUrl} alt={name} style={{ display: 'block', width: '100%', maxHeight: 420, objectFit: 'contain', background: '#f8fafc' }} />
+          ) : (
+            <div style={{ height: 220, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, color: '#6b7280' }}>
+              <PictureOutlined style={{ fontSize: 34, color: '#94a3b8' }} />
+              <span style={{ fontSize: 12 }}>{imageError || '图片暂时无法读取'}</span>
+              {!!fileId && <Button size="small" onClick={(event) => { event.stopPropagation(); setReloadToken((value) => value + 1); }}>重试</Button>}
+            </div>
+          )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 11px' }}>
+          <PictureOutlined style={{ color: '#7c3aed', fontSize: 18 }} />
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div title={name} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#1f2937', fontSize: 13, fontWeight: 550 }}>{name}</div>
+            <div style={{ color: '#9ca3af', fontSize: 10, marginTop: 2 }}>
+              {[artifact.width && artifact.height ? `${artifact.width}×${artifact.height}` : '', formatArtifactSize(size)].filter(Boolean).join(' · ') || '图片'}
+            </div>
+          </div>
+          <Tooltip title="打开完整预览"><Button type="text" size="small" icon={<EyeOutlined />} onClick={openPreview} /></Tooltip>
+          <Tooltip title="下载原文件"><Button type="text" size="small" icon={<DownloadOutlined />} onClick={() => void download()} /></Tooltip>
+        </div>
+      </article>
+    );
+  }
+
+  return (
+    <article style={{ display: 'flex', alignItems: 'center', gap: 11, width: 'min(520px, 100%)', padding: '11px 12px', border: '1px solid #dfe3ee', borderRadius: 11, background: '#fff', boxShadow: '0 1px 3px rgba(15,23,42,0.05)' }}>
+      <div style={{ width: 40, height: 44, display: 'grid', placeItems: 'center', borderRadius: 9, background: '#eef2ff', color: WB.primary, flex: '0 0 auto' }}>
+        <FileTextOutlined style={{ fontSize: 21 }} />
+      </div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div title={name} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#1f2937', fontSize: 13, fontWeight: 550 }}>{name}</div>
+        <div style={{ color: '#9ca3af', fontSize: 10, marginTop: 4 }}>
+          {[extension ? extension.toUpperCase() : '文件', formatArtifactSize(size), artifact.parseStatus === 'ready' || resolved?.parseStatus === 'ready' ? 'AI 已解析' : ''].filter(Boolean).join(' · ')}
+        </div>
+      </div>
+      <Button size="small" icon={<EyeOutlined />} onClick={openPreview}>预览</Button>
+      <Tooltip title="下载原文件"><Button type="text" size="small" icon={<DownloadOutlined />} onClick={() => void download()} /></Tooltip>
+    </article>
   );
 }
 
