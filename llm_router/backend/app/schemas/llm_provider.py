@@ -3,7 +3,9 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.services.multimodal_service import validate_provider_config
 
 
 class LlmProviderCreate(BaseModel):
@@ -20,6 +22,14 @@ class LlmProviderCreate(BaseModel):
     # 层级范围：由创建端点决定（org/dept/team 端点分别校验），默认 organization
     scope_type: str = Field(default="organization", pattern=r"^(organization|department|team)$")
 
+    @field_validator("config")
+    @classmethod
+    def validate_config(cls, value: dict) -> dict:
+        try:
+            return validate_provider_config(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
 
 class LlmProviderUpdate(BaseModel):
     name: str | None = Field(None, max_length=255)
@@ -33,6 +43,16 @@ class LlmProviderUpdate(BaseModel):
     supported_models: list[str] | None = None
     config: dict | None = None
     # scope_type/department_id/team_id 不可改（绑定节点固定，同 API Key）
+
+    @field_validator("config")
+    @classmethod
+    def validate_config(cls, value: dict | None) -> dict | None:
+        if value is None:
+            return None
+        try:
+            return validate_provider_config(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class LlmProviderRead(BaseModel):

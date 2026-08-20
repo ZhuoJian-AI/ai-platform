@@ -31,6 +31,7 @@ from app.agents import llm_client
 from app.agents.graph.context import get_deps, get_stream_writer
 from app.agents.graph.state import AgentState
 from app.config import settings
+from app.dlp.scanner import scan_request
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.audit_log import AuditLog
@@ -42,6 +43,7 @@ from app.schemas.rag import RagRetrieveRequest
 from app.schemas.workspace import WorkspaceFileCreate
 from app.services import (
     memory_service,
+    multimodal_service,
     scope_service,
     skill_import_service,
     skill_runner_client,
@@ -124,7 +126,7 @@ _TOOL_SUCCESS_CLAIM_RE = re.compile(
 )
 _TOOL_ARTIFACT_CLAIM_RE = re.compile(
     r"(?:file[_\s-]?id|文件\s*(?:id|ID)|平台工具输出/|"
-    r"(?:spreadsheet|document|presentation|pdf|text|image|archive|web)_tool|"
+    r"(?:spreadsheet|document|presentation|pdf|text|image|image_generation|archive|web)_tool|"
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
     re.IGNORECASE,
 )
@@ -159,13 +161,15 @@ PLATFORM_TOOL_NAMES = {
 ALWAYS_AVAILABLE_TOOL_NAMES = {"web_tool"}
 BUILTIN_TOOL_NAMES = {
     "workspace_list_files", "workspace_read_file", "workspace_write_file", "workspace_delete_file",
-    *PLATFORM_TOOL_NAMES,
+    *PLATFORM_TOOL_NAMES, "image_generation_tool",
 }
 # Kept executable for old persisted calls, but no longer advertised to new LLM rounds.
 LEGACY_BUILTIN_TOOL_NAMES = {"generate_docx"}
 
 
-def _builtin_tool_defs(*, include_workspace: bool = True) -> list[dict]:
+def _builtin_tool_defs(
+    *, include_workspace: bool = True, include_image_generation: bool = False,
+) -> list[dict]:
     """内置工作空间文件工具的 OpenAI function-tool 定义。"""
     tools = [
         {"type": "function", "function": {
@@ -315,6 +319,20 @@ def _builtin_tool_defs(*, include_workspace: bool = True) -> list[dict]:
             }, "required": ["action"]},
         }},
     ]
+    if include_image_generation:
+        tools.append({"type": "function", "function": {
+            "name": "image_generation_tool",
+            "description": (
+                "使用当前组织配置的专用生图模型生成真实图片，并保存到当前工作空间。"
+                "仅在用户明确要求生成图片、插画、海报或视觉素材时调用。"
+            ),
+            "parameters": {"type": "object", "properties": {
+                "prompt": {"type": "string", "description": "完整、具体的生图提示词"},
+                "output_name": {"type": "string", "description": "输出文件名；系统统一保存为 PNG"},
+                "size": {"type": "string", "description": "如 1024x1024、1536x1024、1024x1536 或 auto"},
+                "quality": {"type": "string", "enum": ["auto", "low", "medium", "high"]},
+            }, "required": ["prompt"]},
+        }})
     if include_workspace:
         return tools
     return [
@@ -436,6 +454,77 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
     # （仅在 save_memory 里 flush 未提交）被一并回滚，「任务回复消失」。
     try:
         async with db.begin_nested():
+            if name == "image_generation_tool":
+                if state.get("exec_mode") != "craft":
+                    return json.dumps({"status": "error", "error": "请切换到 Craft 模式执行生图"}, ensure_ascii=False)
+                if ws is None or user is None:
+                    return json.dumps({"status": "error", "error": "请先绑定工作空间"}, ensure_ascii=False)
+                scoped = await multimodal_service.resolve_image_generation(
+                    db, UUID(state["org_id"]), dept_id=state.get("department_id"),
+                    team_id=state.get("team_id"),
+                )
+                if scoped is None:
+                    return json.dumps({"status": "unavailable", "error": "当前组织未配置生图模型"}, ensure_ascii=False)
+                prompt = str(params.get("prompt") or "").strip()
+                if not prompt:
+                    return json.dumps({"status": "error", "error": "prompt is required"}, ensure_ascii=False)
+                if len(prompt) > 12000:
+                    return json.dumps({"status": "error", "error": "prompt is too long"}, ensure_ascii=False)
+                dlp = await scan_request(
+                    db, prompt, str(state["org_id"]), state.get("department_id"), state.get("team_id"),
+                )
+                if dlp.blocked:
+                    return json.dumps({"status": "error", "error": "生图提示词被安全策略拦截"}, ensure_ascii=False)
+                prompt = dlp.redacted_text or prompt
+                generation = (scoped.provider.config or {}).get("image_generation") or {}
+                size = str(params.get("size") or generation.get("default_size") or "1024x1024")
+                if size not in multimodal_service.ALLOWED_IMAGE_SIZES and not re.fullmatch(r"\d{2,5}x\d{2,5}", size):
+                    return json.dumps({"status": "error", "error": "不支持的图片尺寸"}, ensure_ascii=False)
+                started = datetime.now(UTC)
+                result = await llm_client.generate_image(
+                    scoped.provider, scoped.model, prompt=prompt, size=size,
+                    quality=str(params.get("quality") or "auto"),
+                    endpoint_path=str(generation.get("endpoint_path") or "/images/generations"),
+                )
+                raw, width, height = multimodal_service.normalize_generated_png(result.raw)
+                requested = PurePosixPath(str(params.get("output_name") or "generated-image.png")).name
+                stem = PurePosixPath(requested).stem or "generated-image"
+                safe_stem = (
+                    re.sub(r"[^\w\-.\u4e00-\u9fff]+", "-", stem, flags=re.UNICODE).strip("-.")
+                    or "generated-image"
+                )
+                filename = f"{safe_stem}.png"
+                stamp = started.strftime("%Y%m%d-%H%M%S")
+                task_part = state.get("task_id") or "playground"
+                path = f"平台工具输出/{task_part}/{stamp}-{uuid4().hex[:8]}-{filename}"
+                saved = await workspace_service.ingest_uploaded_file(
+                    db, ws, path=path, filename=filename, content_type="image/png", raw=raw,
+                )
+                saved.metadata_ = {
+                    **(saved.metadata_ or {}), "generated_by": "image_generation_tool",
+                    "provider_id": result.provider_id, "model": result.model_served,
+                    "width": width, "height": height, "task_id": str(task_part),
+                }
+                db.add(AuditLog(
+                    request_id=f"image-generation-{uuid4().hex}",
+                    organization_id=str(state["org_id"]), department_id=state.get("department_id"),
+                    team_id=state.get("team_id"), provider_id=result.provider_id,
+                    event_type="image_generation", direction="outbound",
+                    model_requested=scoped.model, model_served=result.model_served,
+                    latency_ms=max(0, int((datetime.now(UTC) - started).total_seconds() * 1000)),
+                    status_code=200, metadata_={
+                        "file_id": str(saved.id), "sha256": saved.content_hash,
+                        "mime": "image/png", "width": width, "height": height,
+                    },
+                ))
+                await db.flush()
+                return json.dumps({
+                    "status": "success", "tool": name,
+                    "outputs": [{"file_id": str(saved.id), "name": filename, "path": saved.path,
+                                 "mime_type": "image/png", "width": width, "height": height,
+                                 "parse_status": saved.parse_status}],
+                    "revised_prompt": result.revised_prompt,
+                }, ensure_ascii=False)
             if name in PLATFORM_TOOL_NAMES:
                 return await _execute_platform_file_tool(state, name, params, ws, user)
             if name == "workspace_list_files":
@@ -956,6 +1045,166 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
 
 # ── agent_loop ─────────────────────────────────────────────────────────
 
+async def _prepare_current_turn_images(state: AgentState, db, user) -> list[multimodal_service.PreparedImage]:
+    """Load only the current turn's authorized image attachments and run best-effort OCR DLP."""
+    snapshots = state.get("attachment_files") or []
+    image_snapshots = [
+        item for item in snapshots
+        if PurePosixPath(str(item.get("name") or item.get("path") or "")).suffix.lower()
+        in multimodal_service.ALLOWED_IMAGE_SUFFIXES
+    ]
+    if not image_snapshots:
+        return []
+    if len(image_snapshots) > multimodal_service.MAX_IMAGE_COUNT:
+        raise ValueError(f"每轮最多发送 {multimodal_service.MAX_IMAGE_COUNT} 张图片")
+    prepared: list[multimodal_service.PreparedImage] = []
+    for item in image_snapshots:
+        try:
+            file = await workspace_service.get_file(db, UUID(str(item.get("file_id"))))
+        except (ValueError, TypeError, AttributeError):
+            file = None
+        if file is None or str(file.workspace_id) != str(state.get("workspace_id") or ""):
+            raise ValueError("图片附件已不存在或不属于当前工作空间")
+        workspace = await workspace_service.get_workspace(db, file.workspace_id)
+        if workspace is None or user is None or not scope_service.is_workspace_visible(workspace, user):
+            raise ValueError("图片附件已不存在或无权访问")
+        raw = await workspace_service.load_file_bytes(file)
+        meta = file.metadata_ or {}
+        image = multimodal_service.prepare_image_bytes(
+            file_id=str(file.id), name=str(meta.get("name") or item.get("name") or file.path),
+            declared_mime=str(meta.get("mime") or "") or None, raw=raw,
+        )
+        prepared.append(image)
+
+        # OCR is only a DLP pre-check. Failure does not turn OCR into a prerequisite for vision.
+        try:
+            ocr, _ = await skill_runner_client.execute_builtin(
+                tool_kind="image", action="ocr", params={"language": "chi_sim+eng", "max_pages": 1},
+                inputs=[{
+                    "file_id": image.file_id, "name": image.name,
+                    "content_base64": base64.b64encode(image.raw).decode("ascii"),
+                }],
+                execution_id=f"vision-dlp-{state.get('task_id') or 'playground'}-{uuid4().hex[:8]}",
+                timeout_seconds=min(settings.skill_runner_timeout_seconds, 45),
+            )
+            summary = ocr.get("summary") or {}
+            ocr_text = str(summary.get("content") or summary.get("text") or "").strip()
+            if ocr_text:
+                dlp = await scan_request(
+                    db, ocr_text, str(state["org_id"]), state.get("department_id"), state.get("team_id"),
+                )
+                # Redacting extracted text cannot redact pixels, so raw image transmission must stop.
+                if dlp.blocked or dlp.redacted_text is not None:
+                    raise ValueError(f"图片 {image.name} 含安全策略限制内容，不能发送给外部视觉模型")
+        except ValueError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.info("vision_ocr_dlp_unavailable", file_id=image.file_id, error=str(exc))
+    multimodal_service.ensure_image_batch_limits(prepared)
+    return prepared
+
+
+def _attach_images_to_current_user_message(
+    messages: list[dict], images: list[multimodal_service.PreparedImage],
+) -> None:
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        original = message.get("content", "")
+        text = original if isinstance(original, str) else ""
+        message["content"] = [
+            {"type": "text", "text": text},
+            *[
+                {"type": "image_url", "image_url": {"url": image.data_url, "detail": "auto"}}
+                for image in images
+            ],
+        ]
+        return
+
+
+async def _configure_visual_turn(
+    state: AgentState, db, user, messages: list[dict], system_prompt: str,
+) -> tuple[Any | None, str | None, str]:
+    """Resolve the main provider and apply direct-vision or scoped fallback routing once per turn."""
+    images = await _prepare_current_turn_images(state, db, user)
+    if not images:
+        # Preserve the existing routing path for text-only turns (and its test/failover behavior).
+        return None, None, system_prompt
+    provider, model = await llm_client.resolve_provider(
+        db, UUID(state["org_id"]), state.get("model_alias", "default"),
+        dept_id=state.get("department_id"), team_id=state.get("team_id"),
+    )
+    vision_enabled, _ = await multimodal_service.organization_feature_flags(db, UUID(state["org_id"]))
+    direct = bool(
+        vision_enabled and provider.provider_type != "anthropic"
+        and multimodal_service.provider_model_supports_vision(provider, model)
+    )
+    _emit({"type": "vision_preprocess", "status": "ready", "images": len(images),
+           "mode": "direct" if direct else "fallback"})
+    if direct:
+        _attach_images_to_current_user_message(messages, images)
+        db.add(AuditLog(
+            request_id=f"vision-{uuid4().hex}", organization_id=str(state["org_id"]),
+            department_id=state.get("department_id"), team_id=state.get("team_id"),
+            provider_id=str(provider.id), event_type="vision_input", direction="outbound",
+            model_requested=model, model_served=model, status_code=200, dlp_violations=[],
+            metadata_={
+                "mode": "direct", "images": [
+                    {"file_id": image.file_id, "sha256": image.sha256, "mime": image.mime_type,
+                     "width": image.width, "height": image.height}
+                    for image in images
+                ],
+            },
+        ))
+        return provider, model, system_prompt
+
+    fallback = await multimodal_service.resolve_vision_fallback(
+        db, UUID(state["org_id"]), dept_id=state.get("department_id"), team_id=state.get("team_id"),
+    )
+    if fallback is None:
+        raise RuntimeError("当前组织未配置视觉模型；仍可使用 OCR 或 image_tool 处理图片")
+    visual_messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": (
+                "请准确分析这些图片，输出结构化中文描述。包括可见对象、文字、表格/图表、空间关系、"
+                "重要细节与不确定之处。不要猜测图片中不存在的信息。"
+            )},
+            *[
+                {"type": "image_url", "image_url": {"url": image.data_url, "detail": "auto"}}
+                for image in images
+            ],
+        ],
+    }]
+    visual = await llm_client.chat(
+        db, UUID(state["org_id"]), fallback.model, visual_messages,
+        system_prompt="你是视觉信息提取器，只描述图片中可验证的内容。",
+        provider_override=fallback.provider, model_override=fallback.model,
+    )
+    description = (visual.content or "").strip()
+    if not description:
+        raise RuntimeError("视觉回退模型未返回有效描述")
+    db.add(AuditLog(
+        request_id=f"vision-fallback-{uuid4().hex}", organization_id=str(state["org_id"]),
+        department_id=state.get("department_id"), team_id=state.get("team_id"),
+        provider_id=str(fallback.provider.id), event_type="vision_fallback", direction="outbound",
+        model_requested=fallback.model, model_served=visual.model_served, status_code=200,
+        input_tokens=visual.usage.get("input_tokens"), output_tokens=visual.usage.get("output_tokens"),
+        dlp_violations=[], metadata_={
+            "mode": "fallback", "images": [
+                {"file_id": image.file_id, "sha256": image.sha256, "mime": image.mime_type,
+                 "width": image.width, "height": image.height}
+                for image in images
+            ],
+        },
+    ))
+    system_prompt = (
+        f"{system_prompt}\n\n[视觉回退模型对本轮图片的结构化描述]\n{description}\n"
+        "以上描述来自平台配置的视觉模型；主模型不得声称直接看到了原图。"
+    )
+    _emit({"type": "vision_preprocess", "status": "completed", "images": len(images), "mode": "fallback"})
+    return provider, model, system_prompt
+
 async def _build_tools(
     db, skill_ids: list[str], workspace_id: str | None, user=None,
 ) -> tuple[list[dict], dict[str, dict]]:
@@ -1122,7 +1371,14 @@ async def _build_tools(
             registry[name] = {
                 "kind": name, "skills": agent_skills, "slug_index": agent_skill_slugs,
             }
-    tools.extend(_builtin_tool_defs(include_workspace=bool(workspace_id)))
+    include_image_generation = False
+    if workspace_id and user is not None:
+        include_image_generation = await multimodal_service.resolve_image_generation(
+            db, user.organization_id, dept_id=user.department_id, team_id=user.team_id,
+        ) is not None
+    tools.extend(_builtin_tool_defs(
+        include_workspace=bool(workspace_id), include_image_generation=include_image_generation,
+    ))
     return tools, registry
 
 
@@ -1607,7 +1863,14 @@ async def agent_loop(state: AgentState) -> dict:
             file_refs.append({"file_id": fid, "path": f.path})
             content = workspace_service.resolve_file_content(f)
             raw_tool = workspace_service.raw_tool_file_kind(f)
-            if f.parse_status != "ready" and raw_tool:
+            suffix = PurePosixPath(str((f.metadata_ or {}).get("name") or f.path)).suffix.lower()
+            is_current_image = (
+                any(str(item.get("file_id")) == fid for item in state.get("attachment_files") or [])
+                and suffix in multimodal_service.ALLOWED_IMAGE_SUFFIXES
+            )
+            if is_current_image:
+                rendered = "（本轮原始图片由平台视觉路由处理；如需 OCR、裁剪或格式转换再调用 image_tool。）"
+            elif f.parse_status != "ready" and raw_tool:
                 rendered = (
                     f"（原始二进制附件无需正文解析；请使用 {raw_tool} 并把 file_id={fid} "
                     "作为 input_file_ids 实际读取。不得声称附件不可用，也不得编造处理结果。）"
@@ -1666,6 +1929,19 @@ async def agent_loop(state: AgentState) -> dict:
             _emit({"type": "trace", **skill_trace})
             traces.append(skill_trace)
 
+    try:
+        main_provider, main_model, system_prompt = await _configure_visual_turn(
+            state, db, deps.get("user"), messages, system_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("vision_preprocess_failed", error=str(exc))
+        _emit({"type": "vision_preprocess", "status": "failed", "error": str(exc)})
+        return {
+            "error": f"vision failed: {exc}", "messages": messages, "steps": steps,
+            "traces": traces, "assistant_final": f"(图片处理失败: {exc})",
+            "usage": {"input_tokens": usage_in, "output_tokens": usage_out},
+        }
+
     assistant_final = ""
     verification_retries = 0
     for step_idx in range(MAX_STEPS):
@@ -1681,6 +1957,8 @@ async def agent_loop(state: AgentState) -> dict:
                 tools=tools or None,
                 dept_id=state.get("department_id"),
                 team_id=state.get("team_id"),
+                provider_override=main_provider,
+                model_override=main_model,
             ):
                 if kind == "text":
                     round_text += payload
@@ -1710,6 +1988,8 @@ async def agent_loop(state: AgentState) -> dict:
                     tools=tools or None,
                     dept_id=state.get("department_id"),
                     team_id=state.get("team_id"),
+                    provider_override=main_provider,
+                    model_override=main_model,
                 )
                 round_text = result.content or ""
                 round_tool_calls = result.tool_calls or []

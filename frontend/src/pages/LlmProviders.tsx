@@ -80,6 +80,7 @@ export default function LlmProviders() {
   const [selectedOrgId, setSelectedOrgId] = useState<string | undefined>();
   const [selectedNodeKey, setSelectedNodeKey] = useState<string | null>(null);
   const [form] = Form.useForm();
+  const supportedModels = Form.useWatch('supported_models', form) as string[] | undefined;
   const [confirm, setConfirm] = useState<{ id: string; name: string } | null>(null);
 
   const { treeData, nodeMap, isLoading: treeLoading } = useOrgTree();
@@ -133,6 +134,13 @@ export default function LlmProviders() {
         timeout_seconds: editing.timeout_seconds,
         max_retries: editing.max_retries,
         is_active: editing.is_active,
+        vision_models: Object.entries((editing.config?.model_capabilities as Record<string, { vision?: boolean }> | undefined) ?? {})
+          .filter(([, capability]) => capability?.vision).map(([model]) => model),
+        vision_fallback_model: (editing.config?.vision_fallback_model as string | null | undefined) ?? undefined,
+        image_generation_enabled: Boolean((editing.config?.image_generation as Record<string, unknown> | undefined)?.enabled),
+        image_generation_model: (editing.config?.image_generation as Record<string, unknown> | undefined)?.model,
+        image_generation_endpoint: (editing.config?.image_generation as Record<string, unknown> | undefined)?.endpoint_path ?? '/images/generations',
+        image_generation_size: (editing.config?.image_generation as Record<string, unknown> | undefined)?.default_size ?? '1024x1024',
       });
     }
   }, [modalOpen, editing, form]);
@@ -160,7 +168,7 @@ export default function LlmProviders() {
         weight: data.weight ?? 1,
         timeout_seconds: data.timeout_seconds ?? 120,
         max_retries: data.max_retries ?? 2,
-        config: {},
+        config: buildProviderConfig(data),
       };
       switch (selectedNode.type) {
         case 'organization':
@@ -189,6 +197,13 @@ export default function LlmProviders() {
     mutationFn: (data: Record<string, unknown>) => {
       if (!editing) return Promise.reject(new Error('No provider'));
       const payload: Record<string, unknown> = { ...data };
+      payload.config = buildProviderConfig(data, editing.config);
+      delete payload.vision_models;
+      delete payload.vision_fallback_model;
+      delete payload.image_generation_enabled;
+      delete payload.image_generation_model;
+      delete payload.image_generation_endpoint;
+      delete payload.image_generation_size;
       // api_key 仅在填写时才提交，避免覆盖为空
       if (!payload.api_key) delete payload.api_key;
       return providers.update(editing.id, payload);
@@ -208,6 +223,27 @@ export default function LlmProviders() {
     if (isEdit) updateProvider.mutate(v);
     else createProvider.mutate(v);
   };
+
+  function buildProviderConfig(data: Record<string, unknown>, existing: Record<string, unknown> = {}) {
+    const visionModels = (data.vision_models as string[] | undefined) ?? [];
+    const previousCapabilities = (existing.model_capabilities as Record<string, Record<string, unknown>> | undefined) ?? {};
+    const modelCapabilities: Record<string, Record<string, unknown>> = {};
+    for (const model of (data.supported_models as string[] | undefined) ?? supportedModels ?? []) {
+      modelCapabilities[model] = { ...(previousCapabilities[model] ?? {}), vision: visionModels.includes(model) };
+    }
+    return {
+      ...existing,
+      model_capabilities: modelCapabilities,
+      vision_fallback_model: (data.vision_fallback_model as string | undefined) || null,
+      image_generation: {
+        ...((existing.image_generation as Record<string, unknown> | undefined) ?? {}),
+        enabled: Boolean(data.image_generation_enabled),
+        model: (data.image_generation_model as string | undefined) || null,
+        endpoint_path: (data.image_generation_endpoint as string | undefined) || '/images/generations',
+        default_size: (data.image_generation_size as string | undefined) || '1024x1024',
+      },
+    };
+  }
 
   const deleteProvider = useMutation({
     mutationFn: (id: string) => providers.delete(id),
@@ -281,7 +317,13 @@ export default function LlmProviders() {
                     { title: 'Base URL', dataIndex: 'base_url', ellipsis: true },
                     {
                       title: '支持模型', dataIndex: 'supported_models', width: 260,
-                      render: (v: string[]) => v?.map((m) => <Tag key={m} style={{ marginBottom: 2 }}>{m}</Tag>),
+                      render: (v: string[], r: LlmProvider) => v?.map((m) => {
+                        const caps = (r.config?.model_capabilities as Record<string, { vision?: boolean }> | undefined)?.[m];
+                        const imageModel = (r.config?.image_generation as Record<string, unknown> | undefined)?.model === m;
+                        return <Tag key={m} color={imageModel ? 'magenta' : caps?.vision ? 'cyan' : undefined} style={{ marginBottom: 2 }}>
+                          {m}{imageModel ? ' · 生图' : caps?.vision ? ' · 视觉' : ''}
+                        </Tag>;
+                      }),
                     },
                     {
                       title: '启用', dataIndex: 'is_active', width: 70,
@@ -353,6 +395,35 @@ export default function LlmProviders() {
           </Form.Item>
           <Form.Item name="supported_models" label="支持的模型" rules={[{ required: true }]}>
             <Select mode="tags" placeholder="输入模型名称，如 claude-opus-4-8" />
+          </Form.Item>
+          <Alert
+            type="info" showIcon style={{ marginBottom: 16 }}
+            message="多模态能力（OpenAI 兼容协议）"
+            description="视觉模型可直接读取图片；纯文本主模型会继承当前节点配置的视觉回退。生图模型只作为 Craft 工具，不会出现在用户主模型下拉框。"
+          />
+          <Form.Item name="vision_models" label="支持视觉输入的聊天模型">
+            <Select mode="multiple" allowClear options={(supportedModels ?? []).map((model) => ({ value: model, label: model }))} />
+          </Form.Item>
+          <Form.Item name="vision_fallback_model" label="视觉回退模型">
+            <Select allowClear showSearch options={(supportedModels ?? []).map((model) => ({ value: model, label: model }))} />
+          </Form.Item>
+          <Form.Item name="image_generation_enabled" label="启用专用生图模型" valuePropName="checked" initialValue={false}>
+            <Switch checkedChildren="启用" unCheckedChildren="停用" />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="image_generation_model" label="生图模型">
+                <Select allowClear showSearch options={(supportedModels ?? []).map((model) => ({ value: model, label: model }))} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="image_generation_size" label="默认尺寸" initialValue="1024x1024">
+                <Select options={['1024x1024', '1536x1024', '1024x1536', 'auto'].map((value) => ({ value, label: value }))} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="image_generation_endpoint" label="Images API 路径" initialValue="/images/generations">
+            <Input placeholder="/images/generations" />
           </Form.Item>
           <Row gutter={16}>
             <Col span={6}><Form.Item name="priority" label="优先级" initialValue={0}><InputNumber min={0} style={{ width: '100%' }} /></Form.Item></Col>

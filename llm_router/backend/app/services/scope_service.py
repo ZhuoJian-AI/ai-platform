@@ -22,11 +22,11 @@ from app.auth.user_auth import CurrentUser
 from app.models.agent import Agent
 from app.models.api_key import ApiKey
 from app.models.data_interface import DataInterface, DataSystem
-from app.models.llm_provider import LlmProvider
 from app.models.ontology import OntologyFile
 from app.models.rag import RagCollection
 from app.models.skill import SkillFile, SkillFolder
 from app.models.workspace import Workspace
+from app.services import multimodal_service
 
 
 def effective_scope_set(cu: CurrentUser) -> list[tuple[str, str | None]]:
@@ -262,13 +262,9 @@ async def list_available_models_for_user(
     """
     keys = await list_api_keys_for_user(db, cu)
 
-    providers = list((await db.execute(
-        select(LlmProvider).where(
-            LlmProvider.organization_id == cu.organization_id,
-            LlmProvider.is_active.is_(True),
-            LlmProvider.deleted_at.is_(None),
-        )
-    )).scalars().all())
+    providers = await multimodal_service.visible_providers(
+        db, cu.organization_id, dept_id=cu.department_id, team_id=cu.team_id,
+    )
     provider_models: list[str] = []
     for p in providers:
         provider_models.extend(p.supported_models or [])
@@ -280,4 +276,26 @@ async def list_available_models_for_user(
         models = sorted({m for k in keys for m in (k.allowed_models or [])})
 
     # 过滤 embedding 模型：任务配置只列对话/生成类，避免误选无法 chat 的嵌入模型
-    return [m for m in models if "embed" not in m.lower()]
+    generation_models = {
+        model for provider in providers
+        if (model := multimodal_service.provider_image_generation_model(provider))
+    }
+    return [m for m in models if "embed" not in m.lower() and m not in generation_models]
+
+
+async def terminal_model_capabilities(db: AsyncSession, cu: CurrentUser, models: list[str]) -> dict:
+    """Return additive multimodal metadata without changing the legacy models array."""
+    capabilities = await multimodal_service.model_capabilities_for_scope(
+        db, cu.organization_id, models, dept_id=cu.department_id, team_id=cu.team_id,
+    )
+    fallback = await multimodal_service.resolve_vision_fallback(
+        db, cu.organization_id, dept_id=cu.department_id, team_id=cu.team_id,
+    )
+    image_generation = await multimodal_service.resolve_image_generation(
+        db, cu.organization_id, dept_id=cu.department_id, team_id=cu.team_id,
+    )
+    return {
+        "capabilities": capabilities,
+        "vision_fallback_available": fallback is not None,
+        "image_generation_available": image_generation is not None,
+    }

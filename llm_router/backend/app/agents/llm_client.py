@@ -12,10 +12,14 @@
 
 from __future__ import annotations
 
+import base64
+import ipaddress
 import json
+import socket
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
@@ -38,6 +42,14 @@ class LlmResult:
     usage: dict  # {"input_tokens": int|None, "output_tokens": int|None}
     provider_id: str
     model_served: str
+
+
+@dataclass
+class ImageGenerationResult:
+    raw: bytes
+    provider_id: str
+    model_served: str
+    revised_prompt: str | None = None
 
 
 async def _resolve(
@@ -65,8 +77,18 @@ async def resolve_provider_model(
     供审计/监控按 provider 归属智能体通路的 LLM 用量（agent 运行时直连上游、不经 /v1 代理
     端点，故需在落审计日志时显式解析 provider，否则 by_provider 维度会落空）。
     """
-    provider, actual_model = await _resolve(db, org_id, model_alias, for_embeddings=for_embeddings, dept_id=dept_id, team_id=team_id)
+    provider, actual_model = await _resolve(
+        db, org_id, model_alias, for_embeddings=for_embeddings, dept_id=dept_id, team_id=team_id,
+    )
     return str(provider.id), actual_model
+
+
+async def resolve_provider(
+    db: AsyncSession, org_id: UUID, model_alias: str, *,
+    dept_id: str | UUID | None = None, team_id: str | UUID | None = None,
+) -> tuple[LlmProvider, str]:
+    """Resolve a concrete provider once so a multimodal turn cannot switch protocols mid-loop."""
+    return await _resolve(db, org_id, model_alias, dept_id=dept_id, team_id=team_id)
 
 
 def _auth_headers(provider: LlmProvider, api_key: str) -> dict[str, str]:
@@ -95,6 +117,27 @@ def _chat_url(provider: LlmProvider) -> str:
 def _embed_url(provider: LlmProvider) -> str:
     """上游 embeddings 端点（OpenAI 兼容；base_url 已含 ``/v1``，只补 ``/embeddings``）。"""
     return f"{provider.base_url.rstrip('/')}/embeddings"
+
+
+def _images_url(provider: LlmProvider, endpoint_path: str) -> str:
+    path = endpoint_path.strip()
+    if not path.startswith("/") or "://" in path or ".." in path:
+        raise RuntimeError("invalid image generation endpoint_path")
+    return f"{provider.base_url.rstrip('/')}{path}"
+
+
+def _assert_public_image_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError("image generation returned an invalid URL")
+    try:
+        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except OSError as exc:
+        raise RuntimeError("image generation URL cannot be resolved") from exc
+    for item in addresses:
+        address = ipaddress.ip_address(item[4][0])
+        if not address.is_global:
+            raise RuntimeError("image generation URL points to a private or reserved address")
 
 
 def _build_chat_body(
@@ -188,9 +231,14 @@ async def chat(
     tools: list[dict] | None = None,
     dept_id: str | UUID | None = None,
     team_id: str | UUID | None = None,
+    provider_override: LlmProvider | None = None,
+    model_override: str | None = None,
 ) -> LlmResult:
     """非流式 chat。返回 assistant 文本 + tool_calls + usage。"""
-    provider, model = await _resolve(db, org_id, model_alias, dept_id=dept_id, team_id=team_id)
+    if provider_override is not None:
+        provider, model = provider_override, (model_override or model_alias)
+    else:
+        provider, model = await _resolve(db, org_id, model_alias, dept_id=dept_id, team_id=team_id)
     api_key = await get_decrypted_api_key(provider)
     body = _build_chat_body(provider, model, messages, system_prompt, temperature, max_tokens, tools, stream=False)
 
@@ -238,6 +286,8 @@ async def stream_chat(
     tools: list[dict] | None = None,
     dept_id: str | UUID | None = None,
     team_id: str | UUID | None = None,
+    provider_override: LlmProvider | None = None,
+    model_override: str | None = None,
 ) -> AsyncIterator[tuple[str, Any, Any]]:
     """流式 chat，yield (event, payload, extra)。
 
@@ -245,7 +295,10 @@ async def stream_chat(
     - ("tool_calls", [OpenAI 风格 tool_call], None)    本轮流式累积的完整工具调用，流末一次性下发
     - ("usage", None, {"input_tokens","output_tokens"})
     """
-    provider, model = await _resolve(db, org_id, model_alias, dept_id=dept_id, team_id=team_id)
+    if provider_override is not None:
+        provider, model = provider_override, (model_override or model_alias)
+    else:
+        provider, model = await _resolve(db, org_id, model_alias, dept_id=dept_id, team_id=team_id)
     api_key = await get_decrypted_api_key(provider)
     body = _build_chat_body(provider, model, messages, system_prompt, temperature, max_tokens, tools, stream=True)
     is_anthropic = provider.provider_type == "anthropic"
@@ -346,6 +399,63 @@ async def stream_chat(
         ]
     if tool_calls:
         yield ("tool_calls", tool_calls, None)
+
+
+async def generate_image(
+    provider: LlmProvider, model: str, *, prompt: str, size: str,
+    quality: str | None = None, endpoint_path: str = "/images/generations",
+    max_bytes: int = 5 * 1024 * 1024,
+) -> ImageGenerationResult:
+    """Call an OpenAI-compatible Images API and accept either b64_json or a temporary URL."""
+    if provider.provider_type == "anthropic":
+        raise RuntimeError("Anthropic provider is not supported by the image generation adapter")
+    api_key = await get_decrypted_api_key(provider)
+    body: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1, "size": size}
+    if quality:
+        body["quality"] = quality
+    # Do not follow redirects when downloading a provider-supplied URL.  The
+    # original URL is checked for public routing below, but a redirect could
+    # otherwise bounce the request into a private network.
+    async with httpx.AsyncClient(timeout=provider.timeout_seconds, follow_redirects=False) as client:
+        response = await client.post(
+            _images_url(provider, endpoint_path), headers=_auth_headers(provider, api_key), json=body,
+        )
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(f"upstream image error {response.status_code}: invalid JSON") from exc
+        if response.status_code >= 400:
+            raise RuntimeError(f"upstream image error {response.status_code}: {data}")
+        item = (data.get("data") or [{}])[0]
+        raw: bytes
+        if item.get("b64_json"):
+            try:
+                raw = base64.b64decode(item["b64_json"], validate=True)
+            except (ValueError, TypeError) as exc:
+                raise RuntimeError("image generation returned invalid base64") from exc
+        elif item.get("url"):
+            _assert_public_image_url(str(item["url"]))
+            async with client.stream("GET", str(item["url"])) as image_response:
+                if 300 <= image_response.status_code < 400:
+                    raise RuntimeError("generated image download redirects are not allowed")
+                if image_response.status_code >= 400:
+                    raise RuntimeError(f"generated image download failed ({image_response.status_code})")
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in image_response.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise RuntimeError("generated image exceeds the 5MB limit")
+                    chunks.append(chunk)
+                raw = b"".join(chunks)
+        else:
+            raise RuntimeError("image generation returned neither b64_json nor url")
+    if not raw or len(raw) > max_bytes:
+        raise RuntimeError("generated image is empty or exceeds the 5MB limit")
+    return ImageGenerationResult(
+        raw=raw, provider_id=str(provider.id), model_served=model,
+        revised_prompt=item.get("revised_prompt"),
+    )
 
 
 async def embed(

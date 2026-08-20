@@ -1209,6 +1209,9 @@ export interface TerminalResources {
 export interface TerminalModels {
   /** 用户可用的原始模型名（按可访问 API Key 聚合，embedding 已过滤）。 */
   models: string[];
+  capabilities: Record<string, { vision: boolean }>;
+  vision_fallback_available: boolean;
+  image_generation_available: boolean;
 }
 
 export interface TaskConfig {

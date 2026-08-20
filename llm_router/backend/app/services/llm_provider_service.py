@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.llm_provider import LlmProvider
 from app.schemas.llm_provider import LlmProviderCreate, LlmProviderUpdate
+from app.services.multimodal_service import validate_provider_config
 from app.utils.crypto import decrypt_provider_api_key, encrypt_provider_api_key
 
 
@@ -18,6 +19,7 @@ async def create_provider(
     dept_id: UUID | None = None,
     team_id: UUID | None = None,
 ) -> LlmProvider:
+    normalized_config = validate_provider_config(data.config, data.supported_models)
     encrypted_key = encrypt_provider_api_key(data.api_key)
     provider = LlmProvider(
         organization_id=org_id,
@@ -33,7 +35,7 @@ async def create_provider(
         timeout_seconds=data.timeout_seconds,
         max_retries=data.max_retries,
         supported_models=data.supported_models,
-        config=data.config,
+        config=normalized_config,
     )
     db.add(provider)
     await db.flush()
@@ -59,6 +61,11 @@ async def update_provider(db: AsyncSession, provider: LlmProvider, data: LlmProv
     if "api_key" in update_data:
         update_data["api_key_encrypted"] = encrypt_provider_api_key(update_data.pop("api_key"))
         provider.api_key_version += 1
+    if "config" in update_data or "supported_models" in update_data:
+        update_data["config"] = validate_provider_config(
+            update_data.get("config", provider.config),
+            update_data.get("supported_models", provider.supported_models),
+        )
     for field, value in update_data.items():
         setattr(provider, field, value)
     await db.flush()

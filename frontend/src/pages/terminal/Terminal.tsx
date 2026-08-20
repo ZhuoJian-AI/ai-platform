@@ -475,6 +475,13 @@ export default function Terminal() {
         }]);
         break;
       }
+      case 'vision_preprocess': {
+        updateTurn((bs) => [...bs, {
+          kind: 'trace', category: 'file', title: '视觉输入预处理', detail: evt,
+        }]);
+        if (evt.status === 'failed') message.error((evt.error as string) || '图片处理失败');
+        break;
+      }
       case 'judge':
         updateTurn((bs) => [...bs, { kind: 'meta', subtype: 'judge', data: evt }]);
         break;
@@ -1108,6 +1115,9 @@ export default function Terminal() {
         }}
         resources={resources} config={cfgContext === 'chat' ? taskConfig : config}
         models={modelData?.models ?? []}
+        modelCapabilities={modelData?.capabilities}
+        visionFallbackAvailable={modelData?.vision_fallback_available}
+        imageGenerationAvailable={modelData?.image_generation_available}
         agents={agentsList}
         agentId={selectedAgentId}
         onAgentChange={setSelectedAgentId}
@@ -2243,7 +2253,11 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
 // 从 blocks 里筛出 workspace_write_file / generate_docx 两类已成功完成的 tool_call，
 // 解析 arguments 取路径/文件名，作为本轮「新生成与修改」的文件清单。
 // 实时走 tool_call 事件、历史回放由 tracesToBlocks 还原成同样的 tool_call block，两条路径在此统一。
-const FILE_WRITE_TOOLS = new Set(['workspace_write_file', 'generate_docx']);
+const FILE_WRITE_TOOLS = new Set([
+  'workspace_write_file', 'generate_docx', 'spreadsheet_tool', 'document_tool',
+  'presentation_tool', 'pdf_tool', 'text_tool', 'image_tool', 'archive_tool',
+  'image_generation_tool', 'run_skill_script',
+]);
 
 function extractFileChanges(blocks?: Block[]): { path: string; generated: boolean }[] {
   if (!blocks) return [];
@@ -2252,6 +2266,13 @@ function extractFileChanges(blocks?: Block[]): { path: string; generated: boolea
     if (b.kind !== 'tool_call') continue;
     if (b.running || b.result?.ok === false) continue;
     if (!FILE_WRITE_TOOLS.has(b.name)) continue;
+    try {
+      const result = JSON.parse(b.result?.content || '{}') as { outputs?: { path?: string }[] };
+      for (const output of result.outputs ?? []) {
+        if (output.path) ordered.push({ path: output.path, generated: true });
+      }
+      if ((result.outputs?.length ?? 0) > 0) continue;
+    } catch { /* legacy textual tool result */ }
     let path = '';
     try {
       const p = JSON.parse(b.arguments || '{}');

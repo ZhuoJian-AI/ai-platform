@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Drawer, Select, Typography, Space, Tag, Empty, TreeSelect, Divider } from 'antd';
-import type { TaskConfig, TerminalResources, TerminalAgent, Workspace } from '../../api/client';
+import type { TaskConfig, TerminalResources, TerminalAgent, TerminalModels, Workspace } from '../../api/client';
 
 interface Props {
   open: boolean;
@@ -10,6 +10,9 @@ interface Props {
   resources: TerminalResources | undefined;
   config: TaskConfig;
   models: string[];
+  modelCapabilities?: TerminalModels['capabilities'];
+  visionFallbackAvailable?: boolean;
+  imageGenerationAvailable?: boolean;
   /** 用户可见的活跃智能体（供「选智能体」下拉）。 */
   agents: TerminalAgent[];
   /** 当前选中的智能体 id；null=通用智能体（不绑模板）。逐次运行覆盖，不落库。 */
@@ -32,7 +35,7 @@ const SCOPE_LABEL: Record<string, string> = Object.fromEntries(
 
  * RAG 固定绑定在智能体；智能体 Skill 是默认推荐，聊天仍可按当前轮选择其他有权 Skill。
  */
-export default function TaskConfigDrawer({ open, onApply, resources, config, models, agents, agentId, onAgentChange }: Props) {
+export default function TaskConfigDrawer({ open, onApply, resources, config, models, modelCapabilities, visionFallbackAvailable, imageGenerationAvailable, agents, agentId, onAgentChange }: Props) {
   const [local, setLocal] = useState<TaskConfig>(config);
 
   useEffect(() => {
@@ -46,7 +49,10 @@ export default function TaskConfigDrawer({ open, onApply, resources, config, mod
   const apply = () => onApply(local);
 
   // 模型下拉：直接列用户权限范围内 API Key 允许的全部模型（embedding 已在后端过滤）
-  const modelOptions = models.map((m) => ({ value: m, label: m }));
+  const modelOptions = models.map((m) => ({
+    value: m,
+    label: modelCapabilities?.[m]?.vision ? `${m}（视觉）` : m,
+  }));
 
   // 工作空间树：用户权限可见的工作空间按 scope 层级（组织→部门→团队→个人）嵌套成单链。
   // 用户至多见每层一个工作空间，构成一条路径；value = workspace.id。
@@ -104,6 +110,12 @@ export default function TaskConfigDrawer({ open, onApply, resources, config, mod
         notFoundContent="当前作用域下无可用模型"
       />
       {!modelOptions.length && <Empty description="无可用模型，将使用默认" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 8 }} />}
+      {(visionFallbackAvailable || imageGenerationAvailable) && (
+        <Space size={6} wrap style={{ marginTop: 8 }}>
+          {visionFallbackAvailable && <Tag color="cyan">已配置视觉回退</Tag>}
+          {imageGenerationAvailable && <Tag color="magenta">Craft 可生图</Tag>}
+        </Space>
+      )}
 
       <Divider orientation="left">智能体</Divider>
       <Select

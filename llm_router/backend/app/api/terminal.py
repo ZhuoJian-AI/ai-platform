@@ -388,7 +388,8 @@ async def models_endpoint(
     ``model_alias`` 字段直接填这些模型 id 之一即可（或 "default" 走组织默认路由）。
     """
     models = await scope_service.list_available_models_for_user(db, cu)
-    return {"models": models}
+    multimodal = await scope_service.terminal_model_capabilities(db, cu, models)
+    return {"models": models, **multimodal}
 
 
 @router.get("/terminal/agents")

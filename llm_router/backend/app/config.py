@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     skill_package_max_bytes: int = 10 * 1024 * 1024
     original_preview_enabled: bool = False
     original_preview_org_allowlist: str = ""
+    multimodal_vision_enabled: bool = True
+    multimodal_vision_org_allowlist: str = "aifabei"
+    image_generation_enabled: bool = True
+    image_generation_org_allowlist: str = "aifabei"
 
     # Workspace binary object storage (authorized ZhuoJian Storage Gateway).
     # Text workspace files stay inline for editing; Office/PDF/images use this
@@ -76,6 +80,23 @@ class Settings(BaseSettings):
             if value.strip()
         }
         return not allowed or organization_slug.lower() in allowed
+
+    @staticmethod
+    def _org_feature_enabled(enabled: bool, allowlist: str, organization_slug: str) -> bool:
+        if not enabled:
+            return False
+        allowed = {value.strip().lower() for value in allowlist.split(",") if value.strip()}
+        return not allowed or organization_slug.lower() in allowed
+
+    def multimodal_vision_enabled_for(self, organization_slug: str) -> bool:
+        return self._org_feature_enabled(
+            self.multimodal_vision_enabled, self.multimodal_vision_org_allowlist, organization_slug,
+        )
+
+    def image_generation_enabled_for(self, organization_slug: str) -> bool:
+        return self._org_feature_enabled(
+            self.image_generation_enabled, self.image_generation_org_allowlist, organization_slug,
+        )
 
     # API Key cache
     api_key_cache_ttl: int = 60
