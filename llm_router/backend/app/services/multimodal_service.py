@@ -160,6 +160,22 @@ async def resolve_vision_fallback(
     if not vision_enabled:
         return None
     for provider in await visible_providers(db, org_id, dept_id=dept_id, team_id=team_id):
+        deployments = sorted(
+            [
+                item for item in (provider.model_deployments or [])
+                if item.is_active and item.deleted_at is None
+                and item.verification_status in {"verified", "legacy"}
+                and "vision" in (item.capabilities or [])
+            ],
+            key=lambda item: item.routing_priority,
+            reverse=True,
+        )
+        if deployments:
+            from app.services.llm_provider_service import effective_provider
+            return ScopedModel(
+                provider=effective_provider(provider, deployments[0]),
+                model=deployments[0].model_id,
+            )
         if provider.provider_type == "anthropic":
             continue
         model = str((provider.config or {}).get("vision_fallback_model") or "").strip()
@@ -176,6 +192,22 @@ async def resolve_image_generation(
     if not generation_enabled:
         return None
     for provider in await visible_providers(db, org_id, dept_id=dept_id, team_id=team_id):
+        deployments = sorted(
+            [
+                item for item in (provider.model_deployments or [])
+                if item.is_active and item.deleted_at is None
+                and item.verification_status in {"verified", "legacy"}
+                and "image_generation" in (item.capabilities or [])
+            ],
+            key=lambda item: item.routing_priority,
+            reverse=True,
+        )
+        if deployments:
+            from app.services.llm_provider_service import effective_provider
+            return ScopedModel(
+                provider=effective_provider(provider, deployments[0]),
+                model=deployments[0].model_id,
+            )
         if provider.provider_type == "anthropic":
             continue
         model = provider_image_generation_model(provider)
@@ -192,7 +224,19 @@ async def model_capabilities_for_scope(
     if not vision_enabled:
         return {model: {"vision": False} for model in models}
     capabilities: dict[str, dict[str, bool]] = {}
+    providers = await visible_providers(db, org_id, dept_id=dept_id, team_id=team_id)
     for model in models:
+        deployment = next((
+            item
+            for provider in providers
+            for item in (provider.model_deployments or [])
+            if item.model_id == model and item.is_active and item.deleted_at is None
+            and item.verification_status in {"verified", "legacy"}
+            and "chat" in (item.capabilities or [])
+        ), None)
+        if deployment is not None:
+            capabilities[model] = {"vision": "vision" in (deployment.capabilities or [])}
+            continue
         provider = await find_provider(db, org_id, model, dept_id=dept_id, team_id=team_id)
         capabilities[model] = {
             "vision": bool(

@@ -19,10 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth.user_auth import CurrentUser
+from app.config import settings
 from app.models.agent import Agent
 from app.models.api_key import ApiKey
 from app.models.data_interface import DataInterface, DataSystem
 from app.models.ontology import OntologyFile
+from app.models.organization import Organization
 from app.models.rag import RagCollection
 from app.models.skill import SkillFile, SkillFolder
 from app.models.workspace import Workspace
@@ -265,22 +267,46 @@ async def list_available_models_for_user(
     providers = await multimodal_service.visible_providers(
         db, cu.organization_id, dept_id=cu.department_id, team_id=cu.team_id,
     )
+    organization = await db.get(Organization, cu.organization_id)
+    allow_new_gateway = bool(
+        organization and settings.model_gateway_enabled_for(organization.slug)
+    )
     provider_models: list[str] = []
     for p in providers:
-        provider_models.extend(p.supported_models or [])
+        declared = [
+            deployment.model_id for deployment in (p.model_deployments or [])
+            if deployment.is_active and deployment.deleted_at is None
+            and (
+                deployment.verification_status == "legacy"
+                or (allow_new_gateway and deployment.verification_status == "verified")
+            )
+            and "chat" in (deployment.capabilities or [])
+        ]
+        if declared:
+            provider_models.extend(declared)
+        else:
+            # Pre-gateway providers retain the old conservative name filter.
+            provider_models.extend(
+                model for model in (p.supported_models or []) if "embed" not in model.lower()
+            )
 
     if any(not k.allowed_models for k in keys):
         # 存在不限模型的 Key → 用户可调用 provider 全集
         models = sorted(set(provider_models))
     else:
-        models = sorted({m for k in keys for m in (k.allowed_models or [])})
+        models = sorted({m for k in keys for m in (k.allowed_models or []) if m in set(provider_models)})
 
     # 过滤 embedding 模型：任务配置只列对话/生成类，避免误选无法 chat 的嵌入模型
     generation_models = {
+        deployment.model_id
+        for provider in providers
+        for deployment in (provider.model_deployments or [])
+        if "image_generation" in (deployment.capabilities or [])
+    } | {
         model for provider in providers
         if (model := multimodal_service.provider_image_generation_model(provider))
     }
-    return [m for m in models if "embed" not in m.lower() and m not in generation_models]
+    return [m for m in models if m not in generation_models]
 
 
 async def terminal_model_capabilities(db: AsyncSession, cu: CurrentUser, models: list[str]) -> dict:

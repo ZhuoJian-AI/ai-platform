@@ -12,7 +12,7 @@ from app.models.data_interface import DataInterface, DataSystem
 from app.models.department import Department
 from app.models.dlp_rule import DlpRule
 from app.models.judge import JudgeTemplate
-from app.models.llm_provider import LlmProvider
+from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.models.memory import Memory
 from app.models.ontology import Ontology, OntologyFile, OntologyFolder
 from app.models.organization import Organization
@@ -33,6 +33,7 @@ __all__ = [
     "User",
     "ApiKey",
     "LlmProvider",
+    "ModelDeployment",
     "DlpRule",
     "RoutingPolicy",
     "AuditLog",

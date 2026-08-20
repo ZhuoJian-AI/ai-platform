@@ -466,9 +466,16 @@ async def embed(
     *,
     dept_id: str | UUID | None = None,
     team_id: str | UUID | None = None,
+    provider_override: LlmProvider | None = None,
+    model_override: str | None = None,
 ) -> list[list[float]]:
     """文本嵌入（OpenAI 兼容 /v1/embeddings）。返回与 texts 等长的向量列表。"""
-    provider, actual = await _resolve(db, org_id, model, for_embeddings=True, dept_id=dept_id, team_id=team_id)
+    if provider_override is not None:
+        provider, actual = provider_override, (model_override or model)
+    else:
+        provider, actual = await _resolve(
+            db, org_id, model, for_embeddings=True, dept_id=dept_id, team_id=team_id,
+        )
     if provider.provider_type == "anthropic":
         raise RuntimeError("Anthropic provider does not expose embeddings; configure an OpenAI-compatible provider")
     api_key = await get_decrypted_api_key(provider)

@@ -1,6 +1,6 @@
-"""LLM Provider ORM model."""
+"""LLM provider credentials and capability-scoped model deployments."""
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,7 +14,13 @@ class LlmProvider(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
         ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    provider_type: Mapped[str] = mapped_column(String(50), nullable=False)  # anthropic, openai, azure_openai, custom
+    # ``vendor`` identifies who owns the account/billing relationship. ``provider_type``
+    # is retained as the legacy default wire protocol so existing proxy clients keep
+    # working while model deployments select their own adapter.
+    vendor: Mapped[str] = mapped_column(String(50), nullable=False, default="custom", index=True)
+    provider_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    region: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    workspace_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # 层级范围：organization / department / team（调用解析遵循 团队>部门>组织 优先级且继承）
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False, default="organization", index=True)
@@ -50,3 +56,46 @@ class LlmProvider(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
 
     # 关系
     organization = relationship("Organization", back_populates="providers")
+    model_deployments = relationship(
+        "ModelDeployment",
+        back_populates="provider",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        primaryjoin="and_(LlmProvider.id == ModelDeployment.provider_id, ModelDeployment.deleted_at.is_(None))",
+    )
+
+
+class ModelDeployment(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
+    """One callable upstream model and its protocol/capability declaration."""
+
+    __tablename__ = "model_deployments"
+    __table_args__ = (
+        Index(
+            "uq_model_deployment_provider_model_adapter_active",
+            "provider_id",
+            "model_id",
+            "adapter",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
+
+    provider_id: Mapped[str] = mapped_column(
+        ForeignKey("llm_providers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    model_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    adapter: Mapped[str] = mapped_column(String(64), nullable=False, default="openai_chat_completions")
+    capabilities: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    base_url_override: Mapped[str | None] = mapped_column(Text, nullable=True)
+    endpoint_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    embedding_dimensions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    routing_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    verification_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="unverified", index=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    provider = relationship("LlmProvider", back_populates="model_deployments")

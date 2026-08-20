@@ -27,7 +27,6 @@ from uuid import UUID, uuid4
 
 import structlog
 
-from app.agents import llm_client
 from app.agents.graph.context import get_deps, get_stream_writer
 from app.agents.graph.state import AgentState
 from app.config import settings
@@ -50,6 +49,7 @@ from app.services import (
     skill_scope_service,
     workspace_service,
 )
+from app.services import model_gateway as llm_client
 from app.services.message_verification import contains_unverified_tool_success_claim
 from app.services.rag_service import retrieve as rag_retrieve
 from app.services.skill_store_service import SKILL_MANIFEST_PATH

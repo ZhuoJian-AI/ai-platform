@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     multimodal_vision_org_allowlist: str = "aifabei"
     image_generation_enabled: bool = True
     image_generation_org_allowlist: str = "aifabei"
+    model_gateway_enabled: bool = True
+    model_gateway_org_allowlist: str = "aifabei"
 
     # Workspace binary object storage (authorized ZhuoJian Storage Gateway).
     # Text workspace files stay inline for editing; Office/PDF/images use this
@@ -96,6 +98,11 @@ class Settings(BaseSettings):
     def image_generation_enabled_for(self, organization_slug: str) -> bool:
         return self._org_feature_enabled(
             self.image_generation_enabled, self.image_generation_org_allowlist, organization_slug,
+        )
+
+    def model_gateway_enabled_for(self, organization_slug: str) -> bool:
+        return self._org_feature_enabled(
+            self.model_gateway_enabled, self.model_gateway_org_allowlist, organization_slug,
         )
 
     # API Key cache

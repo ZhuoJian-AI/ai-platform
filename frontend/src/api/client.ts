@@ -100,12 +100,15 @@ export interface LlmProvider {
   id: string;
   organization_id: string;
   name: string;
+  vendor: 'openai' | 'anthropic' | 'azure_openai' | 'aliyun_bailian' | 'volcengine_ark' | 'custom';
   provider_type: string;
+  region: string | null;
+  workspace_id: string | null;
   scope_type: 'organization' | 'department' | 'team';
   department_id: string | null;
   team_id: string | null;
   base_url: string;
-  api_key_encrypted: string;
+  api_key_masked: string;
   api_key_version: number;
   is_active: boolean;
   priority: number;
@@ -115,8 +118,43 @@ export interface LlmProvider {
   supported_models: string[];
   health_status: string;
   config: Record<string, unknown>;
+  model_deployments: ModelDeployment[];
   created_at: string;
   updated_at: string;
+}
+
+export type ModelCapability = 'chat' | 'vision' | 'embedding' | 'image_generation';
+
+export interface ModelDeployment {
+  id: string;
+  provider_id: string;
+  model_id: string;
+  display_name: string | null;
+  adapter: string;
+  capabilities: ModelCapability[];
+  base_url_override: string | null;
+  endpoint_path: string | null;
+  embedding_dimensions: number | null;
+  routing_priority: number;
+  is_active: boolean;
+  verification_status: 'unverified' | 'verified' | 'failed' | 'legacy';
+  last_error: string | null;
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ModelDeploymentInput {
+  model_id: string;
+  display_name?: string;
+  adapter: string;
+  capabilities: ModelCapability[];
+  base_url_override?: string;
+  endpoint_path?: string;
+  embedding_dimensions?: number;
+  routing_priority?: number;
+  is_active?: boolean;
+  config?: Record<string, unknown>;
 }
 
 export interface ApiKey {
@@ -400,6 +438,20 @@ export const providers = {
     request<LlmProvider>(`/api/v1/providers/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) =>
     request<void>(`/api/v1/providers/${id}`, { method: 'DELETE' }),
+  test: (id: string) =>
+    request<{ status: string; vendor: string; detail: string }>(`/api/v1/providers/${id}/test`, { method: 'POST' }),
+  listModels: (id: string) => request<ModelDeployment[]>(`/api/v1/providers/${id}/models`),
+  createModel: (id: string, data: ModelDeploymentInput) =>
+    request<ModelDeployment>(`/api/v1/providers/${id}/models`, { method: 'POST', body: JSON.stringify(data) }),
+  updateModel: (providerId: string, modelId: string, data: Partial<ModelDeploymentInput>) =>
+    request<ModelDeployment>(`/api/v1/providers/${providerId}/models/${modelId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteModel: (providerId: string, modelId: string) =>
+    request<void>(`/api/v1/providers/${providerId}/models/${modelId}`, { method: 'DELETE' }),
+  testModel: (providerId: string, modelId: string, capability: ModelCapability) =>
+    request<{ status: string; capability: string; model_id: string; detail: string }>(
+      `/api/v1/providers/${providerId}/models/${modelId}/test/${capability}`,
+      { method: 'POST' },
+    ),
 };
 
 // ── API Keys ───────────────────────────────────────────────────────────

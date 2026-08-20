@@ -6,11 +6,11 @@ import {
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, CloudServerOutlined,
-  BankOutlined, ApartmentOutlined, TeamOutlined,
+  BankOutlined, ApartmentOutlined, TeamOutlined, ApiOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { providers } from '../api/client';
-import type { LlmProvider } from '../api/client';
+import type { LlmProvider, ModelCapability, ModelDeploymentInput } from '../api/client';
 import { ApiError } from '../api/client';
 import { useOrgTree } from '../hooks/useOrgTree';
 import OrgSelect from '../components/OrgSelect';
@@ -27,6 +27,29 @@ const TYPE_LABELS: Record<string, string> = {
   azure_openai: 'Azure OpenAI',
   custom: '自定义',
 };
+
+const VENDOR_LABELS: Record<string, string> = {
+  aliyun_bailian: '阿里云百炼',
+  volcengine_ark: '火山方舟',
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  azure_openai: 'Azure OpenAI',
+  custom: '自定义兼容服务',
+};
+
+const CAPABILITY_LABELS: Record<ModelCapability, string> = {
+  chat: '聊天', vision: '视觉理解', embedding: 'Embedding', image_generation: '生图',
+};
+
+const ADAPTER_OPTIONS = [
+  { value: 'openai_chat_completions', label: 'OpenAI Chat Completions' },
+  { value: 'openai_responses', label: 'OpenAI Responses（方舟等）' },
+  { value: 'anthropic_messages', label: 'Anthropic Messages' },
+  { value: 'openai_embeddings', label: 'OpenAI Embeddings' },
+  { value: 'openai_images', label: 'OpenAI Images' },
+  { value: 'volcengine_images', label: '火山方舟图片生成' },
+  { value: 'bailian_multimodal_generation', label: '百炼图片生成' },
+];
 
 const SCOPE_LABELS: Record<string, string> = {
   organization: '组织级',
@@ -80,7 +103,10 @@ export default function LlmProviders() {
   const [selectedOrgId, setSelectedOrgId] = useState<string | undefined>();
   const [selectedNodeKey, setSelectedNodeKey] = useState<string | null>(null);
   const [form] = Form.useForm();
-  const supportedModels = Form.useWatch('supported_models', form) as string[] | undefined;
+  const [modelForm] = Form.useForm();
+  const [modelProvider, setModelProvider] = useState<LlmProvider | null>(null);
+  const vendor = Form.useWatch('vendor', form) as string | undefined;
+  const providerType = Form.useWatch('provider_type', form) as string | undefined;
   const [confirm, setConfirm] = useState<{ id: string; name: string } | null>(null);
 
   const { treeData, nodeMap, isLoading: treeLoading } = useOrgTree();
@@ -113,6 +139,11 @@ export default function LlmProviders() {
   const openCreate = () => {
     setEditing(null);
     form.resetFields();
+    form.setFieldsValue({
+      vendor: 'aliyun_bailian', provider_type: 'openai', region: 'cn-beijing',
+      access_mode: 'payg', priority: 0, weight: 1, timeout_seconds: 120, max_retries: 2,
+      model_deployments: [{ adapter: 'openai_chat_completions', capabilities: ['chat'], routing_priority: 0 }],
+    });
     setModalOpen(true);
   };
 
@@ -125,7 +156,10 @@ export default function LlmProviders() {
     if (modalOpen && editing) {
       form.setFieldsValue({
         name: editing.name,
+        vendor: editing.vendor,
         provider_type: editing.provider_type,
+        region: editing.region,
+        workspace_id: editing.workspace_id,
         base_url: editing.base_url,
         api_key: undefined,
         supported_models: editing.supported_models,
@@ -134,13 +168,6 @@ export default function LlmProviders() {
         timeout_seconds: editing.timeout_seconds,
         max_retries: editing.max_retries,
         is_active: editing.is_active,
-        vision_models: Object.entries((editing.config?.model_capabilities as Record<string, { vision?: boolean }> | undefined) ?? {})
-          .filter(([, capability]) => capability?.vision).map(([model]) => model),
-        vision_fallback_model: (editing.config?.vision_fallback_model as string | null | undefined) ?? undefined,
-        image_generation_enabled: Boolean((editing.config?.image_generation as Record<string, unknown> | undefined)?.enabled),
-        image_generation_model: (editing.config?.image_generation as Record<string, unknown> | undefined)?.model,
-        image_generation_endpoint: (editing.config?.image_generation as Record<string, unknown> | undefined)?.endpoint_path ?? '/images/generations',
-        image_generation_size: (editing.config?.image_generation as Record<string, unknown> | undefined)?.default_size ?? '1024x1024',
       });
     }
   }, [modalOpen, editing, form]);
@@ -157,18 +184,24 @@ export default function LlmProviders() {
         message.error('请先在左侧选择绑定节点');
         return Promise.reject(new Error('No node selected'));
       }
+      const deployments = (data.model_deployments as ModelDeploymentInput[] | undefined) ?? [];
       const payload: Record<string, unknown> = {
         name: data.name,
+        vendor: data.vendor,
         provider_type: data.provider_type,
+        region: data.region,
+        workspace_id: data.workspace_id,
+        access_mode: 'payg',
         scope_type: selectedNode.type,
-        base_url: data.base_url,
+        base_url: data.base_url || undefined,
         api_key: data.api_key,
-        supported_models: data.supported_models ?? [],
+        supported_models: deployments.map((item) => item.model_id),
+        model_deployments: deployments,
         priority: data.priority ?? 0,
         weight: data.weight ?? 1,
         timeout_seconds: data.timeout_seconds ?? 120,
         max_retries: data.max_retries ?? 2,
-        config: buildProviderConfig(data),
+        config: {},
       };
       switch (selectedNode.type) {
         case 'organization':
@@ -197,13 +230,14 @@ export default function LlmProviders() {
     mutationFn: (data: Record<string, unknown>) => {
       if (!editing) return Promise.reject(new Error('No provider'));
       const payload: Record<string, unknown> = { ...data };
-      payload.config = buildProviderConfig(data, editing.config);
-      delete payload.vision_models;
-      delete payload.vision_fallback_model;
-      delete payload.image_generation_enabled;
-      delete payload.image_generation_model;
-      delete payload.image_generation_endpoint;
-      delete payload.image_generation_size;
+      delete payload.vendor;
+      delete payload.provider_type;
+      delete payload.model_deployments;
+      delete payload.supported_models;
+      if (
+        ['aliyun_bailian', 'volcengine_ark', 'openai', 'anthropic'].includes(editing.vendor)
+        && payload.base_url === editing.base_url
+      ) delete payload.base_url;
       // api_key 仅在填写时才提交，避免覆盖为空
       if (!payload.api_key) delete payload.api_key;
       return providers.update(editing.id, payload);
@@ -224,31 +258,46 @@ export default function LlmProviders() {
     else createProvider.mutate(v);
   };
 
-  function buildProviderConfig(data: Record<string, unknown>, existing: Record<string, unknown> = {}) {
-    const visionModels = (data.vision_models as string[] | undefined) ?? [];
-    const previousCapabilities = (existing.model_capabilities as Record<string, Record<string, unknown>> | undefined) ?? {};
-    const modelCapabilities: Record<string, Record<string, unknown>> = {};
-    for (const model of (data.supported_models as string[] | undefined) ?? supportedModels ?? []) {
-      modelCapabilities[model] = { ...(previousCapabilities[model] ?? {}), vision: visionModels.includes(model) };
-    }
-    return {
-      ...existing,
-      model_capabilities: modelCapabilities,
-      vision_fallback_model: (data.vision_fallback_model as string | undefined) || null,
-      image_generation: {
-        ...((existing.image_generation as Record<string, unknown> | undefined) ?? {}),
-        enabled: Boolean(data.image_generation_enabled),
-        model: (data.image_generation_model as string | undefined) || null,
-        endpoint_path: (data.image_generation_endpoint as string | undefined) || '/images/generations',
-        default_size: (data.image_generation_size as string | undefined) || '1024x1024',
-      },
-    };
-  }
-
   const deleteProvider = useMutation({
     mutationFn: (id: string) => providers.delete(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['providers'] }); message.success('提供商已删除'); },
     onError: () => { message.error('删除失败'); },
+  });
+
+  const testProvider = useMutation({
+    mutationFn: (id: string) => providers.test(id),
+    onSuccess: (result) => { message.success(result.detail); qc.invalidateQueries({ queryKey: ['providers'] }); },
+    onError: (err: unknown) => message.error(err instanceof ApiError ? err.message : '连接测试失败'),
+  });
+
+  const createModel = useMutation({
+    mutationFn: (data: ModelDeploymentInput) => {
+      if (!modelProvider) return Promise.reject(new Error('No provider'));
+      return providers.createModel(modelProvider.id, data);
+    },
+    onSuccess: () => {
+      message.success('模型部署已添加，请执行真实能力测试后加入生产路由');
+      qc.invalidateQueries({ queryKey: ['providers'] });
+      setModelProvider(null);
+      modelForm.resetFields();
+    },
+    onError: (err: unknown) => message.error(err instanceof ApiError ? err.message : '模型部署添加失败'),
+  });
+
+  const testModel = useMutation({
+    mutationFn: ({ providerId, modelId, capability }: { providerId: string; modelId: string; capability: ModelCapability }) =>
+      providers.testModel(providerId, modelId, capability),
+    onSuccess: (result) => {
+      message.success(`${CAPABILITY_LABELS[result.capability as ModelCapability]}：${result.detail}`);
+      qc.invalidateQueries({ queryKey: ['providers'] });
+    },
+    onError: (err: unknown) => message.error(err instanceof ApiError ? err.message : '模型能力测试失败'),
+  });
+
+  const removeModel = useMutation({
+    mutationFn: ({ providerId, modelId }: { providerId: string; modelId: string }) => providers.deleteModel(providerId, modelId),
+    onSuccess: () => { message.success('模型部署已删除'); qc.invalidateQueries({ queryKey: ['providers'] }); },
+    onError: () => message.error('模型部署删除失败'),
   });
 
   const createBtn = (
@@ -301,19 +350,51 @@ export default function LlmProviders() {
                   scroll={{ x: 'max-content' }}
                   expandable={{
                     expandedRowRender: (r: LlmProvider) => (
-                      <Descriptions column={3} size="small">
-                        <Descriptions.Item label="超时时间">{r.timeout_seconds}s</Descriptions.Item>
-                        <Descriptions.Item label="最大重试">{r.max_retries}</Descriptions.Item>
-                        <Descriptions.Item label="权重">{r.weight}</Descriptions.Item>
-                        <Descriptions.Item label="优先级">{r.priority}</Descriptions.Item>
-                        <Descriptions.Item label="Key 版本">v{r.api_key_version}</Descriptions.Item>
-                        <Descriptions.Item label="配置">{JSON.stringify(r.config)}</Descriptions.Item>
-                      </Descriptions>
+                      <Space direction="vertical" style={{ width: '100%' }} size={12}>
+                        <Descriptions column={4} size="small">
+                          <Descriptions.Item label="地域">{r.region || '默认'}</Descriptions.Item>
+                          <Descriptions.Item label="超时">{r.timeout_seconds}s</Descriptions.Item>
+                          <Descriptions.Item label="Key">{r.api_key_masked} · v{r.api_key_version}</Descriptions.Item>
+                          <Descriptions.Item label="健康状态">{r.health_status}</Descriptions.Item>
+                        </Descriptions>
+                        <Space>
+                          <Button size="small" icon={<ApiOutlined />} loading={testProvider.isPending} onClick={() => testProvider.mutate(r.id)}>测试供应商连接</Button>
+                          <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => {
+                            setModelProvider(r);
+                            modelForm.setFieldsValue({ adapter: 'openai_chat_completions', capabilities: ['chat'], routing_priority: 0 });
+                          }}>添加模型部署</Button>
+                        </Space>
+                        <Table
+                          size="small"
+                          pagination={false}
+                          rowKey="id"
+                          dataSource={r.model_deployments ?? []}
+                          columns={[
+                            { title: '模型ID', dataIndex: 'model_id' },
+                            { title: '适配器', dataIndex: 'adapter', render: (value: string) => <Tag>{value}</Tag> },
+                            { title: '能力', dataIndex: 'capabilities', render: (values: ModelCapability[]) => values.map((value) => <Tag color="blue" key={value}>{CAPABILITY_LABELS[value]}</Tag>) },
+                            { title: '状态', dataIndex: 'verification_status', render: (value: string, model) => <Tooltip title={model.last_error}><Tag color={value === 'verified' || value === 'legacy' ? 'green' : value === 'failed' ? 'red' : 'gold'}>{value === 'verified' ? '真实已验证' : value === 'legacy' ? '旧配置兼容' : value === 'partially_verified' ? '部分能力已验证' : value === 'failed' ? '验证失败' : '待验证'}</Tag></Tooltip> },
+                            {
+                              title: '操作', render: (_value: unknown, model) => (
+                                <Space wrap>
+                                  {(model.capabilities as ModelCapability[]).map((capability) => (
+                                    <Button key={capability} size="small" icon={<ThunderboltOutlined />} loading={testModel.isPending} onClick={() => testModel.mutate({ providerId: r.id, modelId: model.id, capability })}>
+                                      测试{CAPABILITY_LABELS[capability]}
+                                    </Button>
+                                  ))}
+                                  <Button size="small" danger icon={<DeleteOutlined />} loading={removeModel.isPending} onClick={() => removeModel.mutate({ providerId: r.id, modelId: model.id })}>删除</Button>
+                                </Space>
+                              ),
+                            },
+                          ]}
+                        />
+                      </Space>
                     ),
                   }}
                   columns={[
                     { title: '名称', dataIndex: 'name', width: 200 },
-                    { title: '类型', dataIndex: 'provider_type', width: 130, render: (v: string) => <Tag>{TYPE_LABELS[v] || v}</Tag> },
+                    { title: '供应商', dataIndex: 'vendor', width: 140, render: (v: string) => <Tag color="blue">{VENDOR_LABELS[v] || v}</Tag> },
+                    { title: '协议', dataIndex: 'provider_type', width: 120, render: (v: string) => <Tag>{TYPE_LABELS[v] || v}</Tag> },
                     { title: 'Base URL', dataIndex: 'base_url', ellipsis: true },
                     {
                       title: '支持模型', dataIndex: 'supported_models', width: 260,
@@ -353,7 +434,7 @@ export default function LlmProviders() {
         onCancel={closeModal}
         onOk={() => form.submit()}
         confirmLoading={createProvider.isPending || updateProvider.isPending}
-        width={640}
+        width={860}
       >
         <Form form={form} layout="vertical" onFinish={submit} onFinishFailed={() => message.warning('请检查表单必填项')}>
           {!isEdit && selectedNode && (
@@ -374,16 +455,58 @@ export default function LlmProviders() {
           <Form.Item name="name" label="提供商名称" rules={[{ required: true }]}>
             <Input placeholder="如：Anthropic Direct" />
           </Form.Item>
-          <Form.Item name="provider_type" label="类型" rules={isEdit ? [] : [{ required: true }]}>
-            <Select disabled={isEdit} options={[
-              { value: 'anthropic', label: 'Anthropic' },
-              { value: 'openai', label: 'OpenAI' },
-              { value: 'azure_openai', label: 'Azure OpenAI' },
-              { value: 'custom', label: '自定义' },
-            ]} />
-          </Form.Item>
-          <Form.Item name="base_url" label="Base URL" rules={[{ required: true }]}>
-            <Input placeholder="https://api.anthropic.com" />
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="vendor" label="供应商" rules={[{ required: true }]}>
+                <Select disabled={isEdit} options={[
+                  { value: 'aliyun_bailian', label: '阿里云百炼' },
+                  { value: 'volcengine_ark', label: '火山方舟' },
+                  { value: 'openai', label: 'OpenAI' },
+                  { value: 'anthropic', label: 'Anthropic' },
+                  { value: 'custom', label: '自定义兼容服务' },
+                ]} onChange={(value) => {
+                  if (value === 'anthropic') form.setFieldValue('provider_type', 'anthropic');
+                  else form.setFieldValue('provider_type', 'openai');
+                  if (value === 'aliyun_bailian' || value === 'volcengine_ark') form.setFieldValue('region', 'cn-beijing');
+                }} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="provider_type" label="默认通信协议" rules={[{ required: true }]}>
+                <Select disabled={isEdit || vendor === 'openai' || vendor === 'anthropic' || vendor === 'volcengine_ark'} options={[
+                  { value: 'openai', label: 'OpenAI 兼容协议' },
+                  { value: 'anthropic', label: 'Anthropic Messages 协议' },
+                  { value: 'azure_openai', label: 'Azure OpenAI' },
+                ]} />
+              </Form.Item>
+            </Col>
+          </Row>
+          {(vendor === 'aliyun_bailian' || vendor === 'volcengine_ark') && (
+            <Row gutter={16}>
+              <Col span={12}>
+                <Form.Item name="region" label="地域" rules={[{ required: true }]}>
+                  <Select options={vendor === 'volcengine_ark' ? [
+                    { value: 'cn-beijing', label: '北京' },
+                  ] : [
+                    { value: 'cn-beijing', label: '中国（北京）' },
+                    { value: 'ap-southeast-1', label: '新加坡' },
+                    { value: 'ap-northeast-1', label: '日本（东京）' },
+                    { value: 'eu-central-1', label: '德国（法兰克福）' },
+                  ]} />
+                </Form.Item>
+              </Col>
+              {vendor === 'aliyun_bailian' && (
+                <Col span={12}><Form.Item name="workspace_id" label="业务空间 ID" extra="生产建议填写；日本和德国地域必须填写"><Input /></Form.Item></Col>
+              )}
+            </Row>
+          )}
+          <Form.Item
+            name="base_url"
+            label="Base URL"
+            rules={(vendor === 'custom' || vendor === 'azure_openai') ? [{ required: true }] : []}
+            extra={(vendor === 'aliyun_bailian' || vendor === 'volcengine_ark' || vendor === 'openai' || vendor === 'anthropic') ? '可留空，由平台根据供应商、地域和协议自动生成' : undefined}
+          >
+            <Input placeholder="留空使用官方端点；自定义服务必须填写 https:// 地址" />
           </Form.Item>
           <Form.Item
             name="api_key"
@@ -393,38 +516,41 @@ export default function LlmProviders() {
           >
             <Input.Password placeholder="sk-ant-..." />
           </Form.Item>
-          <Form.Item name="supported_models" label="支持的模型" rules={[{ required: true }]}>
-            <Select mode="tags" placeholder="输入模型名称，如 claude-opus-4-8" />
-          </Form.Item>
           <Alert
             type="info" showIcon style={{ marginBottom: 16 }}
-            message="多模态能力（OpenAI 兼容协议）"
-            description="视觉模型可直接读取图片；纯文本主模型会继承当前节点配置的视觉回退。生图模型只作为 Craft 工具，不会出现在用户主模型下拉框。"
+            message="供应商账号与模型能力分开配置"
+            description={vendor === 'aliyun_bailian'
+              ? '请使用按量付费 API Key。Coding Plan / Token Plan 不适用于 SaaS 后端。Key、地域和 Base URL 必须属于同一地域。'
+              : vendor === 'volcengine_ark'
+                ? '聊天/视觉、Embedding 和图片生成需要按实际模型选择不同适配器；图片生成不会被当作聊天接口调用。'
+                : '模型必须明确填写能力和适配器，平台不再根据模型名称猜测。'}
           />
-          <Form.Item name="vision_models" label="支持视觉输入的聊天模型">
-            <Select mode="multiple" allowClear options={(supportedModels ?? []).map((model) => ({ value: model, label: model }))} />
-          </Form.Item>
-          <Form.Item name="vision_fallback_model" label="视觉回退模型">
-            <Select allowClear showSearch options={(supportedModels ?? []).map((model) => ({ value: model, label: model }))} />
-          </Form.Item>
-          <Form.Item name="image_generation_enabled" label="启用专用生图模型" valuePropName="checked" initialValue={false}>
-            <Switch checkedChildren="启用" unCheckedChildren="停用" />
-          </Form.Item>
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item name="image_generation_model" label="生图模型">
-                <Select allowClear showSearch options={(supportedModels ?? []).map((model) => ({ value: model, label: model }))} />
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="image_generation_size" label="默认尺寸" initialValue="1024x1024">
-                <Select options={['1024x1024', '1536x1024', '1024x1536', 'auto'].map((value) => ({ value, label: value }))} />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Form.Item name="image_generation_endpoint" label="Images API 路径" initialValue="/images/generations">
-            <Input placeholder="/images/generations" />
-          </Form.Item>
+          {!isEdit ? (
+            <Form.List name="model_deployments" rules={[{ validator: async (_rule, value) => { if (!value?.length) throw new Error('至少配置一个模型部署'); } }]}>
+              {(fields, { add, remove }, { errors }) => (
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {fields.map(({ key, name, ...rest }) => (
+                    <div key={key} style={{ padding: 12, border: '1px solid #e5e7eb', borderRadius: 8 }}>
+                      <Row gutter={12}>
+                        <Col span={10}><Form.Item {...rest} name={[name, 'model_id']} label="供应商模型ID" rules={[{ required: true }]}><Input placeholder="例如 qwen-plus / ep-..." /></Form.Item></Col>
+                        <Col span={10}><Form.Item {...rest} name={[name, 'adapter']} label="调用适配器" rules={[{ required: true }]}><Select options={ADAPTER_OPTIONS} /></Form.Item></Col>
+                        <Col span={4}><Button danger style={{ marginTop: 30 }} onClick={() => remove(name)} disabled={fields.length === 1}>移除</Button></Col>
+                      </Row>
+                      <Row gutter={12}>
+                        <Col span={12}><Form.Item {...rest} name={[name, 'capabilities']} label="能力" rules={[{ required: true }]}><Select mode="multiple" options={(Object.entries(CAPABILITY_LABELS) as [ModelCapability, string][]).map(([value, label]) => ({ value, label }))} /></Form.Item></Col>
+                        <Col span={6}><Form.Item {...rest} name={[name, 'endpoint_path']} label="接口路径"><Input placeholder={providerType === 'anthropic' ? '/v1/messages' : '通常留空'} /></Form.Item></Col>
+                        <Col span={6}><Form.Item {...rest} name={[name, 'embedding_dimensions']} label="向量维度"><InputNumber min={1} style={{ width: '100%' }} /></Form.Item></Col>
+                      </Row>
+                    </div>
+                  ))}
+                  <Button block icon={<PlusOutlined />} onClick={() => add({ adapter: 'openai_chat_completions', capabilities: ['chat'], routing_priority: 0 })}>增加模型部署</Button>
+                  <Form.ErrorList errors={errors} />
+                </Space>
+              )}
+            </Form.List>
+          ) : (
+            <Alert type="warning" showIcon style={{ marginBottom: 16 }} message="模型部署在列表展开区独立管理" description="编辑供应商只修改账号、地域、端点和密钥，不会覆盖已验证模型。" />
+          )}
           <Row gutter={16}>
             <Col span={6}><Form.Item name="priority" label="优先级" initialValue={0}><InputNumber min={0} style={{ width: '100%' }} /></Form.Item></Col>
             <Col span={6}><Form.Item name="weight" label="权重" initialValue={1}><InputNumber min={1} style={{ width: '100%' }} /></Form.Item></Col>
@@ -436,6 +562,36 @@ export default function LlmProviders() {
               <Switch checkedChildren="启用" unCheckedChildren="停用" />
             </Form.Item>
           )}
+        </Form>
+      </Modal>
+
+      <Modal
+        title={`添加模型部署${modelProvider ? ` · ${modelProvider.name}` : ''}`}
+        open={!!modelProvider}
+        onCancel={() => { setModelProvider(null); modelForm.resetFields(); }}
+        onOk={() => modelForm.submit()}
+        confirmLoading={createModel.isPending}
+        width={680}
+      >
+        <Alert
+          type="info" showIcon style={{ marginBottom: 16 }}
+          message="保存后默认为“待验证”"
+          description="只有真实能力测试通过后才进入新网关生产路由；旧 DeepSeek 不受影响。生图测试可能产生供应商费用。"
+        />
+        <Form form={modelForm} layout="vertical" onFinish={(values) => createModel.mutate(values as ModelDeploymentInput)}>
+          <Row gutter={16}>
+            <Col span={12}><Form.Item name="model_id" label="供应商模型ID" rules={[{ required: true }]}><Input /></Form.Item></Col>
+            <Col span={12}><Form.Item name="display_name" label="显示名称"><Input /></Form.Item></Col>
+          </Row>
+          <Form.Item name="adapter" label="调用适配器" rules={[{ required: true }]}><Select options={ADAPTER_OPTIONS} /></Form.Item>
+          <Form.Item name="capabilities" label="能力" rules={[{ required: true }]}>
+            <Select mode="multiple" options={(Object.entries(CAPABILITY_LABELS) as [ModelCapability, string][]).map(([value, label]) => ({ value, label }))} />
+          </Form.Item>
+          <Row gutter={16}>
+            <Col span={12}><Form.Item name="endpoint_path" label="能力接口路径"><Input placeholder="通常留空，图片生成可填写专用路径" /></Form.Item></Col>
+            <Col span={6}><Form.Item name="embedding_dimensions" label="向量维度"><InputNumber min={1} style={{ width: '100%' }} /></Form.Item></Col>
+            <Col span={6}><Form.Item name="routing_priority" label="路由优先级"><InputNumber style={{ width: '100%' }} /></Form.Item></Col>
+          </Row>
         </Form>
       </Modal>
 

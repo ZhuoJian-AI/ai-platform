@@ -10,7 +10,6 @@ import structlog
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents import llm_client
 from app.database import async_session_factory
 from app.models.organization import Organization
 from app.models.rag import RagChunk, RagCollection, RagDocument, RagFolder
@@ -27,6 +26,7 @@ from app.schemas.rag import (
     RagRetrieveRequest,
 )
 from app.services import doc_parser
+from app.services import model_gateway as llm_client
 
 logger = structlog.get_logger()
 
