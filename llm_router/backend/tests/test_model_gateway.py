@@ -1,6 +1,7 @@
 """Model gateway engineering acceptance tests (no real provider credentials)."""
 
 import base64
+import gc
 from uuid import uuid4
 
 import pytest
@@ -10,7 +11,7 @@ from app.agents import llm_client
 from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.schemas.llm_provider import ModelDeploymentCreate
 from app.services import model_gateway
-from app.services.llm_provider_service import provider_base_url
+from app.services.llm_provider_service import effective_provider, provider_base_url
 from app.utils.crypto import encrypt_provider_api_key
 
 
@@ -249,6 +250,27 @@ async def test_mock_gateway_chat_vision_embedding_image_and_stream(monkeypatch, 
     assert any("input_image" in str(body) for body in vision_bodies)
     embedding_body = next(body for url, body in _FakeClient.calls if url.endswith("/embeddings"))
     assert embedding_body["dimensions"] == 4
+
+
+def test_effective_provider_survives_nested_resolution_after_original_is_collected():
+    provider = _provider()
+    deployment = _deployment(
+        provider,
+        model_id="qwen-image-2.0",
+        adapter="bailian_multimodal_generation",
+        capabilities=["image_generation"],
+    )
+
+    first = effective_provider(provider, deployment)
+    del provider
+    gc.collect()
+
+    second = effective_provider(first, deployment)
+
+    assert second.provider_type == "openai"
+    assert second.id == first.id
+    assert second.config["_gateway_deployment_id"] == str(deployment.id)
+    assert second._sa_instance_state is not first._sa_instance_state
 
 
 class _FakeImageStream:

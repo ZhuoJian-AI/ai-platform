@@ -1,7 +1,7 @@
 """Provider credentials, endpoint presets and model deployment CRUD."""
 
 import re
-from copy import copy
+from copy import deepcopy
 from datetime import UTC
 from urllib.parse import urlparse
 from uuid import UUID
@@ -381,7 +381,17 @@ async def delete_model_deployment(db: AsyncSession, deployment: ModelDeployment)
 
 def effective_provider(provider: LlmProvider, deployment: ModelDeployment) -> LlmProvider:
     """Return a request-local provider copy configured for one deployment adapter."""
-    resolved = copy(provider)
+    # Do not use ``copy.copy`` on SQLAlchemy mapped instances.  A shallow copy
+    # shares the original ``InstanceState``; once the original ORM object is
+    # released, assigning a mapped attribute on the copy raises
+    # ``parent object ... has been garbage collected``.  This path is commonly
+    # hit twice by agent tools (capability resolution, then gateway dispatch),
+    # so build a transient mapped instance with independent instrumentation.
+    values = {
+        column.key: deepcopy(getattr(provider, column.key))
+        for column in LlmProvider.__table__.columns
+    }
+    resolved = LlmProvider(**values)
     resolved.provider_type = "anthropic" if deployment.adapter == "anthropic_messages" else "openai"
     if deployment.base_url_override:
         resolved.base_url = deployment.base_url_override.rstrip("/")
