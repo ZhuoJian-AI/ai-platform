@@ -202,6 +202,12 @@ async def complete_direct_upload(
                 admin_id=actor.id if is_admin else None, file=file, version_id=file.current_version_id,
                 metadata={"size": file.size, "etag": server_etag})
     await db.flush()
+    # ``updated_at`` is populated by a server-side ``onupdate`` expression.  The
+    # final flush above therefore expires that attribute; refresh it before the
+    # ORM object is handed to a FastAPI/Pydantic response model.  Without this,
+    # successful direct uploads are committed but the response serialization
+    # fails with a missing ``updated_at`` field.
+    await db.refresh(file)
     return file
 
 

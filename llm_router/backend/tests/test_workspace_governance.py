@@ -13,7 +13,7 @@ from app.models.department import Department
 from app.models.organization import Organization
 from app.models.user import User
 from app.models.workspace import Workspace
-from app.schemas.workspace import WorkspaceFileCreate, WorkspaceUploadInitiate
+from app.schemas.workspace import WorkspaceFileCreate, WorkspaceFileRead, WorkspaceUploadInitiate
 from app.services import (
     workspace_governance_service,
     workspace_permission_service,
@@ -170,6 +170,10 @@ async def test_direct_upload_verifies_oss_and_can_restore_from_trash(db_session,
     assert saved.size == expected_size
     assert saved.parse_status == "queued"
     assert saved.current_version_id is not None
+    # Direct-upload completion is returned through ``WorkspaceFileRead``.
+    # Validate the exact response shape so server-generated timestamps cannot
+    # be left expired after the final ORM flush.
+    assert WorkspaceFileRead.model_validate(saved).updated_at is not None
 
     await workspace_service.soft_delete_file(db_session, saved, user_id=cu.id)
     restored = await workspace_governance_service.restore_from_trash(
