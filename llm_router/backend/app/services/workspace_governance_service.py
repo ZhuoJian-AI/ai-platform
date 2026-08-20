@@ -251,6 +251,7 @@ async def restore_version(
     await workspace_service.create_file_version(db, file, created_by_user_id=cu.id)
     await audit(db, ws, "version_restored", user_id=cu.id, file=file,
                 version_id=file.current_version_id, metadata={"restored_from": str(version.id)})
+    await db.refresh(file)
     return file
 
 
@@ -281,6 +282,7 @@ async def restore_from_trash(db: AsyncSession, ws: Workspace, file_id: UUID, cu:
     file.deleted_by_admin_id = None
     file.purge_after = None
     await audit(db, ws, "file_restored", user_id=cu.id, file=file, version_id=file.current_version_id)
+    await db.refresh(file)
     return file
 
 
@@ -330,6 +332,7 @@ async def publish_file(
         version_id=clone.current_version_id,
         metadata={"source_file_id": str(source.id)},
     )
+    await db.refresh(clone)
     return clone
 
 

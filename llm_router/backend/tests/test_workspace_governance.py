@@ -121,6 +121,8 @@ async def test_publish_keeps_personal_original_and_never_silently_overwrites(db_
     assert second.path.startswith("report-")
     assert first.current_version_id is not None
     assert second.current_version_id is not None
+    assert WorkspaceFileRead.model_validate(first).updated_at is not None
+    assert WorkspaceFileRead.model_validate(second).updated_at is not None
 
 
 @pytest.mark.asyncio
@@ -181,6 +183,7 @@ async def test_direct_upload_verifies_oss_and_can_restore_from_trash(db_session,
     )
     assert restored.deleted_at is None
     assert restored.purge_after is None
+    assert WorkspaceFileRead.model_validate(restored).updated_at is not None
 
 
 @pytest.mark.asyncio
