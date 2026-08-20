@@ -48,7 +48,6 @@ services:
 
   mock:
     image: ${COMPOSE_PROJECT_NAME:-ai-platform}-mock:${APP_IMAGE_TAG:-latest}
-    pull_policy: build
     build:
       context: ./mock
       dockerfile: Dockerfile
@@ -69,7 +68,6 @@ services:
 
   skill-runner:
     image: ${COMPOSE_PROJECT_NAME:-ai-platform}-skill-runner:${APP_IMAGE_TAG:-latest}
-    pull_policy: build
     build:
       context: ./skill_runner
       dockerfile: Dockerfile
@@ -92,7 +90,6 @@ services:
 
   backend:
     image: ${COMPOSE_PROJECT_NAME:-ai-platform}-backend:${APP_IMAGE_TAG:-latest}
-    pull_policy: build
     build:
       context: ./llm_router/backend
       dockerfile: Dockerfile
@@ -152,7 +149,6 @@ services:
 
   frontend:
     image: ${COMPOSE_PROJECT_NAME:-ai-platform}-frontend:${APP_IMAGE_TAG:-latest}
-    pull_policy: build
     build:
       context: ./frontend
       dockerfile: Dockerfile.coolify
