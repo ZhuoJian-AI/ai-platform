@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
-  Input, Typography, Upload, message, Empty, Tooltip, Spin,
+  Input, Typography, Upload, message, Empty, Tooltip, Spin, Select, Checkbox,
 } from 'antd';
 import {
   DeleteOutlined, BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined,
   FolderOutlined, FileTextOutlined, FolderAddOutlined, ArrowUpOutlined,
   HomeOutlined, UploadOutlined, EyeOutlined, RightOutlined,
+  AppstoreOutlined, UnorderedListOutlined, SearchOutlined, CheckSquareOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -67,16 +68,26 @@ function buildTree(workspaces: Workspace[]): { treeData: TreeNode[]; wsById: Map
   return { treeData: child ? [child] : [], wsById };
 }
 
-/** 把路径相对当前目录的前缀裁掉，返回相对段（无前缀时原样返回）。 */
-function relPath(p: string, cwd: string[]): string {
-  const prefix = cwd.length ? `${cwd.join('/')}/` : '';
-  return prefix ? p.slice(prefix.length) : p;
-}
-
 /** 文件扩展名（小写、无点）。 */
 function fileName(path: string): string {
   return path.split('/').pop() || path;
 }
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function fileType(path: string): string {
+  const name = fileName(path);
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(dot + 1).toUpperCase() : '文件';
+}
+
+const PARSE_LABEL: Record<string, string> = {
+  ready: '已解析', failed: '解析失败', unsupported: '不支持解析', unparsed: '未解析',
+};
 
 /** 工作空间管理视图：MacOS Finder 风格。
  *  左栏（2:8）为用户权限可见的工作空间树（组织→部门→团队→个人，逐级嵌套）；
@@ -102,6 +113,11 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
   const [folderModalOpen, setFolderModalOpen] = useState(false);
   const [folderName, setFolderName] = useState('');
   const [hovered, setHovered] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [sortBy, setSortBy] = useState<'name' | 'time' | 'type' | 'size'>('name');
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  const [selecting, setSelecting] = useState(false);
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const composingRef = useRef(false);
 
   // 浏览器抽屉：点击文件后右侧弹出，复用 BrowserDrawer
@@ -122,34 +138,57 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
   });
 
   // 切换工作空间时回到根目录
-  useEffect(() => { setCwd([]); }, [wsId]);
+  useEffect(() => { setCwd([]); setSearch(''); setSelectedKeys(new Set()); }, [wsId]);
+  useEffect(() => { setSelectedKeys(new Set()); }, [cwd, search]);
 
-  // 当前层级直系子项：显式文件夹 + 由文件 / 更深文件夹路径推导的隐式文件夹 + 直系文件。
+  // 无搜索时展示当前层直系子项；搜索时覆盖整个工作空间并保留完整路径。
   const { folderItems, fileItems } = useMemo(() => {
-    const folderByName = new Map<string, WorkspaceFolder | null>();
-    const addFolder = (name: string, rec: WorkspaceFolder | null) => {
-      if (!folderByName.has(name)) folderByName.set(name, rec);
-      else if (rec && !folderByName.get(name)) folderByName.set(name, rec);
+    const allFolderPaths = new Map<string, WorkspaceFolder | null>();
+    const addFolderPath = (path: string, rec: WorkspaceFolder | null = null) => {
+      if (!path) return;
+      if (!allFolderPaths.has(path)) allFolderPaths.set(path, rec);
+      else if (rec && !allFolderPaths.get(path)) allFolderPaths.set(path, rec);
     };
     for (const f of folders ?? []) {
-      const r = relPath(f.path, cwd);
-      if (!r) continue;
-      if (r.includes('/')) addFolder(r.split('/')[0], null);
-      else addFolder(r, f);
+      const parts = f.path.split('/');
+      for (let i = 1; i <= parts.length; i++) addFolderPath(parts.slice(0, i).join('/'), i === parts.length ? f : null);
     }
-    const directFiles: { file: WorkspaceFileListItem; name: string }[] = [];
     for (const f of files ?? []) {
-      const r = relPath(f.path, cwd);
-      if (!r) continue;
-      if (r.includes('/')) addFolder(r.split('/')[0], null);
-      else directFiles.push({ file: f, name: r });
+      const parts = f.path.split('/').slice(0, -1);
+      for (let i = 1; i <= parts.length; i++) addFolderPath(parts.slice(0, i).join('/'));
     }
-    const folderItems = [...folderByName.entries()]
-      .map(([name, record]) => ({ name, record }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-    directFiles.sort((a, b) => a.name.localeCompare(b.name));
-    return { folderItems, fileItems: directFiles };
-  }, [files, folders, cwd]);
+    const cwdPath = cwd.join('/');
+    const query = search.trim().toLocaleLowerCase();
+    const folderItems = [...allFolderPaths.entries()].flatMap(([path, record]) => {
+      const parent = path.split('/').slice(0, -1).join('/');
+      if (query ? !path.toLocaleLowerCase().includes(query) : parent !== cwdPath) return [];
+      return [{ name: fileName(path), path, record }];
+    });
+    const fileItems = (files ?? []).flatMap((file) => {
+      const parent = file.path.split('/').slice(0, -1).join('/');
+      if (query ? !file.path.toLocaleLowerCase().includes(query) : parent !== cwdPath) return [];
+      return [{ file, name: fileName(file.path), path: file.path }];
+    });
+    const compare = (a: { name: string; path: string; record?: WorkspaceFolder | null; file?: WorkspaceFileListItem }, b: typeof a) => {
+      if (sortBy === 'time') return new Date(b.file?.updated_at ?? b.record?.updated_at ?? 0).getTime() - new Date(a.file?.updated_at ?? a.record?.updated_at ?? 0).getTime();
+      if (sortBy === 'size') return (b.file?.size ?? 0) - (a.file?.size ?? 0) || a.name.localeCompare(b.name);
+      if (sortBy === 'type') return fileType(a.path).localeCompare(fileType(b.path)) || a.name.localeCompare(b.name);
+      return a.name.localeCompare(b.name);
+    };
+    folderItems.sort(compare);
+    fileItems.sort(compare);
+    return { folderItems, fileItems };
+  }, [files, folders, cwd, search, sortBy]);
+
+  const resultKeys = useMemo(() => [
+    ...folderItems.map((item) => `d:${item.path}`),
+    ...fileItems.map((item) => `f:${item.file.id}`),
+  ], [folderItems, fileItems]);
+  const toggleSelected = (key: string) => setSelectedKeys((current) => {
+    const next = new Set(current);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
 
   const createFolder = useMutation({
     mutationFn: (name: string) => {
@@ -210,22 +249,38 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
     onError: () => message.error('删除失败'),
   });
 
+  const bulkDelete = useMutation({
+    mutationFn: () => {
+      if (!wsId) return Promise.reject(new Error('no ws'));
+      return terminal.bulkDeleteWsItems(wsId, {
+        file_ids: [...selectedKeys].filter((key) => key.startsWith('f:')).map((key) => key.slice(2)),
+        folder_paths: [...selectedKeys].filter((key) => key.startsWith('d:')).map((key) => key.slice(2)),
+      });
+    },
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ['ws-mgr-folders'] });
+      qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+      setSelectedKeys(new Set());
+      message.success(`已删除 ${result.deleted_files} 个文件、${result.deleted_folders} 个显式文件夹`);
+    },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '批量删除失败'),
+  });
+
   // 删除确认弹窗：不再用悬浮 Popconfirm，改为界面正中的模态框（字体与终端一致）。
   const [confirm, setConfirm] = useState<{
-    kind: 'folder' | 'folderPath' | 'file'; id: string; title: string; desc?: string;
+    kind: 'folder' | 'folderPath' | 'file' | 'bulk'; id: string; title: string; desc?: string;
   } | null>(null);
   const confirmLoading = confirm?.kind === 'folder'
     ? delFolder.isPending
     : confirm?.kind === 'folderPath'
       ? delFolderPath.isPending
-      : confirm?.kind === 'file'
-        ? delFile.isPending
-        : false;
+      : confirm?.kind === 'file' ? delFile.isPending : confirm?.kind === 'bulk' ? bulkDelete.isPending : false;
   const confirmOk = () => {
     if (!confirm) return;
     if (confirm.kind === 'folder') delFolder.mutate(confirm.id);
     else if (confirm.kind === 'folderPath') delFolderPath.mutate(confirm.id);
-    else delFile.mutate(confirm.id);
+    else if (confirm.kind === 'file') delFile.mutate(confirm.id);
+    else bulkDelete.mutate();
     setConfirm(null);
   };
 
@@ -315,7 +370,41 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                     ))}
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <Input
+                    allowClear
+                    prefix={<SearchOutlined />}
+                    placeholder="搜索整个工作空间"
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                    style={{ width: 190, height: 28, fontSize: 12 }}
+                  />
+                  <Select
+                    size="small"
+                    value={sortBy}
+                    onChange={setSortBy}
+                    style={{ width: 94 }}
+                    options={[
+                      { value: 'name', label: '按名称' }, { value: 'time', label: '按时间' },
+                      { value: 'type', label: '按类型' }, { value: 'size', label: '按大小' },
+                    ]}
+                  />
+                  <button style={toolBtnStyle} title={viewMode === 'grid' ? '切换列表视图' : '切换网格视图'} onClick={() => setViewMode((mode) => mode === 'grid' ? 'list' : 'grid')}>
+                    {viewMode === 'grid' ? <UnorderedListOutlined /> : <AppstoreOutlined />}
+                  </button>
+                  <button style={{ ...toolBtnStyle, color: selecting ? WB.primary : '#1d1d1f' }} onClick={() => { setSelecting((value) => !value); setSelectedKeys(new Set()); }}>
+                    <CheckSquareOutlined /> {selecting ? '退出多选' : '多选'}
+                  </button>
+                  {selecting && (
+                    <>
+                      <button style={toolBtnStyle} onClick={() => setSelectedKeys(new Set(resultKeys))}>全选结果</button>
+                      <button
+                        style={{ ...toolBtnStyle, color: '#dc2626' }}
+                        disabled={!selectedKeys.size}
+                        onClick={() => setConfirm({ kind: 'bulk', id: '', title: `删除选中的 ${selectedKeys.size} 项？`, desc: '文件夹会连同全部子文件夹和文件一起删除，此操作不可撤销。' })}
+                      ><DeleteOutlined /> 批量删除</button>
+                    </>
+                  )}
                   {cwd.length > 0 && (
                     <button
                       style={{ ...toolBtnStyle, color: '#dc2626' }}
@@ -349,7 +438,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                 </div>
               </div>
 
-              {/* 图标网格 */}
+              {/* 文件网格 / 列表 */}
               <div style={{ flex: 1, overflowY: 'auto', padding: '18px 20px' }} className="wb-scroll-hide">
                 {filesLoading ? (
                   <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}><Spin /></div>
@@ -358,37 +447,32 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                     此处暂无文件夹 / 文件
                   </div>
                 ) : (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                  <div style={viewMode === 'grid' ? { display: 'flex', flexWrap: 'wrap', gap: 4 } : { display: 'flex', flexDirection: 'column', gap: 2 }}>
                     {folderItems.map((it) => {
-                      const key = `d:${it.name}`;
+                      const key = `d:${it.path}`;
                       const isHover = hovered === key;
+                      const selected = selectedKeys.has(key);
                       return (
                         <div
                           key={key}
                           onMouseEnter={() => setHovered(key)}
                           onMouseLeave={() => setHovered(null)}
-                          onClick={() => setCwd((c) => [...c, it.name])}
-                          style={iconCardStyle(isHover)}
+                          onClick={() => selecting ? toggleSelected(key) : (setCwd(it.path.split('/')), setSearch(''))}
+                          style={viewMode === 'grid' ? { ...iconCardStyle(isHover), background: selected ? '#e8eafe' : (isHover ? '#f0f1f4' : 'transparent') } : listRowStyle(selected || isHover)}
                         >
-                          <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', width: 92, cursor: 'pointer' }}>
-                            {isHover && (
-                              <span
-                                style={{ position: 'absolute', top: -6, right: -6, zIndex: 2 }}
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                <button
-                                  style={iconActionBtnStyle('danger')}
-                                  onClick={() => setConfirm({
-                                    kind: it.record ? 'folder' : 'folderPath',
-                                    id: it.record ? it.record.id : [...cwd, it.name].join('/'),
-                                    title: '删除该文件夹？',
-                                    desc: '将一并删除其下所有子文件夹与文件',
-                                  })}
-                                ><DeleteOutlined /></button>
-                              </span>
+                          {selecting && <Checkbox checked={selected} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelected(key)} style={viewMode === 'grid' ? { position: 'absolute', top: 5, left: 6 } : undefined} />}
+                          <div style={viewMode === 'grid' ? { position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', width: 92, cursor: 'pointer' } : { display: 'contents' }}>
+                            <FolderOutlined style={{ fontSize: viewMode === 'grid' ? 42 : 22, color: WB.macFolder }} />
+                            <div style={viewMode === 'grid' ? iconNameStyle : listNameStyle} title={it.path}>{it.name}</div>
+                            {viewMode === 'grid' && !!search.trim() && <div style={{ ...iconNameStyle, fontSize: 9, color: '#9ca3af', marginTop: 2 }} title={it.path}>{it.path}</div>}
+                            {viewMode === 'list' && <><span style={listMetaStyle}>文件夹</span><span style={listMetaStyle}>{it.record?.updated_at ? new Date(it.record.updated_at).toLocaleString() : '路径推导'}</span><span style={listPathStyle}>{it.path}</span></>}
+                            {!selecting && (
+                              <button
+                                style={viewMode === 'grid' ? { ...iconActionBtnStyle('danger'), position: 'absolute', top: -6, right: -6 } : iconActionBtnStyle('danger')}
+                                title="删除文件夹"
+                                onClick={(event) => { event.stopPropagation(); setConfirm({ kind: it.record ? 'folder' : 'folderPath', id: it.record ? it.record.id : it.path, title: '删除该文件夹？', desc: '将一并删除其下所有子文件夹与文件' }); }}
+                              ><DeleteOutlined /></button>
                             )}
-                            <FolderOutlined style={{ fontSize: 42, color: WB.macFolder }} />
-                            <div style={iconNameStyle}>{it.name}</div>
                           </div>
                         </div>
                       );
@@ -396,32 +480,31 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                     {fileItems.map((it) => {
                       const key = `f:${it.file.id}`;
                       const isHover = hovered === key;
+                      const selected = selectedKeys.has(key);
                       return (
                         <div
                           key={key}
                           onMouseEnter={() => setHovered(key)}
                           onMouseLeave={() => setHovered(null)}
-                          style={iconCardStyle(isHover)}
+                          onClick={() => selecting ? toggleSelected(key) : openFile(it.file.path)}
+                          style={viewMode === 'grid' ? { ...iconCardStyle(isHover), background: selected ? '#e8eafe' : (isHover ? '#f0f1f4' : 'transparent') } : listRowStyle(selected || isHover)}
                         >
-                          <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', width: 92 }}>
-                            {isHover && (
-                              <span style={{ position: 'absolute', top: -6, right: -6, zIndex: 2, display: 'flex', gap: 4 }}>
-                                <Tooltip title="查看文件">
-                                  <button style={iconActionBtnStyle('default')} onClick={() => openFile(it.file.path)}>
-                                    <EyeOutlined />
-                                  </button>
-                                </Tooltip>
-                                <button
-                                  style={iconActionBtnStyle('danger')}
-                                  onClick={() => setConfirm({ kind: 'file', id: it.file.id, title: '删除该文件？' })}
-                                ><DeleteOutlined /></button>
+                          {selecting && <Checkbox checked={selected} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelected(key)} style={viewMode === 'grid' ? { position: 'absolute', top: 5, left: 6 } : undefined} />}
+                          <div style={viewMode === 'grid' ? { position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', width: 92 } : { display: 'contents' }}>
+                            <FileTextOutlined style={{ fontSize: viewMode === 'grid' ? 42 : 22, color: WB.macFile }} />
+                            <div style={viewMode === 'grid' ? iconNameStyle : listNameStyle} title={it.file.path}>{fileName(it.file.path)}</div>
+                            {viewMode === 'grid' && !!search.trim() && <div style={{ ...iconNameStyle, fontSize: 9, color: '#9ca3af', marginTop: 2 }} title={it.file.path}>{it.file.path}</div>}
+                            {viewMode === 'grid' ? (
+                              <span style={{ fontSize: 10, color: '#aeaeb2', marginTop: 1 }}>{formatBytes(it.file.size)}</span>
+                            ) : (
+                              <><span style={listMetaStyle}>{fileType(it.file.path)} · {formatBytes(it.file.size)}</span><span style={listMetaStyle}>{new Date(it.file.updated_at).toLocaleString()}</span><span style={listMetaStyle}>{PARSE_LABEL[it.file.parse_status] ?? it.file.parse_status}</span><span style={listPathStyle}>{it.file.path}</span></>
+                            )}
+                            {!selecting && (
+                              <span style={viewMode === 'grid' ? { position: 'absolute', top: -6, right: -6, display: 'flex', gap: 4 } : { display: 'flex', gap: 4 }} onClick={(event) => event.stopPropagation()}>
+                                <Tooltip title="查看文件"><button style={iconActionBtnStyle('default')} onClick={() => openFile(it.file.path)}><EyeOutlined /></button></Tooltip>
+                                <button title="删除文件" style={iconActionBtnStyle('danger')} onClick={() => setConfirm({ kind: 'file', id: it.file.id, title: '删除该文件？' })}><DeleteOutlined /></button>
                               </span>
                             )}
-                            <div onClick={() => openFile(it.file.path)} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', cursor: 'pointer' }}>
-                              <FileTextOutlined style={{ fontSize: 42, color: WB.macFile }} />
-                              <div style={iconNameStyle}>{fileName(it.file.path)}</div>
-                              <span style={{ fontSize: 10, color: '#aeaeb2', marginTop: 1 }}>{it.file.size} B</span>
-                            </div>
                           </div>
                         </div>
                       );
@@ -627,8 +710,26 @@ const iconCardStyle = (hover: boolean): CSSProperties => ({
   width: 108, padding: '10px 6px 8px', borderRadius: 8, cursor: 'default',
   display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
   border: '1px solid transparent', transition: 'background .12s',
-  background: hover ? '#f0f1f4' : 'transparent',
+  background: hover ? '#f0f1f4' : 'transparent', position: 'relative',
 });
+
+const listRowStyle = (active: boolean): CSSProperties => ({
+  display: 'grid', gridTemplateColumns: '24px minmax(180px, 1.4fr) 120px 150px 110px minmax(160px, 1fr) auto',
+  alignItems: 'center', gap: 10, minHeight: 40, padding: '5px 8px', borderRadius: 6,
+  background: active ? '#f0f1f4' : 'transparent', cursor: 'pointer', fontSize: 12,
+});
+
+const listNameStyle: CSSProperties = {
+  minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#1d1d1f',
+};
+
+const listMetaStyle: CSSProperties = {
+  color: '#6b7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+};
+
+const listPathStyle: CSSProperties = {
+  ...listMetaStyle, color: '#9ca3af', direction: 'rtl', textAlign: 'left',
+};
 
 const iconNameStyle: CSSProperties = {
   marginTop: 6, fontSize: 12, color: '#1d1d1f', textAlign: 'center',

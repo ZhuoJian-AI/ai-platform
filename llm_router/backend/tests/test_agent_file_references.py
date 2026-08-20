@@ -17,7 +17,7 @@ from app.models.organization import Organization
 from app.models.task import Task, TaskMessage
 from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceFile
-from app.schemas.workspace import WorkspaceFileCreate
+from app.schemas.workspace import WorkspaceFileCreate, WorkspaceFolderCreate
 from app.services import workspace_service
 
 
@@ -437,6 +437,49 @@ async def test_delete_inferred_workspace_folder_path_recursively(db_session: Asy
     assert first.deleted_at is not None
     assert second.deleted_at is not None
     assert keep.deleted_at is None
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_deduplicates_nested_folders_and_selected_files(db_session: AsyncSession):
+    _, ws, first = await _make_workspace_with_file(
+        db_session, path="平台工具输出/task-a/result.xlsx", content="a",
+    )
+    second = await workspace_service.upsert_file(
+        db_session, ws, WorkspaceFileCreate(path="平台工具输出/task-b/report.docx", content="b"),
+    )
+    keep = await workspace_service.upsert_file(
+        db_session, ws, WorkspaceFileCreate(path="会话附件/task-c/input.xlsx", content="c"),
+    )
+    await workspace_service.create_folder(
+        db_session, ws, WorkspaceFolderCreate(path="平台工具输出/task-a"),
+    )
+
+    deleted = await workspace_service.bulk_soft_delete_items(
+        db_session,
+        ws.id,
+        file_ids=[first.id, first.id],
+        folder_paths=["平台工具输出", "平台工具输出/task-a"],
+    )
+
+    assert deleted == {"deleted_files": 2, "deleted_folders": 1}
+    assert first.deleted_at is not None
+    assert second.deleted_at is not None
+    assert keep.deleted_at is None
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_rejects_cross_workspace_and_traversal(db_session: AsyncSession):
+    _, ws, _ = await _make_workspace_with_file(db_session, path="keep.txt", content="a")
+    _, other_ws, other = await _make_workspace_with_file(db_session, path="other.txt", content="b")
+
+    with pytest.raises(ValueError, match="不属于当前工作空间"):
+        await workspace_service.bulk_soft_delete_items(
+            db_session, ws.id, file_ids=[other.id], folder_paths=[],
+        )
+    with pytest.raises(ValueError, match="不能包含"):
+        await workspace_service.bulk_soft_delete_items(
+            db_session, other_ws.id, file_ids=[], folder_paths=["../根目录"],
+        )
 
 
 @pytest.mark.asyncio

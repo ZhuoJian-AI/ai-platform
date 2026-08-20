@@ -673,6 +673,63 @@ async def soft_delete_folder_path(db: AsyncSession, ws_id: UUID, path: str) -> d
     return {"folders": len(matched_folders), "files": len(file_rows)}
 
 
+async def bulk_soft_delete_items(
+    db: AsyncSession,
+    ws_id: UUID,
+    *,
+    file_ids: list[UUID],
+    folder_paths: list[str],
+) -> dict[str, int]:
+    """Atomically validate and soft-delete selected files and folder subtrees."""
+    unique_file_ids = list(dict.fromkeys(file_ids))
+    normalized_paths: list[str] = []
+    for raw_path in folder_paths:
+        segments = raw_path.replace("\\", "/").split("/")
+        if any(segment == ".." for segment in segments):
+            raise ValueError("文件夹路径不能包含 ..")
+        normalized = _normalize_path(raw_path)
+        if not normalized:
+            raise ValueError("不能删除工作空间根目录")
+        normalized_paths.append(normalized)
+
+    # Keep only the shallowest selected ancestor; deleting it already covers descendants.
+    reduced_paths: list[str] = []
+    for path in sorted(set(normalized_paths), key=lambda item: (item.count("/"), item)):
+        if not any(path == parent or path.startswith(f"{parent}/") for parent in reduced_paths):
+            reduced_paths.append(path)
+
+    if not unique_file_ids and not reduced_paths:
+        raise ValueError("请至少选择一个文件或文件夹")
+
+    selected_files: list[WorkspaceFile] = []
+    if unique_file_ids:
+        selected_files = list((await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.id.in_(unique_file_ids),
+                WorkspaceFile.deleted_at.is_(None),
+            )
+        )).scalars().all())
+        if len(selected_files) != len(unique_file_ids):
+            raise ValueError("部分文件不存在或已删除")
+        if any(item.workspace_id != ws_id for item in selected_files):
+            raise ValueError("文件不属于当前工作空间")
+
+    deleted_files = 0
+    deleted_folders = 0
+    for path in reduced_paths:
+        result = await soft_delete_folder_path(db, ws_id, path)
+        deleted_files += result["files"]
+        deleted_folders += result["folders"]
+
+    now = datetime.now(UTC)
+    for item in selected_files:
+        if item.deleted_at is None:
+            item.deleted_at = now
+            deleted_files += 1
+    await db.flush()
+    return {"deleted_files": deleted_files, "deleted_folders": deleted_folders}
+
+
 # ── Workspace Tree（随组织架构逐级嵌套）──────────────────────────────────
 
 def _ws_info(ws: Workspace | None) -> dict | None:

@@ -1,11 +1,13 @@
 """Task & TaskMessage Pydantic schemas — 终端用户任务线程。"""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas._base import MetaReadModel
+from app.services.message_verification import classify_execution_verification
 
 
 class TaskConfig(BaseModel):
@@ -55,6 +57,13 @@ class TaskRunRequest(BaseModel):
     template_agent_id: str | None = None
 
 
+class ExecutionVerification(BaseModel):
+    status: Literal["verified", "partial", "failed", "legacy_unverified"]
+    tool_calls: int
+    succeeded: int
+    failed: int
+
+
 class TaskMessageRead(MetaReadModel):
     id: UUID
     task_id: UUID
@@ -62,6 +71,15 @@ class TaskMessageRead(MetaReadModel):
     content: str
     created_at: datetime
     updated_at: datetime
+    execution_verification: ExecutionVerification | None = None
+
+    @model_validator(mode="after")
+    def _derive_execution_verification(self):
+        if self.role == "assistant" and self.execution_verification is None:
+            result = classify_execution_verification(self.content, self.metadata)
+            if result is not None:
+                self.execution_verification = ExecutionVerification(**result)
+        return self
 
 
 class TaskRead(BaseModel):

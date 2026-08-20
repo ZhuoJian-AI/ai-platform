@@ -89,6 +89,8 @@ from app.schemas.task import (
 )
 from app.schemas.user import UserRead
 from app.schemas.workspace import (
+    WorkspaceBulkDeleteRequest,
+    WorkspaceBulkDeleteResult,
     WorkspaceFileCreate,
     WorkspaceFilePage,
     WorkspaceFilePreviewRead,
@@ -961,6 +963,31 @@ async def delete_ws_folder_path_endpoint(
     ws = await _get_visible_workspace(db, ws_id, cu)
     try:
         deleted = await workspace_service.soft_delete_folder_path(db, ws.id, path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return deleted
+
+
+@router.post(
+    "/terminal/workspaces/{ws_id}/items/bulk-delete",
+    response_model=WorkspaceBulkDeleteResult,
+)
+async def bulk_delete_ws_items_endpoint(
+    ws_id: UUID,
+    data: WorkspaceBulkDeleteRequest,
+    cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    assert_user_write(cu)
+    ws = await _get_visible_workspace(db, ws_id, cu)
+    try:
+        deleted = await workspace_service.bulk_soft_delete_items(
+            db,
+            ws.id,
+            file_ids=data.file_ids,
+            folder_paths=data.folder_paths,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()

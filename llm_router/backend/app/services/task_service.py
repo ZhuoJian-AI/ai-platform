@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from uuid import UUID
@@ -20,6 +21,31 @@ from app.services.workspace_service import get_file_by_path as workspace_service
 # 删除一整轮对话时据此识别本轮产出的工作空间文件，避免残留孤立产物。
 FILE_WRITE_TOOLS = {"workspace_write_file", "generate_docx"}
 
+_LEADING_COMMAND_RE = re.compile(r"^\s*/[a-zA-Z0-9][a-zA-Z0-9_-]*\s*")
+_LEADING_UUID_RE = re.compile(
+    r"^\s*@?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\s*"
+)
+_LEADING_ATTACHMENT_RE = re.compile(
+    r"^\s*(?:\[(?:附件|文件)[^\]]*\]|【(?:附件|文件)[^】]*】)\s*"
+)
+
+
+def make_task_title(message: str, *, max_length: int = 60) -> str:
+    """Build a readable task title without leaking invocation syntax into the sidebar."""
+    value = message or ""
+    previous = None
+    while value != previous:
+        previous = value
+        value = _LEADING_COMMAND_RE.sub("", value, count=1)
+        value = _LEADING_UUID_RE.sub("", value, count=1)
+        value = _LEADING_ATTACHMENT_RE.sub("", value, count=1)
+    value = re.sub(r"\s+", " ", value).strip(" -—:：,，")
+    if not value:
+        return "新任务"
+    sentence = re.split(r"[\n。！？!?]", value, maxsplit=1)[0].strip()
+    return (sentence or value)[:max_length]
+
 
 async def create_task(
     db: AsyncSession, *, org_id: UUID, user_id: str, department_id: str | None,
@@ -31,7 +57,7 @@ async def create_task(
         department_id=department_id,
         team_id=team_id,
         session_id=f"task-{uuid.uuid4()}",
-        title=data.title or data.message[:60],
+        title=data.title.strip() if data.title.strip() else make_task_title(data.message),
         message=data.message,
         config=data.config.model_dump(),
         status="active",

@@ -1256,6 +1256,12 @@ export interface TerminalTaskMessage {
   metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+  execution_verification: {
+    status: 'verified' | 'partial' | 'failed' | 'legacy_unverified';
+    tool_calls: number;
+    succeeded: number;
+    failed: number;
+  } | null;
 }
 
 export interface TerminalTaskWithMessages extends TerminalTask {
@@ -1429,6 +1435,11 @@ export const terminal = {
     userRequest<{ folders: number; files: number }>(
       `/api/v1/terminal/workspaces/${wsId}/folder-path?path=${encodeURIComponent(path)}`,
       { method: 'DELETE' },
+    ),
+  bulkDeleteWsItems: (wsId: string, data: { file_ids: string[]; folder_paths: string[] }) =>
+    userRequest<{ deleted_files: number; deleted_folders: number }>(
+      `/api/v1/terminal/workspaces/${wsId}/items/bulk-delete`,
+      { method: 'POST', body: JSON.stringify(data) },
     ),
 
   // ── 知识库（RAG）：终端用户 scope 内可见；删除/重命名/编辑仅限自己创建 ──

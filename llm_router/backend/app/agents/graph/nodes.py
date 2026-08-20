@@ -50,6 +50,7 @@ from app.services import (
     skill_scope_service,
     workspace_service,
 )
+from app.services.message_verification import contains_unverified_tool_success_claim
 from app.services.rag_service import retrieve as rag_retrieve
 from app.services.skill_store_service import SKILL_MANIFEST_PATH
 from app.services.skill_store_service import get_file_by_path as get_skill_file_by_path
@@ -118,30 +119,6 @@ OUTPUT_PROTOCOL_PROMPT = (
     "3. 任何‘已调用工具 / 执行成功 / 已生成文件’的声明，以及 file_id、输出路径和处理结果，都必须来自"
     "本轮真实 tool_result。若本轮没有真实 tool_call，只能如实说明尚未执行，严禁编造 UUID、路径或成功状态。"
 )
-
-_TOOL_SUCCESS_CLAIM_RE = re.compile(
-    r"(?:已(?:经)?(?:真实)?调用|调用成功|执行成功|处理成功|已(?:经)?(?:生成|创建|写入|保存|导出)|"
-    r"(?:处理|生成|转换|缩放|裁剪|压缩|解压|识别)?已?完成|工具(?:均|全部)?已|全部[^。；\n]{0,20}成功)",
-    re.IGNORECASE,
-)
-_TOOL_ARTIFACT_CLAIM_RE = re.compile(
-    r"(?:file[_\s-]?id|文件\s*(?:id|ID)|平台工具输出/|"
-    r"(?:spreadsheet|document|presentation|pdf|text|image|image_generation|archive|web)_tool|"
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})",
-    re.IGNORECASE,
-)
-
-
-def _contains_unverified_tool_success_claim(text: str) -> bool:
-    """Detect high-confidence claims that require a real tool result this turn."""
-    value = (text or "").strip()
-    return bool(
-        value
-        and _TOOL_SUCCESS_CLAIM_RE.search(value)
-        and _TOOL_ARTIFACT_CLAIM_RE.search(value)
-    )
-
-
 
 def _emit(event: dict) -> None:
     """经 stream_writer 下发事件（流式分支；非流式分支 writer 为 no-op）。"""
@@ -2055,7 +2032,7 @@ async def agent_loop(state: AgentState) -> dict:
         has_successful_tool = any(
             step.get("step") == "tool" and step.get("ok") is True for step in steps
         )
-        if not has_successful_tool and _contains_unverified_tool_success_claim(round_text):
+        if not has_successful_tool and contains_unverified_tool_success_claim(round_text):
             if round_text:
                 _emit({"type": "text_retract", "chars": len(round_text)})
             steps.append({"step": "tool_claim_rejected"})

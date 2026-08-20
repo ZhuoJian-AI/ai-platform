@@ -121,3 +121,13 @@ class WorkspaceFolderRead(OrmModel):
     path: str
     created_at: datetime
     updated_at: datetime
+
+
+class WorkspaceBulkDeleteRequest(BaseModel):
+    file_ids: list[UUID] = Field(default_factory=list, max_length=200)
+    folder_paths: list[str] = Field(default_factory=list, max_length=100)
+
+
+class WorkspaceBulkDeleteResult(BaseModel):
+    deleted_files: int
+    deleted_folders: int

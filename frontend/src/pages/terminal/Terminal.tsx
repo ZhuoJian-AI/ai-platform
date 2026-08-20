@@ -78,6 +78,7 @@ interface ChatMsg {
   agentName?: string | null;
   attachments?: MessageAttachment[];
   invokedSkills?: InvokedSkill[];
+  executionVerification?: TerminalTaskMessage['execution_verification'];
 }
 
 interface InvokedSkill {
@@ -210,7 +211,7 @@ function restoreChat(messages: TerminalTaskMessage[]): ChatMsg[] {
       const traces = (m.metadata?.traces as Record<string, unknown>[] | undefined) ?? [];
       const blocks = traces.length ? tracesToBlocks(traces) : undefined;
       if (blocks && m.content) blocks.push({ kind: 'text', content: m.content });
-      return { role: 'assistant' as const, content: m.content, blocks };
+      return { role: 'assistant' as const, content: m.content, blocks, executionVerification: m.execution_verification };
     });
 }
 
@@ -249,6 +250,7 @@ export default function Terminal() {
   // 任务重命名：内联编辑，Enter 保存、Esc 取消、失焦保存
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
+  const [taskSearch, setTaskSearch] = useState('');
   const [chat, setChat] = useState<ChatMsg[]>([]);
   const [traceLog, setTraceLog] = useState<Record<string, unknown>[]>([]);
   const [streaming, setStreaming] = useState(false);
@@ -306,6 +308,23 @@ export default function Terminal() {
   const { data: tasks } = useQuery<TerminalTask[]>({
     queryKey: ['terminal-tasks'], queryFn: () => terminal.listTasks(),
   });
+  const taskGroups = useMemo(() => {
+    const query = taskSearch.trim().toLocaleLowerCase();
+    const filtered = (tasks ?? []).filter((task) => !query
+      || task.title.toLocaleLowerCase().includes(query)
+      || task.message.toLocaleLowerCase().includes(query));
+    const startToday = new Date();
+    startToday.setHours(0, 0, 0, 0);
+    const startYesterday = new Date(startToday); startYesterday.setDate(startYesterday.getDate() - 1);
+    const startWeek = new Date(startToday); startWeek.setDate(startWeek.getDate() - 7);
+    const buckets: Record<string, TerminalTask[]> = { 今天: [], 昨天: [], '最近 7 天': [], 更早: [] };
+    for (const task of filtered) {
+      const updated = new Date(task.updated_at);
+      const label = updated >= startToday ? '今天' : updated >= startYesterday ? '昨天' : updated >= startWeek ? '最近 7 天' : '更早';
+      buckets[label].push(task);
+    }
+    return Object.entries(buckets).filter(([, items]) => items.length);
+  }, [tasks, taskSearch]);
   const { data: selectedTask } = useQuery<TerminalTaskWithMessages>({
     queryKey: ['terminal-task', selectedId],
     queryFn: () => terminal.getTask(selectedId!),
@@ -673,7 +692,7 @@ export default function Terminal() {
       file_id, workspace_id, path, name,
     }));
     try {
-      const task = await terminal.createTask({ title: msg.slice(0, 60), message: msg, config });
+      const task = await terminal.createTask({ message: msg, config });
       // 新建后立即让左栏任务列表可见（不再等流结束才 invalidate）——根治「执行期间左栏看不到任务」诱因。
       qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
       // 标记本次选中是「新建并立即 live 执行」，阻止 selectedTask 回放清掉实时轨迹；
@@ -901,75 +920,75 @@ export default function Terminal() {
               <div style={{ fontSize: 12, color: '#6b7280', fontWeight: 500, marginBottom: 8 }}>
                 任务 ({tasks?.length ?? 0})
               </div>
+              <Input
+                allowClear
+                size="small"
+                prefix={<SearchOutlined />}
+                placeholder="搜索任务"
+                value={taskSearch}
+                onChange={(event) => setTaskSearch(event.target.value)}
+                style={{ fontSize: 12 }}
+              />
             </div>
             <div style={{ flex: 1, overflowY: 'auto', padding: '0 8px' }} className="wb-scroll-hide">
-              {(tasks ?? []).length === 0 && (
-                <div style={{ padding: '8px 12px', color: '#9ca3af', fontSize: 12 }}>暂无任务</div>
+              {taskGroups.length === 0 && (
+                <div style={{ padding: '8px 12px', color: '#9ca3af', fontSize: 12 }}>{taskSearch ? '没有匹配任务' : '暂无任务'}</div>
               )}
-              {(tasks ?? []).map((t) => {
-                const active = selectedId === t.id && !composerOpen;
-                const showActions = hoveredId === t.id || active;
-                const editing = editingId === t.id;
-                return (
-                  <div
-                    key={t.id}
-                    onClick={() => { if (!editing) { selectTask(t.id); setView('assistant'); } }}
-                    onMouseEnter={() => { setHoveredId(t.id); }}
-                    onMouseLeave={() => { setHoveredId(null); }}
-                    style={{
-                      display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
-                      background: active ? `${WB.primary}1A` : (hoveredId === t.id ? WB.hover : undefined),
-                      color: active ? WB.primary : '#6b7280',
-                    }}
-                  >
-                    <FileTextOutlined style={{ marginTop: 2, color: active ? WB.primary : '#cbd5e1' }} />
-                    {editing ? (
-                      <Input
-                        size="small"
-                        autoFocus
-                        value={editingTitle}
-                        onChange={(e) => setEditingTitle(e.target.value)}
-                        onClick={(e) => e.stopPropagation()}
-                        onPointerDown={(e) => e.stopPropagation()}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') { e.preventDefault(); commitRename(t.id); }
-                          else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
+              {taskGroups.map(([group, items]) => (
+                <div key={group} style={{ marginBottom: 8 }}>
+                  <div style={{ padding: '7px 10px 3px', color: '#9ca3af', fontSize: 10, fontWeight: 600 }}>{group}</div>
+                  {items.map((t) => {
+                    const active = selectedId === t.id && !composerOpen;
+                    const editing = editingId === t.id;
+                    return (
+                      <div
+                        key={t.id}
+                        onClick={() => { if (!editing) { selectTask(t.id); setView('assistant'); } }}
+                        onMouseEnter={() => setHoveredId(t.id)}
+                        onMouseLeave={() => setHoveredId(null)}
+                        style={{
+                          display: 'flex', alignItems: 'flex-start', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
+                          background: active ? `${WB.primary}1A` : (hoveredId === t.id ? WB.hover : undefined), color: active ? WB.primary : '#6b7280',
                         }}
-                        onBlur={() => commitRename(t.id)}
-                        maxLength={255}
-                        style={{ fontSize: 12, padding: '0 6px', height: 24 }}
-                      />
-                    ) : (
-                      <span style={{ flex: 1, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
-                        {t.title || '(未命名)'}
-                      </span>
-                    )}
-                    <span style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginTop: 2 }}>
-                      <span style={{ color: active ? `${WB.primary}B3` : '#cbd5e1', fontSize: 10, visibility: showActions ? 'hidden' : 'visible' }}>
-                        {t.updated_at.slice(5, 10)}
-                      </span>
-                      {showActions && !editing && (
-                        <EditOutlined
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            startRename(t);
-                          }}
-                          style={{ color: '#9ca3af', fontSize: 13, cursor: 'pointer' }}
-                        />
-                      )}
-                      {showActions && !editing && (
-                        <DeleteOutlined
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setDelConfirm({ id: t.id, title: t.title || '(未命名)' });
-                          }}
-                          style={{ color: '#9ca3af', fontSize: 13, cursor: 'pointer' }}
-                        />
-                      )}
-                    </span>
-                  </div>
-                );
-              })}
+                      >
+                        <FileTextOutlined style={{ marginTop: 2, color: active ? WB.primary : '#cbd5e1' }} />
+                        {editing ? (
+                          <Input
+                            size="small" autoFocus value={editingTitle}
+                            onChange={(e) => setEditingTitle(e.target.value)}
+                            onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') { e.preventDefault(); commitRename(t.id); }
+                              else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
+                            }}
+                            onBlur={() => commitRename(t.id)} maxLength={255}
+                            style={{ fontSize: 12, padding: '0 6px', height: 24 }}
+                          />
+                        ) : (
+                          <Tooltip title={t.title || '(未命名)'} placement="right">
+                            <span style={{ flex: 1, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title || '(未命名)'}</span>
+                          </Tooltip>
+                        )}
+                        {!editing && (
+                          <Dropdown
+                            trigger={['click']}
+                            menu={{ items: [
+                              { key: 'rename', label: '重命名', icon: <EditOutlined /> },
+                              { key: 'delete', label: '删除', icon: <DeleteOutlined />, danger: true },
+                            ], onClick: ({ key, domEvent }) => {
+                              domEvent.stopPropagation();
+                              if (key === 'rename') startRename(t);
+                              else setDelConfirm({ id: t.id, title: t.title || '(未命名)' });
+                            } }}
+                          >
+                            <button aria-label={`管理任务 ${t.title}`} onClick={(event) => event.stopPropagation()} style={{ border: 0, background: 'transparent', color: '#9ca3af', cursor: 'pointer', padding: 0 }}><MoreOutlined /></button>
+                          </Dropdown>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
             </div>
 
             {/* 底部用户 */}
@@ -2170,15 +2189,50 @@ function ChatView(props: {
 
 // ── 助手气泡：Claude Code 风格执行过程时间线 ──────────────────────────────
 
+type ExecutionVerification = NonNullable<TerminalTaskMessage['execution_verification']>;
+
+function verificationFromBlocks(blocks?: Block[]): ExecutionVerification | null {
+  const calls = (blocks ?? []).filter((block): block is Extract<Block, { kind: 'tool_call' }> => block.kind === 'tool_call' && !block.running && !!block.result);
+  if (!calls.length) return null;
+  const succeeded = calls.filter((call) => call.result?.ok !== false).length;
+  const failed = calls.length - succeeded;
+  return {
+    status: failed === 0 ? 'verified' : succeeded ? 'partial' : 'failed',
+    tool_calls: calls.length,
+    succeeded,
+    failed,
+  };
+}
+
+function ExecutionStatus({ verification, streaming }: { verification: ExecutionVerification | null; streaming: boolean }) {
+  if (streaming) return <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginBottom: 8, color: WB.primary }}><LoadingOutlined /> 执行中…</div>;
+  if (!verification) return null;
+  const display = {
+    verified: { color: '#16a34a', label: '已验证执行', icon: <CheckCircleOutlined /> },
+    partial: { color: '#d97706', label: '部分完成', icon: <CheckCircleOutlined /> },
+    failed: { color: '#dc2626', label: '执行失败', icon: <CloseOutlined /> },
+    legacy_unverified: { color: '#d97706', label: '历史结果未验证', icon: <CloseOutlined /> },
+  }[verification.status];
+  return (
+    <Tooltip title={verification.status === 'legacy_unverified' ? '未找到真实工具执行记录' : `工具调用 ${verification.tool_calls} 次：成功 ${verification.succeeded}，失败 ${verification.failed}`}>
+      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, marginBottom: 8, color: display.color }}>
+        {display.icon} {display.label}
+      </div>
+    </Tooltip>
+  );
+}
+
 function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; streaming: boolean; onLink: (href: string) => void; fileLinks: { path: string; name: string }[] }) {
   const blocks = msg.blocks;
   const hasLiveBlocks = blocks && blocks.length > 0;
+  const verification = msg.executionVerification ?? verificationFromBlocks(blocks);
   // 兜底：无 blocks（历史回放）直接渲染 content markdown
   if (!hasLiveBlocks) {
     return (
       <div style={{ maxWidth: '92%' }}>
         <AvatarHeader />
         <div style={{ background: WB.botMsg, border: `1px solid ${WB.border}`, borderRadius: '16px 16px 16px 4px', boxShadow: '0 1px 2px rgba(0,0,0,0.04)', padding: 16 }}>
+          <ExecutionStatus verification={verification} streaming={streaming} />
           <div className="wb-md"><Md onLink={onLink} files={fileLinks}>{msg.content || '(无内容)'}</Md></div>
         </div>
       </div>
@@ -2192,10 +2246,7 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
     <div style={{ maxWidth: '92%' }}>
       <AvatarHeader streaming={streaming} />
       <div style={{ background: WB.botMsg, border: `1px solid ${WB.border}`, borderRadius: '16px 16px 16px 4px', boxShadow: '0 1px 2px rgba(0,0,0,0.04)', padding: 16 }}>
-        {/* 状态条 */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginBottom: 8, color: streaming ? WB.primary : '#22c55e' }}>
-          {streaming ? <><LoadingOutlined /> 执行中…</> : <><CheckCircleOutlined /> 已完成</>}
-        </div>
+        <ExecutionStatus verification={verification} streaming={streaming} />
 
         {/* 时间线 blocks */}
         {blocks!.map((b, i) => {
