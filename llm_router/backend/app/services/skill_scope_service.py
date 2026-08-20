@@ -105,11 +105,11 @@ async def replace_manager_grants(
 
 async def managed_scopes(db: AsyncSession, cu: CurrentUser) -> set[tuple[str, str | None]]:
     rows = list((await db.execute(select(ScopeManagerAssignment).where(
-        ScopeManagerAssignment.user_id == UUID(cu.id),
+        ScopeManagerAssignment.user_id == UUID(str(cu.id)),
         ScopeManagerAssignment.organization_id == cu.organization_id,
         ScopeManagerAssignment.deleted_at.is_(None),
     ))).scalars().all())
-    scopes: set[tuple[str, str | None]] = {("user", cu.id)}
+    scopes: set[tuple[str, str | None]] = {("user", str(cu.id))}
     for row in rows:
         scopes.add((row.scope_type, row.scope_id))
         if row.scope_type == "department":

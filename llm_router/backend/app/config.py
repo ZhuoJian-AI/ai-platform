@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     skill_runner_timeout_seconds: int = 120
     skill_package_max_bytes: int = 10 * 1024 * 1024
     original_preview_enabled: bool = False
+    # Native file preview is part of the staging-wide workspace experience;
+    # keep the emergency deployment switch but no tenant allowlist.
     original_preview_org_allowlist: str = ""
     multimodal_vision_enabled: bool = True
     multimodal_vision_org_allowlist: str = "aifabei"
@@ -53,6 +55,13 @@ class Settings(BaseSettings):
     storage_public_endpoint: str = ""
     storage_internal_endpoint: str = ""
     storage_gateway_timeout_seconds: int = 60
+    # Staging-wide workspace upload policy. It intentionally has no tenant
+    # allowlist: every organization follows the same capability and limits.
+    workspace_hybrid_upload_enabled: bool = True
+    workspace_max_file_bytes: int = 100 * 1024 * 1024
+    workspace_proxy_upload_max_bytes: int = 10 * 1024 * 1024
+    workspace_upload_session_ttl_seconds: int = 15 * 60
+    workspace_trash_retention_days: int = 30
 
     @property
     def workspace_object_storage_configured(self) -> bool:

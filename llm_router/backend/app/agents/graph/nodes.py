@@ -47,6 +47,8 @@ from app.services import (
     skill_import_service,
     skill_runner_client,
     skill_scope_service,
+    storage_gateway_service,
+    workspace_permission_service,
     workspace_service,
 )
 from app.services import model_gateway as llm_client
@@ -60,6 +62,7 @@ from app.tools.skill_manifest import parse_skill_manifest
 logger = structlog.get_logger()
 
 MAX_STEPS = 8
+RUNNER_INLINE_FILE_BYTES = 10 * 1024 * 1024
 
 GENERAL_SYSTEM_PROMPT = (
     "你是组织智能助手。默认用 Markdown 直接回答；只有用户明确要求生成、编辑、转换或导出文件时，"
@@ -318,6 +321,44 @@ def _builtin_tool_defs(
     ]
 
 
+async def _runner_input(file) -> dict:
+    """Keep large OSS objects out of agent/backend JSON payloads."""
+    meta = file.metadata_ or {}
+    item = {
+        "file_id": str(file.id),
+        "name": str(meta.get("name") or PurePosixPath(file.path).name),
+        "expected_size": file.size,
+    }
+    if file.size > RUNNER_INLINE_FILE_BYTES and storage_gateway_service.is_object_ref(file.content_ref):
+        signed = await storage_gateway_service.get_signed_download(str(file.content_ref))
+        item.update({"download_url": signed["url"], "download_headers": signed.get("headers") or {}})
+    else:
+        raw = await workspace_service.load_file_bytes(file)
+        item["content_base64"] = base64.b64encode(raw).decode("ascii")
+    return item
+
+
+async def _validated_runner_output(item: dict, fallback_mime: str) -> tuple[str, int, str, str]:
+    """Trust OSS, not the Runner response, for large output metadata."""
+    content_ref = str(item.get("content_ref") or "")
+    actual = await storage_gateway_service.inspect_object(content_ref)
+    actual_size = int(actual.get("size") or 0)
+    if actual_size <= 0:
+        raise ValueError("Runner 输出文件为空")
+    if actual_size > settings.workspace_max_file_bytes:
+        raise ValueError("Runner 输出文件超过 100MB 上限")
+    declared_size = int(item.get("size") or 0)
+    if declared_size and declared_size != actual_size:
+        raise ValueError(f"Runner 输出大小校验失败：声明 {declared_size}，实际 {actual_size}")
+    actual_etag = str(actual.get("etag") or "").strip('"')
+    declared_etag = str(item.get("etag") or "").strip('"')
+    if declared_etag and actual_etag and declared_etag != actual_etag:
+        raise ValueError("Runner 输出 ETag 校验失败")
+    actual_mime = str(actual.get("content_type") or "").split(";", 1)[0].strip().lower()
+    mime = actual_mime if actual_mime and actual_mime != "application/octet-stream" else fallback_mime
+    return content_ref, actual_size, mime, actual_etag
+
+
 async def _execute_platform_file_tool(
     state: AgentState, name: str, params: dict, ws, user,
 ) -> str:
@@ -345,13 +386,7 @@ async def _execute_platform_file_tool(
             file = None
         if file is None or ws is None or str(file.workspace_id) != str(ws.id):
             return json.dumps({"status": "error", "error": f"Input file {value} is unavailable"})
-        raw = await workspace_service.load_file_bytes(file)
-        meta = file.metadata_ or {}
-        runner_inputs.append({
-            "file_id": str(file.id),
-            "name": str(meta.get("name") or PurePosixPath(file.path).name),
-            "content_base64": base64.b64encode(raw).decode("ascii"),
-        })
+        runner_inputs.append(await _runner_input(file))
     runner_params = {key: value for key, value in params.items() if key != "input_file_ids"}
     try:
         result, latency = await skill_runner_client.execute_builtin(
@@ -367,20 +402,32 @@ async def _execute_platform_file_tool(
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         task_part = state.get("task_id") or "playground"
         for item in result.get("outputs") or []:
-            raw = base64.b64decode(item.get("content_base64") or "", validate=True)
             original = PurePosixPath(str(item.get("name") or "output.bin")).name
             relative = PurePosixPath(str(item.get("relative_path") or original).replace("\\", "/"))
             safe_parts = [part for part in relative.parts if part not in {"", ".", ".."}]
             relative_path = "/".join(safe_parts) or original
             path = f"平台工具输出/{task_part}/{stamp}-{uuid4().hex[:8]}-{relative_path}"
-            saved = await workspace_service.ingest_uploaded_file(
-                db,
-                ws,
-                path=path,
-                filename=original,
-                content_type=item.get("mime_type") or mimetypes.guess_type(original)[0],
-                raw=raw,
-            )
+            mime = item.get("mime_type") or mimetypes.guess_type(original)[0] or "application/octet-stream"
+            if item.get("content_ref"):
+                content_ref, actual_size, mime, actual_etag = await _validated_runner_output(item, mime)
+                saved = await workspace_service.upsert_file(
+                    db, ws,
+                    WorkspaceFileCreate(path=path, content="", metadata={
+                        "binary": True, "mime": mime, "name": original,
+                        "storage_backend": "oss_gateway", "etag": actual_etag,
+                    }),
+                    content_ref=content_ref, raw_size=actual_size,
+                    raw_content_hash=None, created_by_user_id=user.id,
+                )
+                saved.content = None
+                saved.parse_status = "queued"
+                await workspace_service.sync_current_version(db, saved)
+            else:
+                raw = base64.b64decode(item.get("content_base64") or "", validate=True)
+                saved = await workspace_service.ingest_uploaded_file(
+                    db, ws, path=path, filename=original, content_type=mime, raw=raw,
+                    created_by_user_id=user.id,
+                )
             output_meta = {
                 **(saved.metadata_ or {}),
                 "generated_by": "platform_file_tool",
@@ -421,8 +468,9 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
     }
     if ws is None and not no_workspace_web_action:
         return "no workspace bound to this task"
-    if ws is not None and user is not None and not scope_service.is_workspace_visible(ws, user):
-        return "workspace out of your scope"
+    if ws is not None and user is not None:
+        if not (await workspace_permission_service.capabilities(db, ws, user))["read"]:
+            return "workspace out of your scope"
 
     # 用 SAVEPOINT 隔离本轮工具的 DB 写入：若 flush 失败（如唯一约束冲突），
     # 只回滚保存点，不污染 run 主事务。否则主事务进入 PendingRollback 态，
@@ -958,9 +1006,9 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
                 workspace = await workspace_service.get_workspace(db, UUID(bound_workspace_id))
             except (ValueError, TypeError, AttributeError):
                 workspace = None
-            workspace_visible = bool(
-                workspace is not None and scope_service.is_workspace_visible(workspace, user)
-            )
+            workspace_visible = bool(workspace is not None and (
+                await workspace_permission_service.capabilities(db, workspace, user)
+            )["read"])
         if attachment_ids and workspace_visible:
             file_rows = await db.execute(
                 select(WorkspaceFile).where(
@@ -1043,7 +1091,9 @@ async def _prepare_current_turn_images(state: AgentState, db, user) -> list[mult
         if file is None or str(file.workspace_id) != str(state.get("workspace_id") or ""):
             raise ValueError("图片附件已不存在或不属于当前工作空间")
         workspace = await workspace_service.get_workspace(db, file.workspace_id)
-        if workspace is None or user is None or not scope_service.is_workspace_visible(workspace, user):
+        if workspace is None or user is None or not (
+            await workspace_permission_service.capabilities(db, workspace, user)
+        )["read"]:
             raise ValueError("图片附件已不存在或无权访问")
         raw = await workspace_service.load_file_bytes(file)
         meta = file.metadata_ or {}
@@ -1389,7 +1439,7 @@ async def _execute_code_skill(
     if not ws_id:
         return json.dumps({"status": "error", "error": "请先绑定工作空间"}, ensure_ascii=False)
     ws = await workspace_service.get_workspace(db, UUID(ws_id))
-    if ws is None or not scope_service.is_workspace_visible(ws, user):
+    if ws is None or not (await workspace_permission_service.capabilities(db, ws, user))["read"]:
         return json.dumps({"status": "error", "error": "Workspace is unavailable"})
     params = dict(params)
     requested_ids = params.pop("input_file_ids", None) or state.get("referenced_file_ids") or []
@@ -1410,17 +1460,7 @@ async def _execute_code_skill(
             file = None
         if file is None or str(file.workspace_id) != str(ws.id):
             return json.dumps({"status": "error", "error": f"Input file {value} is unavailable"})
-        meta = file.metadata_ or {}
-        if meta.get("binary"):
-            raw = await workspace_service.load_file_bytes(file)
-            content = base64.b64encode(raw).decode("ascii")
-        else:
-            content = base64.b64encode((file.content or "").encode("utf-8")).decode("ascii")
-        inputs.append({
-            "file_id": str(file.id),
-            "name": str(meta.get("name") or PurePosixPath(file.path).name),
-            "content_base64": content,
-        })
+        inputs.append(await _runner_input(file))
         valid_ids.append(str(file.id))
 
     execution = SkillExecution(
@@ -1446,13 +1486,29 @@ async def _execute_code_skill(
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         task_part = state.get("task_id") or "playground"
         for item in result.get("outputs") or []:
-            raw = base64.b64decode(item.get("content_base64") or "", validate=True)
             original = PurePosixPath(str(item.get("name") or "output.bin")).name
             path = f"技能输出/{task_part}/{stamp}-{uuid4().hex[:8]}-{original}"
-            saved = await workspace_service.ingest_uploaded_file(
-                db, ws, path=path, filename=original,
-                content_type=mimetypes.guess_type(original)[0], raw=raw,
-            )
+            mime = item.get("mime_type") or mimetypes.guess_type(original)[0] or "application/octet-stream"
+            if item.get("content_ref"):
+                content_ref, actual_size, mime, actual_etag = await _validated_runner_output(item, mime)
+                saved = await workspace_service.upsert_file(
+                    db, ws,
+                    WorkspaceFileCreate(path=path, content="", metadata={
+                        "binary": True, "mime": mime, "name": original,
+                        "storage_backend": "oss_gateway", "etag": actual_etag,
+                    }),
+                    content_ref=content_ref, raw_size=actual_size,
+                    raw_content_hash=None, created_by_user_id=user.id,
+                )
+                saved.content = None
+                saved.parse_status = "queued"
+                await workspace_service.sync_current_version(db, saved)
+            else:
+                raw = base64.b64decode(item.get("content_base64") or "", validate=True)
+                saved = await workspace_service.ingest_uploaded_file(
+                    db, ws, path=path, filename=original, content_type=mime, raw=raw,
+                    created_by_user_id=user.id,
+                )
             output_ids.append(str(saved.id))
             output_items.append({
                 "file_id": str(saved.id), "name": original, "path": saved.path,
@@ -1834,7 +1890,9 @@ async def agent_loop(state: AgentState) -> dict:
             if f is None or not f.workspace_id:
                 continue
             ws = await workspace_service.get_workspace(db, UUID(str(f.workspace_id)))
-            if ws is None or (user is not None and not scope_service.is_workspace_visible(ws, user)):
+            if ws is None or (user is not None and not (
+                await workspace_permission_service.capabilities(db, ws, user)
+            )["read"]):
                 continue  # 文件不可见，跳过
             file_names.append(f.path)
             file_refs.append({"file_id": fid, "path": f.path})

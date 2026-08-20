@@ -25,6 +25,9 @@ services:
     init: true
     stop_grace_period: 30s
     logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "0.75", memory: 2G }
 
   redis:
     image: redis:7-alpine
@@ -45,6 +48,9 @@ services:
     restart: unless-stopped
     init: true
     logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 512M }
 
   mock:
     image: ${COMPOSE_PROJECT_NAME:-ai-platform}-mock:${APP_IMAGE_TAG:-latest}
@@ -65,6 +71,9 @@ services:
     restart: unless-stopped
     init: true
     logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "0.20", memory: 256M }
 
   skill-runner:
     image: ${COMPOSE_PROJECT_NAME:-ai-platform}-skill-runner:${APP_IMAGE_TAG:-latest}
@@ -74,6 +83,9 @@ services:
     environment:
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
       SKILL_CACHE_ROOT: /cache
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
+      STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
     expose:
       - "8020"
     volumes:
@@ -87,6 +99,9 @@ services:
     restart: unless-stopped
     init: true
     logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 2G }
 
   backend:
     image: ${COMPOSE_PROJECT_NAME:-ai-platform}-backend:${APP_IMAGE_TAG:-latest}
@@ -109,7 +124,7 @@ services:
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
       SKILL_RUNNER_TIMEOUT_SECONDS: "${SKILL_RUNNER_TIMEOUT_SECONDS:-120}"
       ORIGINAL_PREVIEW_ENABLED: "${ORIGINAL_PREVIEW_ENABLED:-true}"
-      ORIGINAL_PREVIEW_ORG_ALLOWLIST: "${ORIGINAL_PREVIEW_ORG_ALLOWLIST:-aifabei}"
+      ORIGINAL_PREVIEW_ORG_ALLOWLIST: "${ORIGINAL_PREVIEW_ORG_ALLOWLIST:-}"
       MULTIMODAL_VISION_ENABLED: "${MULTIMODAL_VISION_ENABLED:-true}"
       MULTIMODAL_VISION_ORG_ALLOWLIST: "${MULTIMODAL_VISION_ORG_ALLOWLIST:-aifabei}"
       IMAGE_GENERATION_ENABLED: "${IMAGE_GENERATION_ENABLED:-true}"
@@ -122,6 +137,11 @@ services:
       STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-https://oss-cn-hongkong.aliyuncs.com}"
       STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
       STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      WORKSPACE_HYBRID_UPLOAD_ENABLED: "${WORKSPACE_HYBRID_UPLOAD_ENABLED:-true}"
+      WORKSPACE_MAX_FILE_BYTES: "${WORKSPACE_MAX_FILE_BYTES:-104857600}"
+      WORKSPACE_PROXY_UPLOAD_MAX_BYTES: "${WORKSPACE_PROXY_UPLOAD_MAX_BYTES:-10485760}"
+      WORKSPACE_UPLOAD_SESSION_TTL_SECONDS: "${WORKSPACE_UPLOAD_SESSION_TTL_SECONDS:-900}"
+      WORKSPACE_TRASH_RETENTION_DAYS: "${WORKSPACE_TRASH_RETENTION_DAYS:-30}"
     expose:
       - "8000"
     command:
@@ -148,6 +168,40 @@ services:
     restart: unless-stopped
     init: true
     logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "1.25", memory: 2G }
+
+  workspace-parser:
+    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-backend:${APP_IMAGE_TAG:-latest}
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?}
+      DATABASE_URL: ${DATABASE_URL:?}
+      REDIS_URL: ${REDIS_URL:?}
+      WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-true}"
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
+      STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
+      STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-https://oss-cn-hongkong.aliyuncs.com}"
+      STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      WORKSPACE_MAX_FILE_BYTES: "${WORKSPACE_MAX_FILE_BYTES:-104857600}"
+      WORKSPACE_TRASH_RETENTION_DAYS: "${WORKSPACE_TRASH_RETENTION_DAYS:-30}"
+    command: ["python", "-m", "app.workers.workspace_parser"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:size=1073741824,mode=1777
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "0.75", memory: 1536M }
 
   frontend:
     image: ${COMPOSE_PROJECT_NAME:-ai-platform}-frontend:${APP_IMAGE_TAG:-latest}
@@ -162,6 +216,9 @@ services:
     restart: unless-stopped
     init: true
     logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "0.20", memory: 256M }
 
 volumes:
   postgres_data:

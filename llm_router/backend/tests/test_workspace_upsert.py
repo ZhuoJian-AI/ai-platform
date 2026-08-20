@@ -8,14 +8,14 @@
 
 修复后：同路径即便存在软删记录，upsert 应复活该行并覆盖内容，不再 INSERT 冲突。
 
-自包含：本测试自建引擎 + 仅创建所需 3 张表（organizations / workspaces /
-workspace_files），使软删除唯一约束回归场景与全局 API 测试夹具相互隔离。
+自包含：本测试自建引擎；文件版本与审计字段引入跨表外键后，使用完整元数据
+建表，使软删除唯一约束回归场景与全局 API 测试夹具相互隔离。
 """
 
 import asyncpg
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -27,7 +27,6 @@ from app.schemas.workspace import WorkspaceFileCreate
 from app.services import workspace_service
 
 _TEST_DB = "ai_infra_ws_upsert_test"
-_TABLES = [Organization.__table__, Workspace.__table__, WorkspaceFile.__table__]
 
 
 # 本测试自建引擎 + 仅建 3 张表，不复用 conftest 的全量 ``db_engine`` autouse fixture，
@@ -63,8 +62,9 @@ def _test_db_url() -> str:
 async def session(_test_db_url: str) -> AsyncSession:
     engine = create_async_engine(_test_db_url, echo=False)
     async with engine.begin() as conn:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(
-            lambda c: Base.metadata.create_all(c, tables=_TABLES, checkfirst=True)
+            lambda c: Base.metadata.create_all(c, checkfirst=True)
         )
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as s:
@@ -72,7 +72,7 @@ async def session(_test_db_url: str) -> AsyncSession:
         await s.rollback()
     async with engine.begin() as conn:
         await conn.run_sync(
-            lambda c: Base.metadata.drop_all(c, tables=_TABLES, checkfirst=True)
+            lambda c: Base.metadata.drop_all(c, checkfirst=True)
         )
     await engine.dispose()
 

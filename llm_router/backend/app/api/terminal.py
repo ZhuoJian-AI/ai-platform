@@ -19,7 +19,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +48,7 @@ from app.models.rag import RagCollection, RagDocument, RagFolder
 from app.models.skill import SkillFolder, SkillVersion
 from app.models.task import Task
 from app.models.team import Team
+from app.models.workspace import WorkspaceFileVersion, WorkspaceUploadSession
 from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
 from app.schemas.data_interface import DataInterfaceRead, DataSystemRead
 from app.schemas.ontology import (
@@ -89,15 +90,23 @@ from app.schemas.task import (
 )
 from app.schemas.user import UserRead
 from app.schemas.workspace import (
+    WorkspaceAuditEventRead,
     WorkspaceBulkDeleteRequest,
     WorkspaceBulkDeleteResult,
     WorkspaceFileCreate,
     WorkspaceFilePage,
     WorkspaceFilePreviewRead,
     WorkspaceFileRead,
+    WorkspaceFileVersionRead,
     WorkspaceFolderCreate,
     WorkspaceFolderRead,
+    WorkspacePublishRequest,
     WorkspaceRead,
+    WorkspaceShareCreate,
+    WorkspaceShareRead,
+    WorkspaceUploadComplete,
+    WorkspaceUploadInitiate,
+    WorkspaceUploadSessionRead,
 )
 from app.services import (
     doc_parser,
@@ -106,7 +115,10 @@ from app.services import (
     scope_service,
     skill_scope_service,
     skills_pack_service,
+    storage_gateway_service,
     task_service,
+    workspace_governance_service,
+    workspace_permission_service,
     workspace_service,
 )
 from app.services.agent_service import (
@@ -268,19 +280,23 @@ async def _resolve_task_attachments(
         if str(f.workspace_id) != str(workspace_id):
             raise HTTPException(status_code=400, detail=f"附件不属于当前任务工作空间：{f.path}")
         ws = await workspace_service.get_workspace(db, f.workspace_id)
-        if ws is None or not scope_service.is_workspace_visible(ws, cu):
+        if ws is None:
             raise HTTPException(status_code=404, detail=f"附件不存在或无权访问：{fid}")
+        await workspace_permission_service.assert_can_read(db, ws, cu)
         raw_tool = workspace_service.raw_tool_file_kind(f)
         if f.parse_status != "ready" and raw_tool is None:
             detail = f.parse_error or "文件尚未解析完成"
             raise HTTPException(status_code=422, detail=f"附件无法用于对话：{f.path}（{detail}）")
         meta = f.metadata_ or {}
-        snapshots.append({
+        snapshot = {
             "file_id": fid,
             "workspace_id": str(f.workspace_id),
             "path": f.path,
             "name": str(meta.get("name") or f.path.rsplit("/", 1)[-1]),
-        })
+        }
+        if getattr(f, "current_version_id", None):
+            snapshot["version_id"] = str(f.current_version_id)
+        snapshots.append(snapshot)
     return snapshots
 
 
@@ -322,8 +338,13 @@ async def resources_endpoint(
     rags = await scope_service.list_rags_for_user(db, cu)
     defaults = await _user_defaults(db, cu)
     skill_summaries = await _skill_summaries(db, skills)
+    workspace_reads: list[dict] = []
+    for workspace in workspaces:
+        item = WorkspaceRead.model_validate(workspace).model_dump()
+        item["capabilities"] = await workspace_permission_service.capabilities(db, workspace, cu)
+        workspace_reads.append(item)
     return {
-        "workspaces": [WorkspaceRead.model_validate(w).model_dump() for w in workspaces],
+        "workspaces": workspace_reads,
         "skills": skill_summaries,
         # 本体已文件化：返回轻量摘要（id / name=文件名 / path），供下拉与计数。
         "ontologies": [
@@ -716,8 +737,9 @@ async def cancel_task_endpoint(
 
 async def _get_visible_workspace(db: AsyncSession, ws_id: UUID, cu: CurrentUser):
     ws = await workspace_service.get_workspace(db, ws_id)
-    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+    if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
     return ws
 
 
@@ -743,7 +765,11 @@ async def upsert_ws_file_endpoint(
 ):
     assert_user_write(cu)
     ws = await _get_visible_workspace(db, ws_id, cu)
-    f = await workspace_service.upsert_file(db, ws, data)
+    await workspace_permission_service.assert_can_create(db, ws, cu)
+    f = await workspace_service.upsert_file(db, ws, data, created_by_user_id=cu.id)
+    await workspace_governance_service.audit(
+        db, ws, "file_written", user_id=cu.id, file=f, version_id=f.current_version_id,
+    )
     await db.commit()
     return f
 
@@ -757,16 +783,76 @@ async def upload_ws_file_endpoint(
 ):
     assert_user_write(cu)
     ws = await _get_visible_workspace(db, ws_id, cu)
-    raw = await file.read()
+    await workspace_permission_service.assert_can_create(db, ws, cu)
+    raw = bytearray()
+    while chunk := await file.read(1024 * 1024):
+        raw.extend(chunk)
+        if len(raw) > settings.workspace_proxy_upload_max_bytes:
+            raise HTTPException(status_code=413, detail="10MB 以上文件请使用 OSS 直传")
     try:
         f = await workspace_service.ingest_uploaded_file(
             db, ws, path=path or file.filename or "upload.bin",
-            filename=file.filename or "upload.bin", content_type=file.content_type, raw=raw,
+            filename=file.filename or "upload.bin", content_type=file.content_type, raw=bytes(raw),
+            created_by_user_id=cu.id,
         )
     except workspace_service.WorkspaceFileUploadError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await workspace_governance_service.audit(
+        db,
+        ws,
+        "upload_completed",
+        user_id=cu.id,
+        file=f,
+        version_id=f.current_version_id,
+        metadata={"size": f.size, "transport": "backend_proxy"},
+    )
     await db.commit()
     return f
+
+
+@router.post(
+    "/terminal/workspaces/{ws_id}/uploads/initiate",
+    response_model=WorkspaceUploadSessionRead,
+    status_code=201,
+)
+async def initiate_ws_upload_endpoint(
+    ws_id: UUID, data: WorkspaceUploadInitiate,
+    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    ws = await _get_visible_workspace(db, ws_id, cu)
+    session = await workspace_governance_service.initiate_direct_upload(db, ws, cu, data)
+    result = WorkspaceUploadSessionRead(
+        id=session.id, url=str(session.upload_url), headers=dict(session.upload_headers or {}),
+        expires_at=session.expires_at, max_file_bytes=settings.workspace_max_file_bytes,
+    )
+    await db.commit()
+    return result
+
+
+@router.post(
+    "/terminal/uploads/{session_id}/complete", response_model=WorkspaceFileRead,
+)
+async def complete_ws_upload_endpoint(
+    session_id: UUID, data: WorkspaceUploadComplete,
+    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    session = await db.get(WorkspaceUploadSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="上传会话不存在")
+    file = await workspace_governance_service.complete_direct_upload(db, session, cu, client_etag=data.etag)
+    await db.commit()
+    return file
+
+
+@router.delete("/terminal/uploads/{session_id}", status_code=204)
+async def cancel_ws_upload_endpoint(
+    session_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    session = await db.get(WorkspaceUploadSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="上传会话不存在")
+    await workspace_governance_service.cancel_upload(db, session, cu)
+    await db.commit()
 
 
 @router.get("/terminal/files/{file_id}", response_model=WorkspaceFileRead)
@@ -777,8 +863,9 @@ async def get_ws_file_endpoint(
     if f is None:
         raise HTTPException(status_code=404, detail="File not found")
     ws = await workspace_service.get_workspace(db, f.workspace_id)
-    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+    if ws is None:
         raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
     return f
 
 
@@ -790,8 +877,9 @@ async def preview_ws_file_endpoint(
     if f is None:
         raise HTTPException(status_code=404, detail="File not found")
     ws = await workspace_service.get_workspace(db, f.workspace_id)
-    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+    if ws is None:
         raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
     return f
 
 
@@ -803,8 +891,9 @@ async def original_preview_ws_file_endpoint(
     if f is None:
         raise HTTPException(status_code=404, detail="File not found")
     ws = await workspace_service.get_workspace(db, f.workspace_id)
-    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+    if ws is None:
         raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
     organization = await db.get(Organization, ws.organization_id)
     if organization is None or not settings.original_preview_enabled_for(organization.slug):
         raise HTTPException(status_code=404, detail="Original preview is not enabled")
@@ -830,8 +919,15 @@ async def download_ws_file_endpoint(
     if f is None:
         raise HTTPException(status_code=404, detail="File not found")
     ws = await workspace_service.get_workspace(db, f.workspace_id)
-    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+    if ws is None:
         raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
+    if storage_gateway_service.is_object_ref(f.content_ref):
+        try:
+            signed = await storage_gateway_service.get_signed_download(str(f.content_ref))
+        except storage_gateway_service.StorageGatewayError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return RedirectResponse(str(signed["url"]), status_code=307)
     try:
         raw = await workspace_service.load_file_bytes(f)
     except workspace_service.WorkspaceFileUploadError as exc:
@@ -854,8 +950,9 @@ async def reparse_ws_file_endpoint(
     if f is None:
         raise HTTPException(status_code=404, detail="File not found")
     ws = await workspace_service.get_workspace(db, f.workspace_id)
-    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+    if ws is None:
         raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_manage(db, ws, cu)
     f = await workspace_service.reparse_file(db, f)
     await db.commit()
     return f
@@ -867,19 +964,8 @@ PUBLIC_HTML_EXTS = {"html", "htm", "doc", "docx"}
 
 @router.get("/terminal/public/files/{file_id}")
 async def public_ws_file_endpoint(file_id: UUID, db: AsyncSession = Depends(get_db)):
-    """免登录永久公开访问工作空间 HTML 文件（分享链接）。
-
-    仅放行 HTML 类扩展名（html/htm/doc/docx，内容为 HTML），其余一律 404——
-    即「分享」只对 HTML 文件生效。``file_id`` 为 UUID，链接永久有效，持有者均可访问。
-    """
-    f = await workspace_service.get_file(db, file_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    ext = f.path.rsplit(".", 1)[-1].lower() if "." in f.path else ""
-    if ext not in PUBLIC_HTML_EXTS:
-        raise HTTPException(status_code=404, detail="File not found")
-    content = workspace_service.resolve_file_content(f)
-    return Response(content=content, media_type="text/html; charset=utf-8")
+    """Legacy permanent links are intentionally retired in favour of expiring tokens."""
+    raise HTTPException(status_code=410, detail="永久公开链接已停用，请重新创建限时分享链接")
 
 
 @router.patch("/terminal/files/{file_id}", response_model=WorkspaceFileRead)
@@ -892,9 +978,10 @@ async def update_ws_file_endpoint(
     if f is None:
         raise HTTPException(status_code=404, detail="File not found")
     ws = await workspace_service.get_workspace(db, f.workspace_id)
-    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+    if ws is None:
         raise HTTPException(status_code=404, detail="File not found")
-    updated = await workspace_service.upsert_file(db, ws, data)
+    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    updated = await workspace_service.upsert_file(db, ws, data, created_by_user_id=cu.id)
     await db.commit()
     return updated
 
@@ -908,9 +995,13 @@ async def delete_ws_file_endpoint(
     if f is None:
         raise HTTPException(status_code=404, detail="File not found")
     ws = await workspace_service.get_workspace(db, f.workspace_id)
-    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+    if ws is None:
         raise HTTPException(status_code=404, detail="File not found")
-    await workspace_service.soft_delete_file(db, f)
+    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    await workspace_service.soft_delete_file(db, f, user_id=cu.id)
+    await workspace_governance_service.audit(
+        db, ws, "file_deleted", user_id=cu.id, file=f, version_id=f.current_version_id,
+    )
     await db.commit()
 
 
@@ -931,6 +1022,7 @@ async def create_ws_folder_endpoint(
 ):
     assert_user_write(cu)
     ws = await _get_visible_workspace(db, ws_id, cu)
+    await workspace_permission_service.assert_can_create(db, ws, cu)
     folder = await workspace_service.create_folder(db, ws, data)
     await db.commit()
     return folder
@@ -945,10 +1037,127 @@ async def delete_ws_folder_endpoint(
     if folder is None:
         raise HTTPException(status_code=404, detail="Folder not found")
     ws = await workspace_service.get_workspace(db, folder.workspace_id)
-    if ws is None or not scope_service.is_workspace_visible(ws, cu):
+    if ws is None:
         raise HTTPException(status_code=404, detail="Folder not found")
-    await workspace_service.soft_delete_folder(db, folder)
+    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    await workspace_service.soft_delete_folder(db, folder, user_id=cu.id)
+    await workspace_governance_service.audit(
+        db, ws, "folder_deleted", user_id=cu.id, metadata={"path": folder.path},
+    )
     await db.commit()
+
+
+@router.get("/terminal/files/{file_id}/versions", response_model=list[WorkspaceFileVersionRead])
+async def list_ws_file_versions_endpoint(
+    file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    file = await workspace_service.get_file(db, file_id)
+    if file is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await _get_visible_workspace(db, file.workspace_id, cu)
+    await workspace_permission_service.assert_can_read(db, ws, cu)
+    return await workspace_governance_service.list_versions(db, file)
+
+
+@router.post("/terminal/files/{file_id}/versions/{version_id}/restore", response_model=WorkspaceFileRead)
+async def restore_ws_file_version_endpoint(
+    file_id: UUID, version_id: UUID,
+    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    file = await workspace_service.get_file(db, file_id)
+    version = await db.get(WorkspaceFileVersion, version_id)
+    if file is None or version is None:
+        raise HTTPException(status_code=404, detail="文件版本不存在")
+    ws = await _get_visible_workspace(db, file.workspace_id, cu)
+    restored = await workspace_governance_service.restore_version(db, ws, file, version, cu)
+    await db.commit()
+    return restored
+
+
+@router.get("/terminal/workspaces/{ws_id}/trash", response_model=list[WorkspaceFileRead])
+async def list_ws_trash_endpoint(
+    ws_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    ws = await _get_visible_workspace(db, ws_id, cu)
+    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    return await workspace_governance_service.list_trash(db, ws)
+
+
+@router.get("/terminal/workspaces/{ws_id}/audit", response_model=list[WorkspaceAuditEventRead])
+async def list_ws_audit_endpoint(
+    ws_id: UUID, limit: int = Query(200, ge=1, le=500),
+    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    ws = await _get_visible_workspace(db, ws_id, cu)
+    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    return await workspace_governance_service.list_audit_events(db, ws, limit=limit)
+
+
+@router.post("/terminal/workspaces/{ws_id}/trash/{file_id}/restore", response_model=WorkspaceFileRead)
+async def restore_ws_trash_endpoint(
+    ws_id: UUID, file_id: UUID,
+    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    ws = await _get_visible_workspace(db, ws_id, cu)
+    file = await workspace_governance_service.restore_from_trash(db, ws, file_id, cu)
+    await db.commit()
+    return file
+
+
+@router.post("/terminal/files/{file_id}/publish", response_model=WorkspaceFileRead, status_code=201)
+async def publish_ws_file_endpoint(
+    file_id: UUID, data: WorkspacePublishRequest,
+    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    file = await workspace_service.get_file(db, file_id)
+    if file is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    source_ws = await _get_visible_workspace(db, file.workspace_id, cu)
+    target_ws = await workspace_service.get_workspace(db, data.target_workspace_id)
+    if target_ws is None:
+        raise HTTPException(status_code=404, detail="目标工作空间不存在")
+    result = await workspace_governance_service.publish_file(
+        db, source_ws, file, target_ws, cu, data.target_path,
+    )
+    await db.commit()
+    return result
+
+
+@router.post("/terminal/files/{file_id}/shares", response_model=WorkspaceShareRead, status_code=201)
+async def create_ws_share_endpoint(
+    file_id: UUID, data: WorkspaceShareCreate, request: Request,
+    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    file = await workspace_service.get_file(db, file_id)
+    if file is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await _get_visible_workspace(db, file.workspace_id, cu)
+    token, expires_at = await workspace_governance_service.create_share(
+        db, ws, file, cu, data.expires_in_seconds,
+    )
+    await db.commit()
+    return WorkspaceShareRead(
+        url=str(request.url_for("public_workspace_share_endpoint", token=token)), expires_at=expires_at,
+    )
+
+
+@router.get("/terminal/public/shares/{token}", name="public_workspace_share_endpoint")
+async def public_workspace_share_endpoint(token: str, db: AsyncSession = Depends(get_db)):
+    version, filename, media_type = await workspace_governance_service.resolve_share(db, token)
+    if storage_gateway_service.is_object_ref(version.content_ref):
+        try:
+            signed = await storage_gateway_service.get_signed_download(str(version.content_ref))
+        except storage_gateway_service.StorageGatewayError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return RedirectResponse(str(signed["url"]), status_code=307)
+    try:
+        raw = await workspace_governance_service.load_version_bytes(version)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="分享文件暂时无法读取") from exc
+    return Response(content=raw, media_type=media_type, headers={
+        "Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}",
+        "X-Content-Type-Options": "nosniff",
+    })
 
 
 @router.delete("/terminal/workspaces/{ws_id}/folder-path")
@@ -961,10 +1170,14 @@ async def delete_ws_folder_path_endpoint(
     """Delete a real or inferred folder path recursively."""
     assert_user_write(cu)
     ws = await _get_visible_workspace(db, ws_id, cu)
+    await workspace_permission_service.assert_can_manage(db, ws, cu)
     try:
-        deleted = await workspace_service.soft_delete_folder_path(db, ws.id, path)
+        deleted = await workspace_service.soft_delete_folder_path(db, ws.id, path, user_id=cu.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await workspace_governance_service.audit(
+        db, ws, "folder_deleted", user_id=cu.id, metadata={"path": path, **deleted},
+    )
     await db.commit()
     return deleted
 
@@ -981,15 +1194,21 @@ async def bulk_delete_ws_items_endpoint(
 ):
     assert_user_write(cu)
     ws = await _get_visible_workspace(db, ws_id, cu)
+    await workspace_permission_service.assert_can_manage(db, ws, cu)
     try:
         deleted = await workspace_service.bulk_soft_delete_items(
             db,
             ws.id,
             file_ids=data.file_ids,
             folder_paths=data.folder_paths,
+            user_id=cu.id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await workspace_governance_service.audit(
+        db, ws, "items_bulk_deleted", user_id=cu.id,
+        metadata={**deleted, "folder_paths": data.folder_paths, "file_count": len(data.file_ids)},
+    )
     await db.commit()
     return deleted
 

@@ -23,7 +23,15 @@ from app.models.task import Task, TaskMessage
 from app.models.team import Team
 from app.models.tool_call_log import ToolCallLog
 from app.models.user import User
-from app.models.workspace import Workspace, WorkspaceFile, WorkspaceFolder
+from app.models.workspace import (
+    Workspace,
+    WorkspaceAuditEvent,
+    WorkspaceFile,
+    WorkspaceFileVersion,
+    WorkspaceFolder,
+    WorkspaceShareLink,
+    WorkspaceUploadSession,
+)
 
 __all__ = [
     "Admin",
@@ -42,6 +50,10 @@ __all__ = [
     "Workspace",
     "WorkspaceFile",
     "WorkspaceFolder",
+    "WorkspaceFileVersion",
+    "WorkspaceUploadSession",
+    "WorkspaceAuditEvent",
+    "WorkspaceShareLink",
     "Agent",
     "AgentRun",
     "AgentRunEvent",

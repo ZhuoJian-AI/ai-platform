@@ -3,7 +3,7 @@
 import base64
 import hashlib
 import mimetypes
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from uuid import UUID
 
@@ -16,7 +16,7 @@ from app.models.department import Department
 from app.models.organization import Organization
 from app.models.team import Team
 from app.models.user import User
-from app.models.workspace import Workspace, WorkspaceFile, WorkspaceFolder
+from app.models.workspace import Workspace, WorkspaceFile, WorkspaceFileVersion, WorkspaceFolder
 from app.schemas.workspace import (
     WorkspaceCreate,
     WorkspaceFileCreate,
@@ -27,7 +27,7 @@ from app.schemas.workspace import (
 )
 from app.services import doc_parser, storage_gateway_service
 
-MAX_WORKSPACE_FILE_BYTES = 5 * 1024 * 1024
+MAX_WORKSPACE_FILE_BYTES = settings.workspace_max_file_bytes
 MAX_LLM_FILE_CHARS = 100_000
 MAX_TOOL_FILE_BYTES = 50 * 1024
 
@@ -129,13 +129,15 @@ async def upsert_file(
     content_ref: str | None = None,
     raw_size: int | None = None,
     raw_content_hash: str | None = None,
+    created_by_user_id: str | UUID | None = None,
+    created_by_admin_id: int | None = None,
 ) -> WorkspaceFile:
     path = _normalize_path(data.path)
     content = _sanitize_content(data.content)
     meta = dict(data.metadata or {})
     # 二进制文件：前端以 base64 编码写入 content，并以 metadata.binary 标记。
     # size / content_hash 按解码后的原始字节计算，content 列存 base64 文本（PG TEXT 不允许 NUL）。
-    if meta.get("binary") and raw_size is not None and raw_content_hash is not None:
+    if meta.get("binary") and raw_size is not None:
         size = raw_size
         content_hash = raw_content_hash
     elif meta.get("binary"):
@@ -174,6 +176,7 @@ async def upsert_file(
             parse_status=parse_status,
             parse_kind=parse_kind,
             metadata_=meta,
+            created_by_user_id=created_by_user_id,
         )
         db.add(f)
     else:
@@ -189,14 +192,65 @@ async def upsert_file(
         # 复活被软删的同路径记录：upsert 语义是「该路径现在应是这份内容」，
         # 旧记录的软删状态不应阻挡新写入（否则唯一约束会让 INSERT 失败）。
         f.deleted_at = None
+        f.deleted_by_user_id = None
+        f.deleted_by_admin_id = None
+        f.purge_after = None
         # 合并而非覆盖：保留既有元数据（如 task_id 归属标记），仅用新值更新同名字段。
         f.metadata_ = {**(f.metadata_ or {}), **meta}
         if not meta.get("binary"):
             f.metadata_.pop("binary", None)
             f.metadata_.pop("mime", None)
     await db.flush()
+    await create_file_version(
+        db, f, created_by_user_id=created_by_user_id, created_by_admin_id=created_by_admin_id,
+    )
     await db.refresh(f)
     return f
+
+
+async def create_file_version(
+    db: AsyncSession,
+    f: WorkspaceFile,
+    *,
+    created_by_user_id: str | UUID | None = None,
+    created_by_admin_id: int | None = None,
+) -> WorkspaceFileVersion:
+    latest = int((await db.execute(select(func.coalesce(func.max(WorkspaceFileVersion.version_no), 0)).where(
+        WorkspaceFileVersion.workspace_file_id == f.id,
+    ))).scalar_one())
+    version = WorkspaceFileVersion(
+        workspace_file_id=f.id,
+        version_no=latest + 1,
+        size=f.size,
+        content_hash=f.content_hash,
+        content_ref=f.content_ref,
+        content=f.content,
+        extracted_text=f.extracted_text,
+        parse_status=f.parse_status,
+        parse_kind=f.parse_kind,
+        parse_error=f.parse_error,
+        metadata_=dict(f.metadata_ or {}),
+        created_by_user_id=created_by_user_id,
+        created_by_admin_id=created_by_admin_id,
+    )
+    db.add(version)
+    await db.flush()
+    f.current_version_id = version.id
+    await db.flush()
+    return version
+
+
+async def sync_current_version(db: AsyncSession, f: WorkspaceFile) -> None:
+    if not f.current_version_id:
+        return
+    version = await db.get(WorkspaceFileVersion, f.current_version_id)
+    if version is None:
+        return
+    version.extracted_text = f.extracted_text
+    version.parse_status = f.parse_status
+    version.parse_kind = f.parse_kind
+    version.parse_error = f.parse_error
+    await db.flush()
 
 
 async def list_files(db: AsyncSession, ws_id: UUID) -> list[WorkspaceFile]:
@@ -308,12 +362,24 @@ async def update_file(db: AsyncSession, f: WorkspaceFile, data: WorkspaceFileUpd
     if data.metadata is not None:
         f.metadata_ = data.metadata
     await db.flush()
+    await create_file_version(db, f)
     await db.refresh(f)
     return f
 
 
-async def soft_delete_file(db: AsyncSession, f: WorkspaceFile) -> None:
+async def soft_delete_file(
+    db: AsyncSession,
+    f: WorkspaceFile,
+    *,
+    user_id: str | UUID | None = None,
+    admin_id: int | None = None,
+) -> None:
     f.deleted_at = datetime.now(UTC)
+    f.deleted_by_user_id = user_id
+    f.deleted_by_admin_id = admin_id
+    f.purge_after = datetime.fromtimestamp(
+        f.deleted_at.timestamp() + settings.workspace_trash_retention_days * 86400, tz=UTC,
+    )
     await db.flush()
 
 
@@ -325,8 +391,10 @@ async def ingest_uploaded_file(
     filename: str,
     content_type: str | None,
     raw: bytes,
+    created_by_user_id: str | UUID | None = None,
+    created_by_admin_id: int | None = None,
 ) -> WorkspaceFile:
-    """保存工作空间原文件并同步提取可预览、可供 LLM 使用的结构化文本。"""
+    """Store an original file and queue binary parsing outside the request."""
     if not raw:
         raise WorkspaceFileUploadError("文件为空")
     if len(raw) > MAX_WORKSPACE_FILE_BYTES:
@@ -359,6 +427,8 @@ async def ingest_uploaded_file(
             content_ref=content_ref,
             raw_size=len(raw),
             raw_content_hash=digest,
+            created_by_user_id=created_by_user_id,
+            created_by_admin_id=created_by_admin_id,
         )
         if content_ref is not None:
             f.content = None
@@ -370,7 +440,23 @@ async def ingest_uploaded_file(
             except storage_gateway_service.StorageGatewayError:
                 pass
         raise
-    await _parse_binary_file(db, f, filename=filename, content_type=mime, raw=raw)
+    # Small uploads preserve the original immediate-availability behaviour.
+    # Only direct/large OSS uploads are handed to workspace-parser so a large
+    # Office document never occupies a backend request worker for minutes.
+    if len(raw) <= settings.workspace_proxy_upload_max_bytes:
+        await _parse_binary_file(
+            db,
+            f,
+            filename=filename,
+            content_type=content_type,
+            raw=raw,
+        )
+    else:
+        f.parse_status = "queued"
+        f.parse_kind = None
+        f.parse_error = None
+        await sync_current_version(db, f)
+        await db.flush()
     return f
 
 
@@ -405,22 +491,14 @@ async def reparse_file(db: AsyncSession, f: WorkspaceFile) -> WorkspaceFile:
         await db.flush()
         await db.refresh(f)
         return f
-    try:
-        raw = await load_file_bytes(f)
-    except (WorkspaceFileUploadError, storage_gateway_service.StorageGatewayError) as exc:
-        f.parse_status = "failed"
-        f.parse_error = str(exc)[:1000]
-        await db.flush()
-        await db.refresh(f)
-        return f
-    meta = f.metadata_ or {}
-    await _parse_binary_file(
-        db,
-        f,
-        filename=str(meta.get("name") or f.path.rsplit("/", 1)[-1]),
-        content_type=str(meta.get("mime") or "application/octet-stream"),
-        raw=raw,
-    )
+    f.parse_status = "queued"
+    f.parse_kind = None
+    f.parse_error = None
+    f.parse_locked_at = None
+    f.parse_locked_by = None
+    await sync_current_version(db, f)
+    await db.flush()
+    await db.refresh(f)
     return f
 
 
@@ -447,6 +525,7 @@ async def _parse_binary_file(
         f.parse_kind = None
         f.parse_error = message[:1000]
     await db.flush()
+    await sync_current_version(db, f)
     await db.refresh(f)
 
 
@@ -598,7 +677,9 @@ async def get_folder(db: AsyncSession, folder_id: UUID) -> WorkspaceFolder | Non
     return result.scalar_one_or_none()
 
 
-async def soft_delete_folder(db: AsyncSession, folder: WorkspaceFolder) -> None:
+async def soft_delete_folder(
+    db: AsyncSession, folder: WorkspaceFolder, *, user_id: str | UUID | None = None,
+) -> None:
     """软删文件夹 + 其下所有子文件夹 + 该前缀下所有文件（级联）。
 
     嵌套靠路径段，故以 ``folder.path + "/"`` 前缀匹配后代与文件。
@@ -627,12 +708,16 @@ async def soft_delete_folder(db: AsyncSession, folder: WorkspaceFolder) -> None:
     )).scalars().all()
     for sf in sub_files:
         sf.deleted_at = now
+        sf.deleted_by_user_id = user_id
+        sf.purge_after = now + timedelta(days=settings.workspace_trash_retention_days)
 
     folder.deleted_at = now
     await db.flush()
 
 
-async def soft_delete_folder_path(db: AsyncSession, ws_id: UUID, path: str) -> dict[str, int]:
+async def soft_delete_folder_path(
+    db: AsyncSession, ws_id: UUID, path: str, *, user_id: str | UUID | None = None,
+) -> dict[str, int]:
     """Delete an explicit or path-inferred folder and everything below it.
 
     Generated tool/attachment directories often exist only as path prefixes and
@@ -668,6 +753,8 @@ async def soft_delete_folder_path(db: AsyncSession, ws_id: UUID, path: str) -> d
     )).scalars().all()
     for item in file_rows:
         item.deleted_at = now
+        item.deleted_by_user_id = user_id
+        item.purge_after = now + timedelta(days=settings.workspace_trash_retention_days)
 
     await db.flush()
     return {"folders": len(matched_folders), "files": len(file_rows)}
@@ -679,6 +766,7 @@ async def bulk_soft_delete_items(
     *,
     file_ids: list[UUID],
     folder_paths: list[str],
+    user_id: str | UUID | None = None,
 ) -> dict[str, int]:
     """Atomically validate and soft-delete selected files and folder subtrees."""
     unique_file_ids = list(dict.fromkeys(file_ids))
@@ -717,7 +805,7 @@ async def bulk_soft_delete_items(
     deleted_files = 0
     deleted_folders = 0
     for path in reduced_paths:
-        result = await soft_delete_folder_path(db, ws_id, path)
+        result = await soft_delete_folder_path(db, ws_id, path, user_id=user_id)
         deleted_files += result["files"]
         deleted_folders += result["folders"]
 
@@ -725,6 +813,8 @@ async def bulk_soft_delete_items(
     for item in selected_files:
         if item.deleted_at is None:
             item.deleted_at = now
+            item.deleted_by_user_id = user_id
+            item.purge_after = now + timedelta(days=settings.workspace_trash_retention_days)
             deleted_files += 1
     await db.flush()
     return {"deleted_files": deleted_files, "deleted_folders": deleted_folders}

@@ -14,6 +14,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
+from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +29,7 @@ from app.auth.admin_auth import (
 from app.config import settings
 from app.database import get_db
 from app.models.organization import Organization
+from app.models.workspace import WorkspaceUploadSession
 from app.schemas.workspace import (
     WorkspaceCreate,
     WorkspaceFileCreate,
@@ -39,7 +41,11 @@ from app.schemas.workspace import (
     WorkspaceFolderRead,
     WorkspaceRead,
     WorkspaceUpdate,
+    WorkspaceUploadComplete,
+    WorkspaceUploadInitiate,
+    WorkspaceUploadSessionRead,
 )
+from app.services import storage_gateway_service, workspace_governance_service
 from app.services.organization_service import list_organizations
 from app.services.workspace_preview_service import (
     OriginalPreviewError,
@@ -167,7 +173,16 @@ async def upsert_file_endpoint(
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
     assert_org_write_access(auth, ws.organization_id)
-    return await upsert_file(db, ws, data)
+    saved = await upsert_file(db, ws, data, created_by_admin_id=auth.id)
+    await workspace_governance_service.audit(
+        db,
+        ws,
+        "file_written",
+        admin_id=auth.id,
+        file=saved,
+        version_id=saved.current_version_id,
+    )
+    return saved
 
 
 @router.post("/workspaces/{ws_id}/files/upload", response_model=WorkspaceFileRead, status_code=201)
@@ -182,14 +197,72 @@ async def upload_file_endpoint(
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
     assert_org_write_access(auth, ws.organization_id)
-    raw = await file.read()
+    raw = bytearray()
+    while chunk := await file.read(1024 * 1024):
+        raw.extend(chunk)
+        if len(raw) > settings.workspace_proxy_upload_max_bytes:
+            raise HTTPException(status_code=413, detail="10MB 以上文件请使用 OSS 直传")
     try:
-        return await ingest_uploaded_file(
+        saved = await ingest_uploaded_file(
             db, ws, path=path or file.filename or "upload.bin",
-            filename=file.filename or "upload.bin", content_type=file.content_type, raw=raw,
+            filename=file.filename or "upload.bin", content_type=file.content_type, raw=bytes(raw),
+            created_by_admin_id=auth.id,
         )
+        await workspace_governance_service.audit(
+            db,
+            ws,
+            "upload_completed",
+            admin_id=auth.id,
+            file=saved,
+            version_id=saved.current_version_id,
+            metadata={"size": saved.size, "transport": "backend_proxy"},
+        )
+        return saved
     except WorkspaceFileUploadError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/workspaces/{ws_id}/uploads/initiate", response_model=WorkspaceUploadSessionRead, status_code=201,
+)
+async def initiate_admin_upload_endpoint(
+    ws_id: UUID, data: WorkspaceUploadInitiate,
+    auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+):
+    ws = await get_workspace(db, ws_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_write_access(auth, ws.organization_id)
+    session = await workspace_governance_service.initiate_admin_direct_upload(db, ws, auth, data)
+    return WorkspaceUploadSessionRead(
+        id=session.id, url=str(session.upload_url), headers=dict(session.upload_headers or {}),
+        expires_at=session.expires_at, max_file_bytes=settings.workspace_max_file_bytes,
+    )
+
+
+@router.post("/workspace-uploads/{session_id}/complete", response_model=WorkspaceFileRead)
+async def complete_admin_upload_endpoint(
+    session_id: UUID, data: WorkspaceUploadComplete,
+    auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+):
+    session = await db.get(WorkspaceUploadSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="上传会话不存在")
+    assert_org_write_access(auth, session.organization_id)
+    return await workspace_governance_service.complete_direct_upload(
+        db, session, auth, client_etag=data.etag,
+    )
+
+
+@router.delete("/workspace-uploads/{session_id}", status_code=204)
+async def cancel_admin_upload_endpoint(
+    session_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+):
+    session = await db.get(WorkspaceUploadSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="上传会话不存在")
+    assert_org_write_access(auth, session.organization_id)
+    await workspace_governance_service.cancel_upload(db, session, auth)
 
 
 @router.get("/workspaces/{ws_id}/files", response_model=WorkspaceFilePage)
@@ -266,6 +339,12 @@ async def download_file_endpoint(
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
+    if storage_gateway_service.is_object_ref(f.content_ref):
+        try:
+            signed = await storage_gateway_service.get_signed_download(str(f.content_ref))
+        except storage_gateway_service.StorageGatewayError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return RedirectResponse(str(signed["url"]), status_code=307)
     try:
         raw = await load_file_bytes(f)
     except WorkspaceFileUploadError as exc:
@@ -310,7 +389,7 @@ async def delete_file_endpoint(
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_write_access(auth, await _ws_org_id(db, f.workspace_id))
-    await soft_delete_file(db, f)
+    await soft_delete_file(db, f, admin_id=auth.id)
 
 
 # ── Workspace Folders ──

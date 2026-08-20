@@ -26,6 +26,7 @@ import {
   type TerminalResources, type TerminalMemoryItem, type TerminalModels, type TerminalAgent, type WorkspaceFileListItem,
   type TerminalTaskWithMessages,
   type SkillFolderSummary, type WorkspaceFileSummary,
+  WORKSPACE_MAX_FILE_BYTES,
 } from '../../api/client';
 import { useUserAuth } from '../../context/UserAuthContext';
 import TaskConfigDrawer from './TaskConfigDrawer';
@@ -95,7 +96,7 @@ interface MessageAttachment {
   name: string;
 }
 
-type ComposerAttachmentStatus = 'uploading' | 'parsing' | 'ready' | 'failed';
+type ComposerAttachmentStatus = 'uploading' | 'validating' | 'parsing' | 'ready' | 'failed';
 
 interface ComposerAttachment extends MessageAttachment {
   client_id: string;
@@ -107,7 +108,7 @@ interface ComposerAttachment extends MessageAttachment {
   raw_tool?: 'image_tool' | 'archive_tool';
 }
 
-const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = WORKSPACE_MAX_FILE_BYTES;
 const MAX_ATTACHMENTS = 10;
 const MAX_UPLOAD_CONCURRENCY = 3;
 
@@ -1515,6 +1516,16 @@ function TaskInputBox(props: {
     qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
   }, [qc]);
 
+  const waitForAttachmentParse = useCallback(async (fileId: string, signal: AbortSignal) => {
+    for (let attempt = 0; attempt < 150; attempt += 1) {
+      if (signal.aborted) throw new DOMException('上传已取消', 'AbortError');
+      const current = await terminal.getWsFile(fileId);
+      if (!['queued', 'processing', 'unparsed'].includes(current.parse_status)) return current;
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    }
+    throw new Error('文件解析等待超过 5 分钟，可稍后在工作空间重试');
+  }, []);
+
   const uploadOne = useCallback(async (draft: ComposerAttachment, workspaceId: string) => {
     const controller = new AbortController();
     uploadControllersRef.current.set(draft.client_id, controller);
@@ -1532,19 +1543,25 @@ function TaskInputBox(props: {
       const uploaded = await terminal.uploadWsFile(workspaceId, draft.file, draft.path, {
         signal: controller.signal,
         onProgress: (progress) => updateAttachment(draft.client_id, { progress }),
-        onUploadComplete: () => updateAttachment(draft.client_id, { status: 'parsing', progress: 100 }),
+        onUploadComplete: () => updateAttachment(draft.client_id, { status: 'validating', progress: 100 }),
       });
+      if (!['ready', 'unsupported', 'failed'].includes(uploaded.parse_status)) {
+        updateAttachment(draft.client_id, { status: 'parsing', progress: 100 });
+      }
       const rawTool = rawAttachmentTool(draft.name);
-      const nextStatus: ComposerAttachmentStatus = uploaded.parse_status === 'ready' || rawTool ? 'ready' : 'failed';
+      const parsed = uploaded.parse_status === 'ready' || rawTool
+        ? uploaded
+        : await waitForAttachmentParse(uploaded.id, controller.signal);
+      const nextStatus: ComposerAttachmentStatus = parsed.parse_status === 'ready' || rawTool ? 'ready' : 'failed';
       updateAttachment(draft.client_id, {
         file_id: uploaded.id,
         workspace_id: uploaded.workspace_id,
         path: uploaded.path,
         status: nextStatus,
-        raw_tool: uploaded.parse_status === 'ready' ? undefined : rawTool,
+        raw_tool: parsed.parse_status === 'ready' ? undefined : rawTool,
         progress: 100,
         error: nextStatus === 'failed'
-          ? (uploaded.parse_error || (uploaded.parse_status === 'unsupported' ? '暂不支持该文件格式' : '文件解析失败'))
+          ? (parsed.parse_error || (parsed.parse_status === 'unsupported' ? '暂不支持该文件格式' : '文件解析失败'))
           : undefined,
       });
       refreshWorkspaceFiles(workspaceId);
@@ -1560,7 +1577,7 @@ function TaskInputBox(props: {
       uploadControllersRef.current.delete(draft.client_id);
       uploadWaitersRef.current.shift()?.();
     }
-  }, [refreshWorkspaceFiles, updateAttachment]);
+  }, [refreshWorkspaceFiles, updateAttachment, waitForAttachmentParse]);
 
   const queueFiles = useCallback(async (fileList: FileList | File[]) => {
     const workspaceId = effectiveWorkspaceId;
@@ -1587,7 +1604,7 @@ function TaskInputBox(props: {
       name: file.name,
       status: file.size > MAX_ATTACHMENT_BYTES ? 'failed' : 'uploading',
       progress: 0,
-      error: file.size > MAX_ATTACHMENT_BYTES ? '文件超过 5MB 上限' : undefined,
+      error: file.size > MAX_ATTACHMENT_BYTES ? '文件超过 100MB 上限' : undefined,
     }));
     attachmentsRef.current = [...attachmentsRef.current, ...drafts];
     setAttachments((current) => [...current, ...drafts]);
@@ -1625,7 +1642,7 @@ function TaskInputBox(props: {
 
   const retryAttachment = useCallback(async (item: ComposerAttachment) => {
     if (item.file.size > MAX_ATTACHMENT_BYTES) {
-      message.warning('该文件超过 5MB，请压缩或拆分后重新选择');
+      message.warning('该文件超过 100MB，请压缩或拆分后重新选择');
       return;
     }
     if (item.file_id) {
@@ -1638,7 +1655,8 @@ function TaskInputBox(props: {
       }
       updateAttachment(item.client_id, { status: 'parsing', error: undefined, progress: 100 });
       try {
-        const reparsed = await terminal.reparseWsFile(item.file_id);
+        const queued = await terminal.reparseWsFile(item.file_id);
+        const reparsed = await waitForAttachmentParse(queued.id, new AbortController().signal);
         updateAttachment(item.client_id, {
           status: reparsed.parse_status === 'ready' ? 'ready' : 'failed',
           error: reparsed.parse_status === 'ready'
@@ -1652,7 +1670,7 @@ function TaskInputBox(props: {
       return;
     }
     await uploadOne(item, item.workspace_id);
-  }, [refreshWorkspaceFiles, updateAttachment, uploadOne]);
+  }, [refreshWorkspaceFiles, updateAttachment, uploadOne, waitForAttachmentParse]);
 
   const removeAttachment = useCallback((item: ComposerAttachment) => {
     uploadControllersRef.current.get(item.client_id)?.abort();
@@ -1680,7 +1698,7 @@ function TaskInputBox(props: {
   }, []);
 
   const statusLabel: Record<ComposerAttachmentStatus, string> = {
-    uploading: '上传中', parsing: '解析中', ready: '可以发送', failed: '处理失败',
+    uploading: '上传中', validating: '校验中', parsing: '解析中', ready: '可以发送', failed: '处理失败',
   };
 
   const pickerContent = (
@@ -1793,7 +1811,7 @@ function TaskInputBox(props: {
                       {item.status === 'uploading' ? ` ${item.progress}%` : ''}
                     </div>
                   </div>
-                  {(item.status === 'uploading' || item.status === 'parsing') && <Spin size="small" />}
+                  {(item.status === 'uploading' || item.status === 'validating' || item.status === 'parsing') && <Spin size="small" />}
                   {item.status === 'ready' && <CheckCircleOutlined style={{ color: '#16a34a' }} />}
                   {item.status === 'failed' && item.file.size <= MAX_ATTACHMENT_BYTES && (
                     <Button type="link" size="small" onClick={() => void retryAttachment(item)} style={{ padding: 0, fontSize: 11 }}>重试</Button>

@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
-  Input, Typography, Upload, message, Empty, Tooltip, Spin, Select, Checkbox,
+  Input, Typography, Upload, message, Empty, Tooltip, Spin, Select, Checkbox, Modal, List,
 } from 'antd';
 import {
   DeleteOutlined, BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined,
   FolderOutlined, FileTextOutlined, FolderAddOutlined, ArrowUpOutlined,
   HomeOutlined, UploadOutlined, EyeOutlined, RightOutlined,
   AppstoreOutlined, UnorderedListOutlined, SearchOutlined, CheckSquareOutlined,
+  HistoryOutlined, RestOutlined, ShareAltOutlined, SendOutlined, AuditOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  terminal, type Workspace, type WorkspaceFileListItem, type WorkspaceFolder, type TerminalResources,
+  terminal, WORKSPACE_MAX_FILE_BYTES, type Workspace, type WorkspaceFileListItem, type WorkspaceFolder, type TerminalResources,
 } from '../../api/client';
 import { ApiError } from '../../api/client';
 import BrowserDrawer, { classifyFile, classifyUrl, type Source } from './BrowserDrawer';
@@ -34,8 +35,6 @@ const SCOPE_LABEL: Record<string, string> = {
 const SCOPE_ICON: Record<string, ReactNode> = {
   organization: <BankOutlined />, department: <ApartmentOutlined />, team: <TeamOutlined />, user: <UserOutlined />,
 };
-
-const MAX_UPLOAD_BYTES = 5 * 1024 * 1024; // 单文件上传上限 5MB（内联文本存储）
 
 interface TreeNode {
   key: string;
@@ -86,7 +85,7 @@ function fileType(path: string): string {
 }
 
 const PARSE_LABEL: Record<string, string> = {
-  ready: '已解析', failed: '解析失败', unsupported: '不支持解析', unparsed: '未解析',
+  queued: '等待解析', processing: '解析中', ready: '可使用', failed: '解析失败', unsupported: '不支持解析', unparsed: '未解析',
 };
 
 /** 工作空间管理视图：MacOS Finder 风格。
@@ -108,6 +107,8 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
     if (selectedWsId === null && defaultWsId) setSelectedWsId(defaultWsId);
   }, [defaultWsId, selectedWsId]);
   const selectedWs = selectedWsId ? wsById.get(selectedWsId) ?? null : null;
+  const canCreate = selectedWs?.capabilities?.create ?? false;
+  const canManage = selectedWs?.capabilities?.manage ?? false;
 
   const [cwd, setCwd] = useState<string[]>([]); // 当前目录段数组，根为 []
   const [folderModalOpen, setFolderModalOpen] = useState(false);
@@ -118,6 +119,11 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [selecting, setSelecting] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [versionFile, setVersionFile] = useState<WorkspaceFileListItem | null>(null);
+  const [publishFile, setPublishFile] = useState<WorkspaceFileListItem | null>(null);
+  const [publishTarget, setPublishTarget] = useState<string | undefined>();
   const composingRef = useRef(false);
 
   // 浏览器抽屉：点击文件后右侧弹出，复用 BrowserDrawer
@@ -189,6 +195,18 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
     if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
+  const { data: trash = [], isLoading: trashLoading } = useQuery({
+    queryKey: ['ws-mgr-trash', wsId], queryFn: () => terminal.listWsTrash(wsId!),
+    enabled: !!wsId && trashOpen && canManage,
+  });
+  const { data: auditEvents = [], isLoading: auditLoading } = useQuery({
+    queryKey: ['ws-mgr-audit', wsId], queryFn: () => terminal.listWsAudit(wsId!),
+    enabled: !!wsId && auditOpen && canManage,
+  });
+  const { data: versions = [], isLoading: versionsLoading } = useQuery({
+    queryKey: ['ws-mgr-versions', versionFile?.id], queryFn: () => terminal.listWsFileVersions(versionFile!.id),
+    enabled: !!versionFile,
+  });
 
   const createFolder = useMutation({
     mutationFn: (name: string) => {
@@ -232,7 +250,10 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
       if (!wsId) return Promise.reject(new Error('no ws'));
       return terminal.uploadWsFile(wsId, v.file, v.path);
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['ws-mgr-files'] }); message.success('文件已上传'); },
+    onSuccess: (file) => {
+      qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+      message.success(file.parse_status === 'ready' ? '文件已上传，可使用' : '文件已上传，正在后台解析');
+    },
     onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '上传失败'),
   });
 
@@ -240,6 +261,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
     const updated = await terminal.reparseWsFile(fileId);
     await qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
     if (updated.parse_status === 'ready') message.success('文件解析完成');
+    else if (updated.parse_status === 'queued' || updated.parse_status === 'processing') message.info('已加入解析队列');
     else message.warning(updated.parse_error || '文件仍无法解析');
   };
 
@@ -248,6 +270,45 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['ws-mgr-files'] }); message.success('文件已删除'); },
     onError: () => message.error('删除失败'),
   });
+
+  const restoreTrash = useMutation({
+    mutationFn: (fileId: string) => terminal.restoreWsTrash(wsId!, fileId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ws-mgr-trash'] });
+      qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+      message.success('文件已从回收站恢复');
+    },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '恢复失败'),
+  });
+
+  const restoreVersion = useMutation({
+    mutationFn: (versionId: string) => terminal.restoreWsFileVersion(versionFile!.id, versionId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ws-mgr-versions'] });
+      qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+      message.success('已恢复为一个新的当前版本');
+    },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '版本恢复失败'),
+  });
+
+  const publishMutation = useMutation({
+    mutationFn: () => terminal.publishWsFile(publishFile!.id, publishTarget!),
+    onSuccess: () => {
+      setPublishFile(null); setPublishTarget(undefined);
+      message.success('已发布到目标工作空间，个人原件仍保留');
+    },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '发布失败'),
+  });
+
+  const shareFile = async (file: WorkspaceFileListItem) => {
+    try {
+      const share = await terminal.createWsShare(file.id);
+      await navigator.clipboard.writeText(share.url);
+      message.success('7 天有效分享链接已复制');
+    } catch (e) {
+      message.error(e instanceof ApiError ? e.message : '创建分享链接失败');
+    }
+  };
 
   const bulkDelete = useMutation({
     mutationFn: () => {
@@ -395,7 +456,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                   <button style={{ ...toolBtnStyle, color: selecting ? WB.primary : '#1d1d1f' }} onClick={() => { setSelecting((value) => !value); setSelectedKeys(new Set()); }}>
                     <CheckSquareOutlined /> {selecting ? '退出多选' : '多选'}
                   </button>
-                  {selecting && (
+                  {selecting && canManage && (
                     <>
                       <button style={toolBtnStyle} onClick={() => setSelectedKeys(new Set(resultKeys))}>全选结果</button>
                       <button
@@ -405,7 +466,9 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                       ><DeleteOutlined /> 批量删除</button>
                     </>
                   )}
-                  {cwd.length > 0 && (
+                  {canManage && <button style={toolBtnStyle} onClick={() => setTrashOpen(true)}><RestOutlined /> 回收站</button>}
+                  {canManage && <button style={toolBtnStyle} onClick={() => setAuditOpen(true)}><AuditOutlined /> 审计</button>}
+                  {cwd.length > 0 && canManage && (
                     <button
                       style={{ ...toolBtnStyle, color: '#dc2626' }}
                       onClick={() => setConfirm({
@@ -417,21 +480,25 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                       <DeleteOutlined style={{ fontSize: 13 }} /> 删除当前文件夹
                     </button>
                   )}
-                  <button style={toolBtnStyle} onClick={() => { setFolderName(''); setFolderModalOpen(true); }}>
+                  <button style={toolBtnStyle} disabled={!canCreate} onClick={() => { setFolderName(''); setFolderModalOpen(true); }}>
                     <FolderAddOutlined style={{ fontSize: 13 }} /> 新建文件夹
                   </button>
                   <Upload
                     showUploadList={false}
                     beforeUpload={(file) => {
-                      if (file.size > MAX_UPLOAD_BYTES) {
-                        message.warning(`文件过大（> ${MAX_UPLOAD_BYTES / 1024 / 1024}MB），请选择更小的文件`);
+                      if (!canCreate) {
+                        message.warning('当前工作空间为只读');
+                        return Upload.LIST_IGNORE;
+                      }
+                      if (file.size > WORKSPACE_MAX_FILE_BYTES) {
+                        message.warning(`文件过大（> ${WORKSPACE_MAX_FILE_BYTES / 1024 / 1024}MB），请选择更小的文件`);
                         return Upload.LIST_IGNORE;
                       }
                       uploadFile.mutate({ path: [...cwd, file.name].join('/'), file: file as File });
                       return false;
                     }}
                   >
-                    <button style={toolBtnStyle} disabled={uploadFile.isPending}>
+                    <button style={toolBtnStyle} disabled={!canCreate || uploadFile.isPending}>
                       <UploadOutlined style={{ fontSize: 13 }} /> 上传文件
                     </button>
                   </Upload>
@@ -466,7 +533,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                             <div style={viewMode === 'grid' ? iconNameStyle : listNameStyle} title={it.path}>{it.name}</div>
                             {viewMode === 'grid' && !!search.trim() && <div style={{ ...iconNameStyle, fontSize: 9, color: '#9ca3af', marginTop: 2 }} title={it.path}>{it.path}</div>}
                             {viewMode === 'list' && <><span style={listMetaStyle}>文件夹</span><span style={listMetaStyle}>{it.record?.updated_at ? new Date(it.record.updated_at).toLocaleString() : '路径推导'}</span><span style={listPathStyle}>{it.path}</span></>}
-                            {!selecting && (
+                            {!selecting && canManage && (
                               <button
                                 style={viewMode === 'grid' ? { ...iconActionBtnStyle('danger'), position: 'absolute', top: -6, right: -6 } : iconActionBtnStyle('danger')}
                                 title="删除文件夹"
@@ -502,7 +569,10 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                             {!selecting && (
                               <span style={viewMode === 'grid' ? { position: 'absolute', top: -6, right: -6, display: 'flex', gap: 4 } : { display: 'flex', gap: 4 }} onClick={(event) => event.stopPropagation()}>
                                 <Tooltip title="查看文件"><button style={iconActionBtnStyle('default')} onClick={() => openFile(it.file.path)}><EyeOutlined /></button></Tooltip>
-                                <button title="删除文件" style={iconActionBtnStyle('danger')} onClick={() => setConfirm({ kind: 'file', id: it.file.id, title: '删除该文件？' })}><DeleteOutlined /></button>
+                                {canManage && <Tooltip title="版本历史"><button style={iconActionBtnStyle('default')} onClick={() => setVersionFile(it.file)}><HistoryOutlined /></button></Tooltip>}
+                                {canManage && <Tooltip title="创建限时分享"><button style={iconActionBtnStyle('default')} onClick={() => void shareFile(it.file)}><ShareAltOutlined /></button></Tooltip>}
+                                {selectedWs.capabilities?.publish && <Tooltip title="发布到部门或团队"><button style={iconActionBtnStyle('default')} onClick={() => setPublishFile(it.file)}><SendOutlined /></button></Tooltip>}
+                                {canManage && <button title="移至回收站" style={iconActionBtnStyle('danger')} onClick={() => setConfirm({ kind: 'file', id: it.file.id, title: '将该文件移至回收站？', desc: '文件将在回收站保留 30 天，可由负责人恢复。' })}><DeleteOutlined /></button>}
                               </span>
                             )}
                           </div>
@@ -513,7 +583,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                 )}
                 {folderItems.length === 0 && fileItems.length === 0 && !filesLoading && (
                   <Typography.Text style={{ display: 'block', marginTop: 16, fontSize: 11, color: '#aeaeb2', textAlign: 'center' }}>
-                    点击文件夹进入 · 点击文件查看 · 「上传文件」写入当前目录（同名覆盖）
+                    点击文件夹进入 · 点击文件查看 · 同名上传将建立不可变新版本
                   </Typography.Text>
                 )}
               </div>
@@ -555,6 +625,33 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
         onCancel={() => setConfirm(null)}
         onOk={confirmOk}
       />
+
+      <Modal title="回收站（保留 30 天）" open={trashOpen} footer={null} onCancel={() => setTrashOpen(false)} width={720}>
+        <List loading={trashLoading} dataSource={trash} locale={{ emptyText: '回收站为空' }} renderItem={(file) => (
+          <List.Item actions={[<a key="restore" onClick={() => restoreTrash.mutate(file.id)}>恢复</a>]}>
+            <List.Item.Meta title={fileName(file.path)} description={`${file.path} · ${formatBytes(file.size)}`} />
+          </List.Item>
+        )} />
+      </Modal>
+
+      <Modal title={`版本历史${versionFile ? ` · ${fileName(versionFile.path)}` : ''}`} open={!!versionFile} footer={null} onCancel={() => setVersionFile(null)} width={720}>
+        <List loading={versionsLoading} dataSource={versions} locale={{ emptyText: '暂无版本' }} renderItem={(version, index) => (
+          <List.Item actions={index === 0 ? [] : [<a key="restore" onClick={() => restoreVersion.mutate(version.id)}>恢复此版本</a>]}>
+            <List.Item.Meta title={`版本 ${version.version_no}${index === 0 ? '（当前）' : ''}`} description={`${formatBytes(version.size)} · ${new Date(version.created_at).toLocaleString()} · ${PARSE_LABEL[version.parse_status] ?? version.parse_status}`} />
+          </List.Item>
+        )} />
+      </Modal>
+
+      <Modal title="发布文件" open={!!publishFile} confirmLoading={publishMutation.isPending} okButtonProps={{ disabled: !publishTarget }} onCancel={() => { setPublishFile(null); setPublishTarget(undefined); }} onOk={() => publishMutation.mutate()}>
+        <Typography.Paragraph>发布会在目标工作空间建立一份受版本管理的文件，个人原件不会删除。</Typography.Paragraph>
+        <Select style={{ width: '100%' }} placeholder="选择本人所属部门或团队" value={publishTarget} onChange={setPublishTarget} options={workspaces.filter((workspace) => workspace.id !== selectedWsId && workspace.capabilities?.create && (workspace.scope_type === 'department' || workspace.scope_type === 'team')).map((workspace) => ({ value: workspace.id, label: `${SCOPE_LABEL[workspace.scope_type]} · ${workspace.name}` }))} />
+      </Modal>
+
+      <Modal title="工作空间审计" open={auditOpen} footer={null} onCancel={() => setAuditOpen(false)} width={760}>
+        <List loading={auditLoading} dataSource={auditEvents} locale={{ emptyText: '暂无审计事件' }} renderItem={(event) => (
+          <List.Item><List.Item.Meta title={event.action} description={`${new Date(event.created_at).toLocaleString()} · ${JSON.stringify(event.metadata)}`} /></List.Item>
+        )} />
+      </Modal>
     </div>
   );
 }

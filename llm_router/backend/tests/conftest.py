@@ -106,9 +106,13 @@ async def client(db_session: AsyncSession) -> AsyncClient:
         role="super_admin",
         is_active=True,
     )
+    # Persist the overridden principal so audit/version foreign keys exercise
+    # the same invariant as production authentication.
+    db_session.add(test_admin)
+    await db_session.flush()
     test_auth = CurrentAdmin(
         admin=test_admin,
-        id=1,
+        id=test_admin.id,
         username=test_admin.username,
         role="super_admin",
     )

@@ -1,6 +1,18 @@
-"""Workspace ORM models — agent file read/write sandbox per organization."""
+"""Workspace ORM models — governed tenant file storage and immutable versions."""
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, String, Text, UniqueConstraint
+from datetime import datetime
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -55,8 +67,30 @@ class WorkspaceFile(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     parse_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
     parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+    current_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "workspace_file_versions.id",
+            name="fk_wsfile_current_version",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    deleted_by_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    deleted_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), nullable=True)
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    parse_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    parse_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    parse_locked_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     workspace = relationship("Workspace", back_populates="files")
+    versions = relationship(
+        "WorkspaceFileVersion", foreign_keys="WorkspaceFileVersion.workspace_file_id",
+        back_populates="file", cascade="all, delete-orphan", lazy="selectin",
+    )
 
 
 class WorkspaceFolder(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
@@ -72,3 +106,87 @@ class WorkspaceFolder(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base
     path: Mapped[str] = mapped_column(String(1024), nullable=False)  # 相对 workspace root 的 POSIX 路径
 
     workspace = relationship("Workspace", back_populates="folders")
+
+
+class WorkspaceFileVersion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Immutable snapshot pinned by tasks, shares and audit records."""
+
+    __tablename__ = "workspace_file_versions"
+    __table_args__ = (UniqueConstraint("workspace_file_id", "version_no", name="uq_wsfile_version"),)
+
+    workspace_file_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_files.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    content_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    content_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parse_status: Mapped[str] = mapped_column(String(20), nullable=False, default="unparsed")
+    parse_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+    created_by_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), nullable=True)
+
+    file = relationship("WorkspaceFile", foreign_keys=[workspace_file_id], back_populates="versions")
+
+
+class WorkspaceUploadSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "workspace_upload_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "(user_id IS NOT NULL) <> (admin_id IS NOT NULL)",
+            name="ck_workspace_upload_session_one_actor",
+        ),
+    )
+
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    admin_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="CASCADE"), nullable=True, index=True)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    expected_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    upload_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    upload_headers: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    workspace_file_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_files.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class WorkspaceAuditEvent(TimestampMixin, Base):
+    __tablename__ = "workspace_audit_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    workspace_file_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_files.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_file_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    actor_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    actor_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), nullable=True)
+    action: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+
+
+class WorkspaceShareLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "workspace_share_links"
+
+    workspace_file_id: Mapped[str] = mapped_column(ForeignKey("workspace_files.id", ondelete="CASCADE"), index=True)
+    version_id: Mapped[str] = mapped_column(ForeignKey("workspace_file_versions.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), nullable=True)

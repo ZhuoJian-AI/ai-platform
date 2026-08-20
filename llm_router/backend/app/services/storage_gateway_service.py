@@ -7,6 +7,7 @@ gateway for short-lived, project-scoped signed URLs and stores only an opaque
 
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -108,6 +109,75 @@ async def upload_bytes(raw: bytes, *, filename: str, content_type: str) -> str:
     return f"{OSS_REF_PREFIX}{object_key}"
 
 
+async def sign_browser_upload(*, filename: str, content_type: str, size_bytes: int) -> dict:
+    """Return a short-lived browser PUT URL without exposing gateway credentials."""
+    if size_bytes <= 0 or size_bytes > settings.workspace_max_file_bytes:
+        raise StorageGatewayError("Object size is outside the configured workspace limit")
+    try:
+        async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
+            response = await client.post(
+                _gateway_url("/v1/uploads/sign"),
+                headers=_auth_headers(),
+                json={"filename": filename, "content_type": content_type, "size_bytes": size_bytes},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return {
+                "url": str(payload["url"]),
+                "headers": {str(k): str(v) for k, v in (payload.get("headers") or {}).items()},
+                "object_key": str(payload["object_key"]),
+            }
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("OSS upload signing failed; check token limit and CORS") from exc
+
+
+async def inspect_object(content_ref: str) -> dict:
+    """Verify an uploaded object through a signed ranged GET.
+
+    A one-byte range avoids loading a 100MB object in backend memory. OSS
+    returns the authoritative total in Content-Range and an ETag header.
+    """
+    object_key = object_key_from_ref(content_ref)
+    try:
+        async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
+            signed = await client.post(
+                _gateway_url("/v1/downloads/sign"),
+                headers=_auth_headers(),
+                json={"object_key": object_key},
+            )
+            signed.raise_for_status()
+            url = _internal_signed_url(str(signed.json()["url"]))
+            async with client.stream("GET", url, headers={"Range": "bytes=0-0"}) as response:
+                response.raise_for_status()
+                content_range = response.headers.get("content-range", "")
+                if "/" in content_range:
+                    size = int(content_range.rsplit("/", 1)[1])
+                else:
+                    size = int(response.headers.get("content-length", "0"))
+                return {
+                    "size": size,
+                    "etag": response.headers.get("etag", "").strip('"'),
+                    "content_type": response.headers.get("content-type", "application/octet-stream").split(";", 1)[0],
+                }
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("OSS uploaded object verification failed") from exc
+
+
+async def get_signed_download(content_ref: str) -> dict:
+    """Issue a signed download used by internal workers and the Skill Runner."""
+    object_key = object_key_from_ref(content_ref)
+    try:
+        async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
+            response = await client.post(
+                _gateway_url("/v1/downloads/sign"), headers=_auth_headers(), json={"object_key": object_key}
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return {"url": str(payload["url"]), "headers": payload.get("headers") or {}}
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("OSS download signing failed") from exc
+
+
 async def download_bytes(content_ref: str) -> bytes:
     object_key = object_key_from_ref(content_ref)
     timeout = settings.storage_gateway_timeout_seconds
@@ -125,6 +195,39 @@ async def download_bytes(content_ref: str) -> bytes:
             return response.content
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise StorageGatewayError("OSS download failed; check storage gateway status") from exc
+
+
+async def download_to_path(content_ref: str, target: Path, *, max_bytes: int) -> int:
+    """Stream an OSS object to disk without buffering it in backend memory."""
+    object_key = object_key_from_ref(content_ref)
+    written = 0
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(settings.storage_gateway_timeout_seconds, read=300), trust_env=False,
+        ) as client:
+            signed = await client.post(
+                _gateway_url("/v1/downloads/sign"), headers=_auth_headers(), json={"object_key": object_key},
+            )
+            signed.raise_for_status()
+            payload = signed.json()
+            async with client.stream("GET", _internal_signed_url(str(payload["url"]))) as response:
+                response.raise_for_status()
+                declared = int(response.headers.get("content-length", "0") or 0)
+                if declared > max_bytes:
+                    raise StorageGatewayError("OSS object exceeds workspace limit")
+                with target.open("wb") as output:
+                    async for chunk in response.aiter_bytes(1024 * 1024):
+                        written += len(chunk)
+                        if written > max_bytes:
+                            raise StorageGatewayError("OSS object exceeds workspace limit")
+                        output.write(chunk)
+    except StorageGatewayError:
+        target.unlink(missing_ok=True)
+        raise
+    except (httpx.HTTPError, KeyError, TypeError, ValueError, OSError) as exc:
+        target.unlink(missing_ok=True)
+        raise StorageGatewayError("OSS streaming download failed") from exc
+    return written
 
 
 async def delete_object(content_ref: str) -> None:

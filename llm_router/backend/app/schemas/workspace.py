@@ -43,6 +43,7 @@ class WorkspaceRead(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: datetime
+    capabilities: dict[str, bool] | None = None
 
     model_config = {"from_attributes": True}
 
@@ -71,6 +72,7 @@ class WorkspaceFileRead(MetaReadModel):
     parse_error: str | None = None
     created_at: datetime
     updated_at: datetime
+    current_version_id: UUID | None = None
 
 
 class WorkspaceFileListItem(BaseModel):
@@ -131,3 +133,61 @@ class WorkspaceBulkDeleteRequest(BaseModel):
 class WorkspaceBulkDeleteResult(BaseModel):
     deleted_files: int
     deleted_folders: int
+
+
+class WorkspaceUploadInitiate(BaseModel):
+    path: str = Field(..., max_length=1024)
+    filename: str = Field(..., max_length=512)
+    content_type: str = Field("application/octet-stream", max_length=255)
+    size: int = Field(..., gt=0)
+
+
+class WorkspaceUploadSessionRead(BaseModel):
+    id: UUID
+    method: str = "PUT"
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    expires_at: datetime
+    max_file_bytes: int
+
+
+class WorkspaceUploadComplete(BaseModel):
+    etag: str | None = Field(None, max_length=256)
+
+
+class WorkspaceFileVersionRead(BaseModel):
+    id: UUID
+    workspace_file_id: UUID
+    version_no: int
+    size: int
+    content_hash: str | None = None
+    parse_status: str
+    parse_kind: str | None = None
+    parse_error: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class WorkspacePublishRequest(BaseModel):
+    target_workspace_id: UUID
+    target_path: str | None = Field(None, max_length=1024)
+
+
+class WorkspaceShareCreate(BaseModel):
+    expires_in_seconds: int = Field(7 * 24 * 3600, ge=60, le=30 * 24 * 3600)
+
+
+class WorkspaceShareRead(BaseModel):
+    url: str
+    expires_at: datetime
+
+
+class WorkspaceAuditEventRead(MetaReadModel):
+    id: int
+    workspace_id: UUID
+    workspace_file_id: UUID | None = None
+    version_id: UUID | None = None
+    action: str
+    metadata: dict = Field(default_factory=dict)
+    created_at: datetime

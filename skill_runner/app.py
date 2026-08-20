@@ -20,6 +20,7 @@ from typing import Literal
 
 from builtin_tools import BuiltinToolError, execute_builtin
 from fastapi import FastAPI, Header, HTTPException
+import httpx
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, Field
@@ -32,9 +33,12 @@ except ModuleNotFoundError:  # pragma: no cover - production Runner is Python 3.
 CACHE_ROOT = Path(os.getenv("SKILL_CACHE_ROOT", "/cache")).resolve()
 RUNNER_TOKEN = os.getenv("SKILL_RUNNER_TOKEN", "skill-runner-dev-token-change-in-production")
 MAX_PACKAGE_BYTES = 10 * 1024 * 1024
-MAX_OUTPUT_BYTES = 5 * 1024 * 1024
+MAX_OUTPUT_BYTES = 100 * 1024 * 1024
+INLINE_TRANSFER_BYTES = 10 * 1024 * 1024
 MAX_OUTPUT_FILES = 20
 BASE_NODE_MODULES = Path(os.getenv("SKILL_BASE_NODE_MODULES", "/opt/skill-node/node_modules"))
+STORAGE_GATEWAY_URL = os.getenv("STORAGE_GATEWAY_URL", "").rstrip("/")
+STORAGE_PROJECT_TOKEN = os.getenv("STORAGE_PROJECT_TOKEN", "")
 BUILTIN_PYTHON_PACKAGES = (
     "openpyxl", "pandas", "python-docx", "python-pptx", "PyMuPDF", "pypdf", "Pillow", "pytesseract",
 )
@@ -87,7 +91,10 @@ class InstallRequest(BaseModel):
 class InputFile(BaseModel):
     file_id: str
     name: str
-    content_base64: str
+    content_base64: str | None = None
+    download_url: str | None = None
+    download_headers: dict[str, str] = Field(default_factory=dict)
+    expected_size: int | None = Field(None, ge=1, le=100 * 1024 * 1024)
 
 
 class ExecuteRequest(InstallRequest):
@@ -377,6 +384,74 @@ def _safe_name(name: str) -> str:
     return Path(name.replace("\\", "/")).name or "input.bin"
 
 
+async def _materialize_input(item: InputFile, path: Path) -> None:
+    if item.content_base64 is not None:
+        try:
+            raw = base64.b64decode(item.content_base64, validate=True)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid input {item.name}") from exc
+        if len(raw) > MAX_OUTPUT_BYTES:
+            raise HTTPException(status_code=413, detail=f"Input {item.name} exceeds 100MB")
+        path.write_bytes(raw)
+    elif item.download_url:
+        total = 0
+        try:
+            async with httpx.AsyncClient(timeout=300, trust_env=False, follow_redirects=False) as client:
+                async with client.stream("GET", item.download_url, headers=item.download_headers) as response:
+                    response.raise_for_status()
+                    with path.open("wb") as handle:
+                        async for chunk in response.aiter_bytes(1024 * 1024):
+                            total += len(chunk)
+                            if total > MAX_OUTPUT_BYTES:
+                                raise HTTPException(status_code=413, detail=f"Input {item.name} exceeds 100MB")
+                            handle.write(chunk)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"Unable to download input {item.name}") from exc
+        if item.expected_size is not None and total != item.expected_size:
+            raise HTTPException(status_code=409, detail=f"Input {item.name} size mismatch")
+    else:
+        raise HTTPException(status_code=422, detail=f"Input {item.name} has no content")
+    path.chmod(0o444)
+
+
+async def _serialize_output(path: Path, relative_path: str, mime_type: str | None = None) -> dict:
+    size = path.stat().st_size
+    if size > MAX_OUTPUT_BYTES:
+        raise HTTPException(status_code=413, detail=f"Output {path.name} exceeds 100MB")
+    base = {"name": path.name, "relative_path": relative_path, "size": size, "mime_type": mime_type}
+    if size <= INLINE_TRANSFER_BYTES:
+        return {**base, "content_base64": base64.b64encode(path.read_bytes()).decode("ascii")}
+    if not STORAGE_GATEWAY_URL or not STORAGE_PROJECT_TOKEN:
+        raise HTTPException(status_code=503, detail="Large Skill output requires Storage Gateway")
+    headers = {"Authorization": f"Bearer {STORAGE_PROJECT_TOKEN}"}
+    content_type = mime_type or "application/octet-stream"
+    async def chunks():
+        with path.open("rb") as handle:
+            while True:
+                chunk = await asyncio.to_thread(handle.read, 1024 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+    try:
+        async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
+            signed = await client.post(
+                f"{STORAGE_GATEWAY_URL}/v1/uploads/sign", headers=headers,
+                json={"filename": path.name, "content_type": content_type, "size_bytes": size},
+            )
+            signed.raise_for_status()
+            payload = signed.json()
+            upload_headers = {str(k): str(v) for k, v in (payload.get("headers") or {}).items()}
+            upload_headers.setdefault("Content-Length", str(size))
+            upload = await client.put(
+                str(payload["url"]), headers=upload_headers,
+                content=chunks(),
+            )
+            upload.raise_for_status()
+            return {**base, "content_ref": f"oss://{payload['object_key']}", "etag": upload.headers.get("etag", "").strip('"')}
+    except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Unable to upload large output {path.name}") from exc
+
+
 def _script(package: Path, requested: str | None, legacy_entrypoint: str | None) -> tuple[Path, str]:
     value = requested or legacy_entrypoint
     if not value:
@@ -431,14 +506,7 @@ async def execute_builtin_tool(
                 safe_name = f"{index + 1}-{safe_name}"
             used_names.add(safe_name)
             path = input_dir / safe_name
-            try:
-                raw = base64.b64decode(item.content_base64, validate=True)
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=f"Invalid input {item.name}") from exc
-            if len(raw) > MAX_OUTPUT_BYTES:
-                raise HTTPException(status_code=413, detail=f"Input {item.name} exceeds 5MB")
-            path.write_bytes(raw)
-            path.chmod(0o444)
+            await _materialize_input(item, path)
             input_paths.append(path)
         input_dir.chmod(0o555)
         try:
@@ -465,16 +533,10 @@ async def execute_builtin_tool(
             raise HTTPException(status_code=422, detail="Builtin tool produced more than 20 files")
         outputs = []
         for path in files:
-            raw = path.read_bytes()
-            if len(raw) > MAX_OUTPUT_BYTES:
-                raise HTTPException(status_code=413, detail=f"Output {path.name} exceeds 5MB")
-            outputs.append({
-                "name": path.name,
-                "relative_path": path.relative_to(output_dir).as_posix(),
-                "content_base64": base64.b64encode(raw).decode("ascii"),
-                "size": len(raw),
-                "mime_type": (result.get("mime_types") or {}).get(path.name),
-            })
+            outputs.append(await _serialize_output(
+                path, path.relative_to(output_dir).as_posix(),
+                (result.get("mime_types") or {}).get(path.name),
+            ))
         return {
             "status": "success",
             "tool_kind": req.tool_kind,
@@ -505,12 +567,7 @@ async def execute(req: ExecuteRequest, x_skill_runner_token: str | None = Header
         input_paths: list[Path] = []
         for item in req.inputs:
             path = input_dir / _safe_name(item.name)
-            try:
-                raw = base64.b64decode(item.content_base64, validate=True)
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=f"Invalid input {item.name}") from exc
-            path.write_bytes(raw)
-            path.chmod(0o444)
+            await _materialize_input(item, path)
             input_paths.append(path)
         input_dir.chmod(0o555)
         params_path = run_root / "params.json"
@@ -556,15 +613,7 @@ async def execute(req: ExecuteRequest, x_skill_runner_token: str | None = Header
             raise HTTPException(status_code=422, detail="Skill produced more than 20 files")
         outputs = []
         for path in files:
-            raw = path.read_bytes()
-            if len(raw) > MAX_OUTPUT_BYTES:
-                raise HTTPException(status_code=413, detail=f"Output {path.name} exceeds 5MB")
-            outputs.append({
-                "name": path.name,
-                "relative_path": path.relative_to(output_dir).as_posix(),
-                "content_base64": base64.b64encode(raw).decode("ascii"),
-                "size": len(raw),
-            })
+            outputs.append(await _serialize_output(path, path.relative_to(output_dir).as_posix()))
         return {"status": "success", "stdout": stdout[-4000:], "outputs": outputs}
     finally:
         shutil.rmtree(run_root, ignore_errors=True)

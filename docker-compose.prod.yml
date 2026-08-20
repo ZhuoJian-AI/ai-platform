@@ -42,6 +42,11 @@ services:
       STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-}"
       STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-}"
       STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      WORKSPACE_HYBRID_UPLOAD_ENABLED: "${WORKSPACE_HYBRID_UPLOAD_ENABLED:-true}"
+      WORKSPACE_MAX_FILE_BYTES: "${WORKSPACE_MAX_FILE_BYTES:-104857600}"
+      WORKSPACE_PROXY_UPLOAD_MAX_BYTES: "${WORKSPACE_PROXY_UPLOAD_MAX_BYTES:-10485760}"
+      WORKSPACE_UPLOAD_SESSION_TTL_SECONDS: "${WORKSPACE_UPLOAD_SESSION_TTL_SECONDS:-900}"
+      WORKSPACE_TRASH_RETENTION_DAYS: "${WORKSPACE_TRASH_RETENTION_DAYS:-30}"
     ports:
       - "127.0.0.1:8000:8000"
     command:
@@ -50,4 +55,30 @@ services:
       - |
         alembic upgrade head &&
         uvicorn app.main:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+
+  workspace-parser:
+    build: ./llm_router/backend
+    container_name: ai_infra_workspace_parser
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY}
+      DATABASE_URL: postgresql+asyncpg://ai_infra:ai_infra@postgres:5432/ai_infra
+      REDIS_URL: redis://redis:6379/0
+      WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-false}"
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-}"
+      STORAGE_PROJECT_TOKEN: "${STORAGE_PROJECT_TOKEN:-}"
+      STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-}"
+      STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-}"
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      WORKSPACE_MAX_FILE_BYTES: "${WORKSPACE_MAX_FILE_BYTES:-104857600}"
+      WORKSPACE_TRASH_RETENTION_DAYS: "${WORKSPACE_TRASH_RETENTION_DAYS:-30}"
+    command: ["python", "-m", "app.workers.workspace_parser"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:size=1073741824,mode=1777
     restart: unless-stopped

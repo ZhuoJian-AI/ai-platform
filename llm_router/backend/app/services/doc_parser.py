@@ -28,7 +28,7 @@ import structlog
 logger = structlog.get_logger()
 
 # 单文件大小上限（50MB）——防止超大文件耗尽内存 / 拖垮解析
-MAX_FILE_BYTES = 50 * 1024 * 1024
+MAX_FILE_BYTES = 100 * 1024 * 1024
 LIBREOFFICE_TIMEOUT_SECONDS = 30
 
 WORD_CONVERT_EXTS = {"doc", "docm", "dot", "dotx", "dotm", "rtf", "odt"}
