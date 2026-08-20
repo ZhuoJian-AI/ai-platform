@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
-  Input, Typography, Upload, message, Empty, Tooltip, Spin, Select, Checkbox, Modal, List,
+  Input, Typography, Upload, message, Empty, Spin, Select, Checkbox, Modal, List, Dropdown,
 } from 'antd';
 import {
   DeleteOutlined, BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined,
   FolderOutlined, FileTextOutlined, FolderAddOutlined, ArrowUpOutlined,
   HomeOutlined, UploadOutlined, EyeOutlined, RightOutlined,
   AppstoreOutlined, UnorderedListOutlined, SearchOutlined, CheckSquareOutlined,
-  HistoryOutlined, RestOutlined, ShareAltOutlined, SendOutlined, AuditOutlined,
+  HistoryOutlined, RestOutlined, ShareAltOutlined, SendOutlined, AuditOutlined, MoreOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -114,6 +114,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
   const [folderModalOpen, setFolderModalOpen] = useState(false);
   const [folderName, setFolderName] = useState('');
   const [hovered, setHovered] = useState<string | null>(null);
+  const [focused, setFocused] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState<'name' | 'time' | 'type' | 'size'>('name');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
@@ -518,14 +519,28 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                     {folderItems.map((it) => {
                       const key = `d:${it.path}`;
                       const isHover = hovered === key;
+                      const isActive = isHover || focused === key;
+                      const showActions = viewMode === 'list' || isActive;
                       const selected = selectedKeys.has(key);
                       return (
                         <div
                           key={key}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`打开文件夹 ${it.name}`}
                           onMouseEnter={() => setHovered(key)}
                           onMouseLeave={() => setHovered(null)}
+                          onFocus={() => setFocused(key)}
+                          onBlur={(event) => {
+                            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(null);
+                          }}
                           onClick={() => selecting ? toggleSelected(key) : (setCwd(it.path.split('/')), setSearch(''))}
-                          style={viewMode === 'grid' ? { ...iconCardStyle(isHover), background: selected ? '#e8eafe' : (isHover ? '#f0f1f4' : 'transparent') } : listRowStyle(selected || isHover)}
+                          onKeyDown={(event) => {
+                            if (event.key !== 'Enter' && event.key !== ' ') return;
+                            event.preventDefault();
+                            selecting ? toggleSelected(key) : (setCwd(it.path.split('/')), setSearch(''));
+                          }}
+                          style={viewMode === 'grid' ? { ...iconCardStyle(isActive), background: selected ? '#e8eafe' : (isActive ? '#f0f1f4' : 'transparent') } : listRowStyle(selected || isActive)}
                         >
                           {selecting && <Checkbox checked={selected} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelected(key)} style={viewMode === 'grid' ? { position: 'absolute', top: 5, left: 6 } : undefined} />}
                           <div style={viewMode === 'grid' ? { position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', width: 92, cursor: 'pointer' } : { display: 'contents' }}>
@@ -534,11 +549,24 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                             {viewMode === 'grid' && !!search.trim() && <div style={{ ...iconNameStyle, fontSize: 9, color: '#9ca3af', marginTop: 2 }} title={it.path}>{it.path}</div>}
                             {viewMode === 'list' && <><span style={listMetaStyle}>文件夹</span><span style={listMetaStyle}>{it.record?.updated_at ? new Date(it.record.updated_at).toLocaleString() : '路径推导'}</span><span style={listPathStyle}>{it.path}</span></>}
                             {!selecting && canManage && (
-                              <button
-                                style={viewMode === 'grid' ? { ...iconActionBtnStyle('danger'), position: 'absolute', top: -6, right: -6 } : iconActionBtnStyle('danger')}
-                                title="删除文件夹"
-                                onClick={(event) => { event.stopPropagation(); setConfirm({ kind: it.record ? 'folder' : 'folderPath', id: it.record ? it.record.id : it.path, title: '删除该文件夹？', desc: '将一并删除其下所有子文件夹与文件' }); }}
-                              ><DeleteOutlined /></button>
+                              <Dropdown
+                                trigger={['click']}
+                                placement="bottomRight"
+                                menu={{
+                                  items: [{ key: 'delete', label: '删除文件夹', icon: <DeleteOutlined />, danger: true }],
+                                  onClick: ({ domEvent }) => {
+                                    domEvent.stopPropagation();
+                                    setConfirm({ kind: it.record ? 'folder' : 'folderPath', id: it.record ? it.record.id : it.path, title: '删除该文件夹？', desc: '将一并删除其下所有子文件夹与文件' });
+                                  },
+                                }}
+                              >
+                                <button
+                                  aria-label={`${it.name} 的更多操作`}
+                                  title="更多操作"
+                                  style={moreActionBtnStyle(viewMode, showActions)}
+                                  onClick={(event) => event.stopPropagation()}
+                                ><MoreOutlined /></button>
+                              </Dropdown>
                             )}
                           </div>
                         </div>
@@ -547,14 +575,28 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                     {fileItems.map((it) => {
                       const key = `f:${it.file.id}`;
                       const isHover = hovered === key;
+                      const isActive = isHover || focused === key;
+                      const showActions = viewMode === 'list' || isActive;
                       const selected = selectedKeys.has(key);
                       return (
                         <div
                           key={key}
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`打开文件 ${it.name}`}
                           onMouseEnter={() => setHovered(key)}
                           onMouseLeave={() => setHovered(null)}
+                          onFocus={() => setFocused(key)}
+                          onBlur={(event) => {
+                            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(null);
+                          }}
                           onClick={() => selecting ? toggleSelected(key) : openFile(it.file.path)}
-                          style={viewMode === 'grid' ? { ...iconCardStyle(isHover), background: selected ? '#e8eafe' : (isHover ? '#f0f1f4' : 'transparent') } : listRowStyle(selected || isHover)}
+                          onKeyDown={(event) => {
+                            if (event.key !== 'Enter' && event.key !== ' ') return;
+                            event.preventDefault();
+                            selecting ? toggleSelected(key) : openFile(it.file.path);
+                          }}
+                          style={viewMode === 'grid' ? { ...iconCardStyle(isActive), background: selected ? '#e8eafe' : (isActive ? '#f0f1f4' : 'transparent') } : listRowStyle(selected || isActive)}
                         >
                           {selecting && <Checkbox checked={selected} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelected(key)} style={viewMode === 'grid' ? { position: 'absolute', top: 5, left: 6 } : undefined} />}
                           <div style={viewMode === 'grid' ? { position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', width: 92 } : { display: 'contents' }}>
@@ -567,13 +609,36 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                               <><span style={listMetaStyle}>{fileType(it.file.path)} · {formatBytes(it.file.size)}</span><span style={listMetaStyle}>{new Date(it.file.updated_at).toLocaleString()}</span><span style={listMetaStyle}>{PARSE_LABEL[it.file.parse_status] ?? it.file.parse_status}</span><span style={listPathStyle}>{it.file.path}</span></>
                             )}
                             {!selecting && (
-                              <span style={viewMode === 'grid' ? { position: 'absolute', top: -6, right: -6, display: 'flex', gap: 4 } : { display: 'flex', gap: 4 }} onClick={(event) => event.stopPropagation()}>
-                                <Tooltip title="查看文件"><button style={iconActionBtnStyle('default')} onClick={() => openFile(it.file.path)}><EyeOutlined /></button></Tooltip>
-                                {canManage && <Tooltip title="版本历史"><button style={iconActionBtnStyle('default')} onClick={() => setVersionFile(it.file)}><HistoryOutlined /></button></Tooltip>}
-                                {canManage && <Tooltip title="创建限时分享"><button style={iconActionBtnStyle('default')} onClick={() => void shareFile(it.file)}><ShareAltOutlined /></button></Tooltip>}
-                                {selectedWs.capabilities?.publish && <Tooltip title="发布到部门或团队"><button style={iconActionBtnStyle('default')} onClick={() => setPublishFile(it.file)}><SendOutlined /></button></Tooltip>}
-                                {canManage && <button title="移至回收站" style={iconActionBtnStyle('danger')} onClick={() => setConfirm({ kind: 'file', id: it.file.id, title: '将该文件移至回收站？', desc: '文件将在回收站保留 30 天，可由负责人恢复。' })}><DeleteOutlined /></button>}
-                              </span>
+                              <Dropdown
+                                trigger={['click']}
+                                placement="bottomRight"
+                                menu={{
+                                  items: [
+                                    { key: 'open', label: '查看文件', icon: <EyeOutlined /> },
+                                    ...(canManage ? [
+                                      { key: 'versions', label: '版本历史', icon: <HistoryOutlined /> },
+                                      { key: 'share', label: '创建限时分享', icon: <ShareAltOutlined /> },
+                                    ] : []),
+                                    ...(selectedWs.capabilities?.publish ? [{ key: 'publish', label: '发布到部门或团队', icon: <SendOutlined /> }] : []),
+                                    ...(canManage ? [{ key: 'delete', label: '移至回收站', icon: <DeleteOutlined />, danger: true }] : []),
+                                  ],
+                                  onClick: ({ key: action, domEvent }) => {
+                                    domEvent.stopPropagation();
+                                    if (action === 'open') openFile(it.file.path);
+                                    else if (action === 'versions') setVersionFile(it.file);
+                                    else if (action === 'share') void shareFile(it.file);
+                                    else if (action === 'publish') setPublishFile(it.file);
+                                    else if (action === 'delete') setConfirm({ kind: 'file', id: it.file.id, title: '将该文件移至回收站？', desc: '文件将在回收站保留 30 天，可由负责人恢复。' });
+                                  },
+                                }}
+                              >
+                                <button
+                                  aria-label={`${it.name} 的更多操作`}
+                                  title="更多操作"
+                                  style={moreActionBtnStyle(viewMode, showActions)}
+                                  onClick={(event) => event.stopPropagation()}
+                                ><MoreOutlined /></button>
+                              </Dropdown>
                             )}
                           </div>
                         </div>
@@ -804,7 +869,7 @@ const toolBtnStyle: CSSProperties = {
 };
 
 const iconCardStyle = (hover: boolean): CSSProperties => ({
-  width: 108, padding: '10px 6px 8px', borderRadius: 8, cursor: 'default',
+  width: 108, padding: '10px 6px 8px', borderRadius: 8, cursor: 'pointer',
   display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
   border: '1px solid transparent', transition: 'background .12s',
   background: hover ? '#f0f1f4' : 'transparent', position: 'relative',
@@ -834,11 +899,13 @@ const iconNameStyle: CSSProperties = {
   WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', width: '100%', lineHeight: 1.3,
 };
 
-const iconActionBtnStyle = (variant: 'default' | 'danger'): CSSProperties => ({
-  width: 22, height: 22, borderRadius: 6, border: 'none', cursor: 'pointer',
+const moreActionBtnStyle = (viewMode: 'grid' | 'list', visible: boolean): CSSProperties => ({
+  width: 24, height: 24, borderRadius: 6, border: 'none', cursor: 'pointer',
   display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11,
   background: 'rgba(255,255,255,0.9)', boxShadow: '0 1px 3px rgba(0,0,0,0.18)',
-  color: variant === 'danger' ? '#ff3b30' : '#1d1d1f',
+  color: '#1d1d1f', opacity: visible ? 1 : 0, pointerEvents: visible ? 'auto' : 'none',
+  transition: 'opacity .12s ease, background .12s ease',
+  ...(viewMode === 'grid' ? { position: 'absolute', top: -6, right: -6, zIndex: 1 } : {}),
 });
 
 const modalOverlayStyle: CSSProperties = {
