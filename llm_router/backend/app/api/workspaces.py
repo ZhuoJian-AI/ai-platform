@@ -29,14 +29,18 @@ from app.auth.admin_auth import (
 from app.config import settings
 from app.database import get_db
 from app.models.organization import Organization
-from app.models.workspace import WorkspaceUploadSession
+from app.models.workspace import WorkspaceFileVersion, WorkspaceUploadSession
 from app.schemas.workspace import (
+    WorkspaceAuditEventRead,
+    WorkspaceBulkDeleteRequest,
+    WorkspaceBulkDeleteResult,
     WorkspaceCreate,
     WorkspaceFileCreate,
     WorkspaceFilePage,
     WorkspaceFilePreviewRead,
     WorkspaceFileRead,
     WorkspaceFileUpdate,
+    WorkspaceFileVersionRead,
     WorkspaceFolderCreate,
     WorkspaceFolderRead,
     WorkspaceRead,
@@ -65,8 +69,10 @@ from app.services.workspace_service import (
     list_workspaces,
     load_file_bytes,
     reparse_file,
+    bulk_soft_delete_items,
     soft_delete_file,
     soft_delete_folder,
+    soft_delete_folder_path,
     soft_delete_workspace,
     update_file,
     update_workspace,
@@ -392,6 +398,136 @@ async def delete_file_endpoint(
     await soft_delete_file(db, f, admin_id=auth.id)
 
 
+@router.get("/files/{file_id}/versions", response_model=list[WorkspaceFileVersionRead])
+async def list_file_versions_endpoint(
+    file_id: UUID,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    f = await get_file(db, file_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="File not found")
+    assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
+    return await workspace_governance_service.list_versions(db, f)
+
+
+@router.post(
+    "/files/{file_id}/versions/{version_id}/restore",
+    response_model=WorkspaceFileRead,
+)
+async def restore_file_version_endpoint(
+    file_id: UUID,
+    version_id: UUID,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    f = await get_file(db, file_id)
+    version = await db.get(WorkspaceFileVersion, version_id)
+    if not f or version is None:
+        raise HTTPException(status_code=404, detail="文件版本不存在")
+    ws = await get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_write_access(auth, ws.organization_id)
+    return await workspace_governance_service.restore_version_admin(db, ws, f, version, auth)
+
+
+@router.get("/workspaces/{ws_id}/trash", response_model=list[WorkspaceFileRead])
+async def list_trash_endpoint(
+    ws_id: UUID,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    ws = await get_workspace(db, ws_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_access(auth, ws.organization_id)
+    return await workspace_governance_service.list_trash(db, ws)
+
+
+@router.get("/workspaces/{ws_id}/audit", response_model=list[WorkspaceAuditEventRead])
+async def list_workspace_audit_endpoint(
+    ws_id: UUID,
+    limit: int = Query(200, ge=1, le=500),
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    ws = await get_workspace(db, ws_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_access(auth, ws.organization_id)
+    return await workspace_governance_service.list_audit_events(db, ws, limit=limit)
+
+
+@router.post("/workspaces/{ws_id}/trash/{file_id}/restore", response_model=WorkspaceFileRead)
+async def restore_trash_endpoint(
+    ws_id: UUID,
+    file_id: UUID,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    ws = await get_workspace(db, ws_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_write_access(auth, ws.organization_id)
+    return await workspace_governance_service.restore_from_trash_admin(db, ws, file_id, auth)
+
+
+@router.delete("/workspaces/{ws_id}/folder-path")
+async def delete_folder_path_endpoint(
+    ws_id: UUID,
+    path: str = Query(..., min_length=1, max_length=1024),
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    ws = await get_workspace(db, ws_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_write_access(auth, ws.organization_id)
+    try:
+        deleted = await soft_delete_folder_path(db, ws.id, path, admin_id=auth.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await workspace_governance_service.audit(
+        db, ws, "folder_deleted", admin_id=auth.id, metadata={"path": path, **deleted},
+    )
+    return deleted
+
+
+@router.post(
+    "/workspaces/{ws_id}/items/bulk-delete",
+    response_model=WorkspaceBulkDeleteResult,
+)
+async def bulk_delete_items_endpoint(
+    ws_id: UUID,
+    data: WorkspaceBulkDeleteRequest,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    ws = await get_workspace(db, ws_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_write_access(auth, ws.organization_id)
+    try:
+        deleted = await bulk_soft_delete_items(
+            db,
+            ws.id,
+            file_ids=data.file_ids,
+            folder_paths=data.folder_paths,
+            admin_id=auth.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await workspace_governance_service.audit(
+        db,
+        ws,
+        "items_bulk_deleted",
+        admin_id=auth.id,
+        metadata={**deleted, "folder_paths": data.folder_paths, "file_count": len(data.file_ids)},
+    )
+    return deleted
+
+
 # ── Workspace Folders ──
 
 @router.post("/workspaces/{ws_id}/folders", response_model=WorkspaceFolderRead, status_code=201)
@@ -425,4 +561,9 @@ async def delete_folder_endpoint(
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
     assert_org_write_access(auth, await _ws_org_id(db, folder.workspace_id))
-    await soft_delete_folder(db, folder)
+    await soft_delete_folder(db, folder, admin_id=auth.id)
+    ws = await get_workspace(db, folder.workspace_id)
+    if ws is not None:
+        await workspace_governance_service.audit(
+            db, ws, "folder_deleted", admin_id=auth.id, metadata={"path": folder.path},
+        )

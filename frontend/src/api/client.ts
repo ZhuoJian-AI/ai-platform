@@ -669,6 +669,12 @@ export interface WorkspaceFolder {
   created_at: string; updated_at: string;
 }
 
+export interface WorkspaceFileVersion {
+  id: string; workspace_file_id: string; version_no: number; size: number;
+  content_hash: string | null; parse_status: string; parse_kind: string | null;
+  parse_error: string | null; created_at: string;
+}
+
 /** 工作空间树节点：随组织架构逐级嵌套，每节点携带同名绑定工作空间。 */
 export interface WorkspaceTreeNode {
   node_type: 'organization' | 'department' | 'team' | 'user';
@@ -707,10 +713,22 @@ export const workspaces = {
   updateFile: (id: string, data: { content?: string; metadata?: Record<string, unknown> }) =>
     request<WorkspaceFile>(`/api/v1/files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteFile: (id: string) => request<void>(`/api/v1/files/${id}`, { method: 'DELETE' }),
+  listFileVersions: (id: string) => request<WorkspaceFileVersion[]>(`/api/v1/files/${id}/versions`),
+  restoreFileVersion: (id: string, versionId: string) =>
+    request<WorkspaceFile>(`/api/v1/files/${id}/versions/${versionId}/restore`, { method: 'POST' }),
   listFolders: (wsId: string) => request<WorkspaceFolder[]>(`/api/v1/workspaces/${wsId}/folders`),
   createFolder: (wsId: string, data: { path: string }) =>
     request<WorkspaceFolder>(`/api/v1/workspaces/${wsId}/folders`, { method: 'POST', body: JSON.stringify(data) }),
   deleteFolder: (id: string) => request<void>(`/api/v1/folders/${id}`, { method: 'DELETE' }),
+  deleteFolderPath: (wsId: string, path: string) =>
+    request<{ folders: number; files: number }>(`/api/v1/workspaces/${wsId}/folder-path?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
+  bulkDeleteItems: (wsId: string, data: { file_ids: string[]; folder_paths: string[] }) =>
+    request<{ deleted_files: number; deleted_folders: number }>(`/api/v1/workspaces/${wsId}/items/bulk-delete`, { method: 'POST', body: JSON.stringify(data) }),
+  listTrash: (wsId: string) => request<WorkspaceFile[]>(`/api/v1/workspaces/${wsId}/trash`),
+  restoreTrash: (wsId: string, fileId: string) =>
+    request<WorkspaceFile>(`/api/v1/workspaces/${wsId}/trash/${fileId}/restore`, { method: 'POST' }),
+  listAudit: (wsId: string, limit = 200) =>
+    request<WorkspaceAuditEvent[]>(`/api/v1/workspaces/${wsId}/audit?limit=${limit}`),
 };
 
 // ── Agent Platform: Agents ─────────────────────────────────────────────

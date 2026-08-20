@@ -678,7 +678,11 @@ async def get_folder(db: AsyncSession, folder_id: UUID) -> WorkspaceFolder | Non
 
 
 async def soft_delete_folder(
-    db: AsyncSession, folder: WorkspaceFolder, *, user_id: str | UUID | None = None,
+    db: AsyncSession,
+    folder: WorkspaceFolder,
+    *,
+    user_id: str | UUID | None = None,
+    admin_id: int | None = None,
 ) -> None:
     """软删文件夹 + 其下所有子文件夹 + 该前缀下所有文件（级联）。
 
@@ -709,6 +713,7 @@ async def soft_delete_folder(
     for sf in sub_files:
         sf.deleted_at = now
         sf.deleted_by_user_id = user_id
+        sf.deleted_by_admin_id = admin_id
         sf.purge_after = now + timedelta(days=settings.workspace_trash_retention_days)
 
     folder.deleted_at = now
@@ -716,7 +721,12 @@ async def soft_delete_folder(
 
 
 async def soft_delete_folder_path(
-    db: AsyncSession, ws_id: UUID, path: str, *, user_id: str | UUID | None = None,
+    db: AsyncSession,
+    ws_id: UUID,
+    path: str,
+    *,
+    user_id: str | UUID | None = None,
+    admin_id: int | None = None,
 ) -> dict[str, int]:
     """Delete an explicit or path-inferred folder and everything below it.
 
@@ -754,6 +764,7 @@ async def soft_delete_folder_path(
     for item in file_rows:
         item.deleted_at = now
         item.deleted_by_user_id = user_id
+        item.deleted_by_admin_id = admin_id
         item.purge_after = now + timedelta(days=settings.workspace_trash_retention_days)
 
     await db.flush()
@@ -767,6 +778,7 @@ async def bulk_soft_delete_items(
     file_ids: list[UUID],
     folder_paths: list[str],
     user_id: str | UUID | None = None,
+    admin_id: int | None = None,
 ) -> dict[str, int]:
     """Atomically validate and soft-delete selected files and folder subtrees."""
     unique_file_ids = list(dict.fromkeys(file_ids))
@@ -805,7 +817,9 @@ async def bulk_soft_delete_items(
     deleted_files = 0
     deleted_folders = 0
     for path in reduced_paths:
-        result = await soft_delete_folder_path(db, ws_id, path, user_id=user_id)
+        result = await soft_delete_folder_path(
+            db, ws_id, path, user_id=user_id, admin_id=admin_id,
+        )
         deleted_files += result["files"]
         deleted_folders += result["folders"]
 
@@ -814,6 +828,7 @@ async def bulk_soft_delete_items(
         if item.deleted_at is None:
             item.deleted_at = now
             item.deleted_by_user_id = user_id
+            item.deleted_by_admin_id = admin_id
             item.purge_after = now + timedelta(days=settings.workspace_trash_retention_days)
             deleted_files += 1
     await db.flush()

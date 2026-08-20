@@ -255,6 +255,35 @@ async def restore_version(
     return file
 
 
+async def restore_version_admin(
+    db: AsyncSession,
+    ws: Workspace,
+    file: WorkspaceFile,
+    version: WorkspaceFileVersion,
+    admin: CurrentAdmin,
+) -> WorkspaceFile:
+    """Restore an immutable file version through the administrator API."""
+    if version.workspace_file_id != file.id:
+        raise HTTPException(status_code=404, detail="文件版本不存在")
+    for field in (
+        "size", "content_hash", "content_ref", "content", "extracted_text",
+        "parse_status", "parse_kind", "parse_error", "metadata_",
+    ):
+        setattr(file, field, getattr(version, field))
+    await workspace_service.create_file_version(db, file, created_by_admin_id=admin.id)
+    await audit(
+        db,
+        ws,
+        "version_restored",
+        admin_id=admin.id,
+        file=file,
+        version_id=file.current_version_id,
+        metadata={"restored_from": str(version.id)},
+    )
+    await db.refresh(file)
+    return file
+
+
 async def list_trash(db: AsyncSession, ws: Workspace) -> list[WorkspaceFile]:
     return list((await db.execute(select(WorkspaceFile).where(
         WorkspaceFile.workspace_id == ws.id, WorkspaceFile.deleted_at.is_not(None),
@@ -282,6 +311,29 @@ async def restore_from_trash(db: AsyncSession, ws: Workspace, file_id: UUID, cu:
     file.deleted_by_admin_id = None
     file.purge_after = None
     await audit(db, ws, "file_restored", user_id=cu.id, file=file, version_id=file.current_version_id)
+    await db.refresh(file)
+    return file
+
+
+async def restore_from_trash_admin(
+    db: AsyncSession, ws: Workspace, file_id: UUID, admin: CurrentAdmin,
+) -> WorkspaceFile:
+    """Restore a deleted file through the administrator API."""
+    file = (await db.execute(select(WorkspaceFile).where(
+        WorkspaceFile.id == file_id,
+        WorkspaceFile.workspace_id == ws.id,
+        WorkspaceFile.deleted_at.is_not(None),
+    ))).scalar_one_or_none()
+    if file is None:
+        raise HTTPException(status_code=404, detail="回收站文件不存在")
+    file.deleted_at = None
+    file.deleted_by_user_id = None
+    file.deleted_by_admin_id = None
+    file.purge_after = None
+    await audit(
+        db, ws, "file_restored", admin_id=admin.id,
+        file=file, version_id=file.current_version_id,
+    )
     await db.refresh(file)
     return file
 
