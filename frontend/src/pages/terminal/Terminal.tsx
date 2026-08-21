@@ -39,6 +39,7 @@ import AgentManagerView from './AgentManagerView';
 import DataInterfaceView from './DataInterfaceView';
 import OntologyView from './OntologyView';
 import ConfirmModal from '../../components/finder/ConfirmModal';
+import BrandLogoSlot, { BRAND_LOGO_SLOTS, markBlankFavicon } from '../../branding/BrandLogoSlot';
 
 /** WorkBuddy 配色（参考 HTML 的 tailwind theme）。 */
 const WB = {
@@ -404,13 +405,9 @@ export default function Terminal() {
   // 组件卸载：显式中断 SSE 读端（SPA 导航也干净）。后台 detach run 不受影响，可经 resume 重连。
   useEffect(() => () => { abortRef.current?.abort(); }, []);
 
-  // 终端门户 tab 图标用 terminal-icon.png，离开时还原为管理端 admin-icon.png
+  // BRAND_LOGO_SLOT: 用户端浏览器标签图标暂时留白，离开时恢复管理端位点。
   useEffect(() => {
-    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
-    if (!link) return;
-    const prev = link.href;
-    link.href = '/terminal-icon.png';
-    return () => { link.href = prev; };
+    return markBlankFavicon(BRAND_LOGO_SLOTS.terminalFavicon);
   }, []);
 
   // 作曲器打开后，按后端 /resources.defaults 预填默认装配：默认工作空间=个人工作空间，
@@ -2000,9 +1997,9 @@ function HomeView(props: {
 
       {/* 欢迎内容 */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '0 32px', overflowY: 'auto' }}>
-        {/* 品牌图标 */}
+        {/* BRAND_LOGO_SLOT: 用户端欢迎页品牌位 */}
         <div style={{ position: 'relative', marginBottom: 24 }}>
-          <img src="/terminal-icon.png" alt="AgileBuddy" style={{ width: 72, height: 72, objectFit: 'contain', display: 'block' }} />
+          <BrandLogoSlot slot={BRAND_LOGO_SLOTS.terminalWelcome} width={72} height={72} />
         </div>
 
         <h1 style={{ fontSize: 30, fontWeight: 700, color: '#111827', marginBottom: 4 }}>AgileBuddy</h1>
@@ -2668,7 +2665,7 @@ function ChangesBox({ files, onLink }: { files: { path: string; generated: boole
 function AvatarHeader({ streaming }: { streaming?: boolean }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-      <img src="/terminal-icon.png" alt="AgileBuddy" style={{ width: 28, height: 28, objectFit: 'contain', display: 'block' }} />
+      <BrandLogoSlot slot={BRAND_LOGO_SLOTS.assistantAvatar} width={28} height={28} />
       <span style={{ fontSize: 14, fontWeight: 500, color: '#1f2937' }}>AgileBuddy</span>
       {streaming && <Tag color="processing" style={{ marginInlineStart: 4, fontSize: 11 }}>live</Tag>}
     </div>

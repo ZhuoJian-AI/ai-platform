@@ -6,6 +6,7 @@ import { useAuth } from '../context/AuthContext';
 import type { AdminUser } from '../context/AuthContext';
 import { WB, WB_FONT, FS, antdTheme } from './finder/theme';
 import ContactUs from './ContactUs';
+import BrandLogoSlot, { BRAND_LOGO_SLOTS, type BrandLogoSlotId } from '../branding/BrandLogoSlot';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -101,7 +102,11 @@ export default function LoginForm({ slug, orgName }: LoginFormProps) {
 
   return (
     <>
-      <LoginCard title={title} subtitle={subtitle}>
+      <LoginCard
+        title={title}
+        subtitle={subtitle}
+        logoSlot={slug ? BRAND_LOGO_SLOTS.organizationLogin : BRAND_LOGO_SLOTS.platformLogin}
+      >
         {error && (
           <Alert
             type="error"
@@ -178,15 +183,13 @@ export default function LoginForm({ slug, orgName }: LoginFormProps) {
 export function LoginCard({
   title,
   subtitle,
-  logo = '/logo.png',
-  logoAlt = 'AI Infra',
+  logoSlot = BRAND_LOGO_SLOTS.platformLogin,
   children,
 }: {
   title?: React.ReactNode;
   subtitle?: React.ReactNode;
-  /** 卡片顶部 logo 图片路径；默认 /logo.png（平台 / 组织门户）。终端用户登录传入独立 logo。 */
-  logo?: string;
-  logoAlt?: string;
+  /** BRAND_LOGO_SLOT: 登录卡片顶部企业品牌位。 */
+  logoSlot?: BrandLogoSlotId;
   children: React.ReactNode;
 }) {
   return (
@@ -204,10 +207,11 @@ export function LoginCard({
       styles={{ body: { padding: 28 } }}
     >
       <div style={{ textAlign: 'center', marginBottom: 24 }}>
-        <img
-          src={logo}
-          alt={logoAlt}
-          style={{ height: 56, objectFit: 'contain', display: 'block', margin: '0 auto 12px' }}
+        <BrandLogoSlot
+          slot={logoSlot}
+          width={200}
+          height={56}
+          style={{ margin: '0 auto 12px' }}
         />
         {title && (
           <div style={{ fontSize: FS.title, fontWeight: 600, color: WB.text, lineHeight: 1.4 }}>{title}</div>

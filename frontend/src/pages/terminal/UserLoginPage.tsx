@@ -7,6 +7,7 @@ import ContactUs from '../../components/ContactUs';
 import { WB, FS } from '../../components/finder/theme';
 import { auth as authApi, terminal, type OrgInfo } from '../../api/client';
 import { useUserAuth, type TerminalUserState } from '../../context/UserAuthContext';
+import { BRAND_LOGO_SLOTS, markBlankFavicon } from '../../branding/BrandLogoSlot';
 
 /**
  * 终端用户登录页（/{slug}/terminal/login）：组织员工经 slug 登录，进入AgileBuddy。
@@ -20,6 +21,9 @@ export default function UserLoginPage() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  // BRAND_LOGO_SLOT: 用户登录页也使用用户端浏览器标签图标位。
+  useEffect(() => markBlankFavicon(BRAND_LOGO_SLOTS.terminalFavicon), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -70,8 +74,7 @@ export default function UserLoginPage() {
         />
       ) : (
         <LoginCard
-          logo="/terminal-icon.png"
-          logoAlt="AgileBuddy"
+          logoSlot={BRAND_LOGO_SLOTS.terminalLogin}
           title={
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, justifyContent: 'center' }}>
               <ApartmentOutlined style={{ color: WB.primary, fontSize: FS.body }} />

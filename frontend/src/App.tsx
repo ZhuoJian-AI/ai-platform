@@ -38,6 +38,7 @@ import MonitorOverview from './pages/monitor/MonitorOverview';
 import RouterMonitor from './pages/monitor/RouterMonitor';
 import AgentMonitor from './pages/monitor/AgentMonitor';
 import ToolMonitor from './pages/monitor/ToolMonitor';
+import BrandLogoSlot, { BRAND_LOGO_SLOTS, markBlankFavicon } from './branding/BrandLogoSlot';
 
 interface MenuEntry {
   path: string;
@@ -146,10 +147,9 @@ function AppLayout() {
   const { admin, logout, isSuperAdmin, isOrgScoped } = useAuth();
   const [helpOpen, setHelpOpen] = useState(false);
 
-  // 管理端浏览器 tab 图标用 admin-icon.png（终端门户仍用 terminal-icon.png）
+  // BRAND_LOGO_SLOT: 管理端浏览器标签图标暂时留白。
   useEffect(() => {
-    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
-    if (link) link.href = '/admin-icon.png';
+    return markBlankFavicon(BRAND_LOGO_SLOTS.platformFavicon);
   }, []);
 
   const ROLE_LABELS: Record<string, string> = { super_admin: '超管', admin: '管理员', org_admin: '组织管理员' };
@@ -173,7 +173,12 @@ function AppLayout() {
         {/* 左侧栏：终端式单栏（品牌 / 分组导航 / 底部用户） */}
         <aside style={{ width: 220, background: WB.sidebar, borderRight: `1px solid ${WB.border}`, display: 'flex', flexDirection: 'column', flex: '0 0 auto' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '14px 16px', flex: '0 0 auto' }}>
-            <img src="/logo.png" alt="AI Infra" style={{ height: 26, objectFit: 'contain' }} />
+            <BrandLogoSlot
+              slot={BRAND_LOGO_SLOTS.adminSidebar}
+              width="100%"
+              height={26}
+              style={{ maxWidth: 188 }}
+            />
           </div>
 
           <nav style={{ flex: 1, overflowY: 'auto', padding: '4px 0 8px' }} className="wb-scroll-hide">
