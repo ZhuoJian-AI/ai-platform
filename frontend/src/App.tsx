@@ -38,7 +38,7 @@ import MonitorOverview from './pages/monitor/MonitorOverview';
 import RouterMonitor from './pages/monitor/RouterMonitor';
 import AgentMonitor from './pages/monitor/AgentMonitor';
 import ToolMonitor from './pages/monitor/ToolMonitor';
-import BrandLogoSlot, { BRAND_LOGO_SLOTS, markBlankFavicon } from './branding/BrandLogoSlot';
+import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from './branding/BrandLogoSlot';
 
 interface MenuEntry {
   path: string;
@@ -147,9 +147,9 @@ function AppLayout() {
   const { admin, logout, isSuperAdmin, isOrgScoped } = useAuth();
   const [helpOpen, setHelpOpen] = useState(false);
 
-  // BRAND_LOGO_SLOT: 管理端浏览器标签图标暂时留白。
+  // BRAND_LOGO_SLOT: 管理端浏览器标签图标。
   useEffect(() => {
-    return markBlankFavicon(BRAND_LOGO_SLOTS.platformFavicon);
+    return applyBrandFavicon(BRAND_LOGO_SLOTS.platformFavicon);
   }, []);
 
   const ROLE_LABELS: Record<string, string> = { super_admin: '超管', admin: '管理员', org_admin: '组织管理员' };

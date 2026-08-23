@@ -3,7 +3,7 @@ import type { CSSProperties } from 'react';
 /**
  * BRAND_LOGO_SLOT
  *
- * 所有等待企业品牌素材的前端 Logo 位都必须通过本组件渲染。
+ * 所有企业品牌 Logo 位都必须通过本组件渲染。
  * 替换 Logo 时可全局搜索 `BRAND_LOGO_SLOT` 或 `data-brand-logo-slot`，
  * 不要重新在业务页面中写死图片路径。
  */
@@ -20,6 +20,8 @@ export const BRAND_LOGO_SLOTS = {
 
 export type BrandLogoSlotId = typeof BRAND_LOGO_SLOTS[keyof typeof BRAND_LOGO_SLOTS];
 
+export const BRAND_LOGO_URL = '/brand/aisee-logo.svg';
+
 interface BrandLogoSlotProps {
   slot: BrandLogoSlotId;
   width: number | string;
@@ -27,23 +29,27 @@ interface BrandLogoSlotProps {
   style?: CSSProperties;
 }
 
-/** 品牌 Logo 留白槽。当前故意不展示任何图形，仅保留原布局尺寸和 DOM 标记。 */
+/** 统一品牌 Logo 槽，保留位点标记并渲染同一份灼见 AiSEE SVG。 */
 export default function BrandLogoSlot({ slot, width, height, style }: BrandLogoSlotProps) {
   return (
     <span
-      aria-hidden="true"
       className="brand-logo-slot"
       data-brand-logo-slot={slot}
-      data-brand-logo-status="awaiting-company-logo"
+      data-brand-logo-status="configured"
       style={{ display: 'block', width, height, flex: '0 0 auto', ...style }}
-    />
+    >
+      <img
+        src={BRAND_LOGO_URL}
+        alt="灼见 AiSEE"
+        draggable={false}
+        style={{ display: 'block', width: '100%', height: '100%', objectFit: 'contain' }}
+      />
+    </span>
   );
 }
 
-const BLANK_FAVICON = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2232%22 height=%2232%22 viewBox=%220 0 32 32%22%3E%3C/svg%3E';
-
-/** BRAND_LOGO_SLOT: 浏览器标签图标留白，并在离开当前路由时恢复上一个位点。 */
-export function markBlankFavicon(slot: BrandLogoSlotId): () => void {
+/** BRAND_LOGO_SLOT: 应用统一浏览器标签图标，并在离开当前路由时恢复上一个位点。 */
+export function applyBrandFavicon(slot: BrandLogoSlotId): () => void {
   let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
   const created = !link;
   if (!link) {
@@ -60,9 +66,9 @@ export function markBlankFavicon(slot: BrandLogoSlotId): () => void {
   };
 
   link.type = 'image/svg+xml';
-  link.href = BLANK_FAVICON;
+  link.href = BRAND_LOGO_URL;
   link.dataset.brandLogoSlot = slot;
-  link.dataset.brandLogoStatus = 'awaiting-company-logo';
+  link.dataset.brandLogoStatus = 'configured';
 
   return () => {
     if (created) {

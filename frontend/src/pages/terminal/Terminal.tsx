@@ -39,7 +39,7 @@ import AgentManagerView from './AgentManagerView';
 import DataInterfaceView from './DataInterfaceView';
 import OntologyView from './OntologyView';
 import ConfirmModal from '../../components/finder/ConfirmModal';
-import BrandLogoSlot, { BRAND_LOGO_SLOTS, markBlankFavicon } from '../../branding/BrandLogoSlot';
+import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from '../../branding/BrandLogoSlot';
 
 /** WorkBuddy 配色（参考 HTML 的 tailwind theme）。 */
 const WB = {
@@ -405,9 +405,9 @@ export default function Terminal() {
   // 组件卸载：显式中断 SSE 读端（SPA 导航也干净）。后台 detach run 不受影响，可经 resume 重连。
   useEffect(() => () => { abortRef.current?.abort(); }, []);
 
-  // BRAND_LOGO_SLOT: 用户端浏览器标签图标暂时留白，离开时恢复管理端位点。
+  // BRAND_LOGO_SLOT: 用户端浏览器标签图标，离开时恢复管理端位点。
   useEffect(() => {
-    return markBlankFavicon(BRAND_LOGO_SLOTS.terminalFavicon);
+    return applyBrandFavicon(BRAND_LOGO_SLOTS.terminalFavicon);
   }, []);
 
   // 作曲器打开后，按后端 /resources.defaults 预填默认装配：默认工作空间=个人工作空间，
