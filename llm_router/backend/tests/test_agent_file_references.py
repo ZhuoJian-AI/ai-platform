@@ -11,7 +11,9 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.graph import nodes, runner
+from app.agents import runtime_support
+from app.agents.dsh import runner as dsh_runner
+from app.agents.graph import nodes
 from app.api import terminal as terminal_api
 from app.models.organization import Organization
 from app.models.task import Task, TaskMessage
@@ -164,22 +166,18 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
         ),
     )
     await db_session.flush()
-    captured: dict = {}
-
-    async def fake_stream_chat(_db, _org_id, _alias, messages, **kwargs):
-        captured["messages"] = messages
-        captured["system_prompt"] = kwargs["system_prompt"]
-        yield "text", "已分析指定文件", None
-
     async def fake_build_tools(_db, _skill_ids, _workspace_id, _user=None):
         return nodes._builtin_tool_defs(), {}
 
+    async def fake_visual(_state, _db, _user, _messages, prompt):
+        return None, None, prompt
+
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session})
-    monkeypatch.setattr(nodes.llm_client, "stream_chat", fake_stream_chat)
     monkeypatch.setattr(nodes, "_build_tools", fake_build_tools)
+    monkeypatch.setattr(nodes, "_configure_visual_turn", fake_visual)
 
     file_id = str(selected.id)
-    result = await nodes.agent_loop({
+    result = await nodes.prepare_dsh_turn({
         "mode": "general",
         "org_id": str(org.id),
         "workspace_id": str(ws.id),
@@ -195,14 +193,13 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
         "usage": {},
     })
 
-    prompt = captured["system_prompt"]
+    prompt = result["system_prompt"]
     assert f"@{file_id} → WAIC展商联系方式.xlsx" in prompt
     assert f"file_id={file_id} path=WAIC展商联系方式.xlsx" in prompt
     assert "唯一应被分析的文件内容" in prompt
     assert "不应被注入的其他文件内容" not in prompt
     assert "不得声称无法按 UUID 定位" in prompt
     assert "不要调用工作空间列表/读取工具" in prompt
-    assert result["assistant_final"] == "已分析指定文件"
     file_trace = next(trace for trace in result["traces"] if trace.get("category") == "file")
     assert file_trace["references"] == [
         {"file_id": file_id, "path": "WAIC展商联系方式.xlsx"},
@@ -225,21 +222,18 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
         WorkspaceFileCreate(path="根目录/其他文件.docx", content="绝对不得注入"),
     )
     await db_session.flush()
-    captured: dict = {}
-
-    async def fake_stream_chat(_db, _org_id, _alias, messages, **kwargs):
-        captured["system_prompt"] = kwargs["system_prompt"]
-        yield "text", "已分析附件", None
-
     async def fake_build_tools(_db, _skill_ids, _workspace_id, _user=None):
         return nodes._builtin_tool_defs(), {}
 
+    async def fake_visual(_state, _db, _user, _messages, prompt):
+        return None, None, prompt
+
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session})
-    monkeypatch.setattr(nodes.llm_client, "stream_chat", fake_stream_chat)
     monkeypatch.setattr(nodes, "_build_tools", fake_build_tools)
+    monkeypatch.setattr(nodes, "_configure_visual_turn", fake_visual)
 
     file_id = str(selected.id)
-    result = await nodes.agent_loop({
+    result = await nodes.prepare_dsh_turn({
         "mode": "general",
         "org_id": str(org.id),
         "workspace_id": str(ws.id),
@@ -255,60 +249,39 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
         "usage": {},
     })
 
-    prompt = captured["system_prompt"]
+    prompt = result["system_prompt"]
     assert "只能注入这份附件的内容" in prompt
     assert "绝对不得注入" not in prompt
     assert f"@{file_id} → 会话附件/task-1/指定文件.docx" in prompt
-    assert result["assistant_final"] == "已分析附件"
 
 
 @pytest.mark.asyncio
-async def test_agent_retracts_unverified_tool_success_and_retries(
-    db_session: AsyncSession,
+async def test_dsh_runtime_retracts_unverified_tool_success(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    calls = 0
-    events: list[dict] = []
     fake_id = str(uuid4())
 
-    async def fake_stream_chat(_db, _org_id, _alias, messages, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            yield "text", f"已真实调用 image_tool，执行成功，file_id={fake_id}", None
-        else:
-            assert "系统执行校验" in messages[-1]["content"]
-            yield "text", "未能产生真实工具调用，任务尚未执行。", None
+    async def fake_stream_run(_payload):
+        yield {
+            "type": "text_delta",
+            "delta": f"已真实调用 image_tool，执行成功，file_id={fake_id}",
+        }
+        yield {"type": "done"}
 
-    async def fake_build_tools(_db, _skill_ids, _workspace_id, _user=None):
-        return nodes._builtin_tool_defs(), {}
+    monkeypatch.setattr(dsh_runner.client, "stream_run", fake_stream_run)
+    state = {"run_id": 1, "request": "请处理附件", "steps": [], "messages": []}
+    staged: list[dict] = []
+    await dsh_runner._consume_dsh(
+        state,
+        {"system_prompt": "测试", "tools": [], "memory_context": None},
+        "run-token",
+        None,
+        staged,
+    )
 
-    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session})
-    monkeypatch.setattr(nodes.llm_client, "stream_chat", fake_stream_chat)
-    monkeypatch.setattr(nodes, "_build_tools", fake_build_tools)
-    monkeypatch.setattr(nodes, "_emit", lambda event: events.append(event))
-
-    result = await nodes.agent_loop({
-        "mode": "general",
-        "org_id": str(uuid4()),
-        "workspace_id": None,
-        "system_prompt": "你是测试助手。",
-        "messages": [{"role": "user", "content": "请真实调用 image_tool 处理附件"}],
-        "referenced_file_ids": [],
-        "skill_ids": [],
-        "exec_mode": "craft",
-        "memory_context": [],
-        "rag_context": [],
-        "steps": [],
-        "traces": [],
-        "usage": {},
-    })
-
-    assert calls == 2
-    assert result["assistant_final"] == "未能产生真实工具调用，任务尚未执行。"
-    assert fake_id not in result["assistant_final"]
-    assert any(event.get("type") == "text_retract" for event in events)
-    assert any(step.get("step") == "tool_claim_rejected" for step in result["steps"])
+    assert fake_id not in state["assistant_final"]
+    assert any(event.get("type") == "text_retract" for event in staged)
+    assert any(step.get("step") == "tool_claim_rejected" for step in state["steps"])
 
 
 def test_general_state_and_message_metadata_preserve_attachment_snapshot():
@@ -326,7 +299,7 @@ def test_general_state_and_message_metadata_preserve_attachment_snapshot():
     }
     user = SimpleNamespace(id=str(uuid4()), department_id=None, team_id=None)
 
-    state = runner._general_initial_state(
+    state = runtime_support.general_initial_state(
         org_id=str(uuid4()),
         user=user,
         task_id=str(uuid4()),
@@ -339,7 +312,7 @@ def test_general_state_and_message_metadata_preserve_attachment_snapshot():
 
     assert state["referenced_file_ids"] == [file_id]
     assert state["invoked_skill_ids"] == [invoked_skill["id"]]
-    assert runner._user_message_metadata(state) == {
+    assert runtime_support.user_message_metadata(state) == {
         "attachments": [snapshot], "invoked_skills": [invoked_skill],
     }
 

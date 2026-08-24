@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     skill_runner_token: str = "skill-runner-dev-token-change-in-production"
     skill_runner_timeout_seconds: int = 120
     skill_package_max_bytes: int = 10 * 1024 * 1024
+
+    # Single coordinator runtime (Docker-internal only).
+    dsh_runtime_url: str = "http://localhost:8030"
+    dsh_runtime_token: str = "dsh-runtime-dev-token-change-in-production"
+    dsh_runtime_timeout_seconds: int = 600
     original_preview_enabled: bool = False
     # Native file preview is part of the staging-wide workspace experience;
     # keep the emergency deployment switch but no tenant allowlist.

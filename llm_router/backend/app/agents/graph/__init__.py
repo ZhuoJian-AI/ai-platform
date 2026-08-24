@@ -1,18 +1,9 @@
-"""智能体运行时 LangGraph 图：构建器 + runner + 状态。"""
+"""Shared agent persistence helpers retained by the DSH runtime.
 
-from app.agents.graph.builder import build_agent_graph, get_agent_graph
-from app.agents.graph.runner import (
-    run_agent,
-    run_general_agent,
-    stream_agent,
-    stream_general_agent,
-)
+The public coordinator lives in :mod:`app.agents.dsh`; this package no longer
+exports a second LangGraph runtime.
+"""
 
-__all__ = [
-    "build_agent_graph",
-    "get_agent_graph",
-    "run_agent",
-    "stream_agent",
-    "run_general_agent",
-    "stream_general_agent",
-]
+from app.agents.graph import run_registry
+
+__all__ = ["run_registry"]

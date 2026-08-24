@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.graph import get_agent_graph, run_agent, stream_agent
+from app.agents.dsh import run_agent, stream_agent
 from app.auth.admin_auth import (
     CurrentAdmin,
     assert_org_access,
@@ -47,16 +47,13 @@ async def playground_endpoint(
     """测试广场：运行智能体。stream=true 返回 SSE，否则返回最终结果。"""
     agent = await _load_agent_or_404(db, agent_id)
     assert_org_write_access(auth, agent.organization_id)
-    graph = get_agent_graph()
     if data.stream:
         return await stream_agent(
-            graph,
             agent_id=str(agent.id), org_id=str(agent.organization_id),
             message=data.message, session_id=data.session_id,
             db=db, request=request, admin=auth,
         )
     result = await run_agent(
-        graph,
         agent_id=str(agent.id), org_id=str(agent.organization_id),
         message=data.message, session_id=data.session_id,
         db=db, request=request, admin=auth,

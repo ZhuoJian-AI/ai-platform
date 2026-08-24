@@ -61,11 +61,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     get_proxy_graph()
     logger.info("proxy_graph_ready")
 
-    # 预热智能体运行时 StateGraph 单例
-    from app.agents.graph import get_agent_graph
-
-    get_agent_graph()
-    logger.info("agent_graph_ready")
+    # 智能体协调由独立 DSH Runtime 承担；本进程只保留平台能力与授权边界。
+    logger.info("agent_runtime", coordinator="dsh")
 
     # Retry interrupted executable Skill dependency installs after restart.
     install_resume_task = None

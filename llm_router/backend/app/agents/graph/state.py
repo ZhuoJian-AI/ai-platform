@@ -1,9 +1,7 @@
-"""AgentState —— LangGraph 智能体运行时可序列化状态 schema。
+"""Serializable platform state exchanged with the single DSH coordinator.
 
-与 ProxyState 同约定：所有字段可序列化（str/int/bool/dict/list/None），状态在每个
-super-step 后被 checkpointer 存储。非序列化运行时句柄（db session、admin）绝不入 state，
-经 LangGraph ``context`` 注入（见 :mod:`app.operators.graph.context`）。密钥不入 state：
-LLM 调用在 llm_client 内按 provider 解密、就地使用。
+Database sessions, authenticated principals and provider secrets are never
+included; they remain in the short-lived server-side run registry.
 """
 
 from __future__ import annotations
@@ -12,7 +10,7 @@ from typing import TypedDict
 
 
 class AgentState(TypedDict, total=False):
-    """单次智能体执行在图节点间流转的状态。"""
+    """单次智能体执行在平台准备、DSH 协调和持久化阶段间流转的状态。"""
 
     # ── 标识 ──
     agent_id: str
@@ -58,7 +56,7 @@ class AgentState(TypedDict, total=False):
     # general 模式：当前轮明确调用的技能（结构化 UUID 优先，唯一 /slug 兼容）。
     referenced_skills: list[dict]
     # general 模式：用户在消息中以 @<file_id> 引用的工作空间文件 id（load_config 解析填充）。
-    # agent_loop 读取这些文件内容注入 system prompt（仿本体/RAG），二进制文件只标注不内联。
+    # DSH turn preparation reads these references; binary files are never inlined as text.
     referenced_file_ids: list[str]
     # 本轮结构化附件的服务端校验快照；写入 user TaskMessage.metadata 供历史回放。
     attachment_files: list[dict]

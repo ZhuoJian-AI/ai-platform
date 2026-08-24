@@ -103,6 +103,30 @@ services:
       resources:
         limits: { cpus: "1.00", memory: 2G }
 
+  dsh-runtime:
+    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-dsh-runtime:${APP_IMAGE_TAG:-latest}
+    build:
+      context: ./dsh_runtime
+      dockerfile: Dockerfile
+    environment:
+      DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
+      AI_PLATFORM_BACKEND_URL: http://backend:8000
+      PORT: "8030"
+    expose:
+      - "8030"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8030/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "0.75", memory: 1G }
+
   backend:
     image: ${COMPOSE_PROJECT_NAME:-ai-platform}-backend:${APP_IMAGE_TAG:-latest}
     build:
@@ -123,6 +147,9 @@ services:
       SKILL_RUNNER_URL: http://skill-runner:8020
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
       SKILL_RUNNER_TIMEOUT_SECONDS: "${SKILL_RUNNER_TIMEOUT_SECONDS:-120}"
+      DSH_RUNTIME_URL: http://dsh-runtime:8030
+      DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
+      DSH_RUNTIME_TIMEOUT_SECONDS: "${DSH_RUNTIME_TIMEOUT_SECONDS:-600}"
       ORIGINAL_PREVIEW_ENABLED: "${ORIGINAL_PREVIEW_ENABLED:-true}"
       ORIGINAL_PREVIEW_ORG_ALLOWLIST: "${ORIGINAL_PREVIEW_ORG_ALLOWLIST:-}"
       MULTIMODAL_VISION_ENABLED: "${MULTIMODAL_VISION_ENABLED:-true}"
@@ -158,6 +185,8 @@ services:
       mock:
         condition: service_healthy
       skill-runner:
+        condition: service_healthy
+      dsh-runtime:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]

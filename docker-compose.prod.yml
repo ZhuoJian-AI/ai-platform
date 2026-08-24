@@ -14,6 +14,8 @@ services:
         condition: service_healthy
       skill-runner:
         condition: service_healthy
+      dsh-runtime:
+        condition: service_healthy
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -28,6 +30,9 @@ services:
       SKILL_RUNNER_URL: http://skill-runner:8020
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:-skill-runner-local-dev-token}
       SKILL_RUNNER_TIMEOUT_SECONDS: "120"
+      DSH_RUNTIME_URL: http://dsh-runtime:8030
+      DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:-dsh-runtime-local-dev-token}
+      DSH_RUNTIME_TIMEOUT_SECONDS: "600"
       ORIGINAL_PREVIEW_ENABLED: "true"
       ORIGINAL_PREVIEW_ORG_ALLOWLIST: "${ORIGINAL_PREVIEW_ORG_ALLOWLIST:-}"
       MULTIMODAL_VISION_ENABLED: "${MULTIMODAL_VISION_ENABLED:-true}"
@@ -55,6 +60,12 @@ services:
       - |
         alembic upgrade head &&
         uvicorn app.main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     restart: unless-stopped
 
   workspace-parser:

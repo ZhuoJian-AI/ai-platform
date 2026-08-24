@@ -1,7 +1,7 @@
 """进程内 run 注册表 —— detach 执行的 run 句柄，供「断连续接」回放 + 续接 live。
 
-为什么需要：``runner.py`` 的 ``stream_general_agent`` 把图执行 detach 到后台
-``asyncio.create_task``，执行生命周期不再绑 SSE 连接。客户端断连后想重连续接，
+为什么需要：DSH runner 的 ``stream_general_agent`` 把执行 detach 到后台
+``asyncio.create_task``，执行生命周期不再绑定 SSE 连接。客户端断连后想重连续接，
 需要拿到该 run 已产出的事件 buffer（回放）+ live queue（续接）。本注册表即此中介。
 
 单进程内存态（单 uvicorn worker，见 Dockerfile），重启即失——由 resume 端点的
@@ -10,7 +10,7 @@
 线程/并发模型：
 - ``publish`` 由后台 runner 单写；``buffer`` 与 ``queue`` 仅写者 + 多读者。
 - ``queue`` 是 ``asyncio.Queue``，读者 ``get()`` 直到 ``done`` + 投递哨兵。
-- 同一 task 一次只允许一个 active run（POST /run 对运行中任务 = 重连，不起新图）。
+- 同一 task 一次只允许一个 active run（POST /run 对运行中任务 = 重连，不重复启动）。
 """
 
 from __future__ import annotations

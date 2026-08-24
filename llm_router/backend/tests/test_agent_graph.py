@@ -1,13 +1,9 @@
-"""Tests for the LangGraph agent runtime graph.
-
-不依赖真实 LLM 上游：未配置 provider 时 agent_loop 应优雅降级（error），
-且 AgentRun 仍落库（status=error），验证图拓扑与 write_run_log 收口。
-"""
+"""Contract tests for the single DSH agent runtime entrypoint."""
 
 import pytest
 from httpx import AsyncClient
 
-from app.agents.graph import get_agent_graph
+from app.agents.dsh import run_agent
 
 
 async def _make_agent(client: AsyncClient, slug: str = "g") -> str:
@@ -20,17 +16,14 @@ async def _make_agent(client: AsyncClient, slug: str = "g") -> str:
     return a.json()["id"]
 
 
-def test_agent_graph_topology():
-    g = get_agent_graph()
-    nodes = set(g.get_graph().nodes)
-    for n in ("load_config", "retrieve_rag", "load_memory", "agent_loop", "save_memory", "judge", "write_run_log"):
-        assert n in nodes
+def test_playground_uses_dsh_runtime():
+    assert run_agent.__module__ == "app.agents.dsh.runner"
 
 
 @pytest.mark.asyncio
 async def test_playground_no_provider_graceful_error(client: AsyncClient):
     agent_id = await _make_agent(client, "pg-org")
-    # 非流式运行：无 provider → agent_loop 捕获并写 error，AgentRun 落库
+    # 非流式运行：无 provider → DSH bridge 优雅降级并写 error，AgentRun 落库
     resp = await client.post(
         f"/api/v1/agents/{agent_id}/playground",
         json={"message": "你好", "stream": False},

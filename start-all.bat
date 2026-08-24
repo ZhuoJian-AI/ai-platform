@@ -44,7 +44,7 @@ if errorlevel 1 (
     echo [1/4] Docker is ready.
 )
 
-echo [2/4] Starting PostgreSQL, Redis, Mock API, Skill Runner and backend...
+echo [2/4] Starting PostgreSQL, Redis, Mock API, Skill Runner, DSH Runtime and backend...
 docker compose %COMPOSE_FILES% up -d
 if errorlevel 1 (
     echo [INFO] Normal startup failed. Retrying with image build...
@@ -112,6 +112,7 @@ echo   Admin console: http://localhost:5173
 echo   Backend health: http://localhost:8000/health
 echo   Mock API health: http://localhost:8010/health
 echo   Skill Runner capabilities: http://localhost:8020/health
+echo   Agent coordinator: DSH Runtime (Docker internal port 8030)
 echo   Office preview: browser renders the authenticated original file by type
 echo   Object storage: controlled by WORKSPACE_OBJECT_STORAGE_ENABLED in .env.deploy
 echo.

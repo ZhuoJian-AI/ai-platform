@@ -69,6 +69,22 @@ services:
       retries: 12
     restart: unless-stopped
 
+  dsh-runtime:
+    build: ./dsh_runtime
+    container_name: ai_infra_dsh_runtime
+    environment:
+      DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:-dsh-runtime-local-dev-token}
+      AI_PLATFORM_BACKEND_URL: http://backend:8000
+      PORT: "8030"
+    expose:
+      - "8030"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8030/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redisdata:

@@ -18,6 +18,7 @@ from app.api.connectors import router as connector_router
 from app.api.data_interfaces import router as data_interface_router
 from app.api.departments import router as dept_router
 from app.api.dlp_rules import router as dlp_router
+from app.api.dsh_internal import router as dsh_internal_router
 from app.api.llm_providers import router as provider_router
 from app.api.memory import router as memory_router
 from app.api.monitor import router as monitor_router
@@ -37,6 +38,8 @@ api_router = APIRouter(prefix="/api/v1")
 # 认证相关 — 无需 JWT 保护
 api_router.include_router(admin_router, tags=["auth"])
 api_router.include_router(config_router, tags=["config"])
+# Docker-internal DSH callbacks use a dedicated service token, never user/admin JWTs.
+api_router.include_router(dsh_internal_router, tags=["internal-dsh"])
 
 # 以下路由需要 JWT 管理员认证，
 # 认证通过 require_admin 依赖在各自的路由文件中声明

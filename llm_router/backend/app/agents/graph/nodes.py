@@ -1,12 +1,8 @@
-"""Agent graph nodes — load_config / retrieve_rag / load_memory / agent_loop /
-save_memory / extract_memory / judge / write_run_log.
+"""AI Platform agent capabilities used by the single DSH coordinator.
 
-图拓扑（线性，节点内按配置 no-op）：
-
-    START → load_config → retrieve_rag → load_memory → agent_loop
-          → save_memory → extract_memory → judge → write_run_log → END
-
-agent_loop 内部完成 LLM ↔ 工具 多步循环（非图循环边），逐步经 stream_writer 下发事件。
+This module owns configuration loading, authorized tool discovery/execution, memory,
+evaluation and audit persistence.  It intentionally contains no model/tool loop; DSH
+owns step scheduling, observations and termination.
 
 两种模式（state["mode"]）：
 - ``agent``：管理端测试广场，load_config 读预配置 ``Agent`` 行（单 RAG / session 记忆）。
@@ -52,7 +48,6 @@ from app.services import (
     workspace_service,
 )
 from app.services import model_gateway as llm_client
-from app.services.message_verification import contains_unverified_tool_success_claim
 from app.services.rag_service import retrieve as rag_retrieve
 from app.services.skill_store_service import SKILL_MANIFEST_PATH
 from app.services.skill_store_service import get_file_by_path as get_skill_file_by_path
@@ -803,7 +798,7 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
                 if row["id"] not in explicit_ids:
                     referenced_skills.append({**row, "activation": "slash"})
         # 解析用户消息中 @<file_id> 引用的工作空间文件（精确 UUID，避免误命中邮件等）。
-        # agent_loop 读取这些文件内容注入 system prompt；越权文件在 agent_loop 校验时跳过。
+        # DSH turn preparation injects these authorized file references into model context.
         seen_fids: set[str] = set()
         for raw_fid in state.get("referenced_file_ids") or []:
             fid = str(raw_fid)
@@ -942,7 +937,7 @@ async def load_memory(state: AgentState) -> dict:
 
     agent 模式：按 session 加载最近 N 条 ``AgentMessage`` 历史。
     general 模式：① 按 task 加载 ``TaskMessage`` 对话历史前置；② 按用户权限聚合 4 级 ``Memory``
-    长期记忆填入 ``memory_context``（供 agent_loop 注入 system_prompt）。
+    长期记忆填入 ``memory_context``，由 DSH context contribution 注入。
     """
     deps = get_deps()
     db = deps["db"]
@@ -1068,7 +1063,7 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
     }
 
 
-# ── agent_loop ─────────────────────────────────────────────────────────
+# ── DSH platform capability assembly ───────────────────────────────────
 
 async def _prepare_current_turn_images(state: AgentState, db, user) -> list[multimodal_service.PreparedImage]:
     """Load only the current turn's authorized image attachments and run best-effort OCR DLP."""
@@ -1644,7 +1639,7 @@ async def _execute_tool_call(
 ) -> tuple[dict, str, bool]:
     """执行单个 tool_call，返回 (tool 消息, 结果预览, 是否成功)。
 
-    不负责 emit——由 agent_loop 在调用前后下发 tool_call/tool_result 事件。
+    不负责 emit——由 DSH runner 在调用前后下发 tool_call/tool_result 事件。
     """
     deps = get_deps()
     db = deps["db"]
@@ -1681,6 +1676,35 @@ async def _execute_tool_call(
     if entry is None:
         msg = f"tool '{name}' not found"
         return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
+
+    if entry.get("kind") == "rag_search":
+        query = str(params.get("query") or state.get("request") or "").strip()
+        top_k = max(1, min(int(params.get("top_k") or 5), 8))
+        if not query:
+            msg = "rag_search requires a non-empty query"
+            return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
+        from app.models.rag import RagCollection
+
+        merged: list[dict] = []
+        for cid in entry.get("collection_ids") or []:
+            try:
+                coll = await db.get(RagCollection, UUID(str(cid)))
+                if coll is None:
+                    continue
+                hits = await rag_retrieve(
+                    db, coll, UUID(state["org_id"]), RagRetrieveRequest(query=query, top_k=top_k),
+                )
+                for hit in hits:
+                    merged.append({
+                        "content": hit["content"], "score": hit["score"],
+                        "document_id": hit["document_id"], "collection_id": str(cid),
+                        "metadata": hit.get("metadata") or {},
+                    })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("agent_rag_tool_failed", collection=str(cid), error=str(exc))
+        merged.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+        content = json.dumps({"status": "success", "query": query, "hits": merged[:top_k]}, ensure_ascii=False)
+        return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], True)
 
     if entry.get("kind") == "prompt":
         content = entry.get("content") or ""
@@ -1766,105 +1790,96 @@ def _compact_ontologies(files: list[OntologyFile]) -> str:
     return "\n\n".join(parts)
 
 
-async def agent_loop(state: AgentState) -> dict:
-    """LLM ↔ 工具 多步循环。流式 chat：逐 token 下发文本 + 工具调用块（tool_call/tool_result）。
+async def prepare_dsh_turn(state: AgentState) -> dict:
+    """Assemble the authorized prompt and tool catalog for the DSH coordinator.
 
-    事件协议（经 stream_writer）：
-    - ``phase``   每轮 LLM 开始
-    - ``text``    逐 token 文本增量（终答实时流出）
-    - ``tool_call``    工具调用前（name+arguments），前端立即显示「调用中」
-    - ``tool_result``  工具执行后（content+ok）
-    - ``done``    收口（usage）
+    Python remains the capability and authorization boundary.  This function deliberately
+    performs no model loop and no eager RAG retrieval: DSH receives ``rag_search`` like any
+    other scoped platform tool and decides when it is needed.
     """
     deps = get_deps()
     db = deps["db"]
     messages: list[dict] = list(state.get("messages", []))
-    steps: list[dict] = list(state.get("steps", []))
     traces: list[dict] = list(state.get("traces", []))
-    usage_in = int(state.get("usage", {}).get("input_tokens", 0))
-    usage_out = int(state.get("usage", {}).get("output_tokens", 0))
-
-    # 注入长期记忆 / 组织本体 / 数据接口 / RAG 上下文到 system prompt
     system_prompt = state.get("system_prompt", "")
+
+    memory_context = ""
     mem_ctx = state.get("memory_context") or []
     if mem_ctx:
-        # 记忆内容为 markdown：按条用 scope 标签行 + 原文拼接，避免把整段 markdown 压成单行。
-        parts = [f"[{m['scope_type']}{('/' + m['category']) if m.get('category') else ''}]\n{m['content']}"
-                 for m in mem_ctx]
-        mem_text = "\n\n".join(parts)
-        system_prompt = f"{system_prompt}\n\n[长期记忆]\n{mem_text}"
-    if state.get("mode") == "general":
-        ontology_ids = state.get("ontology_ids") or []
-        if ontology_ids:
-            ontologies = [o for o in [await db.get(OntologyFile, UUID(oid)) for oid in ontology_ids] if o]
-            ont_text = _compact_ontologies(ontologies)
-            if ont_text:
-                system_prompt = f"{system_prompt}\n\n[组织本体]\n{ont_text}"
-            ont_trace = {"category": "ontology", "title": "组织本体注入",
-                         "files": len(ontologies), "paths": [o.path for o in ontologies]}
-            _emit({"type": "trace", **ont_trace})
-            traces.append(ont_trace)
-        # 数据接口：按用户权限自动载入可用接口（管理端目录，仅供参考参数/返回结构，
-        # 不真正执行），压缩注入 system_prompt，并留痕。user 缺失（agent 模式）则跳过。
-        user = deps.get("user")
-        if user is not None:
-            try:
-                di_list = await scope_service.list_data_interfaces_for_user(db, user)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("load_data_interfaces_failed", error=str(exc))
-                di_list = []
-            if di_list:
-                system_names = sorted({(di.system.name if di.system else "?") for di in di_list})
-                di_lines = []
-                for di in di_list:
-                    sys_name = di.system.name if di.system else "?"
-                    params_hint = _format_data_interface_params(di)
-                    di_lines.append(
-                        f"- {sys_name}/{di.name}"
-                        f"{f' {di.method}' if di.method else ''}"
-                        f"{f' {di.path}' if di.path else ''}"
-                        f"{f': {di.description}' if di.description else ''}"
-                        f"{params_hint}"
-                    )
-                system_prompt = (
-                    f"{system_prompt}\n\n[数据接口] 以下为当前可用数据接口"
-                    "（仅供参考其参数/返回结构，不能直接执行调用；path 中 {占位符} 为路径参数，"
-                    "调用时须提供实际值）：\n" + "\n".join(di_lines)
-                )
-            di_trace = {"category": "data_interface", "title": "数据接口注入",
-                        "systems": len(system_names) if di_list else 0,
-                        "interfaces": len(di_list),
-                        "names": [f"{(di.system.name if di.system else '?')}/{di.name}" for di in di_list]}
-            _emit({"type": "trace", **di_trace})
-            traces.append(di_trace)
-    rag_ctx = state.get("rag_context") or []
-    if rag_ctx:
-        ctx_text = "\n\n---\n".join(c["content"] for c in rag_ctx)
-        system_prompt = f"{system_prompt}\n\n[知识库检索结果]\n{ctx_text}"
+        parts = [
+            f"[{item['scope_type']}{('/' + item['category']) if item.get('category') else ''}]\n{item['content']}"
+            for item in mem_ctx
+        ]
+        memory_context = "[长期记忆]\n" + "\n\n".join(parts)
 
-    # Codex-style progressive disclosure: every turn sees only a compact authorized catalog.
-    # Full SKILL.md/references are loaded only after the model selects load_skill/read_skill_resource.
+    ontology_ids = state.get("ontology_ids") or []
+    if ontology_ids:
+        ontologies = [
+            item for item in [await db.get(OntologyFile, UUID(oid)) for oid in ontology_ids] if item
+        ]
+        ont_text = _compact_ontologies(ontologies)
+        if ont_text:
+            system_prompt = f"{system_prompt}\n\n[组织本体]\n{ont_text}"
+        trace = {
+            "category": "ontology", "title": "组织本体注入", "files": len(ontologies),
+            "paths": [item.path for item in ontologies],
+        }
+        _emit({"type": "trace", **trace})
+        traces.append(trace)
+
+    user = deps.get("user")
+    if user is not None:
+        try:
+            interfaces = await scope_service.list_data_interfaces_for_user(db, user)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("load_data_interfaces_failed", error=str(exc))
+            interfaces = []
+        system_names = sorted({(item.system.name if item.system else "?") for item in interfaces})
+        if interfaces:
+            lines = []
+            for item in interfaces:
+                system_name = item.system.name if item.system else "?"
+                lines.append(
+                    f"- {system_name}/{item.name}"
+                    f"{f' {item.method}' if item.method else ''}"
+                    f"{f' {item.path}' if item.path else ''}"
+                    f"{f': {item.description}' if item.description else ''}"
+                    f"{_format_data_interface_params(item)}"
+                )
+            system_prompt = (
+                f"{system_prompt}\n\n[数据接口] 以下为当前可用数据接口（仅供参考其参数/返回结构，"
+                "不能直接执行调用；path 中 {占位符} 为路径参数，调用时须提供实际值）：\n"
+                + "\n".join(lines)
+            )
+        trace = {
+            "category": "data_interface", "title": "数据接口注入",
+            "systems": len(system_names), "interfaces": len(interfaces),
+            "names": [f"{(item.system.name if item.system else '?')}/{item.name}" for item in interfaces],
+        }
+        _emit({"type": "trace", **trace})
+        traces.append(trace)
+
     skill_catalog = list(state.get("skill_catalog") or [])
     if skill_catalog:
         default_ids = {item.get("id") for item in state.get("default_skills") or []}
         invoked_ids = {item.get("id") for item in state.get("invoked_skills") or []}
-        catalog_lines = []
+        lines: list[str] = []
         for item in skill_catalog[:80]:
             priority = "本轮明确" if item.get("id") in invoked_ids else (
                 "智能体默认" if item.get("id") in default_ids else "可用"
             )
             executable = "可执行" if item.get("is_executable") else "说明/API"
             description = str(item.get("description") or "").replace("\n", " ")[:240]
-            catalog_lines.append(
-                f"- [{priority}] id={item.get('id')} /{item.get('slug')} "
-                f"{item.get('name')} | {item.get('scope_type')} | {executable} | {description}"
+            lines.append(
+                f"- [{priority}] id={item.get('id')} /{item.get('slug')} {item.get('name')} | "
+                f"{item.get('scope_type')} | {executable} | {description}"
             )
         if len(skill_catalog) > 80:
-            catalog_lines.append(f"- 其余 {len(skill_catalog) - 80} 个技能未展开；请让用户用选择器明确指定。")
+            lines.append(f"- 其余 {len(skill_catalog) - 80} 个技能未展开；请让用户用选择器明确指定。")
         system_prompt = (
             f"{system_prompt}\n\n[当前用户可用 Skill 目录]\n"
             "此目录仅用于发现能力。不要把目录内容当作已执行结果；需要说明时调用 load_skill，"
-            "需要脚本或企业操作时必须实际调用相应工具。\n" + "\n".join(catalog_lines)
+            "需要脚本或企业操作时必须实际调用相应工具。\n" + "\n".join(lines)
         )
     ambiguities = state.get("skill_slug_ambiguities") or []
     if ambiguities:
@@ -1873,63 +1888,58 @@ async def agent_loop(state: AgentState) -> dict:
             f"{', '.join('/' + slug for slug in ambiguities)}。请让用户通过‘本轮调用技能’选择器指定。"
         )
 
-    # 用户通过结构化附件或 @<file_id> 引用的工作空间文件：读取内容注入 system prompt。
-    # Office/PDF 二进制文件使用工作空间已提取文本，绝不把 Base64 注入模型。
-    # 越权（不在用户 scope 内）文件跳过。文件是上下文，Ask/Plan 也注入。
-    ref_file_ids = state.get("referenced_file_ids") or []
-    if ref_file_ids:
-        user = deps.get("user")
-        file_parts: list[str] = []
-        file_names: list[str] = []
-        file_refs: list[dict[str, str]] = []
-        for fid in ref_file_ids:
-            try:
-                f = await workspace_service.get_file(db, UUID(fid))
-            except (ValueError, AttributeError):
-                f = None
-            if f is None or not f.workspace_id:
-                continue
-            ws = await workspace_service.get_workspace(db, UUID(str(f.workspace_id)))
-            if ws is None or (user is not None and not (
-                await workspace_permission_service.capabilities(db, ws, user)
-            )["read"]):
-                continue  # 文件不可见，跳过
-            file_names.append(f.path)
-            file_refs.append({"file_id": fid, "path": f.path})
-            content = workspace_service.resolve_file_content(f)
-            raw_tool = workspace_service.raw_tool_file_kind(f)
-            suffix = PurePosixPath(str((f.metadata_ or {}).get("name") or f.path)).suffix.lower()
-            is_current_image = (
-                any(str(item.get("file_id")) == fid for item in state.get("attachment_files") or [])
-                and suffix in multimodal_service.ALLOWED_IMAGE_SUFFIXES
+    file_parts: list[str] = []
+    file_names: list[str] = []
+    file_refs: list[dict[str, str]] = []
+    for fid in state.get("referenced_file_ids") or []:
+        try:
+            workspace_file = await workspace_service.get_file(db, UUID(fid))
+        except (ValueError, AttributeError):
+            workspace_file = None
+        if workspace_file is None or not workspace_file.workspace_id:
+            continue
+        workspace = await workspace_service.get_workspace(db, UUID(str(workspace_file.workspace_id)))
+        if workspace is None or (user is not None and not (
+            await workspace_permission_service.capabilities(db, workspace, user)
+        )["read"]):
+            continue
+        file_names.append(workspace_file.path)
+        file_refs.append({"file_id": fid, "path": workspace_file.path})
+        content = workspace_service.resolve_file_content(workspace_file)
+        raw_tool = workspace_service.raw_tool_file_kind(workspace_file)
+        suffix = PurePosixPath(
+            str((workspace_file.metadata_ or {}).get("name") or workspace_file.path)
+        ).suffix.lower()
+        is_current_image = (
+            any(str(item.get("file_id")) == fid for item in state.get("attachment_files") or [])
+            and suffix in multimodal_service.ALLOWED_IMAGE_SUFFIXES
+        )
+        if is_current_image:
+            rendered = "（本轮原始图片由平台视觉路由处理；如需 OCR、裁剪或格式转换再调用 image_tool。）"
+        elif workspace_file.parse_status != "ready" and raw_tool:
+            rendered = (
+                f"（原始二进制附件无需正文解析；请使用 {raw_tool} 并把 file_id={fid} 作为 "
+                "input_file_ids 实际读取。不得声称附件不可用，也不得编造处理结果。）"
             )
-            if is_current_image:
-                rendered = "（本轮原始图片由平台视觉路由处理；如需 OCR、裁剪或格式转换再调用 image_tool。）"
-            elif f.parse_status != "ready" and raw_tool:
-                rendered = (
-                    f"（原始二进制附件无需正文解析；请使用 {raw_tool} 并把 file_id={fid} "
-                    "作为 input_file_ids 实际读取。不得声称附件不可用，也不得编造处理结果。）"
-                )
-            else:
-                rendered = content if content.strip() else "（文件内容为空或尚未解析，无法直接分析）"
-            file_parts.append(f"[引用文件 file_id={fid} path={f.path}]\n{rendered}")
-        if file_refs:
-            mapping = "\n".join(f"- @{r['file_id']} → {r['path']}" for r in file_refs)
-            system_prompt = (
-                f"{system_prompt}\n\n[已解析的文件引用]\n"
-                "本轮结构化附件或用户消息中的 @UUID 已由系统精确解析，映射如下：\n"
-                f"{mapping}\n"
-                "这些文件内容已直接载入下方上下文。请把 UUID 与对应路径视为同一个文件，不得声称无法按 UUID 定位；"
-                "除非用户明确要求比较其他文件，否则不要调用工作空间列表/读取工具，也不要分析未引用文件。\n\n"
-                + "\n\n".join(file_parts)
-            )
-        file_trace = {"category": "file", "title": "引用工作空间文件",
-                      "files": len(file_names), "paths": file_names, "references": file_refs}
-        _emit({"type": "trace", **file_trace})
-        traces.append(file_trace)
+        else:
+            rendered = content if content.strip() else "（文件内容为空或尚未解析，无法直接分析）"
+        file_parts.append(f"[引用文件 file_id={fid} path={workspace_file.path}]\n{rendered}")
+    if file_refs:
+        mapping = "\n".join(f"- @{item['file_id']} → {item['path']}" for item in file_refs)
+        system_prompt = (
+            f"{system_prompt}\n\n[已解析的文件引用]\n"
+            "本轮结构化附件或用户消息中的 @UUID 已由系统精确解析，映射如下：\n"
+            f"{mapping}\n这些文件内容已直接载入下方上下文。请把 UUID 与对应路径视为同一个文件，"
+            "不得声称无法按 UUID 定位；除非用户明确要求比较其他文件，否则不要调用工作空间列表/"
+            "读取工具，也不要分析未引用文件。\n\n" + "\n\n".join(file_parts)
+        )
+        trace = {
+            "category": "file", "title": "引用工作空间文件", "files": len(file_names),
+            "paths": file_names, "references": file_refs,
+        }
+        _emit({"type": "trace", **trace})
+        traces.append(trace)
 
-    # 执行模式：Craft 挂全量工具自主多步执行；Ask / Plan 不挂工具（tools=None → 单轮、无 tool_call），
-    # 仅追加模式 prompt 约束输出。
     exec_mode = state.get("exec_mode") or "craft"
     if exec_mode == "ask":
         system_prompt = f"{system_prompt}{ASK_PROMPT}"
@@ -1939,195 +1949,48 @@ async def agent_loop(state: AgentState) -> dict:
         tools, registry = [], {}
     else:
         tools, registry = await _build_tools(
-            db, state.get("skill_ids") or [], state.get("workspace_id"), deps.get("user"),
+            db, state.get("skill_ids") or [], state.get("workspace_id"), user,
         )
-        # 挂载了工具 → 注入「先分析再调用」策略，约束 agent 结合本体/数据接口规划最少端点集，
-        # 而非盲目把所有端点试一遍。
-        system_prompt = f"{system_prompt}{TOOL_STRATEGY_PROMPT}"
-        # 输出协议（场景无关）：默认 Markdown；明确要求附件时再选择对应工具。
-        system_prompt = f"{system_prompt}{OUTPUT_PROTOCOL_PROMPT}"
-        # 用户本轮通过真实 UUID 或唯一 /slug 明确调用 → 强制本轮实际加载/执行，不写入任务配置。
+        rag_ids = list(state.get("rag_collection_ids") or [])
+        if state.get("rag_collection_id") and str(state["rag_collection_id"]) not in rag_ids:
+            rag_ids.append(str(state["rag_collection_id"]))
+        if rag_ids:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "rag_search",
+                    "description": "按需检索当前智能体已绑定且当前用户有权访问的知识库。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "检索问题或关键词"},
+                            "top_k": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            })
+            registry["rag_search"] = {"kind": "rag_search", "collection_ids": rag_ids}
+        system_prompt = f"{system_prompt}{TOOL_STRATEGY_PROMPT}{OUTPUT_PROTOCOL_PROMPT}"
         referenced = state.get("referenced_skills") or []
         if referenced:
             lines = "\n".join(
-                f"- id={s.get('id')} {s['name']} (/{s['slug']}, {s.get('activation', 'explicit')})"
-                for s in referenced
+                f"- id={item.get('id')} {item['name']} (/{item['slug']}, {item.get('activation', 'explicit')})"
+                for item in referenced
             )
             system_prompt = (
                 f"{system_prompt}\n\n[用户本轮明确调用的 Skill] 以下选择仅对当前轮有效。"
                 "请先加载其完整说明，并在任务需要操作时务必实际调用脚本或接口，不得仅声称完成：\n"
                 f"{lines}"
             )
-            skill_trace = {"category": "skill", "title": "用户明确调用",
-                           "skills": [{"id": s.get("id"), "name": s["name"], "slug": s["slug"]}
-                                      for s in referenced]}
-            _emit({"type": "trace", **skill_trace})
-            traces.append(skill_trace)
 
-    try:
-        main_provider, main_model, system_prompt = await _configure_visual_turn(
-            state, db, deps.get("user"), messages, system_prompt,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("vision_preprocess_failed", error=str(exc))
-        _emit({"type": "vision_preprocess", "status": "failed", "error": str(exc)})
-        return {
-            "error": f"vision failed: {exc}", "messages": messages, "steps": steps,
-            "traces": traces, "assistant_final": f"(图片处理失败: {exc})",
-            "usage": {"input_tokens": usage_in, "output_tokens": usage_out},
-        }
-
-    assistant_final = ""
-    verification_retries = 0
-    for step_idx in range(MAX_STEPS):
-        _emit({"type": "phase", "phase": "llm", "index": step_idx})
-        round_text = ""
-        round_tool_calls: list[dict] = []
-        try:
-            async for kind, payload, extra in llm_client.stream_chat(
-                db, UUID(state["org_id"]), state.get("model_alias", "default"), messages,
-                system_prompt=system_prompt,
-                temperature=state.get("temperature"),
-                max_tokens=state.get("max_tokens"),
-                tools=tools or None,
-                dept_id=state.get("department_id"),
-                team_id=state.get("team_id"),
-                provider_override=main_provider,
-                model_override=main_model,
-            ):
-                if kind == "text":
-                    round_text += payload
-                    _emit({"type": "text", "delta": payload})
-                elif kind == "tool_calls":
-                    round_tool_calls = payload or []
-                elif kind == "usage" and extra:
-                    if extra.get("input_tokens"):
-                        usage_in += int(extra["input_tokens"])
-                    if extra.get("output_tokens"):
-                        usage_out += int(extra["output_tokens"])
-        except Exception as exc:  # noqa: BLE001
-            logger.error("agent_llm_failed", error=str(exc), exc_info=True)
-            return {"error": f"llm failed: {exc}", "messages": messages, "steps": steps,
-                    "traces": traces,
-                    "assistant_final": f"(执行出错: {exc})",
-                    "usage": {"input_tokens": usage_in, "output_tokens": usage_out}}
-
-        # 兜底：个别上游不在 SSE 流里下发 tool_calls（仅非流式可见），此时本轮空 → 降级非流式重取一次。
-        if not round_text and not round_tool_calls:
-            try:
-                result = await llm_client.chat(
-                    db, UUID(state["org_id"]), state.get("model_alias", "default"), messages,
-                    system_prompt=system_prompt,
-                    temperature=state.get("temperature"),
-                    max_tokens=state.get("max_tokens"),
-                    tools=tools or None,
-                    dept_id=state.get("department_id"),
-                    team_id=state.get("team_id"),
-                    provider_override=main_provider,
-                    model_override=main_model,
-                )
-                round_text = result.content or ""
-                round_tool_calls = result.tool_calls or []
-                if round_text:
-                    _emit({"type": "text", "delta": round_text})
-                usage_in += int(result.usage.get("input_tokens") or 0)
-                usage_out += int(result.usage.get("output_tokens") or 0)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("agent_llm_failed", error=str(exc), exc_info=True)
-                return {"error": f"llm failed: {exc}", "messages": messages, "steps": steps,
-                        "traces": traces,
-                        "assistant_final": f"(执行出错: {exc})",
-                        "usage": {"input_tokens": usage_in, "output_tokens": usage_out}}
-
-        if round_tool_calls:
-            # 累计工具调用轮的中间说明，重开任务时仍可完整回放。
-            if round_text:
-                assistant_final += round_text
-            # 重新发给上游的 assistant 工具调用消息须用 OpenAI 嵌套格式
-            # {"id","type":"function","function":{"name","arguments"}}；扁平格式会被严格上游
-            # （如阿里云 MaaS）以 ``tool_calls.0.function Field required`` 拒绝，且与
-            # ``_to_anthropic_messages`` 期望一致。
-            assistant_msg: dict = {
-                "role": "assistant",
-                "content": round_text or "",
-                "tool_calls": [
-                    {"id": tc.get("id", ""), "type": "function",
-                     "function": {"name": tc.get("name", ""), "arguments": tc.get("arguments", "")}}
-                    for tc in round_tool_calls
-                ],
-            }
-            messages.append(assistant_msg)
-            steps.append({"step": "llm", "tool_calls": [tc["name"] for tc in round_tool_calls]})
-            for tc in round_tool_calls:
-                _emit({"type": "tool_call", "id": tc.get("id", ""), "name": tc.get("name", ""),
-                       "arguments": tc.get("arguments", "")})
-                tool_msg, preview, ok = await _execute_tool_call(state, tc, registry)
-                _emit({"type": "tool_result", "id": tc.get("id", ""), "name": tc.get("name", ""),
-                       "content": preview[:4000], "ok": ok})
-                messages.append(tool_msg)
-                steps.append({"step": "tool", "name": tc.get("name"), "ok": ok})
-                # Persist a semantically distinct trace for history playback. Live display already uses
-                # tool_call/tool_result, so no extra trace SSE is emitted here.
-                tool_name = tc.get("name", "")
-                tool_entry = registry.get(tool_name) or {}
-                kind = tool_entry.get("kind")
-                if tool_name in BUILTIN_TOOL_NAMES | LEGACY_BUILTIN_TOOL_NAMES:
-                    category, title = "file", "文件解析与引用"
-                elif kind in {"code", "run_skill_script"}:
-                    category, title = "skill", "Runner脚本执行"
-                elif kind in {"load_skill", "read_skill_resource", "prompt"}:
-                    category, title = "skill", "Skill自动匹配"
-                else:
-                    category, title = "skill", tool_name
-                traces.append({"category": category, "title": title,
-                               "id": tc.get("id", ""), "name": tool_name,
-                               "arguments": tc.get("arguments", ""),
-                               "result": preview[:4000], "ok": ok})
-            continue
-
-        # 无 tool_calls 却声称工具成功时，撤回本轮流式文本并要求模型真实调用一次。
-        # 这不是提示词层面的软约束：高置信度虚假 file_id/路径不会被持久化为终答。
-        has_successful_tool = any(
-            step.get("step") == "tool" and step.get("ok") is True for step in steps
-        )
-        if not has_successful_tool and contains_unverified_tool_success_claim(round_text):
-            if round_text:
-                _emit({"type": "text_retract", "chars": len(round_text)})
-            steps.append({"step": "tool_claim_rejected"})
-            if verification_retries < 1 and tools:
-                verification_retries += 1
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "[系统执行校验] 上一答复声称已经调用或执行工具，但本轮没有产生任何真实 tool_call，"
-                        "因此结果无效。请重新处理原始用户请求：必须实际调用可用工具；如果无法调用，只能如实"
-                        "说明失败，禁止输出虚构的 file_id、路径或成功状态。"
-                    ),
-                })
-                continue
-            round_text = "本轮未产生真实工具调用，因此无法确认任务已执行。请重试或检查当前模型的工具调用能力。"
-            _emit({"type": "text", "delta": round_text})
-
-        # 无 tool_calls → 终答。
-        if round_text:
-            assistant_final += round_text
-        messages.append({"role": "assistant", "content": round_text})
-        steps.append({"step": "llm_final"})
-        break
-
-    if not assistant_final:
-        assistant_final = "(达到最大步数，未产生终答)"
-        _emit({"type": "text", "delta": assistant_final})
-
-    _emit({"type": "done", "usage": {"input_tokens": usage_in, "output_tokens": usage_out}})
+    provider, model, system_prompt = await _configure_visual_turn(
+        state, db, user, messages, system_prompt,
+    )
     return {
-        "messages": messages,
-        "assistant_final": assistant_final,
-        "steps": steps,
-        "traces": traces,
-        "loaded_skills": list(state.get("loaded_skills") or []),
-        "executed_skills": list(state.get("executed_skills") or []),
-        "usage": {"input_tokens": usage_in, "output_tokens": usage_out},
+        "messages": messages, "system_prompt": system_prompt, "tools": tools,
+        "registry": registry, "traces": traces, "provider_override": provider,
+        "model_override": model, "memory_context": memory_context,
     }
 
 

@@ -1,7 +1,7 @@
 """Terminal API — 组织终端用户端（通用智能体AgileBuddy）。
 
 全部由 ``require_user`` 守卫；任务仅属主可访问；工作空间文件读写受 scope 可见性约束。
-通用智能体执行复用编译图 ``get_agent_graph()`` 的 general 模式分支。
+通用智能体由唯一的内部 DSH Runtime 协调；平台继续执行授权后的业务工具。
 """
 
 import asyncio
@@ -24,13 +24,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.graph import (
-    get_agent_graph,
-    run_general_agent,
-    run_registry,
-    stream_general_agent,
-)
-from app.agents.graph.runner import stream_persisted_run
+from app.agents.dsh import run_general_agent, stream_general_agent
+from app.agents.graph import run_registry
+from app.agents.runtime_support import stream_persisted_run
 from app.auth.user_auth import (
     CurrentUser,
     assert_user_org_access,
@@ -620,7 +616,6 @@ async def run_task_endpoint(
     """运行通用智能体。stream=true 返回 SSE，否则返回最终结果。"""
     task = await _get_owned_task(db, task_id, cu)
     assert_user_write(cu)
-    graph = get_agent_graph()
     # 旧任务 config 可能缺 workspace_id，运行时按用户默认补齐。
     # 模型必须显式选择（创建时未选且无最近使用默认则空）——不选模型不允许执行。
     cfg = dict(task.config or {})
@@ -654,7 +649,7 @@ async def run_task_endpoint(
         await scope_service.assert_bound_rags_visible(db, cu, list(selected_agent.rag_collection_ids or []))
     if data.stream:
         resp = await stream_general_agent(
-            graph, org_id=str(task.organization_id), user=cu, task=task,
+            org_id=str(task.organization_id), user=cu, task=task,
             message=data.message, config=cfg,
             session_id=task.session_id, db=db, request=request,
             attachment_files=attachment_files,
@@ -665,7 +660,7 @@ async def run_task_endpoint(
         return resp
 
     result = await run_general_agent(
-        graph, org_id=str(task.organization_id), user=cu, task=task,
+        org_id=str(task.organization_id), user=cu, task=task,
         message=data.message, config=cfg,
         session_id=task.session_id, db=db, request=request,
         attachment_files=attachment_files,
@@ -696,9 +691,9 @@ async def stream_task_endpoint(
     # 情形 1：live handle
     handle = run_registry.get(task_id_str)
     if handle is not None and not handle.done:
-        from app.agents.graph.runner import _sse_replay_and_tail
+        from app.agents.runtime_support import sse_replay_and_tail
         return StreamingResponse(
-            _sse_replay_and_tail(handle),
+            sse_replay_and_tail(handle),
             status_code=200, media_type="text/event-stream",
             headers={"cache-control": "no-cache", "connection": "keep-alive", "x-accel-buffering": "no"},
         )
