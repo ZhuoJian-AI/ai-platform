@@ -14,12 +14,12 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml tsconfig.json ./
 COPY vendor ./vendor
 RUN for attempt in 1 2 3 4 5; do \
-        if pnpm install --frozen-lockfile; then exit 0; fi; \
+        if pnpm install --frozen-lockfile --trust-lockfile; then exit 0; fi; \
         if [ "$attempt" = "5" ]; then exit 1; fi; \
         sleep $((attempt * 5)); \
     done
 COPY src ./src
-RUN pnpm build && pnpm prune --prod
+RUN pnpm build && pnpm --config.trust-lockfile=true prune --prod
 
 FROM node:22.19.0-bookworm-slim
 ENV NODE_ENV=production

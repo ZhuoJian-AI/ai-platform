@@ -16,7 +16,7 @@ RUN for attempt in 1 2 3 4 5; do \
         sleep $((attempt * 5)); \
     done
 COPY src ./src
-RUN pnpm build && pnpm prune --prod
+RUN pnpm build && pnpm --config.trust-lockfile=true prune --prod
 
 FROM node:22.19.0-bookworm-slim
 ARG DEBIAN_MIRROR=mirrors.aliyun.com
