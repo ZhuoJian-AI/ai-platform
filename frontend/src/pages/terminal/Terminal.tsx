@@ -11,7 +11,7 @@ import {
 import {
   PlusOutlined, SendOutlined, RobotOutlined, SettingOutlined, FileTextOutlined,
   LogoutOutlined, DatabaseOutlined, PartitionOutlined,
-  UnorderedListOutlined, BookOutlined, ApiOutlined,
+  UnorderedListOutlined, BookOutlined, ApiOutlined, DashboardOutlined,
   FolderOpenOutlined, MoreOutlined, ThunderboltOutlined,
   AppstoreOutlined, CheckCircleOutlined,
   RightOutlined, DownOutlined,
@@ -36,8 +36,7 @@ import WorkspaceManagerView from './WorkspaceManagerView';
 import KnowledgeBaseView from './KnowledgeBaseView';
 import SkillManagerView from './SkillManagerView';
 import AgentManagerView from './AgentManagerView';
-import DataInterfaceView from './DataInterfaceView';
-import OntologyView from './OntologyView';
+import AifabeiDashboardView from './AifabeiDashboardView';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from '../../branding/BrandLogoSlot';
 
@@ -268,6 +267,7 @@ export default function Terminal() {
   const { slug = '' } = useParams<{ slug: string }>();
   const { user, logout } = useUserAuth();
   const qc = useQueryClient();
+  const isAifabei = (slug || user?.organization_slug || '').trim().toLowerCase() === 'aifabei';
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -302,8 +302,8 @@ export default function Terminal() {
   // 终端「选智能体」逐次覆盖（不落库）：选中后随 /run 发送；null=通用智能体。
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
-  // 左侧功能菜单视图：助理（任务对话）/ 工作空间 / 知识库 / 数据接口
-  const [view, setView] = useState<'assistant' | 'workspaces' | 'agents' | 'knowledge' | 'skills' | 'ontology' | 'data_interface'>('assistant');
+  // 左侧功能菜单视图：助理（任务对话）/ 工作空间 / 智能体 / 知识库 / 技能 / 租户演示模块
+  const [view, setView] = useState<'assistant' | 'workspaces' | 'agents' | 'knowledge' | 'skills' | 'aifabei_dashboard'>('assistant');
 
   // 跟随输入（选中任务后的对话）
   const [followUp, setFollowUp] = useState('');
@@ -935,14 +935,13 @@ export default function Terminal() {
                 <ThunderboltOutlined style={{ fontSize: 16 }} />
                 <span>技能</span>
               </div>
-              <div onClick={() => setView('ontology')} style={navItemStyle(view === 'ontology')}>
-                <PartitionOutlined style={{ fontSize: 16 }} />
-                <span>本体</span>
-              </div>
-              <div onClick={() => setView('data_interface')} style={navItemStyle(view === 'data_interface')}>
-                <ApiOutlined style={{ fontSize: 16 }} />
-                <span>数据接口</span>
-              </div>
+              {isAifabei && (
+                <div onClick={() => setView('aifabei_dashboard')} style={navItemStyle(view === 'aifabei_dashboard')}>
+                  <DashboardOutlined style={{ fontSize: 16 }} />
+                  <span>AI看板</span>
+                  <Tag color="purple" bordered={false} style={{ margin: '0 0 0 auto', fontSize: 9, lineHeight: '17px' }}>演示</Tag>
+                </div>
+              )}
             </nav>
 
             {/* 任务列表 */}
@@ -1057,10 +1056,13 @@ export default function Terminal() {
               <KnowledgeBaseView />
             ) : view === 'skills' ? (
               <SkillManagerView />
-            ) : view === 'ontology' ? (
-              <OntologyView />
-            ) : view === 'data_interface' ? (
-              <DataInterfaceView />
+            ) : view === 'aifabei_dashboard' && isAifabei ? (
+              <AifabeiDashboardView onAskAI={(prompt) => {
+                setView('assistant');
+                setSelectedId(null);
+                setComposerOpen(true);
+                setInput(prompt);
+              }} />
             ) : composerOpen ? (
               <HomeView
                 input={input} setInput={setInput}
@@ -2002,7 +2004,7 @@ function HomeView(props: {
           <BrandLogoSlot slot={BRAND_LOGO_SLOTS.terminalWelcome} width={72} height={72} />
         </div>
 
-        <h1 style={{ fontSize: 30, fontWeight: 700, color: '#111827', marginBottom: 4 }}>AgileBuddy</h1>
+        <h1 style={{ fontSize: 30, fontWeight: 700, color: '#111827', marginBottom: 4 }}>灼见</h1>
         <p style={{ fontSize: 22, fontWeight: 600, color: '#1f2937', marginBottom: 32 }}>你的职场超能力</p>
 
         {/* 输入框 */}
@@ -2362,19 +2364,12 @@ function extractArtifacts(blocks?: Block[]): ArtifactOutput[] {
   for (const block of blocks) {
     if (block.kind !== 'tool_call' || block.running || block.result?.ok === false) continue;
     if (!FILE_WRITE_TOOLS.has(block.name)) continue;
-    let value: Record<string, unknown>;
-    try {
-      value = JSON.parse(block.result?.content || '{}') as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    const rawOutputs = Array.isArray(value.outputs)
-      ? value.outputs
-      : (value.file_id || value.path ? [value] : []);
+    const rawOutputs = artifactRecords(block.result?.content || '');
     for (const raw of rawOutputs) {
-      if (!raw || typeof raw !== 'object') continue;
-      const output = raw as Record<string, unknown>;
-      const fileId = typeof output.file_id === 'string' ? output.file_id : '';
+      const output = raw;
+      const fileId = typeof output.file_id === 'string'
+        ? output.file_id
+        : (typeof output.fileId === 'string' ? output.fileId : '');
       const path = typeof output.path === 'string' ? output.path : '';
       if (!fileId && !path) continue;
       const name = typeof output.name === 'string' && output.name
@@ -2389,7 +2384,9 @@ function extractArtifacts(blocks?: Block[]): ArtifactOutput[] {
         mimeType: typeof output.mime_type === 'string'
           ? output.mime_type
           : (typeof output.content_type === 'string' ? output.content_type : ''),
-        size: typeof output.size === 'number' ? output.size : undefined,
+        size: typeof output.size === 'number'
+          ? output.size
+          : (typeof output.size_bytes === 'number' ? output.size_bytes : undefined),
         width: typeof output.width === 'number' ? output.width : undefined,
         height: typeof output.height === 'number' ? output.height : undefined,
         parseStatus: typeof output.parse_status === 'string' ? output.parse_status : undefined,
@@ -2406,6 +2403,33 @@ function extractArtifacts(blocks?: Block[]): ArtifactOutput[] {
     deduped.unshift(artifact);
   }
   return deduped;
+}
+
+/** DSH、旧 Runtime 与平台工具的结果包装层略有不同。这里仅在文件写工具内
+ *  递归解包已知字段，兼容 outputs/files/artifacts 以及 JSON 字符串嵌套。 */
+function artifactRecords(content: string): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  const visit = (value: unknown, depth: number) => {
+    if (depth > 5 || value === null || value === undefined) return;
+    if (typeof value === 'string') {
+      const trimmed = value.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+      if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) return;
+      try { visit(JSON.parse(trimmed), depth + 1); } catch { /* textual result */ }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    if (typeof value !== 'object') return;
+    const item = value as Record<string, unknown>;
+    if (item.file_id || item.fileId || item.path) records.push(item);
+    for (const key of ['outputs', 'files', 'artifacts', 'output', 'data', 'result', 'content']) {
+      if (key in item) visit(item[key], depth + 1);
+    }
+  };
+  visit(content, 0);
+  return records;
 }
 
 function ArtifactGallery({
@@ -2480,21 +2504,36 @@ function InlineArtifactCard({
     if (!isImage || !fileId || streaming) return;
     let cancelled = false;
     let objectUrl = '';
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
     setImageUrl(null);
     setImageLoading(true);
     setImageError(null);
-    terminal.getWsFileOriginalPreview(fileId)
+    terminal.getWsFileOriginalPreview(fileId, controller.signal)
+      .catch((previewError) => {
+        if (controller.signal.aborted) throw previewError;
+        // 原文件预览可能被部署级开关关闭；图片卡片仍应能走已有下载链路展示。
+        return terminal.downloadWsFile(fileId, controller.signal);
+      })
       .then((blob) => {
         if (cancelled) return;
+        if (!blob.size) throw new Error('图片文件为空');
         objectUrl = URL.createObjectURL(blob);
         setImageUrl(objectUrl);
       })
       .catch((reason) => {
-        if (!cancelled) setImageError((reason as Error)?.message || '图片读取失败');
+        if (!cancelled) {
+          setImageError(controller.signal.aborted ? '图片读取超时，请重试' : ((reason as Error)?.message || '图片读取失败'));
+        }
       })
-      .finally(() => { if (!cancelled) setImageLoading(false); });
+      .finally(() => {
+        window.clearTimeout(timeout);
+        if (!cancelled) setImageLoading(false);
+      });
     return () => {
       cancelled = true;
+      controller.abort();
+      window.clearTimeout(timeout);
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [fileId, isImage, reloadToken, streaming, resolved?.updatedAt]);
@@ -2666,7 +2705,7 @@ function AvatarHeader({ streaming }: { streaming?: boolean }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
       <BrandLogoSlot slot={BRAND_LOGO_SLOTS.assistantAvatar} width={28} height={28} />
-      <span style={{ fontSize: 14, fontWeight: 500, color: '#1f2937' }}>AgileBuddy</span>
+      <span style={{ fontSize: 14, fontWeight: 500, color: '#1f2937' }}>灼见</span>
       {streaming && <Tag color="processing" style={{ marginInlineStart: 4, fontSize: 11 }}>live</Tag>}
     </div>
   );

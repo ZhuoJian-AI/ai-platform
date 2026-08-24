@@ -379,10 +379,11 @@ export interface User {
   updated_at: string;
 }
 
-async function requestBlob(path: string, tokenKey: string): Promise<Blob> {
+async function requestBlob(path: string, tokenKey: string, signal?: AbortSignal): Promise<Blob> {
   const token = localStorage.getItem(tokenKey);
   const resp = await fetch(`${BASE_URL}${path}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
+    signal,
   });
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
@@ -1585,8 +1586,8 @@ export const terminal = {
     uploadTerminalWorkspaceFile(wsId, file, path, options),
   getWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}`),
   getWsFilePreview: (id: string) => userRequest<WorkspaceFilePreview>(`/api/v1/terminal/files/${id}/preview`),
-  getWsFileOriginalPreview: (id: string) => requestBlob(`/api/v1/terminal/files/${id}/original-preview`, USER_TOKEN_KEY),
-  downloadWsFile: (id: string) => requestBlob(`/api/v1/terminal/files/${id}/download`, USER_TOKEN_KEY),
+  getWsFileOriginalPreview: (id: string, signal?: AbortSignal) => requestBlob(`/api/v1/terminal/files/${id}/original-preview`, USER_TOKEN_KEY, signal),
+  downloadWsFile: (id: string, signal?: AbortSignal) => requestBlob(`/api/v1/terminal/files/${id}/download`, USER_TOKEN_KEY, signal),
   reparseWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}/reparse`, { method: 'POST' }),
   updateWsFile: (id: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>
     userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
