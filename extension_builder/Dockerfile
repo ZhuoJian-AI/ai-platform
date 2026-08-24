@@ -8,6 +8,7 @@ ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
     NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000
 COPY pnpm-11.7.0.tgz /tmp/pnpm-11.7.0.tgz
 RUN npm install --global /tmp/pnpm-11.7.0.tgz \
+    && pnpm config set registry https://registry.npmmirror.com \
     && rm -f /tmp/pnpm-11.7.0.tgz
 WORKDIR /app
 COPY package.json tsconfig.json ./
@@ -38,6 +39,7 @@ RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.
     done \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global /tmp/pnpm-11.7.0.tgz \
+    && pnpm config set registry https://registry.npmmirror.com \
     && rm -f /tmp/pnpm-11.7.0.tgz
 ENV NODE_ENV=production
 ENV HOME=/tmp/builder-home
