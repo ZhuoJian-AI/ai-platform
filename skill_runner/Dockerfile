@@ -1,6 +1,8 @@
-FROM node:20-bookworm-slim AS node-runtime
+ARG AI_PLATFORM_NODE20_BASE=node:20-bookworm-slim
+ARG AI_PLATFORM_PYTHON_OFFICE_BASE=python:3.12-slim-bookworm
+FROM ${AI_PLATFORM_NODE20_BASE} AS node-runtime
 
-FROM python:3.12-slim-bookworm
+FROM ${AI_PLATFORM_PYTHON_OFFICE_BASE}
 
 WORKDIR /app
 ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
@@ -23,16 +25,6 @@ COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
-
-RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' \
-        /etc/apt/sources.list.d/debian.sources \
-    && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        bash ca-certificates fontconfig fonts-noto-cjk libatomic1 \
-        libreoffice-calc-nogui libreoffice-impress-nogui libreoffice-writer-nogui \
-        tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng \
-    && fc-cache -f \
-    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir --retries 10 --timeout 120 -r requirements.txt

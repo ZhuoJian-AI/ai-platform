@@ -1,4 +1,5 @@
-FROM node:22.19.0-bookworm-slim AS build
+ARG AI_PLATFORM_NODE22_BASE=node:22.19.0-bookworm-slim
+FROM ${AI_PLATFORM_NODE22_BASE} AS build
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -8,7 +9,9 @@ ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
     NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=5000 \
     NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000
 COPY pnpm-11.7.0.tgz /tmp/pnpm-11.7.0.tgz
-RUN npm install --global /tmp/pnpm-11.7.0.tgz \
+RUN if ! command -v pnpm >/dev/null 2>&1; then \
+        npm install --global /tmp/pnpm-11.7.0.tgz; \
+    fi \
     && pnpm config set registry https://registry.npmmirror.com \
     && rm -f /tmp/pnpm-11.7.0.tgz
 
@@ -23,23 +26,9 @@ RUN for attempt in 1 2 3 4 5; do \
 COPY src ./src
 RUN pnpm build && pnpm --config.trust-lockfile=true prune --prod
 
-FROM node:22.19.0-bookworm-slim
+FROM ${AI_PLATFORM_NODE22_BASE}
 ENV NODE_ENV=production
 WORKDIR /app
-ARG DEBIAN_MIRROR=mirrors.aliyun.com
-RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
-    && printf 'Acquire::Retries "10";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\n' \
-        > /etc/apt/apt.conf.d/80-network-retries \
-    && for attempt in 1 2 3 4 5; do \
-        if apt-get update \
-            && apt-get install -y --no-install-recommends ca-certificates tar; then \
-            break; \
-        fi; \
-        if [ "$attempt" = "5" ]; then exit 1; fi; \
-        rm -rf /var/lib/apt/lists/*; \
-        sleep $((attempt * 5)); \
-    done \
-    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist

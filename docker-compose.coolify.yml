@@ -80,6 +80,9 @@ services:
     build:
       context: ./skill_runner
       dockerfile: Dockerfile
+      args:
+        AI_PLATFORM_NODE20_BASE: 127.0.0.1:5000/zhuojian/ai-platform-node20@sha256:c416cc420efe3342d75724b8010abfa6b9437ce51757a854c271eb5921afd8c0
+        AI_PLATFORM_PYTHON_OFFICE_BASE: 127.0.0.1:5000/zhuojian/ai-platform-python312-office@sha256:eb1ac85d2d89febc7158a0bf3f253e4bdc06d0f0d8a1de6fdf7e34ee821c929f
     environment:
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
       SKILL_CACHE_ROOT: /cache
@@ -108,6 +111,8 @@ services:
     build:
       context: ./dsh_runtime
       dockerfile: Dockerfile
+      args:
+        AI_PLATFORM_NODE22_BASE: 127.0.0.1:5000/zhuojian/ai-platform-node22-pnpm@sha256:666764f1a9f418a78bf7880b057cc77a6bd5373d14fabc80455147be2c54507e
     environment:
       DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
       AI_PLATFORM_BACKEND_URL: http://backend:8000
@@ -135,6 +140,8 @@ services:
     build:
       context: ./extension_builder
       dockerfile: Dockerfile
+      args:
+        AI_PLATFORM_NODE22_BASE: 127.0.0.1:5000/zhuojian/ai-platform-node22-pnpm@sha256:666764f1a9f418a78bf7880b057cc77a6bd5373d14fabc80455147be2c54507e
     environment:
       EXTENSION_BUILDER_TOKEN: ${EXTENSION_BUILDER_TOKEN:?}
       AI_PLATFORM_BACKEND_URL: http://backend:8000
@@ -162,6 +169,8 @@ services:
     build:
       context: ./llm_router/backend
       dockerfile: Dockerfile
+      args:
+        AI_PLATFORM_PYTHON_OFFICE_BASE: 127.0.0.1:5000/zhuojian/ai-platform-python312-office@sha256:eb1ac85d2d89febc7158a0bf3f253e4bdc06d0f0d8a1de6fdf7e34ee821c929f
     environment:
       APP_ENV: production
       DEBUG: "false"
