@@ -7,7 +7,11 @@ ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     PIP_TRUSTED_HOST=mirrors.aliyun.com \
     PIP_DEFAULT_TIMEOUT=120 \
     PIP_RETRIES=10 \
-    NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
+    NPM_CONFIG_REGISTRY=https://registry.npmjs.org \
+    NPM_CONFIG_FETCH_RETRIES=10 \
+    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=5000 \
+    NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000 \
+    NPM_CONFIG_FETCH_TIMEOUT=120000 \
     SKILL_BASE_NODE_MODULES=/opt/skill-node/node_modules \
     NODE_PATH=/opt/skill-node/node_modules
 
@@ -32,7 +36,13 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir --retries 10 --timeout 120 -r requirements.txt
 RUN mkdir -p /opt/skill-node \
-    && npm install --prefix /opt/skill-node --omit=dev --no-audit --no-fund exceljs@4.4.0 \
+    && for attempt in 1 2 3 4 5; do \
+        if npm install --prefix /opt/skill-node --omit=dev --no-audit --no-fund exceljs@4.4.0; then \
+            break; \
+        fi; \
+        if [ "$attempt" = "5" ]; then exit 1; fi; \
+        sleep $((attempt * 5)); \
+    done \
     && npm cache clean --force
 COPY app.py .
 COPY builtin_tools.py .
