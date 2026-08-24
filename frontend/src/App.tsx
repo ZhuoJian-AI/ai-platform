@@ -8,6 +8,7 @@ import {
   FolderOpenOutlined, ExperimentOutlined, DatabaseOutlined, PartitionOutlined,
   ApiOutlined, BarChartOutlined, QuestionCircleOutlined, ReadOutlined,
   MoreOutlined, PhoneOutlined,
+  AppstoreAddOutlined, DeploymentUnitOutlined, ShopOutlined, HistoryOutlined,
 } from '@ant-design/icons';
 import { WB, WB_FONT, FS, antdTheme } from './components/finder/theme';
 import { AuthProvider, useAuth, RequireAuth } from './context/AuthContext';
@@ -39,6 +40,7 @@ import RouterMonitor from './pages/monitor/RouterMonitor';
 import AgentMonitor from './pages/monitor/AgentMonitor';
 import ToolMonitor from './pages/monitor/ToolMonitor';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from './branding/BrandLogoSlot';
+import PlatformExtensions from './pages/platform/PlatformExtensions';
 
 interface MenuEntry {
   path: string;
@@ -56,7 +58,7 @@ interface Subsystem {
   built: boolean;
   menu: MenuEntry[];
   /** path → element；仅 built 子系统使用 */
-  routes?: { path: string; element: ReactNode }[];
+  routes?: { path: string; element: ReactNode; superOnly?: boolean }[];
 }
 
 /** 一级菜单：ai_infra 平台五个子系统。built 标识是否已实现页面。 */
@@ -125,6 +127,23 @@ const SUBSYSTEMS: Subsystem[] = [
     ],
   },
   {
+    key: 'platform_extensions', label: '平台扩展', icon: <AppstoreAddOutlined />, built: true,
+    menu: [
+      { path: '/platform/extensions', label: '扩展总览', icon: <AppstoreAddOutlined />, superOnly: true },
+      { path: '/platform/extensions/runtime', label: 'Runtime 管理', icon: <DeploymentUnitOutlined />, superOnly: true },
+      { path: '/platform/extensions/tools', label: '系统工具', icon: <ToolOutlined />, superOnly: true },
+      { path: '/platform/extensions/catalog', label: '插件仓库', icon: <ShopOutlined />, superOnly: true },
+      { path: '/platform/extensions/releases', label: '发布与回滚', icon: <HistoryOutlined />, superOnly: true },
+    ],
+    routes: [
+      { path: '/platform/extensions', element: <PlatformExtensions section="overview" />, superOnly: true },
+      { path: '/platform/extensions/runtime', element: <PlatformExtensions section="runtime" />, superOnly: true },
+      { path: '/platform/extensions/tools', element: <PlatformExtensions section="tools" />, superOnly: true },
+      { path: '/platform/extensions/catalog', element: <PlatformExtensions section="catalog" />, superOnly: true },
+      { path: '/platform/extensions/releases', element: <PlatformExtensions section="releases" />, superOnly: true },
+    ],
+  },
+  {
     key: 'app_monitor', label: '应用监控台', icon: <MonitorOutlined />, built: true,
     menu: [
       { path: '/monitor/overview', label: '总览', icon: <BarChartOutlined /> },
@@ -156,7 +175,9 @@ function AppLayout() {
 
   // 扁平渲染全部已建成子系统的路由——单侧栏全路由可见，直达链接不再被重定向回首页
   // （原 activeSubsystem 状态不随 URL 同步的坑由此彻底移除）
-  const allRoutes = SUBSYSTEMS.filter((s) => s.built).flatMap((s) => s.routes ?? []);
+  const allRoutes = SUBSYSTEMS.filter((s) => s.built)
+    .flatMap((s) => s.routes ?? [])
+    .filter((route) => !route.superOnly || isSuperAdmin());
 
   const navItemStyle = (active: boolean): CSSProperties => ({
     display: 'flex', alignItems: 'center', gap: 10, padding: '7px 12px', borderRadius: 6,

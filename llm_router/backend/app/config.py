@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     dsh_runtime_url: str = "http://localhost:8030"
     dsh_runtime_token: str = "dsh-runtime-dev-token-change-in-production"
     dsh_runtime_timeout_seconds: int = 600
+    extension_builder_url: str = "http://localhost:8040"
+    extension_builder_token: str = "extension-builder-dev-token-change-in-production"
+    extension_builder_timeout_seconds: int = 600
+    extension_archive_max_bytes: int = 25 * 1024 * 1024
+    extension_artifact_max_bytes: int = 100 * 1024 * 1024
     original_preview_enabled: bool = False
     # Native file preview is part of the staging-wide workspace experience;
     # keep the emergency deployment switch but no tenant allowlist.

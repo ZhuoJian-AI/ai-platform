@@ -131,6 +131,29 @@ async def sign_browser_upload(*, filename: str, content_type: str, size_bytes: i
         raise StorageGatewayError("OSS upload signing failed; check token limit and CORS") from exc
 
 
+async def sign_service_upload(*, filename: str, content_type: str, size_bytes: int, max_bytes: int) -> dict:
+    """Sign a worker artifact upload without applying the workspace file limit."""
+    if size_bytes <= 0 or size_bytes > max_bytes:
+        raise StorageGatewayError("Service artifact size is outside the configured limit")
+    try:
+        async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
+            response = await client.post(
+                _gateway_url("/v1/uploads/sign"),
+                headers=_auth_headers(),
+                json={"filename": filename, "content_type": content_type, "size_bytes": size_bytes},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            object_key = str(payload["object_key"])
+            return {
+                "url": _internal_signed_url(str(payload["url"])),
+                "headers": {str(k): str(v) for k, v in (payload.get("headers") or {}).items()},
+                "content_ref": f"{OSS_REF_PREFIX}{object_key}",
+            }
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("OSS service upload signing failed") from exc
+
+
 async def inspect_object(content_ref: str) -> dict:
     """Verify an uploaded object through a signed ranged GET.
 

@@ -16,6 +16,11 @@ from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.models.memory import Memory
 from app.models.ontology import Ontology, OntologyFile, OntologyFolder
 from app.models.organization import Organization
+from app.models.platform_extension import (
+    PlatformExtensionRelease,
+    PlatformExtensionReleaseEvent,
+    PlatformExtensionSource,
+)
 from app.models.rag import RagChunk, RagCollection, RagDocument, RagFolder
 from app.models.routing_policy import RoutingPolicy
 from app.models.skill import ScopeManagerAssignment, Skill, SkillExecution, SkillFile, SkillFolder, SkillVersion
@@ -46,6 +51,9 @@ __all__ = [
     "RoutingPolicy",
     "AuditLog",
     "BudgetUsage",
+    "PlatformExtensionSource",
+    "PlatformExtensionRelease",
+    "PlatformExtensionReleaseEvent",
     # 智能体平台
     "Workspace",
     "WorkspaceFile",

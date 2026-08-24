@@ -19,8 +19,10 @@ async def stream_run(payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
     timeout = httpx.Timeout(settings.dsh_runtime_timeout_seconds, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream(
-            "POST", f"{settings.dsh_runtime_url.rstrip('/')}/v1/runs",
-            headers={**_headers(), "content-type": "application/json"}, json=payload,
+            "POST",
+            f"{settings.dsh_runtime_url.rstrip('/')}/v1/runs",
+            headers={**_headers(), "content-type": "application/json"},
+            json=payload,
         ) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
@@ -38,3 +40,35 @@ async def cancel_run(run_id: str) -> bool:
         return response.status_code in {200, 202}
     except httpx.HTTPError:
         return False
+
+
+async def runtime_health() -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{settings.dsh_runtime_url.rstrip('/')}/health")
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as exc:
+        return {"status": "unavailable", "error": str(exc)}
+
+
+async def validate_release(release_id: str, manifest: dict, checksum: str) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=settings.dsh_runtime_timeout_seconds) as client:
+        response = await client.post(
+            f"{settings.dsh_runtime_url.rstrip('/')}/v1/extensions/validate",
+            headers={**_headers(), "content-type": "application/json"},
+            json={"release_id": release_id, "manifest": manifest, "checksum": checksum},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def activate_release(release_id: str, manifest: dict, checksum: str) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=settings.dsh_runtime_timeout_seconds) as client:
+        response = await client.post(
+            f"{settings.dsh_runtime_url.rstrip('/')}/v1/extensions/activate",
+            headers={**_headers(), "content-type": "application/json"},
+            json={"release_id": release_id, "manifest": manifest, "checksum": checksum},
+        )
+        response.raise_for_status()
+        return response.json()

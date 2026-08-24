@@ -16,6 +16,8 @@ services:
         condition: service_healthy
       dsh-runtime:
         condition: service_healthy
+      extension-builder:
+        condition: service_healthy
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -33,6 +35,9 @@ services:
       DSH_RUNTIME_URL: http://dsh-runtime:8030
       DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:-dsh-runtime-local-dev-token}
       DSH_RUNTIME_TIMEOUT_SECONDS: "600"
+      EXTENSION_BUILDER_URL: http://extension-builder:8040
+      EXTENSION_BUILDER_TOKEN: ${EXTENSION_BUILDER_TOKEN:-extension-builder-local-dev-token}
+      EXTENSION_BUILDER_TIMEOUT_SECONDS: "600"
       ORIGINAL_PREVIEW_ENABLED: "true"
       ORIGINAL_PREVIEW_ORG_ALLOWLIST: "${ORIGINAL_PREVIEW_ORG_ALLOWLIST:-}"
       MULTIMODAL_VISION_ENABLED: "${MULTIMODAL_VISION_ENABLED:-true}"

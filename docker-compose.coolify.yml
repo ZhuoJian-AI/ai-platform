@@ -112,8 +112,11 @@ services:
       DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
       AI_PLATFORM_BACKEND_URL: http://backend:8000
       PORT: "8030"
+      EXTENSION_CACHE_ROOT: /extensions
     expose:
       - "8030"
+    volumes:
+      - extension_cache:/extensions
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8030/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
@@ -126,6 +129,33 @@ services:
     deploy:
       resources:
         limits: { cpus: "0.75", memory: 1G }
+
+  extension-builder:
+    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-extension-builder:${APP_IMAGE_TAG:-latest}
+    build:
+      context: ./extension_builder
+      dockerfile: Dockerfile
+    environment:
+      EXTENSION_BUILDER_TOKEN: ${EXTENSION_BUILDER_TOKEN:?}
+      AI_PLATFORM_BACKEND_URL: http://backend:8000
+      PORT: "8040"
+    expose:
+      - "8040"
+    read_only: true
+    tmpfs:
+      - /tmp:size=536870912,mode=1777
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8040/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 1G, pids: 256 }
 
   backend:
     image: ${COMPOSE_PROJECT_NAME:-ai-platform}-backend:${APP_IMAGE_TAG:-latest}
@@ -150,6 +180,9 @@ services:
       DSH_RUNTIME_URL: http://dsh-runtime:8030
       DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
       DSH_RUNTIME_TIMEOUT_SECONDS: "${DSH_RUNTIME_TIMEOUT_SECONDS:-600}"
+      EXTENSION_BUILDER_URL: http://extension-builder:8040
+      EXTENSION_BUILDER_TOKEN: ${EXTENSION_BUILDER_TOKEN:?}
+      EXTENSION_BUILDER_TIMEOUT_SECONDS: "${EXTENSION_BUILDER_TIMEOUT_SECONDS:-600}"
       ORIGINAL_PREVIEW_ENABLED: "${ORIGINAL_PREVIEW_ENABLED:-true}"
       ORIGINAL_PREVIEW_ORG_ALLOWLIST: "${ORIGINAL_PREVIEW_ORG_ALLOWLIST:-}"
       MULTIMODAL_VISION_ENABLED: "${MULTIMODAL_VISION_ENABLED:-true}"
@@ -187,6 +220,8 @@ services:
       skill-runner:
         condition: service_healthy
       dsh-runtime:
+        condition: service_healthy
+      extension-builder:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
@@ -253,3 +288,4 @@ volumes:
   postgres_data:
   redis_data:
   skill_cache:
+  extension_cache:

@@ -8,6 +8,10 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import type { RunRequest, RuntimeEvent, ToolSpec } from './contracts.js'
 import { contentText } from './contracts.js'
 import { executePlatformTool, PlatformLlmAdapter } from './platform.js'
+import {
+  loadExternalExtensions, verifyRelease,
+  type ExternalToolHandler, type ReleaseManifest, type ReleaseRequest,
+} from './extensions.js'
 
 interface ActiveRun {
   request: RunRequest
@@ -22,6 +26,7 @@ interface ActiveRun {
 export interface RuntimeOptions {
   backendUrl: string
   serviceToken: string
+  extensionCacheRoot?: string
 }
 
 function renderHistory(messages: RunRequest['messages']): string {
@@ -41,36 +46,67 @@ function safeToolSchema(schema: Record<string, unknown>): Record<string, unknown
 }
 
 export class DshRuntime {
-  private readonly ctx = new Context()
+  private ctx: Context | null = null
   private readonly activeByRun = new Map<string, ActiveRun>()
   private readonly activeBySession = new Map<string, ActiveRun>()
   private ready = false
+  private releaseId = 'baseline'
+  private releaseChecksum = 'builtin'
+  private loadedExtensions: Array<{ slug: string; version: string; checksum: string }> = []
+  private externalTools = new Map<string, ExternalToolHandler>()
+  private restarts = 0
+  private draining = false
+  private activating = false
 
   constructor(private readonly options: RuntimeOptions) {}
 
   async start(): Promise<void> {
     if (this.ready) return
-    await this.ctx.plugin(LlmRuntime)
-    await this.ctx.plugin(SessionStore)
-    await this.ctx.plugin(SystemPrompt, {})
-    await this.ctx.plugin(ToolRuntime, {})
-    await this.ctx.plugin(AgentRegistry)
-    await this.ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
-    this.ctx.llm.registerAdapter(['ai-platform'], new PlatformLlmAdapter({
-      backendUrl: this.options.backendUrl,
-      serviceToken: this.options.serviceToken,
-      resolveRunToken: sessionId => this.activeBySession.get(sessionId)?.request.run_token,
-      consumeModelStep: sessionId => {
-        const run = this.activeBySession.get(sessionId)
-        if (!run) throw new Error('run no longer active')
-        run.modelSteps += 1
-        if (run.modelSteps > run.request.max_steps) {
-          run.budgetExceeded = true
-          throw new Error('MAX_STEPS_EXCEEDED')
-        }
-      },
-    }))
+    const built = await this.buildContext()
+    this.ctx = built.ctx
+    this.loadedExtensions = built.loaded
+    this.externalTools = built.tools
     this.ready = true
+  }
+
+  private async buildContext(manifest?: ReleaseManifest): Promise<{
+    ctx: Context
+    loaded: Array<{ slug: string; version: string; checksum: string }>
+    tools: Map<string, ExternalToolHandler>
+  }> {
+    const ctx = new Context()
+    try {
+      const enabled = (slug: string): boolean => !manifest || (manifest.plugins ?? []).some(
+        item => item.slug === slug && item.enabled !== false,
+      )
+      if (enabled('dsh-llm-runtime')) await ctx.plugin(LlmRuntime)
+      if (enabled('dsh-session')) await ctx.plugin(SessionStore)
+      if (enabled('dsh-system-prompt')) await ctx.plugin(SystemPrompt, {})
+      if (enabled('dsh-tools')) await ctx.plugin(ToolRuntime, {})
+      if (enabled('dsh-agent')) await ctx.plugin(AgentRegistry)
+      if (enabled('dsh-agent-loop')) await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      const extensions = manifest
+        ? await loadExternalExtensions(ctx, manifest, this.options.extensionCacheRoot ?? '/tmp/dsh-extensions')
+        : { items: [], tools: new Map<string, ExternalToolHandler>() }
+      ctx.llm.registerAdapter(['ai-platform'], new PlatformLlmAdapter({
+        backendUrl: this.options.backendUrl,
+        serviceToken: this.options.serviceToken,
+        resolveRunToken: sessionId => this.activeBySession.get(sessionId)?.request.run_token,
+        consumeModelStep: sessionId => {
+          const run = this.activeBySession.get(sessionId)
+          if (!run) throw new Error('run no longer active')
+          run.modelSteps += 1
+          if (run.modelSteps > run.request.max_steps) {
+            run.budgetExceeded = true
+            throw new Error('MAX_STEPS_EXCEEDED')
+          }
+        },
+      }))
+      return { ctx, loaded: extensions.items, tools: extensions.tools }
+    } catch (error) {
+      await ctx.fiber.dispose().catch(() => undefined)
+      throw error
+    }
   }
 
   health(): Record<string, unknown> {
@@ -80,12 +116,55 @@ export class DshRuntime {
       dsh_version: '0.1.0-rc.5',
       node: process.version,
       active_runs: this.activeByRun.size,
+      draining: this.draining,
       max_parallel_tool_calls: 1,
+      release_id: this.releaseId,
+      release_checksum: this.releaseChecksum,
+      loaded_extensions: this.loadedExtensions,
+      runtime_restarts: this.restarts,
+    }
+  }
+
+  async validateRelease(request: ReleaseRequest): Promise<Record<string, unknown>> {
+    verifyRelease(request)
+    const built = await this.buildContext(request.manifest)
+    try {
+      return { ok: true, release_id: request.release_id, loaded_extensions: built.loaded }
+    } finally {
+      await built.ctx.fiber.dispose().catch(() => undefined)
+    }
+  }
+
+  async activateRelease(request: ReleaseRequest): Promise<Record<string, unknown>> {
+    if (this.activating) throw new Error('another release activation is already in progress')
+    verifyRelease(request)
+    this.activating = true
+    this.draining = true
+    try {
+      const deadline = Date.now() + 30_000
+      while (this.activeByRun.size && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      if (this.activeByRun.size) throw new Error('runtime drain timed out; current release remains active')
+      const built = await this.buildContext(request.manifest)
+      const previous = this.ctx
+      this.ctx = built.ctx
+      this.releaseId = request.release_id
+      this.releaseChecksum = request.checksum
+      this.loadedExtensions = built.loaded
+      this.externalTools = built.tools
+      this.restarts += 1
+      await previous?.fiber.dispose().catch(() => undefined)
+      return { ok: true, release_id: this.releaseId, checksum: this.releaseChecksum, health: this.health() }
+    } finally {
+      this.draining = false
+      this.activating = false
     }
   }
 
   async run(request: RunRequest, emit: (event: RuntimeEvent) => void): Promise<void> {
     if (!this.ready) throw new Error('runtime not ready')
+    if (this.draining) throw new Error('runtime is draining for a reviewed extension release')
     if (this.activeByRun.has(request.run_id)) throw new Error('run already active')
     if (!Number.isInteger(request.max_steps) || request.max_steps < 1 || request.max_steps > 8) {
       throw new Error('max_steps must be between 1 and 8')
@@ -100,7 +179,9 @@ export class DshRuntime {
     }
     this.activeByRun.set(request.run_id, active)
     this.activeBySession.set(sessionId, active)
-    const listener = this.ctx.on('session/event', (session, event) => {
+    const ctx = this.ctx
+    if (!ctx) throw new Error('runtime context is unavailable')
+    const listener = ctx.on('session/event', (session, event) => {
       if (String(session.id) !== sessionId) return
       if (event.type === 'step/start') {
         emit({ type: 'phase', phase: 'llm', index: event.data.step - 1 })
@@ -137,7 +218,7 @@ export class DshRuntime {
     let handle: Awaited<ReturnType<Context['agents']['create']>> | undefined
     try {
       emit({ type: 'status', status: 'running' })
-      handle = await this.ctx.agents.create({
+      handle = await ctx.agents.create({
         sessionId: SessionId(sessionId),
         agentOptions: {
           provider: 'ai-platform',
@@ -202,6 +283,14 @@ export class DshRuntime {
         }],
       },
       execute: async (args, exec) => {
+        const localHandler = this.externalTools.get(spec.name)
+        if (localHandler) {
+          return await localHandler(args, {
+            signal: exec.signal,
+            runId: active.request.run_id,
+            taskId: active.request.task_id,
+          })
+        }
         const result = await executePlatformTool({
           backendUrl: this.options.backendUrl,
           serviceToken: this.options.serviceToken,

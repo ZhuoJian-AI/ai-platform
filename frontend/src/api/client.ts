@@ -1806,3 +1806,122 @@ export const memory = {
     request<MemoryItem>(`/api/v1/memory/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) => request<void>(`/api/v1/memory/${id}`, { method: 'DELETE' }),
 };
+
+// ── 平台扩展中心（仅 super_admin）────────────────────────────────────
+
+export type PlatformExtensionKind = 'runtime_plugin' | 'system_tool' | 'library' | 'adapter_required' | 'incompatible';
+
+export interface PlatformExtensionCatalogItem {
+  slug: string;
+  name: string;
+  version: string;
+  description: string;
+  kind: PlatformExtensionKind;
+  source: 'core' | 'reviewed' | 'external';
+  status: string;
+  removable: boolean;
+  capabilities: string[];
+  compatibility_warnings: string[];
+}
+
+export interface PlatformExtensionSource {
+  id: string;
+  source_type: string;
+  locator: string;
+  requested_version: string | null;
+  resolved_version: string | null;
+  commit_sha: string | null;
+  artifact_ref: string | null;
+  artifact_sha256: string | null;
+  manifest: Record<string, any>;
+  build_report: Record<string, any>;
+  compatibility: Record<string, any>;
+  status: string;
+  review_status: string;
+  error: string | null;
+  imported_by_admin_id: number;
+  approved_by_admin_id: number | null;
+  approved_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlatformExtensionRelease {
+  id: string;
+  version_no: number;
+  name: string;
+  manifest: Record<string, any>;
+  checksum: string;
+  status: string;
+  is_active: boolean;
+  base_release_id: string | null;
+  created_by_admin_id: number;
+  published_by_admin_id: number | null;
+  activated_at: string | null;
+  validation_report: Record<string, any>;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlatformExtensionEvent {
+  id: number;
+  source_id: string | null;
+  release_id: string | null;
+  actor_admin_id: number | null;
+  event_type: string;
+  status: string;
+  details: Record<string, any>;
+  created_at: string;
+}
+
+export interface PlatformExtensionOverview {
+  active_release: PlatformExtensionRelease | null;
+  runtime_health: Record<string, any>;
+  source_counts: Record<string, number>;
+  release_counts: Record<string, number>;
+  core_plugins: PlatformExtensionCatalogItem[];
+  system_tools: PlatformExtensionCatalogItem[];
+}
+
+export const platformExtensions = {
+  overview: () => request<PlatformExtensionOverview>('/api/v1/platform/extensions/overview'),
+  catalog: () => request<PlatformExtensionCatalogItem[]>('/api/v1/platform/extensions/catalog'),
+  sources: () => request<PlatformExtensionSource[]>('/api/v1/platform/extensions/sources'),
+  source: (id: string) => request<PlatformExtensionSource>(`/api/v1/platform/extensions/sources/${id}`),
+  importNpm: (packageName: string, version: string) => request<PlatformExtensionSource>(
+    '/api/v1/platform/extensions/import/npm',
+    { method: 'POST', body: JSON.stringify({ package: packageName, version }) },
+  ),
+  importGithub: (repository: string, ref: string) => request<PlatformExtensionSource>(
+    '/api/v1/platform/extensions/import/github',
+    { method: 'POST', body: JSON.stringify({ repository, ref }) },
+  ),
+  importArchive: (archive: File) => {
+    const data = new FormData();
+    data.append('archive', archive);
+    return request<PlatformExtensionSource>('/api/v1/platform/extensions/import/archive', { method: 'POST', body: data });
+  },
+  retrySource: (id: string) => request<PlatformExtensionSource>(
+    `/api/v1/platform/extensions/sources/${id}/retry`, { method: 'POST' },
+  ),
+  approveSource: (id: string, approved: boolean, note?: string) => request<PlatformExtensionSource>(
+    `/api/v1/platform/extensions/sources/${id}/approve`,
+    { method: 'POST', body: JSON.stringify({ approved, note: note || null }) },
+  ),
+  releases: () => request<PlatformExtensionRelease[]>('/api/v1/platform/extensions/releases'),
+  createRelease: (name: string, sourceIds: string[], config: Record<string, unknown> = {}) =>
+    request<PlatformExtensionRelease>('/api/v1/platform/extensions/releases', {
+      method: 'POST', body: JSON.stringify({ name, source_ids: sourceIds, config }),
+    }),
+  validateRelease: (id: string) => request<PlatformExtensionRelease>(
+    `/api/v1/platform/extensions/releases/${id}/validate`, { method: 'POST' },
+  ),
+  publishRelease: (id: string) => request<PlatformExtensionRelease>(
+    `/api/v1/platform/extensions/releases/${id}/publish`, { method: 'POST' },
+  ),
+  rollbackRelease: (id: string) => request<PlatformExtensionRelease>(
+    `/api/v1/platform/extensions/releases/${id}/rollback`, { method: 'POST' },
+  ),
+  events: () => request<PlatformExtensionEvent[]>('/api/v1/platform/extensions/events'),
+};

@@ -1,13 +1,17 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { DshRuntime } from './runtime.js'
 import type { RunRequest, RuntimeEvent } from './contracts.js'
+import type { ReleaseRequest } from './extensions.js'
 
 const port = Number(process.env.PORT ?? 8030)
 const serviceToken = process.env.DSH_RUNTIME_TOKEN?.trim() ?? ''
 const backendUrl = (process.env.AI_PLATFORM_BACKEND_URL ?? 'http://backend:8000').replace(/\/$/, '')
 if (!serviceToken) throw new Error('DSH_RUNTIME_TOKEN is required')
 
-const runtime = new DshRuntime({ backendUrl, serviceToken })
+const runtime = new DshRuntime({
+  backendUrl, serviceToken,
+  extensionCacheRoot: process.env.EXTENSION_CACHE_ROOT ?? '/extensions',
+})
 await runtime.start()
 
 function authorized(request: IncomingMessage): boolean {
@@ -52,6 +56,14 @@ const server = createServer(async (request, response) => {
       const emit = (event: RuntimeEvent): void => { response.write(`${JSON.stringify(event)}\n`) }
       await runtime.run(body, emit)
       response.end()
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/extensions/validate') {
+      json(response, 200, await runtime.validateRelease(await jsonBody<ReleaseRequest>(request)))
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/extensions/activate') {
+      json(response, 200, await runtime.activateRelease(await jsonBody<ReleaseRequest>(request)))
       return
     }
     const match = /^\/v1\/runs\/([^/]+)\/cancel$/.exec(url.pathname)

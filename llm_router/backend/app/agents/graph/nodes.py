@@ -1228,7 +1228,7 @@ async def _configure_visual_turn(
     return provider, model, system_prompt
 
 async def _build_tools(
-    db, skill_ids: list[str], workspace_id: str | None, user=None,
+    db, skill_ids: list[str], workspace_id: str | None, user=None, *, exec_mode: str = "craft",
 ) -> tuple[list[dict], dict[str, dict]]:
     """加载技能文件夹 → 读取 skill.md manifest → OpenAI tools 列表 + name→(folder, endpoint) 映射。
 
@@ -1398,9 +1398,34 @@ async def _build_tools(
         include_image_generation = await multimodal_service.resolve_image_generation(
             db, user.organization_id, dept_id=user.department_id, team_id=user.team_id,
         ) is not None
-    tools.extend(_builtin_tool_defs(
+    from app.services.platform_tool_registry import (
+        active_external_tool_defs,
+        active_platform_tool_names,
+        platform_managed_tool_names,
+    )
+    builtin_defs = _builtin_tool_defs(
         include_workspace=bool(workspace_id), include_image_generation=include_image_generation,
+    )
+    active_builtin_names = await active_platform_tool_names(db)
+    if active_builtin_names is not None:
+        builtin_defs = [
+            item for item in builtin_defs
+            if item.get("function", {}).get("name") in active_builtin_names
+        ]
+        disabled_managed_names = platform_managed_tool_names() - active_builtin_names
+        tools = [
+            item for item in tools
+            if item.get("function", {}).get("name") not in disabled_managed_names
+        ]
+        for name in disabled_managed_names:
+            registry.pop(name, None)
+    builtin_defs.extend(await active_external_tool_defs(
+        db,
+        organization_id=str(user.organization_id) if user is not None else "",
+        user_role=str(user.role) if user is not None else None,
+        exec_mode=exec_mode,
     ))
+    tools.extend(builtin_defs)
     return tools, registry
 
 
@@ -1954,7 +1979,10 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
         rag_ids = list(state.get("rag_collection_ids") or [])
         if state.get("rag_collection_id") and str(state["rag_collection_id"]) not in rag_ids:
             rag_ids.append(str(state["rag_collection_id"]))
-        if rag_ids:
+        from app.services.platform_tool_registry import active_platform_tool_names
+
+        active_platform_names = await active_platform_tool_names(db)
+        if rag_ids and (active_platform_names is None or "rag_search" in active_platform_names):
             tools.append({
                 "type": "function",
                 "function": {

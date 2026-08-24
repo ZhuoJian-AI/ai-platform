@@ -1,0 +1,21 @@
+{
+  "name": "ai-platform-extension-builder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.19.0 <23" },
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "test": "node --test dist/tests/*.test.js"
+  },
+  "dependencies": {
+    "semver": "7.7.4"
+  },
+  "devDependencies": {
+    "@types/semver": "7.7.1",
+    "@types/node": "22.20.0",
+    "typescript": "6.0.3"
+  }
+}
