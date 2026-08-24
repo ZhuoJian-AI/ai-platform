@@ -1,7 +1,7 @@
 FROM node:22.19.0-bookworm-slim AS build
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
-ENV NPM_CONFIG_REGISTRY=https://registry.npmjs.org \
+ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
     NPM_CONFIG_FETCH_RETRIES=10 \
     NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=5000 \
     NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000
@@ -20,6 +20,7 @@ RUN pnpm build && pnpm --config.trust-lockfile=true prune --prod
 
 FROM node:22.19.0-bookworm-slim
 ARG DEBIAN_MIRROR=mirrors.aliyun.com
+ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
 COPY pnpm-11.7.0.tgz /tmp/pnpm-11.7.0.tgz
 RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
     && printf 'Acquire::Retries "10";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\n' \
