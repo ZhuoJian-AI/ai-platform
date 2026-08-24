@@ -2,7 +2,11 @@ FROM node:22.19.0-bookworm-slim AS build
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
-RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
+ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
+    NPM_CONFIG_FETCH_RETRIES=10 \
+    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=5000 \
+    NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000
+RUN npm install --global pnpm@11.7.0
 
 WORKDIR /app
 COPY package.json pnpm-lock.yaml tsconfig.json ./
