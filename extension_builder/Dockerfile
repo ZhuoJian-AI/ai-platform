@@ -5,21 +5,37 @@ ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
     NPM_CONFIG_FETCH_RETRIES=10 \
     NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=5000 \
     NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000
-RUN npm install --global pnpm@11.7.0
+COPY pnpm-11.7.0.tgz /tmp/pnpm-11.7.0.tgz
+RUN npm install --global /tmp/pnpm-11.7.0.tgz \
+    && rm -f /tmp/pnpm-11.7.0.tgz
 WORKDIR /app
 COPY package.json tsconfig.json ./
-RUN pnpm install
+RUN for attempt in 1 2 3 4 5; do \
+        if pnpm install; then exit 0; fi; \
+        if [ "$attempt" = "5" ]; then exit 1; fi; \
+        sleep $((attempt * 5)); \
+    done
 COPY src ./src
 RUN pnpm build && pnpm prune --prod
 
 FROM node:22.19.0-bookworm-slim
 ARG DEBIAN_MIRROR=mirrors.aliyun.com
+COPY pnpm-11.7.0.tgz /tmp/pnpm-11.7.0.tgz
 RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git tar unzip \
+    && printf 'Acquire::Retries "10";\nAcquire::http::Timeout "60";\nAcquire::https::Timeout "60";\n' \
+        > /etc/apt/apt.conf.d/80-network-retries \
+    && for attempt in 1 2 3 4 5; do \
+        if apt-get update \
+            && apt-get install -y --no-install-recommends ca-certificates git tar unzip; then \
+            break; \
+        fi; \
+        if [ "$attempt" = "5" ]; then exit 1; fi; \
+        rm -rf /var/lib/apt/lists/*; \
+        sleep $((attempt * 5)); \
+    done \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install --global pnpm@11.7.0 --registry=https://registry.npmmirror.com \
-        --fetch-retries=10 --fetch-retry-mintimeout=5000 --fetch-retry-maxtimeout=120000
+    && npm install --global /tmp/pnpm-11.7.0.tgz \
+    && rm -f /tmp/pnpm-11.7.0.tgz
 ENV NODE_ENV=production
 ENV HOME=/tmp/builder-home
 WORKDIR /app
