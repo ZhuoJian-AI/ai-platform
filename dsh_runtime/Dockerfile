@@ -3,6 +3,7 @@ FROM node:22.19.0-bookworm-slim AS build
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
+    npm_config_registry=https://registry.npmmirror.com \
     NPM_CONFIG_FETCH_RETRIES=10 \
     NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=5000 \
     NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000
