@@ -1,0 +1,9 @@
+ARG AI_PLATFORM_SKILL_RUNNER_DEPS_BASE
+FROM ${AI_PLATFORM_SKILL_RUNNER_DEPS_BASE}
+
+WORKDIR /app
+COPY app.py .
+COPY builtin_tools.py .
+
+EXPOSE 8020
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8020"]

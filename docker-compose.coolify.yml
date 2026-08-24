@@ -8,7 +8,7 @@ x-logging: &default-logging
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: 127.0.0.1:5000/zhuojian/ai-platform-pgvector-pg16@sha256:eac621400b7b7ff52493883e41e930e3d104695fea5b68cc0c42370cf7880067
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-ai_infra}
       POSTGRES_USER: ${POSTGRES_USER:-ai_infra}
@@ -30,7 +30,7 @@ services:
         limits: { cpus: "0.75", memory: 2G }
 
   redis:
-    image: redis:7-alpine
+    image: 127.0.0.1:5000/zhuojian/ai-platform-redis7@sha256:1db42ccef14898aa29bae778452d567534b59c107129cbc1163fb552de184d3c
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?}
     command:
@@ -53,10 +53,7 @@ services:
         limits: { cpus: "0.25", memory: 512M }
 
   mock:
-    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-mock:${APP_IMAGE_TAG:-latest}
-    build:
-      context: ./mock
-      dockerfile: Dockerfile
+    image: 127.0.0.1:5000/zhuojian/ai-platform-mock-app@sha256:750aeb5a41847d65024c019b043502252b58ec1226f5f6a85c5ad487fa623708
     environment:
       MES_API_KEY: ${MES_API_KEY:?}
       CRM_API_KEY: ${CRM_API_KEY:?}
@@ -76,13 +73,7 @@ services:
         limits: { cpus: "0.20", memory: 256M }
 
   skill-runner:
-    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-skill-runner:${APP_IMAGE_TAG:-latest}
-    build:
-      context: ./skill_runner
-      dockerfile: Dockerfile
-      args:
-        AI_PLATFORM_NODE20_BASE: 127.0.0.1:5000/zhuojian/ai-platform-node20@sha256:c416cc420efe3342d75724b8010abfa6b9437ce51757a854c271eb5921afd8c0
-        AI_PLATFORM_PYTHON_OFFICE_BASE: 127.0.0.1:5000/zhuojian/ai-platform-python312-office@sha256:eb1ac85d2d89febc7158a0bf3f253e4bdc06d0f0d8a1de6fdf7e34ee821c929f
+    image: 127.0.0.1:5000/zhuojian/ai-platform-skill-runner-app@sha256:ca43725ab13af8850b0e81842dc9a3012d1d41c0df24e97ac4c936763c9cc09f
     environment:
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
       SKILL_CACHE_ROOT: /cache
@@ -107,12 +98,7 @@ services:
         limits: { cpus: "1.00", memory: 2G }
 
   dsh-runtime:
-    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-dsh-runtime:${APP_IMAGE_TAG:-latest}
-    build:
-      context: ./dsh_runtime
-      dockerfile: Dockerfile
-      args:
-        AI_PLATFORM_NODE22_BASE: 127.0.0.1:5000/zhuojian/ai-platform-node22-pnpm@sha256:666764f1a9f418a78bf7880b057cc77a6bd5373d14fabc80455147be2c54507e
+    image: 127.0.0.1:5000/zhuojian/ai-platform-dsh-runtime-app@sha256:c59d1b9f0ac5168c1acc41616466aedfb00e1aaf6f575fff0c20e964e02f2d7e
     environment:
       DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
       AI_PLATFORM_BACKEND_URL: http://backend:8000
@@ -136,12 +122,7 @@ services:
         limits: { cpus: "0.75", memory: 1G }
 
   extension-builder:
-    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-extension-builder:${APP_IMAGE_TAG:-latest}
-    build:
-      context: ./extension_builder
-      dockerfile: Dockerfile
-      args:
-        AI_PLATFORM_NODE22_BASE: 127.0.0.1:5000/zhuojian/ai-platform-node22-pnpm@sha256:666764f1a9f418a78bf7880b057cc77a6bd5373d14fabc80455147be2c54507e
+    image: 127.0.0.1:5000/zhuojian/ai-platform-extension-builder-app@sha256:68db37c2bafc7dcb6369f8961816e81ad1b4f00d3cd04551ecdfb2b1b05585fe
     environment:
       EXTENSION_BUILDER_TOKEN: ${EXTENSION_BUILDER_TOKEN:?}
       AI_PLATFORM_BACKEND_URL: http://backend:8000
@@ -165,12 +146,7 @@ services:
         limits: { cpus: "1.00", memory: 1G, pids: 256 }
 
   backend:
-    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-backend:${APP_IMAGE_TAG:-latest}
-    build:
-      context: ./llm_router/backend
-      dockerfile: Dockerfile
-      args:
-        AI_PLATFORM_PYTHON_OFFICE_BASE: 127.0.0.1:5000/zhuojian/ai-platform-python312-office@sha256:eb1ac85d2d89febc7158a0bf3f253e4bdc06d0f0d8a1de6fdf7e34ee821c929f
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:ed9b6c2500dab6fced7df0498f41a3c9c0ac39bfc4c1cfb464dfea113a4ebfef
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -246,7 +222,7 @@ services:
         limits: { cpus: "1.25", memory: 2G }
 
   workspace-parser:
-    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-backend:${APP_IMAGE_TAG:-latest}
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:ed9b6c2500dab6fced7df0498f41a3c9c0ac39bfc4c1cfb464dfea113a4ebfef
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -277,15 +253,18 @@ services:
         limits: { cpus: "0.75", memory: 1536M }
 
   frontend:
-    image: ${COMPOSE_PROJECT_NAME:-ai-platform}-frontend:${APP_IMAGE_TAG:-latest}
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile.coolify
+    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:d4d73043d738c5622f54d796d307be1cc39844be35e580be91b5aec4fd343fe3
     expose:
       - "80"
     depends_on:
       backend:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
     init: true
     logging: *default-logging

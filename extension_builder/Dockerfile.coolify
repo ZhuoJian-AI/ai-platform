@@ -1,0 +1,21 @@
+ARG AI_PLATFORM_EXTENSION_BUILDER_DEPS_BASE
+ARG AI_PLATFORM_NODE22_BASE
+FROM ${AI_PLATFORM_EXTENSION_BUILDER_DEPS_BASE} AS build
+
+WORKDIR /app
+COPY package.json pnpm-lock.yaml tsconfig.json ./
+COPY src ./src
+RUN pnpm build && pnpm --config.trust-lockfile=true prune --prod
+
+FROM ${AI_PLATFORM_NODE22_BASE}
+ENV NODE_ENV=production \
+    HOME=/tmp/builder-home \
+    NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
+    npm_config_registry=https://registry.npmmirror.com
+WORKDIR /app
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+USER node
+EXPOSE 8040
+CMD ["node", "dist/server.js"]

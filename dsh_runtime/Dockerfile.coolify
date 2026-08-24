@@ -1,0 +1,19 @@
+ARG AI_PLATFORM_DSH_RUNTIME_DEPS_BASE
+ARG AI_PLATFORM_NODE22_BASE
+FROM ${AI_PLATFORM_DSH_RUNTIME_DEPS_BASE} AS build
+
+WORKDIR /app
+COPY package.json pnpm-lock.yaml tsconfig.json ./
+COPY src ./src
+RUN pnpm build && pnpm --config.trust-lockfile=true prune --prod
+
+FROM ${AI_PLATFORM_NODE22_BASE}
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+RUN mkdir -p /extensions && chown node:node /extensions
+USER node
+EXPOSE 8030
+CMD ["node", "dist/server.js"]
