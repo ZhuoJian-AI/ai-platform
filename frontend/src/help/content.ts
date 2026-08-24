@@ -202,7 +202,7 @@ export const HELP_SECTIONS: HelpSection[] = [
   },
   {
     id: 'terminal',
-    title: 'AgileBuddy（终端用户端）',
+    title: '灼见（终端用户端）',
     items: [
       {
         heading: '入口与登录',
@@ -210,7 +210,7 @@ export const HELP_SECTIONS: HelpSection[] = [
         bullets: [
           '登录地址：{域名}/{组织 slug}/terminal/login，登录框显示组织名（多租户兼容）。',
           '使用「用户管理」中创建的员工账号（用户名 + 密码）登录。',
-          '登录后进入 /{slug}/terminal AgileBuddy。',
+          '登录后进入 /{slug}/terminal 灼见。',
         ],
       },
       {
