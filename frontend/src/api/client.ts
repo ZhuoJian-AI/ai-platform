@@ -1064,6 +1064,26 @@ export interface WorkspaceFileSummary {
   path: string; scope_type: string; is_binary: boolean;
 }
 
+const SKILL_ARCHIVE_MAX_BYTES = 100 * 1024 * 1024;
+const SKILL_FOLDER_MAX_BYTES = 500 * 1024 * 1024;
+const SKILL_FOLDER_MAX_FILES = 1000;
+
+function assertSkillArchiveLimit(file: File): void {
+  if (file.size > SKILL_ARCHIVE_MAX_BYTES) {
+    throw new ApiError(413, 'Skill ZIP 或 Markdown 文件不能超过 100MB');
+  }
+}
+
+function assertSkillFolderLimits(files: File[]): void {
+  if (!files.length || files.length > SKILL_FOLDER_MAX_FILES) {
+    throw new ApiError(422, `Skill 文件夹必须包含 1-${SKILL_FOLDER_MAX_FILES} 个文件`);
+  }
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  if (total > SKILL_FOLDER_MAX_BYTES) {
+    throw new ApiError(413, 'Skill 文件夹展开后不能超过 500MB');
+  }
+}
+
 export const skillStore = {
   listFolders: (orgId: string, scope: ScopeRef) =>
     request<SkillFolder[]>(`/api/v1/organizations/${orgId}/skill-folders?scope_type=${scope.scope_type}&scope_id=${scope.scope_id ?? ''}`),
@@ -1081,6 +1101,7 @@ export const skillStore = {
     request<SkillFile>(`/api/v1/skill-files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteFile: (id: string) => request<void>(`/api/v1/skill-files/${id}`, { method: 'DELETE' }),
   importPackage: (orgId: string, file: File, scope: ScopeRef) => {
+    assertSkillArchiveLimit(file);
     const fd = new FormData();
     fd.append('file', file);
     fd.append('scope_type', scope.scope_type);
@@ -1090,6 +1111,7 @@ export const skillStore = {
     });
   },
   importPackageFolder: (orgId: string, files: File[], scope: ScopeRef) => {
+    assertSkillFolderLimits(files);
     const fd = new FormData();
     files.forEach((file) => {
       fd.append('files', file, file.name);
@@ -1502,6 +1524,7 @@ export const terminal = {
     userRequest<void>(`/api/v1/terminal/agents/${id}`, { method: 'DELETE' }),
   skillScopes: () => userRequest<SkillScopeNode[]>('/api/v1/terminal/skill-scopes'),
   importSkill: (file: File, scope: { scope_type: string; scope_id?: string | null }) => {
+    assertSkillArchiveLimit(file);
     const fd = new FormData();
     fd.append('file', file);
     fd.append('scope_type', scope.scope_type);
@@ -1509,6 +1532,7 @@ export const terminal = {
     return userRequest<SkillImportResult>('/api/v1/terminal/skills/import', { method: 'POST', body: fd });
   },
   importSkillFolder: (files: File[], scope: { scope_type: string; scope_id?: string | null }) => {
+    assertSkillFolderLimits(files);
     const fd = new FormData();
     files.forEach((file) => {
       fd.append('files', file, file.name);
@@ -1918,6 +1942,20 @@ export interface PlatformExtensionOverview {
   core_plugins: PlatformExtensionCatalogItem[];
   system_tools: PlatformExtensionCatalogItem[];
 }
+
+export interface StorageLifecycleOverview {
+  pending_items: number;
+  overdue_items: number;
+  failed_items: number;
+  reclaimable_bytes: number;
+  runner_cache_bytes: number;
+  runner_cache_limit_bytes: number;
+}
+
+export const storageLifecycle = {
+  overview: () => request<StorageLifecycleOverview>('/api/v1/platform/storage-lifecycle/overview'),
+  retry: () => request<Record<string, number>>('/api/v1/platform/storage-lifecycle/retry', { method: 'POST' }),
+};
 
 export const platformExtensions = {
   overview: () => request<PlatformExtensionOverview>('/api/v1/platform/extensions/overview'),

@@ -200,7 +200,7 @@ export default function Skills() {
                 return false;
               }}
             >
-              <ToolButton primary icon={<UploadOutlined style={{ fontSize: 13 }} />} disabled={uploadSkill.isPending}>上传 ZIP</ToolButton>
+              <ToolButton primary icon={<UploadOutlined style={{ fontSize: 13 }} />} disabled={uploadSkill.isPending}>上传 ZIP/MD</ToolButton>
             </Upload>
           </>
         }

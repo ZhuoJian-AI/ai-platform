@@ -280,7 +280,7 @@ export default function SkillManagerView() {
                       disabled={!scope.canImport || importSkill.isPending}
                       title={scope.canImport ? '上传 Skill ZIP 或单独 SKILL.md' : '你没有该节点的技能管理权限'}
                     >
-                      <UploadOutlined style={{ fontSize: 13 }} /> {importSkill.isPending ? '导入中…' : '上传 ZIP'}
+                      <UploadOutlined style={{ fontSize: 13 }} /> {importSkill.isPending ? '导入中…' : '上传 ZIP/MD'}
                     </button>
                   </Upload>
                 </div>

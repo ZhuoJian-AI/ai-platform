@@ -11,11 +11,13 @@ import {
 } from '@ant-design/icons';
 import {
   platformExtensions,
+  storageLifecycle,
   type PlatformExtensionCatalogItem,
   type PlatformExtensionEvent,
   type PlatformExtensionOverview,
   type PlatformExtensionRelease,
   type PlatformExtensionSource,
+  type StorageLifecycleOverview,
 } from '../../api/client';
 import { WB, FS } from '../../components/finder/theme';
 
@@ -62,8 +64,17 @@ function MetricCard({ title, value, note, icon }: { title: string; value: ReactN
   );
 }
 
+function formatBytes(value: number): string {
+  if (value < 0) return '不可用';
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MB`;
+  return `${(value / 1024 ** 3).toFixed(2)} GB`;
+}
+
 export default function PlatformExtensions({ section }: { section: ExtensionSection }) {
   const [overview, setOverview] = useState<PlatformExtensionOverview | null>(null);
+  const [lifecycle, setLifecycle] = useState<StorageLifecycleOverview | null>(null);
   const [catalog, setCatalog] = useState<PlatformExtensionCatalogItem[]>([]);
   const [sources, setSources] = useState<PlatformExtensionSource[]>([]);
   const [releases, setReleases] = useState<PlatformExtensionRelease[]>([]);
@@ -89,11 +100,12 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
   const refresh = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
     try {
-      const [nextOverview, nextCatalog, nextSources, nextReleases, nextEvents] = await Promise.all([
+      const [nextOverview, nextCatalog, nextSources, nextReleases, nextEvents, nextLifecycle] = await Promise.all([
         platformExtensions.overview(), platformExtensions.catalog({ limit: 3000 }), platformExtensions.sources(),
-        platformExtensions.releases(), platformExtensions.events(),
+        platformExtensions.releases(), platformExtensions.events(), storageLifecycle.overview(),
       ]);
       setOverview(nextOverview); setCatalog(nextCatalog); setSources(nextSources); setReleases(nextReleases); setEvents(nextEvents);
+      setLifecycle(nextLifecycle);
     } catch (error) {
       message.error(error instanceof Error ? error.message : '平台扩展数据加载失败');
     } finally { if (!quiet) setLoading(false); }
@@ -242,6 +254,22 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
           <Descriptions.Item label="Runtime 重载次数">{overview?.runtime_health?.runtime_restarts ?? 0}</Descriptions.Item>
           <Descriptions.Item label="核心插件">{overview?.core_plugins.length || 0}</Descriptions.Item>
           <Descriptions.Item label="系统工具组">{overview?.system_tools.length || 0}</Descriptions.Item>
+        </Descriptions>
+      </Card>
+      <Card
+        title="存储生命周期"
+        style={{ marginTop: 16 }}
+        extra={<Button size="small" icon={<ReloadOutlined />} loading={actionLoading === 'lifecycle-retry'} onClick={() => void runAction('lifecycle-retry', () => storageLifecycle.retry(), '已执行到期清理与失败重试')}>立即重试</Button>}
+      >
+        <Row gutter={[14, 14]}>
+          <Col xs={12} md={6}><Statistic title="30 天回收站" value={lifecycle?.pending_items ?? 0} suffix="项" /></Col>
+          <Col xs={12} md={6}><Statistic title="已到期待清理" value={lifecycle?.overdue_items ?? 0} suffix="项" valueStyle={(lifecycle?.overdue_items || 0) > 0 ? { color: '#d46b08' } : undefined} /></Col>
+          <Col xs={12} md={6}><Statistic title="失败待重试" value={lifecycle?.failed_items ?? 0} suffix="项" valueStyle={(lifecycle?.failed_items || 0) > 0 ? { color: '#cf1322' } : undefined} /></Col>
+          <Col xs={12} md={6}><Statistic title="预计可回收" value={formatBytes(lifecycle?.reclaimable_bytes ?? 0)} /></Col>
+        </Row>
+        <Descriptions size="small" column={{ xs: 1, md: 2 }} style={{ marginTop: 18 }}>
+          <Descriptions.Item label="Runner 缓存">{formatBytes(lifecycle?.runner_cache_bytes ?? -1)}</Descriptions.Item>
+          <Descriptions.Item label="缓存上限">{formatBytes(lifecycle?.runner_cache_limit_bytes ?? -1)}</Descriptions.Item>
         </Descriptions>
       </Card>
     </>;
