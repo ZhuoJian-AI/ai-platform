@@ -3,12 +3,15 @@ import { useParams } from 'react-router-dom';
 import { Alert, Button, Spin } from 'antd';
 import LoginForm, { LoginBackdrop } from '../components/LoginForm';
 import { auth as authApi, type OrgInfo } from '../api/client';
+import { BRAND_TITLES, useBrandTitle } from '../branding/brand';
 
 /**
  * 组织门户登录页（/{slug}/login）：org_admin 通过所属组织的 slug 登录。
  * 进入时按 slug 公开查询组织名并展示在登录框上方；slug 无效则提示。
  */
 export default function OrgLogin() {
+  useBrandTitle(BRAND_TITLES.organization);
+
   const { slug = '' } = useParams<{ slug: string }>();
   const [org, setOrg] = useState<OrgInfo | null>(null);
   const [loading, setLoading] = useState(true);

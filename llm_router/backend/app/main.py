@@ -75,6 +75,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # restore the last active immutable manifest after both services are up.
     from app.services.platform_extension_service import sync_active_release_to_runtime
     extension_sync_task = asyncio.create_task(sync_active_release_to_runtime())
+    from app.services.platform_extension_discovery import run_catalog_sync_scheduler
+    catalog_sync_task = asyncio.create_task(run_catalog_sync_scheduler())
 
     # 启动 MCP session manager task group（FastAPI app.mount 不跑子应用 lifespan，
     # 故在此显式启动；否则 streamable_http 握手报 "Task group is not initialized"）。
@@ -84,6 +86,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         install_resume_task.cancel()
     if not extension_sync_task.done():
         extension_sync_task.cancel()
+    if not catalog_sync_task.done():
+        catalog_sync_task.cancel()
     logger.info("llm_router_stopping")
 
 

@@ -1857,6 +1857,20 @@ export interface PlatformExtensionCatalogItem {
   available_versions: string[];
   category: string;
   metadata: Record<string, any>;
+  lifecycle_status: string;
+  installed: boolean;
+  installed_version: string | null;
+  active_source_id: string | null;
+  latest_source_id: string | null;
+}
+
+export interface PlatformExtensionCatalogPage {
+  items: PlatformExtensionCatalogItem[];
+  page: number;
+  page_size: number;
+  total: number;
+  counts: Record<'compatible' | 'adapter' | 'all' | 'installed', number>;
+  sync: Record<string, any>;
 }
 
 export interface PlatformExtensionSource {
@@ -1925,6 +1939,11 @@ export const platformExtensions = {
     const qs = new URLSearchParams();
     Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== '') qs.set(key, String(value)); });
     return request<PlatformExtensionCatalogItem[]>(`/api/v1/platform/extensions/catalog${qs.size ? `?${qs}` : ''}`);
+  },
+  catalogPage: (params: { q?: string; source?: string; layer?: string; state?: string; page?: number; page_size?: number } = {}) => {
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== '') qs.set(key, String(value)); });
+    return request<PlatformExtensionCatalogPage>(`/api/v1/platform/extensions/catalog/page${qs.size ? `?${qs}` : ''}`);
   },
   syncCatalog: () => request<Record<string, any>>('/api/v1/platform/extensions/catalog/sync', { method: 'POST' }),
   catalogDetail: (id: string) => request<PlatformExtensionCatalogItem>(`/api/v1/platform/extensions/catalog/${id}`),

@@ -141,6 +141,11 @@ def _core_catalog_row(row: dict) -> dict:
         "available_versions": [row["version"]] if row["version"] != "platform" else [],
         "category": "official",
         "metadata": {},
+        "lifecycle_status": "available",
+        "installed": False,
+        "installed_version": None,
+        "active_source_id": None,
+        "latest_source_id": None,
     }
 
 
@@ -169,6 +174,264 @@ def catalog_entry_to_item(row: PlatformExtensionCatalogEntry) -> dict:
         "available_versions": row.available_versions,
         "category": row.category,
         "metadata": row.metadata_payload,
+        "lifecycle_status": "available",
+        "installed": False,
+        "installed_version": None,
+        "active_source_id": None,
+        "latest_source_id": None,
+    }
+
+
+def _manifest_source_map(manifest: dict) -> dict[str, dict]:
+    return {
+        str(item.get("source_id")): item
+        for item in (manifest or {}).get("external_extensions") or []
+        if item.get("source_id") and item.get("enabled", True)
+    }
+
+
+def _source_catalog_entry_id(source: PlatformExtensionSource) -> str | None:
+    value = (source.build_report or {}).get("catalog_entry_id")
+    return str(value) if value else None
+
+
+def _source_item(source: PlatformExtensionSource) -> dict:
+    manifest = source.manifest or {}
+    return {
+        "id": None,
+        "slug": manifest.get("slug") or f"source-{source.id}",
+        "name": manifest.get("name") or source.locator,
+        "version": manifest.get("version") or source.resolved_version or source.requested_version or "unknown",
+        "description": manifest.get("description") or "外部导入候选",
+        "kind": manifest.get("type") or "adapter_required",
+        "source": "reviewed" if source.review_status == "approved" else "external",
+        "status": source.status,
+        "removable": True,
+        "capabilities": manifest.get("provides") or [],
+        "compatibility_warnings": (source.compatibility or {}).get("warnings") or [],
+        "layer": manifest.get("layer") or (
+            "coordinator" if "coordinator" in (manifest.get("provides") or []) else
+            "system_tool" if manifest.get("type") == "system_tool" else "runtime"
+        ),
+        "operation": manifest.get("operation") or (
+            "replace" if "coordinator" in (manifest.get("provides") or []) else "add"
+        ),
+        "trust_level": "platform_reviewed" if source.review_status == "approved" else "external",
+        "runtime_requirements": manifest.get("runtime_requirements") or {},
+        "compatibility_status": "compatible" if source.status == "ready" else source.status,
+        "compatibility_reasons": (source.compatibility or {}).get("warnings") or [],
+        "repository": source.locator if source.source_type == "github" else None,
+        "homepage": None,
+        "package_name": source.locator if source.source_type == "npm" else None,
+        "available_versions": [source.resolved_version] if source.resolved_version else [],
+        "category": "imported",
+        "metadata": {"source_id": str(source.id), "review_status": source.review_status},
+        "lifecycle_status": "available",
+        "installed": False,
+        "installed_version": None,
+        "active_source_id": None,
+        "latest_source_id": source.id,
+    }
+
+
+def _source_lifecycle(
+    source: PlatformExtensionSource | None,
+    *,
+    active_sources: dict[str, dict],
+    candidate_source_ids: set[str],
+) -> tuple[str, bool, str | None, UUID | None]:
+    if source is None:
+        return "not_imported", False, None, None
+    source_id = str(source.id)
+    active_item = active_sources.get(source_id)
+    if active_item is not None:
+        return (
+            "installed",
+            True,
+            str(active_item.get("version") or source.resolved_version or source.requested_version or "unknown"),
+            source.id,
+        )
+    if source_id in candidate_source_ids:
+        return "candidate", False, None, None
+    if source.status in {"importing", "building", "failed", "incompatible", "review_required"}:
+        return source.status, False, None, None
+    if source.status == "ready" and source.review_status == "approved":
+        return "approved", False, None, None
+    return source.status or "not_imported", False, None, None
+
+
+async def _catalog_rows(db: AsyncSession, admin_id: int) -> list[dict]:
+    active = await ensure_baseline(db, admin_id)
+    rows = [_core_catalog_row(row) for row in catalog_items()]
+    plugin_states = {
+        str(item.get("slug")): item
+        for item in (active.manifest or {}).get("plugins") or []
+    }
+    tool_states = {
+        str(item.get("slug")): item
+        for item in (active.manifest or {}).get("system_tools") or []
+    }
+    for row in rows:
+        states = tool_states if row["kind"] == "system_tool" else plugin_states
+        manifest_item = states.get(row["slug"])
+        enabled = bool(manifest_item and manifest_item.get("enabled", True))
+        row["status"] = "enabled" if enabled else "disabled"
+        row["lifecycle_status"] = "installed" if enabled else "disabled"
+        row["installed"] = enabled
+        row["installed_version"] = row["version"] if enabled else None
+
+    discovery = list((await db.execute(
+        select(PlatformExtensionCatalogEntry)
+        .where(
+            PlatformExtensionCatalogEntry.is_active.is_(True),
+            PlatformExtensionCatalogEntry.provider == "community",
+        )
+        .order_by(PlatformExtensionCatalogEntry.name)
+    )).scalars().all())
+    sources = list((await db.execute(
+        select(PlatformExtensionSource).order_by(PlatformExtensionSource.created_at.desc())
+    )).scalars().all())
+    releases = list((await db.execute(
+        select(PlatformExtensionRelease).where(PlatformExtensionRelease.is_active.is_(False))
+    )).scalars().all())
+    active_sources = _manifest_source_map(active.manifest or {})
+    candidate_source_ids = {
+        source_id
+        for release in releases
+        if release.status in {"draft", "validating", "ready", "publishing"}
+        for source_id in _manifest_source_map(release.manifest or {})
+    }
+
+    linked_by_entry: dict[str, PlatformExtensionSource] = {}
+    unlinked_sources: list[PlatformExtensionSource] = []
+    entry_by_locator = {
+        locator: str(entry.id)
+        for entry in discovery
+        for locator in (entry.package_name, entry.repository)
+        if locator
+    }
+    for source in sources:
+        entry_id = _source_catalog_entry_id(source) or entry_by_locator.get(source.locator)
+        if entry_id and entry_id not in linked_by_entry:
+            linked_by_entry[entry_id] = source
+        elif not entry_id:
+            unlinked_sources.append(source)
+
+    for entry in discovery:
+        item = catalog_entry_to_item(entry)
+        source = linked_by_entry.get(str(entry.id))
+        lifecycle, installed, installed_version, active_source_id = _source_lifecycle(
+            source,
+            active_sources=active_sources,
+            candidate_source_ids=candidate_source_ids,
+        )
+        item.update({
+            "status": source.status if source else item["status"],
+            "lifecycle_status": lifecycle,
+            "installed": installed,
+            "installed_version": installed_version,
+            "active_source_id": active_source_id,
+            "latest_source_id": source.id if source else None,
+            "metadata": {
+                **(item.get("metadata") or {}),
+                **({
+                    "source_id": str(source.id),
+                    "review_status": source.review_status,
+                } if source else {}),
+            },
+        })
+        rows.append(item)
+
+    for source in unlinked_sources:
+        item = _source_item(source)
+        lifecycle, installed, installed_version, active_source_id = _source_lifecycle(
+            source,
+            active_sources=active_sources,
+            candidate_source_ids=candidate_source_ids,
+        )
+        item.update({
+            "lifecycle_status": lifecycle,
+            "installed": installed,
+            "installed_version": installed_version,
+            "active_source_id": active_source_id,
+        })
+        rows.append(item)
+    return rows
+
+
+def _filter_catalog_rows(
+    rows: list[dict],
+    *,
+    query: str | None,
+    source_filter: str | None,
+    layer: str | None,
+) -> list[dict]:
+    normalized_query = (query or "").strip().lower()
+    return [
+        row for row in rows
+        if (not source_filter or row["source"] == source_filter)
+        and (not layer or row["layer"] == layer)
+        and (
+            not normalized_query
+            or normalized_query in " ".join(
+                [row["name"], row["slug"], row.get("description") or "", row.get("package_name") or ""]
+            ).lower()
+        )
+    ]
+
+
+async def catalog_sync_summary(db: AsyncSession) -> dict:
+    event = (await db.execute(
+        select(PlatformExtensionReleaseEvent)
+        .where(PlatformExtensionReleaseEvent.event_type == "catalog_synced")
+        .order_by(PlatformExtensionReleaseEvent.created_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    if event is None:
+        return {"status": "never", "stale": True}
+    return {**(event.details or {}), "status": event.status, "event_at": event.created_at.isoformat()}
+
+
+async def catalog_page(
+    db: AsyncSession,
+    admin_id: int,
+    *,
+    query: str | None = None,
+    source_filter: str | None = None,
+    layer: str | None = None,
+    state: str = "all",
+    page: int = 1,
+    page_size: int = 48,
+) -> dict:
+    filtered = _filter_catalog_rows(
+        await _catalog_rows(db, admin_id),
+        query=query,
+        source_filter=source_filter,
+        layer=layer,
+    )
+    counts = {
+        "compatible": sum(row["compatibility_status"] == "compatible" for row in filtered),
+        "adapter": sum(row["compatibility_status"] == "needs_adapter" for row in filtered),
+        "all": len(filtered),
+        "installed": sum(bool(row["installed"]) for row in filtered),
+    }
+    if state == "compatible":
+        filtered = [row for row in filtered if row["compatibility_status"] == "compatible"]
+    elif state == "adapter":
+        filtered = [row for row in filtered if row["compatibility_status"] == "needs_adapter"]
+    elif state == "installed":
+        filtered = [row for row in filtered if row["installed"]]
+    filtered.sort(key=lambda row: (not row["installed"], str(row["name"]).lower(), str(row["slug"])))
+    page_size = max(1, min(page_size, 48))
+    page = max(1, page)
+    start = (page - 1) * page_size
+    return {
+        "items": filtered[start:start + page_size],
+        "page": page,
+        "page_size": page_size,
+        "total": len(filtered),
+        "counts": counts,
+        "sync": await catalog_sync_summary(db),
     }
 
 
@@ -183,84 +446,15 @@ async def list_catalog(
     offset: int = 0,
     limit: int = 3000,
 ) -> list[dict]:
-    active = await ensure_baseline(db, admin_id)
-    rows = [_core_catalog_row(row) for row in catalog_items()]
-    plugin_states = {
-        str(item.get("slug")): item.get("enabled", True)
-        for item in (active.manifest or {}).get("plugins") or []
-    }
-    tool_states = {
-        str(item.get("slug")): item.get("enabled", True)
-        for item in (active.manifest or {}).get("system_tools") or []
-    }
-    for row in rows:
-        states = tool_states if row["kind"] == "system_tool" else plugin_states
-        if row["slug"] in states:
-            row["status"] = "enabled" if states[row["slug"]] else "disabled"
-    discovery = list(
-        (await db.execute(
-            select(PlatformExtensionCatalogEntry)
-            .where(
-                PlatformExtensionCatalogEntry.is_active.is_(True),
-                PlatformExtensionCatalogEntry.provider == "community",
-            )
-            .order_by(PlatformExtensionCatalogEntry.name)
-        )).scalars().all()
+    rows = _filter_catalog_rows(
+        await _catalog_rows(db, admin_id),
+        query=query,
+        source_filter=source_filter,
+        layer=layer,
     )
-    rows.extend(catalog_entry_to_item(row) for row in discovery)
-    sources = list(
-        (await db.execute(select(PlatformExtensionSource).order_by(PlatformExtensionSource.created_at.desc())))
-        .scalars()
-        .all()
-    )
-    for source in sources:
-        manifest = source.manifest or {}
-        rows.append(
-            {
-                "id": None,
-                "slug": manifest.get("slug") or f"source-{source.id}",
-                "name": manifest.get("name") or source.locator,
-                "version": manifest.get("version") or source.resolved_version or source.requested_version or "unknown",
-                "description": manifest.get("description") or "外部导入候选",
-                "kind": manifest.get("type") or "adapter_required",
-                "source": "reviewed" if source.review_status == "approved" else "external",
-                "status": source.status,
-                "removable": True,
-                "capabilities": manifest.get("provides") or [],
-                "compatibility_warnings": (source.compatibility or {}).get("warnings") or [],
-                "layer": (manifest.get("layer") or (
-                    "coordinator" if "coordinator" in (manifest.get("provides") or []) else "system_tool"
-                    if manifest.get("type") == "system_tool" else "runtime"
-                )),
-                "operation": manifest.get("operation") or (
-                    "replace" if "coordinator" in (manifest.get("provides") or []) else "add"
-                ),
-                "trust_level": "platform_reviewed" if source.review_status == "approved" else "external",
-                "runtime_requirements": manifest.get("runtime_requirements") or {},
-                "compatibility_status": "compatible" if source.status == "ready" else source.status,
-                "compatibility_reasons": (source.compatibility or {}).get("warnings") or [],
-                "repository": source.locator if source.source_type == "github" else None,
-                "homepage": None,
-                "package_name": source.locator if source.source_type == "npm" else None,
-                "available_versions": [source.resolved_version] if source.resolved_version else [],
-                "category": "imported",
-                "metadata": {"source_id": str(source.id), "review_status": source.review_status},
-            }
-        )
-    normalized_query = (query or "").strip().lower()
-    filtered = [
-        row for row in rows
-        if (not source_filter or row["source"] == source_filter)
-        and (not layer or row["layer"] == layer)
-        and (not compatibility or row["compatibility_status"] == compatibility)
-        and (
-            not normalized_query
-            or normalized_query in " ".join(
-                [row["name"], row["slug"], row.get("description") or "", row.get("package_name") or ""]
-            ).lower()
-        )
-    ]
-    return filtered[max(0, offset):max(0, offset) + max(1, min(limit, 3000))]
+    if compatibility:
+        rows = [row for row in rows if row["compatibility_status"] == compatibility]
+    return rows[max(0, offset):max(0, offset) + max(1, min(limit, 3000))]
 
 
 async def create_source(
@@ -311,6 +505,7 @@ async def process_source_build(source_id: UUID) -> None:
         )
         await db.commit()
         try:
+            catalog_entry_id = (source.build_report or {}).get("catalog_entry_id")
             payload = {
                 "source_type": source.source_type,
                 "locator": source.locator,
@@ -335,7 +530,10 @@ async def process_source_build(source_id: UUID) -> None:
             source.commit_sha = result.get("commit_sha")
             source.manifest = result.get("manifest") or {}
             source.compatibility = result.get("compatibility") or {}
-            source.build_report = result.get("report") or {}
+            source.build_report = {
+                **(result.get("report") or {}),
+                **({"catalog_entry_id": catalog_entry_id} if catalog_entry_id else {}),
+            }
             publishable = bool(result.get("publishable"))
             source.status = "review_required" if publishable else "incompatible"
             source.error = None if publishable else result.get("error") or "需要平台适配器，不能发布"

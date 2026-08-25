@@ -39,6 +39,7 @@ import AgentManagerView from './AgentManagerView';
 import AifabeiDashboardView from './AifabeiDashboardView';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from '../../branding/BrandLogoSlot';
+import { BRAND_TITLES, useBrandTitle } from '../../branding/brand';
 
 /** WorkBuddy 配色（参考 HTML 的 tailwind theme）。 */
 const WB = {
@@ -269,6 +270,8 @@ const EXEC_LABEL: Record<TaskConfig['exec_mode'], string> = { craft: 'Craft', as
 
 /** WorkBuddy 风格两栏：窗口标题栏 / 左侧栏（新建+任务列表+用户）/ 右侧主区（首页欢迎 or 聊天）。 */
 export default function Terminal() {
+  useBrandTitle(BRAND_TITLES.terminal);
+
   const { slug = '' } = useParams<{ slug: string }>();
   const { user, logout } = useUserAuth();
   const qc = useQueryClient();

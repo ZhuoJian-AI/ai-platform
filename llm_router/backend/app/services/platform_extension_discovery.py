@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import httpx
-from sqlalchemy import select
+from redis.asyncio import Redis
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.database import async_session_factory
 from app.models.platform_extension import PlatformExtensionCatalogEntry
 from app.services.platform_extension_catalog import catalog_items
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SLUG = re.compile(r"[^a-z0-9._-]+")
+_SYNC_LOCK_KEY = "platform-extensions:catalog-sync-lock"
 
 _CATEGORY_LAYER = {
     "model": "model_adapter",
@@ -147,15 +152,19 @@ def _official_rows() -> list[dict]:
     return rows
 
 
-def _community_rows(payload: dict) -> list[dict]:
+def _community_rows_with_stats(payload: dict) -> tuple[list[dict], dict[str, int]]:
     rows = []
-    for raw in payload.get("plugins") or []:
+    raw_plugins = payload.get("plugins") or []
+    skipped = 0
+    for raw in raw_plugins:
         if not isinstance(raw, dict):
+            skipped += 1
             continue
         name = _text(raw.get("name"), 255)
         repository = _url(raw.get("url"))
         package_name = _text(raw.get("npm"), 255) or None
         if not name or not (repository or package_name):
+            skipped += 1
             continue
         description = raw.get("description") or {}
         description_text = (
@@ -193,7 +202,55 @@ def _community_rows(payload: dict) -> list[dict]:
         )
     # Community lists can contain the same npm package in more than one category.
     # Keep one deterministic row so the database uniqueness constraint is never the deduper.
-    return list({row["external_key"]: row for row in rows}.values())
+    deduplicated = list({row["external_key"]: row for row in rows}.values())
+    return deduplicated, {
+        "upstream_count": len(raw_plugins),
+        "usable_count": len(deduplicated),
+        "skipped_count": skipped,
+        "deduplicated_count": len(rows) - len(deduplicated),
+    }
+
+
+def _community_rows(payload: dict) -> list[dict]:
+    return _community_rows_with_stats(payload)[0]
+
+
+async def _acquire_sync_lock() -> tuple[Redis | None, str | None, bool, str | None]:
+    """Acquire the cross-process catalog lock; fail open only when Redis is unavailable."""
+
+    token = uuid4().hex
+    client = Redis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_connect_timeout=1,
+        socket_timeout=1,
+    )
+    try:
+        acquired = bool(await client.set(
+            _SYNC_LOCK_KEY,
+            token,
+            nx=True,
+            ex=max(120, settings.extension_catalog_sync_timeout_seconds + 60),
+        ))
+        return client, token, acquired, None
+    except Exception as exc:  # noqa: BLE001 - metadata sync must keep the last database snapshot
+        await client.aclose()
+        return None, None, True, _text(exc, 500)
+
+
+async def _release_sync_lock(client: Redis | None, token: str | None) -> None:
+    if client is None or token is None:
+        return
+    try:
+        await client.eval(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then "
+            "return redis.call('del', KEYS[1]) else return 0 end",
+            1,
+            _SYNC_LOCK_KEY,
+            token,
+        )
+    finally:
+        await client.aclose()
 
 
 async def _upsert_rows(db: AsyncSession, provider: str, rows: list[dict], synced_at: datetime) -> int:
@@ -228,36 +285,91 @@ async def _upsert_rows(db: AsyncSession, provider: str, rows: list[dict], synced
 async def sync_discovery_catalog(db: AsyncSession) -> dict:
     """Refresh discovery metadata. A remote failure retains the last successful snapshot."""
 
+    lock_client, lock_token, acquired, lock_warning = await _acquire_sync_lock()
+    if not acquired:
+        return {
+            "status": "busy",
+            "official": 0,
+            "community": 0,
+            "synced_at": datetime.now(UTC).isoformat(),
+            "stale": False,
+            "message": "另一个目录同步任务正在运行",
+        }
     synced_at = datetime.now(UTC)
-    official_count = await _upsert_rows(db, "official", _official_rows(), synced_at)
     try:
-        async with httpx.AsyncClient(
-            timeout=settings.extension_catalog_sync_timeout_seconds,
-            follow_redirects=True,
-        ) as client:
-            response = await client.get(settings.extension_catalog_community_url)
-            response.raise_for_status()
-            if len(response.content) > 10 * 1024 * 1024:
-                raise ValueError("Community catalog exceeds the 10MB metadata limit")
-            payload = response.json()
-        community_rows = _community_rows(payload if isinstance(payload, dict) else {})
-        if not community_rows:
-            raise ValueError("Community catalog returned no usable plugin records")
-        community_count = await _upsert_rows(db, "community", community_rows, synced_at)
-        return {
-            "status": "ok", "official": official_count, "community": community_count,
-            "synced_at": synced_at.isoformat(), "stale": False,
-        }
-    except Exception as exc:  # noqa: BLE001 - stale snapshot is an intentional fallback
-        retained = len((await db.execute(select(PlatformExtensionCatalogEntry).where(
-            PlatformExtensionCatalogEntry.provider == "community",
-            PlatformExtensionCatalogEntry.is_active.is_(True),
-        ))).scalars().all())
-        return {
-            "status": "stale" if retained else "failed",
-            "official": official_count,
-            "community": retained,
-            "synced_at": synced_at.isoformat(),
-            "stale": True,
-            "error": _text(exc, 1000),
-        }
+        official_count = await _upsert_rows(db, "official", _official_rows(), synced_at)
+        try:
+            async with httpx.AsyncClient(
+                timeout=settings.extension_catalog_sync_timeout_seconds,
+                follow_redirects=True,
+            ) as client:
+                response = await client.get(settings.extension_catalog_community_url)
+                response.raise_for_status()
+                if len(response.content) > 10 * 1024 * 1024:
+                    raise ValueError("Community catalog exceeds the 10MB metadata limit")
+                payload = response.json()
+            community_rows, stats = _community_rows_with_stats(payload if isinstance(payload, dict) else {})
+            if not community_rows:
+                raise ValueError("Community catalog returned no usable plugin records")
+            community_count = await _upsert_rows(db, "community", community_rows, synced_at)
+            return {
+                "status": "ok", "official": official_count, "community": community_count,
+                "synced_at": synced_at.isoformat(), "stale": False,
+                "lock_warning": lock_warning,
+                **stats,
+            }
+        except Exception as exc:  # noqa: BLE001 - stale snapshot is an intentional fallback
+            retained = len((await db.execute(select(PlatformExtensionCatalogEntry).where(
+                PlatformExtensionCatalogEntry.provider == "community",
+                PlatformExtensionCatalogEntry.is_active.is_(True),
+            ))).scalars().all())
+            return {
+                "status": "stale" if retained else "failed",
+                "official": official_count,
+                "community": retained,
+                "synced_at": synced_at.isoformat(),
+                "stale": True,
+                "error": _text(exc, 1000),
+                "lock_warning": lock_warning,
+                "upstream_count": 0,
+                "usable_count": retained,
+                "skipped_count": 0,
+                "deduplicated_count": 0,
+            }
+    finally:
+        await _release_sync_lock(lock_client, lock_token)
+
+
+async def run_catalog_sync_scheduler() -> None:
+    """Refresh the metadata catalog daily while retaining the last successful snapshot."""
+
+    from app.services.platform_extension_service import record_event
+
+    while True:
+        try:
+            async with async_session_factory() as db:
+                last_synced = (
+                    await db.execute(select(func.max(PlatformExtensionCatalogEntry.last_synced_at)).where(
+                        PlatformExtensionCatalogEntry.provider == "community",
+                        PlatformExtensionCatalogEntry.is_active.is_(True),
+                    ))
+                ).scalar_one_or_none()
+                due = last_synced is None or last_synced <= datetime.now(UTC) - timedelta(
+                    seconds=max(60, settings.extension_catalog_sync_interval_seconds)
+                )
+                if due:
+                    result = await sync_discovery_catalog(db)
+                    await record_event(
+                        db,
+                        event_type="catalog_synced",
+                        actor_admin_id=None,
+                        status="ok" if result["status"] == "ok" else result["status"],
+                        details={**result, "trigger": "scheduled"},
+                    )
+                    await db.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Discovery metadata must never prevent the main API from serving the last snapshot.
+            pass
+        await asyncio.sleep(max(60, settings.extension_catalog_sync_poll_seconds))
