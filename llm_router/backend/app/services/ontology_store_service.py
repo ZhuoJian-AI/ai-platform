@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.ontology import OntologyFile, OntologyFolder
 from app.schemas.ontology import OntologyFileCreate, OntologyFileUpdate
+from app.services.storage_lifecycle_service import mark_deleted
 from app.services.workspace_service import _normalize_path, _sanitize_content
 
 
@@ -102,7 +103,7 @@ async def update_file(db: AsyncSession, f: OntologyFile, data: OntologyFileUpdat
 
 
 async def soft_delete_file(db: AsyncSession, f: OntologyFile) -> None:
-    f.deleted_at = datetime.now(UTC)
+    mark_deleted(f)
     await db.flush()
 
 
@@ -202,7 +203,7 @@ async def soft_delete_folder(db: AsyncSession, folder: OntologyFolder) -> None:
         )
     )).scalars().all()
     for sf in sub_folders:
-        sf.deleted_at = now
+        mark_deleted(sf, now=now)
 
     sub_files = (await db.execute(
         select(OntologyFile).where(
@@ -212,7 +213,7 @@ async def soft_delete_folder(db: AsyncSession, folder: OntologyFolder) -> None:
         )
     )).scalars().all()
     for sf in sub_files:
-        sf.deleted_at = now
+        mark_deleted(sf, now=now)
 
-    folder.deleted_at = now
+    mark_deleted(folder, now=now)
     await db.flush()

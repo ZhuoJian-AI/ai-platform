@@ -27,6 +27,7 @@ from app.models.workspace import (
 )
 from app.schemas.workspace import WorkspaceFileCreate, WorkspaceUploadInitiate
 from app.services import storage_gateway_service, workspace_permission_service, workspace_service
+from app.services.storage_lifecycle_service import restore
 
 
 async def audit(
@@ -306,10 +307,9 @@ async def restore_from_trash(db: AsyncSession, ws: Workspace, file_id: UUID, cu:
     ))).scalar_one_or_none()
     if file is None:
         raise HTTPException(status_code=404, detail="回收站文件不存在")
-    file.deleted_at = None
+    restore(file)
     file.deleted_by_user_id = None
     file.deleted_by_admin_id = None
-    file.purge_after = None
     await audit(db, ws, "file_restored", user_id=cu.id, file=file, version_id=file.current_version_id)
     await db.refresh(file)
     return file
@@ -326,10 +326,9 @@ async def restore_from_trash_admin(
     ))).scalar_one_or_none()
     if file is None:
         raise HTTPException(status_code=404, detail="回收站文件不存在")
-    file.deleted_at = None
+    restore(file)
     file.deleted_by_user_id = None
     file.deleted_by_admin_id = None
-    file.purge_after = None
     await audit(
         db, ws, "file_restored", admin_id=admin.id,
         file=file, version_id=file.current_version_id,
@@ -433,11 +432,19 @@ async def load_version_bytes(version: WorkspaceFileVersion) -> bytes:
 
 
 async def purge_expired(db: AsyncSession) -> int:
+    now = datetime.now(UTC)
     rows = list((await db.execute(select(WorkspaceFile).where(
-        WorkspaceFile.deleted_at.is_not(None), WorkspaceFile.purge_after <= datetime.now(UTC),
+        WorkspaceFile.deleted_at.is_not(None), WorkspaceFile.purge_after <= now,
     ).limit(50))).scalars().all())
     purged = 0
     for file in rows:
+        active_shares = int((await db.scalar(select(func.count()).select_from(WorkspaceShareLink).where(
+            WorkspaceShareLink.workspace_file_id == file.id,
+            WorkspaceShareLink.revoked_at.is_(None),
+            WorkspaceShareLink.expires_at > now,
+        ))) or 0)
+        if active_shares:
+            continue
         refs = {str(version.content_ref) for version in await list_versions(db, file) if version.content_ref}
         if file.content_ref:
             refs.add(str(file.content_ref))
@@ -456,6 +463,11 @@ async def purge_expired(db: AsyncSession) -> int:
             try:
                 await storage_gateway_service.delete_object(ref)
             except storage_gateway_service.StorageGatewayError:
+                file.metadata_ = {
+                    **(file.metadata_ or {}),
+                    "lifecycle_cleanup_error": "OSS delete failed; retry scheduled",
+                    "lifecycle_cleanup_failed_at": datetime.now(UTC).isoformat(),
+                }
                 can_purge = False
                 break
         if not can_purge:

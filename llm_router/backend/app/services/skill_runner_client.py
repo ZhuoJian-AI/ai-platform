@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import time
 from uuid import UUID
 
@@ -13,7 +12,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.database import async_session_factory
 from app.models.skill import SkillFolder, SkillVersion
-from app.services.skill_import_service import activate_version
+from app.services.skill_import_service import activate_version, signed_version_archive
 
 logger = structlog.get_logger()
 
@@ -32,9 +31,9 @@ async def install_version(version_id: UUID | str) -> None:
         await db.commit()
         payload = {
             "package_hash": version.package_hash,
-            "archive_base64": base64.b64encode(version.archive).decode("ascii"),
             "runtime": version.runtime,
             "entrypoint": version.entrypoint,
+            **await signed_version_archive(version),
         }
         try:
             async with httpx.AsyncClient(timeout=max(360, settings.skill_runner_timeout_seconds + 30)) as client:
@@ -94,7 +93,6 @@ async def execute_version(
     started = time.perf_counter()
     payload = {
         "package_hash": version.package_hash,
-        "archive_base64": base64.b64encode(version.archive).decode("ascii"),
         "runtime": version.runtime,
         "entrypoint": version.entrypoint,
         "params": params,
@@ -104,6 +102,7 @@ async def execute_version(
         "args": args or [],
         "execution_id": execution_id,
         "timeout_seconds": settings.skill_runner_timeout_seconds,
+        **await signed_version_archive(version),
     }
     timeout = settings.skill_runner_queue_wait_seconds + settings.skill_runner_timeout_seconds + 15
     async with httpx.AsyncClient(timeout=timeout) as client:

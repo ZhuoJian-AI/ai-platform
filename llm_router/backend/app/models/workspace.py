@@ -40,6 +40,7 @@ class Workspace(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False, default="organization")
     scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     files = relationship("WorkspaceFile", back_populates="workspace", lazy="selectin")
     folders = relationship("WorkspaceFolder", back_populates="workspace", lazy="selectin")
@@ -104,6 +105,7 @@ class WorkspaceFolder(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base
         ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
     )
     path: Mapped[str] = mapped_column(String(1024), nullable=False)  # 相对 workspace root 的 POSIX 路径
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     workspace = relationship("Workspace", back_populates="folders")
 

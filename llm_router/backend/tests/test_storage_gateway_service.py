@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -121,3 +122,64 @@ async def test_workspace_rejects_external_hash_mismatch(monkeypatch):
     monkeypatch.setattr(storage, "download_bytes", fake_download)
     with pytest.raises(workspace_service.WorkspaceFileUploadError, match="完整性校验失败"):
         await workspace_service.load_file_bytes(file)
+
+
+@pytest.mark.asyncio
+async def test_object_listing_is_normalized_for_orphan_reconciliation(monkeypatch):
+    _configure(monkeypatch)
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "items": [
+                    {"object_key": "projects/1/kept.bin", "size_bytes": 12, "created_at": "2026-01-01"},
+                    {"invalid": True},
+                ],
+                "next_cursor": "page-2",
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, **kwargs):
+            assert url.endswith("/v1/objects")
+            assert kwargs["headers"]["Authorization"] == "Bearer project-token"
+            assert kwargs["params"]["limit"] == 500
+            return FakeResponse()
+
+    monkeypatch.setattr(storage.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    result = await storage.list_project_objects(older_than=datetime.now(UTC))
+    assert result == {
+        "items": [{"object_key": "projects/1/kept.bin", "size": 12, "created_at": "2026-01-01"}],
+        "next_cursor": "page-2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_object_listing_safely_skips_legacy_gateway(monkeypatch):
+    _configure(monkeypatch)
+
+    class FakeResponse:
+        status_code = 404
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(storage.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    assert await storage.list_project_objects(older_than=datetime.now(UTC)) is None

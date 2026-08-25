@@ -1,7 +1,9 @@
 """RAG ORM models — collection / document / chunk with pgvector embedding."""
 
+from datetime import datetime
+
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -34,6 +36,7 @@ class RagCollection(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # 创建者（终端用户 id）；admin 创建或历史数据为 None。终端据此判定「仅可操作自己创建的」。
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     documents = relationship("RagDocument", back_populates="collection", lazy="selectin")
     folders = relationship("RagFolder", back_populates="collection", lazy="selectin")
@@ -62,6 +65,7 @@ class RagDocument(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="ready", server_default="ready")
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=100, server_default="100")
     parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     collection = relationship("RagCollection", back_populates="documents")
     chunks = relationship("RagChunk", back_populates="document", lazy="noload")
@@ -80,6 +84,7 @@ class RagFolder(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     path: Mapped[str] = mapped_column(String(1024), nullable=False)  # 相对集合根的 POSIX 路径
     # 创建者（终端用户 id）；admin / 历史数据为 None
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     collection = relationship("RagCollection", back_populates="folders")
 

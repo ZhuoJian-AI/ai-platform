@@ -27,6 +27,7 @@ from app.schemas.rag import (
 )
 from app.services import doc_parser
 from app.services import model_gateway as llm_client
+from app.services.storage_lifecycle_service import mark_deleted, mark_rag_collection_deleted
 
 logger = structlog.get_logger()
 
@@ -99,8 +100,7 @@ async def update_collection(db: AsyncSession, coll: RagCollection, data: RagColl
 
 
 async def soft_delete_collection(db: AsyncSession, coll: RagCollection) -> None:
-    coll.deleted_at = datetime.now(UTC)
-    await db.flush()
+    await mark_rag_collection_deleted(db, coll)
 
 
 # ── Document ingest (chunk + embed) ────────────────────────────────────
@@ -596,7 +596,7 @@ async def update_document(db: AsyncSession, doc: RagDocument, data: RagDocumentU
 
 async def soft_delete_document(db: AsyncSession, doc: RagDocument) -> None:
     """软删文档（其分块 RagChunk 无 deleted_at 列，沿用既有策略不级联）。"""
-    doc.deleted_at = datetime.now(UTC)
+    mark_deleted(doc)
     await db.flush()
 
 
@@ -795,7 +795,7 @@ async def soft_delete_folder(db: AsyncSession, folder: RagFolder) -> None:
         )
     )).scalars().all()
     for sf in sub_folders:
-        sf.deleted_at = now  # type: ignore[assignment]
+        mark_deleted(sf, now=now)
 
     # 该文件夹自身 + 前缀下文档
     docs = (await db.execute(
@@ -806,9 +806,9 @@ async def soft_delete_folder(db: AsyncSession, folder: RagFolder) -> None:
     )).scalars().all()
     for doc in docs:
         if doc.folder_path == folder.path or doc.folder_path.startswith(prefix):
-            doc.deleted_at = now  # type: ignore[assignment]
+            mark_deleted(doc, now=now)
 
-    folder.deleted_at = now
+    mark_deleted(folder, now=now)
     await db.flush()
 
 

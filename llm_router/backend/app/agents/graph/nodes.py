@@ -1263,7 +1263,7 @@ async def _build_tools(
                     item["path"] for item in platform.get("resources", [])
                     if PurePosixPath(str(item.get("path") or "")).name.lower() == "skill.md"
                 )
-                skill_content = skill_import_service.read_version_resource(version, skill_path).decode("utf-8")
+                skill_content = (await skill_import_service.read_version_resource(version, skill_path)).decode("utf-8")
             except (StopIteration, UnicodeDecodeError, KeyError):
                 logger.warning("agent_skill_manifest_unavailable", skill_folder=str(folder.id), slug=folder.slug)
                 continue
@@ -1629,7 +1629,7 @@ async def _execute_agent_skill_tool(state: AgentState, entry: dict, name: str, p
         if path not in indexed:
             return json.dumps({"status": "error", "error": "Resource is not part of this Skill version"})
         try:
-            raw = skill_import_service.read_version_resource(selected["version"], path)
+            raw = await skill_import_service.read_version_resource(selected["version"], path)
             if len(raw) > 200_000:
                 return json.dumps({"status": "error", "error": "Text resource exceeds 200KB"})
             content = raw.decode("utf-8")

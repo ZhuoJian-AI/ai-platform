@@ -4,7 +4,9 @@
 ``OntologyFolder`` / ``OntologyFile``（Markdown 文件 + 文件夹），agent 运行时改读后者。
 """
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
+from datetime import datetime
+
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -37,6 +39,7 @@ class Ontology(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
 
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class OntologyFolder(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
@@ -58,6 +61,7 @@ class OntologyFolder(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base)
     path: Mapped[str] = mapped_column(String(1024), nullable=False)
     # 创建者（终端用户 id）；admin / 历史数据为 None，终端用户仅可删改自己创建的
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class OntologyFile(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
@@ -83,3 +87,4 @@ class OntologyFile(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
     # 创建者（终端用户 id）；admin / 历史数据为 None，终端用户仅可删改自己创建的
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)

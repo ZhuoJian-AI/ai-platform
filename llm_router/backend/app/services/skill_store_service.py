@@ -5,7 +5,6 @@
 """
 
 import hashlib
-from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -14,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.skill import SkillFile, SkillFolder
 from app.schemas.skill import SkillFileCreate, SkillFileUpdate, SkillFolderCreate, SkillFolderUpdate
+from app.services.storage_lifecycle_service import mark_deleted, mark_skill_deleted
 from app.services.workspace_service import _normalize_path, _sanitize_content
 
 SKILL_MANIFEST_PATH = "skill.md"
@@ -76,8 +76,7 @@ async def update_folder(db: AsyncSession, f: SkillFolder, data: SkillFolderUpdat
 
 async def soft_delete_folder(db: AsyncSession, f: SkillFolder) -> None:
     """软删技能文件夹（FK CASCADE 会级联 skill_files；此处显式软删）。"""
-    f.deleted_at = datetime.now(UTC)
-    await db.flush()
+    await mark_skill_deleted(db, f)
 
 
 # ── SkillFile ───────────────────────────────────────────────────────────
@@ -159,5 +158,5 @@ async def update_file(db: AsyncSession, f: SkillFile, data: SkillFileUpdate) -> 
 
 
 async def soft_delete_file(db: AsyncSession, f: SkillFile) -> None:
-    f.deleted_at = datetime.now(UTC)
+    mark_deleted(f)
     await db.flush()

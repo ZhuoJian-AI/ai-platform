@@ -29,6 +29,7 @@ from app.api.rag import router as rag_router
 from app.api.routing_policies import router as routing_router
 from app.api.skill_packages import router as skill_package_router
 from app.api.skills import router as skill_router
+from app.api.storage_lifecycle import router as storage_lifecycle_router
 from app.api.teams import router as team_router
 from app.api.terminal import router as terminal_router
 from app.api.users import router as user_router
@@ -40,6 +41,7 @@ api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(admin_router, tags=["auth"])
 api_router.include_router(config_router, tags=["config"])
 api_router.include_router(platform_extension_router, tags=["platform-extensions"])
+api_router.include_router(storage_lifecycle_router, tags=["storage-lifecycle"])
 # Docker-internal DSH callbacks use a dedicated service token, never user/admin JWTs.
 api_router.include_router(dsh_internal_router, tags=["internal-dsh"])
 

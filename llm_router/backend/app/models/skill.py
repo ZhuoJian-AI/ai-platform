@@ -4,10 +4,13 @@
 ``SkillFolder`` + ``SkillFile``，agent ``_build_tools`` 改读 skill.md manifest。
 """
 
+from datetime import datetime
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    DateTime,
     ForeignKey,
     Integer,
     LargeBinary,
@@ -81,6 +84,7 @@ class SkillFolder(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
         index=True,
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     files = relationship("SkillFile", back_populates="folder", lazy="selectin")
 
@@ -106,6 +110,7 @@ class SkillFile(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     content_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     folder = relationship("SkillFolder", back_populates="files")
 
@@ -125,7 +130,15 @@ class SkillVersion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     version_no: Mapped[int] = mapped_column(Integer, nullable=False)
     package_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     manifest: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    archive: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # Legacy inline package. New packages live in private OSS and keep only an
+    # opaque project-scoped reference here; the column remains during the
+    # rolling migration so old versions continue to execute.
+    archive: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    archive_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archive_size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    storage_status: Mapped[str] = mapped_column(String(20), nullable=False, default="inline", index=True)
+    purge_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    archive_purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     runtime: Mapped[str] = mapped_column(String(20), nullable=False, default="prompt")
     entrypoint: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     is_executable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

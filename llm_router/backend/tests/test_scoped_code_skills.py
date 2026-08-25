@@ -285,6 +285,60 @@ Read references/rules.md, then run scripts/clean.py with the input attachment.
     assert runner_call["inputs"][0]["name"] == "input.txt"
 
 
+def test_agent_skill_archive_rejects_traversal_and_expansion_limits(monkeypatch):
+    traversal = io.BytesIO()
+    with zipfile.ZipFile(traversal, "w") as archive:
+        archive.writestr("../SKILL.md", "blocked")
+    with pytest.raises(HTTPException, match="Unsafe path"):
+        skill_import_service._safe_archive(traversal.getvalue(), "unsafe.zip")
+
+    monkeypatch.setattr(skill_import_service, "MAX_ARCHIVE_FILES", 1)
+    too_many = io.BytesIO()
+    with zipfile.ZipFile(too_many, "w") as archive:
+        archive.writestr("SKILL.md", "manifest")
+        archive.writestr("scripts/run.py", "print('x')")
+    with pytest.raises(HTTPException, match="1-1 files"):
+        skill_import_service._safe_archive(too_many.getvalue(), "too-many.zip")
+
+    monkeypatch.setattr(skill_import_service, "MAX_ARCHIVE_FILES", 1000)
+    monkeypatch.setattr(skill_import_service, "MAX_UNCOMPRESSED_BYTES", 4)
+    expanded = io.BytesIO()
+    with zipfile.ZipFile(expanded, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("SKILL.md", "12345")
+    with pytest.raises(HTTPException, match="Expanded Skill package"):
+        skill_import_service._safe_archive(expanded.getvalue(), "expanded.zip")
+
+
+@pytest.mark.asyncio
+async def test_agent_skill_folder_applies_total_upload_limit(monkeypatch):
+    monkeypatch.setattr(skill_import_service, "MAX_UNCOMPRESSED_BYTES", 8)
+    monkeypatch.setattr(skill_import_service, "MAX_PACKAGE_BYTES", 1024)
+    uploads = [
+        UploadFile(filename="SKILL.md", file=io.BytesIO(b"12345")),
+        UploadFile(filename="run.py", file=io.BytesIO(b"6789")),
+    ]
+    with pytest.raises(HTTPException, match="Expanded Skill package exceeds 500MB"):
+        await skill_import_service._folder_archive(
+            uploads,
+            ["SKILL.md", "scripts/run.py"],
+        )
+
+
+def test_agent_skill_rejects_case_insensitive_duplicate_paths():
+    with pytest.raises(HTTPException, match="Duplicate Skill path"):
+        skill_import_service._normalize_files({
+            "SKILL.md": b"---\nname: Example\ndescription: example\n---\n",
+            "scripts/Run.py": b"print('first')",
+            "scripts/run.py": b"print('second')",
+        })
+
+
+def test_agent_skill_normalized_archive_respects_compressed_limit(monkeypatch):
+    monkeypatch.setattr(skill_import_service, "MAX_PACKAGE_BYTES", 4)
+    with pytest.raises(HTTPException, match="Normalized Skill archive exceeds 100MB"):
+        skill_import_service._normalize_files({"SKILL.md": b"manifest"})
+
+
 @pytest.mark.asyncio
 async def test_executable_skill_output_is_ingested_into_workspace(db_session, monkeypatch):
     org, _, department, _, _, user, cu = await _hierarchy(db_session)

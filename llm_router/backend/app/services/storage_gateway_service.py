@@ -7,6 +7,7 @@ gateway for short-lived, project-scoped signed URLs and stores only an opaque
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -109,6 +110,22 @@ async def upload_bytes(raw: bytes, *, filename: str, content_type: str) -> str:
     return f"{OSS_REF_PREFIX}{object_key}"
 
 
+async def upload_skill_archive(raw: bytes, *, organization_id: str, package_hash: str) -> str:
+    """Store one immutable Skill package through the private project gateway.
+
+    The logical name is deterministic and intentionally contains no original
+    user filename. The gateway remains authoritative for the physical object
+    key and the database stores only the returned opaque reference.
+    """
+    if len(package_hash) != 64 or any(ch not in "0123456789abcdef" for ch in package_hash):
+        raise StorageGatewayError("Invalid Skill package hash")
+    return await upload_bytes(
+        raw,
+        filename=f"skill-packages/{organization_id}/{package_hash}.zip",
+        content_type="application/zip",
+    )
+
+
 async def sign_browser_upload(*, filename: str, content_type: str, size_bytes: int) -> dict:
     """Return a short-lived browser PUT URL without exposing gateway credentials."""
     if size_bytes <= 0 or size_bytes > settings.workspace_max_file_bytes:
@@ -196,7 +213,10 @@ async def get_signed_download(content_ref: str) -> dict:
             )
             response.raise_for_status()
             payload = response.json()
-            return {"url": str(payload["url"]), "headers": payload.get("headers") or {}}
+            return {
+                "url": _internal_signed_url(str(payload["url"])),
+                "headers": payload.get("headers") or {},
+            }
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise StorageGatewayError("OSS download signing failed") from exc
 
@@ -266,3 +286,49 @@ async def delete_object(content_ref: str) -> None:
             response.raise_for_status()
     except httpx.HTTPError as exc:
         raise StorageGatewayError("OSS delete failed; check storage gateway status") from exc
+
+
+async def list_project_objects(
+    *, older_than: datetime, cursor: str | None = None, limit: int = 500,
+) -> dict | None:
+    """List project-scoped objects for orphan reconciliation when supported.
+
+    Older Storage Gateway deployments intentionally expose no listing API. In
+    that case ``None`` is returned and the lifecycle worker skips orphan
+    deletion rather than guessing object keys or requiring an OSS AccessKey.
+    """
+    params: dict[str, str | int] = {
+        "older_than": older_than.isoformat(),
+        "limit": max(1, min(limit, 1000)),
+    }
+    if cursor:
+        params["cursor"] = cursor
+    try:
+        async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
+            response = await client.get(
+                _gateway_url("/v1/objects"), headers=_auth_headers(), params=params,
+            )
+            if response.status_code in {404, 405, 501}:
+                return None
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        raise StorageGatewayError("OSS object listing failed") from exc
+    except (httpx.HTTPError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("OSS object listing failed") from exc
+    items = payload if isinstance(payload, list) else payload.get("items", [])
+    if not isinstance(items, list):
+        raise StorageGatewayError("OSS object listing returned an invalid response")
+    normalized: list[dict[str, str | int]] = []
+    for item in items:
+        if not isinstance(item, dict) or not item.get("object_key"):
+            continue
+        normalized.append({
+            "object_key": str(item["object_key"]),
+            "size": int(item.get("size") or item.get("size_bytes") or 0),
+            "created_at": str(item.get("created_at") or ""),
+        })
+    return {
+        "items": normalized,
+        "next_cursor": None if isinstance(payload, list) else payload.get("next_cursor"),
+    }

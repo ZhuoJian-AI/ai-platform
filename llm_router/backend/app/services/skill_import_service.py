@@ -7,7 +7,6 @@ import io
 import json
 import re
 import zipfile
-from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from uuid import UUID
 
@@ -19,12 +18,13 @@ from app.config import settings
 from app.models.organization import Organization
 from app.models.skill import SkillFile, SkillFolder, SkillVersion
 from app.schemas.skill import SkillFolderCreate
-from app.services import skill_store_service
+from app.services import skill_store_service, storage_gateway_service
+from app.services.storage_lifecycle_service import mark_deleted, restore
 from app.tools.skill_manifest import parse_skill_manifest, parse_skill_manifest_dict
 
-MAX_PACKAGE_BYTES = 10 * 1024 * 1024
-MAX_ARCHIVE_FILES = 200
-MAX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
+MAX_PACKAGE_BYTES = settings.skill_package_max_bytes
+MAX_ARCHIVE_FILES = settings.skill_package_max_files
+MAX_UNCOMPRESSED_BYTES = settings.skill_package_expanded_max_bytes
 TEXT_FILE_LIMIT = 1024 * 1024
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _SCRIPT_LANGUAGES = {
@@ -54,19 +54,22 @@ def _normalize_files(files: dict[str, bytes]) -> tuple[bytes, dict[str, bytes], 
     hash and the same immutable SkillVersion.
     """
     if not files or len(files) > MAX_ARCHIVE_FILES:
-        raise HTTPException(status_code=422, detail="Skill package must contain 1-200 files")
+        raise HTTPException(status_code=422, detail=f"Skill package must contain 1-{MAX_ARCHIVE_FILES} files")
     normalized_files: dict[str, bytes] = {}
+    canonical_paths: set[str] = set()
     total = 0
     for raw_path, data in files.items():
         normalized = raw_path.replace("\\", "/").lstrip("/")
         path = PurePosixPath(normalized)
         if not normalized or ".." in path.parts or path.is_absolute():
             raise HTTPException(status_code=422, detail="Unsafe path in Skill package")
-        if normalized in normalized_files:
+        canonical = normalized.casefold()
+        if canonical in canonical_paths:
             raise HTTPException(status_code=422, detail=f"Duplicate Skill path: {normalized}")
+        canonical_paths.add(canonical)
         total += len(data)
         if total > MAX_UNCOMPRESSED_BYTES:
-            raise HTTPException(status_code=413, detail="Expanded Skill package exceeds 50MB")
+            raise HTTPException(status_code=413, detail="Expanded Skill package exceeds 500MB")
         normalized_files[normalized] = data
 
     skill_paths = [path for path in normalized_files if PurePosixPath(path).name.lower() == "skill.md"]
@@ -87,7 +90,10 @@ def _normalize_files(files: dict[str, bytes]) -> tuple[bytes, dict[str, bytes], 
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16
             zf.writestr(info, data)
-    return out.getvalue(), normalized_files, skill_path
+    archive = out.getvalue()
+    if len(archive) > MAX_PACKAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Normalized Skill archive exceeds 100MB")
+    return archive, normalized_files, skill_path
 
 
 def _safe_archive(raw: bytes, filename: str) -> tuple[bytes, dict[str, bytes], str]:
@@ -100,9 +106,11 @@ def _safe_archive(raw: bytes, filename: str) -> tuple[bytes, dict[str, bytes], s
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
             infos = [i for i in zf.infolist() if not i.is_dir()]
             if not infos or len(infos) > MAX_ARCHIVE_FILES:
-                raise HTTPException(status_code=422, detail="Skill archive must contain 1-200 files")
+                raise HTTPException(
+                    status_code=422, detail=f"Skill archive must contain 1-{MAX_ARCHIVE_FILES} files",
+                )
             if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
-                raise HTTPException(status_code=413, detail="Expanded Skill package exceeds 50MB")
+                raise HTTPException(status_code=413, detail="Expanded Skill package exceeds 500MB")
             files: dict[str, bytes] = {}
             for info in infos:
                 normalized = info.filename.replace("\\", "/").lstrip("/")
@@ -121,14 +129,18 @@ async def _folder_archive(
     if not uploads or len(uploads) != len(relative_paths):
         raise HTTPException(status_code=422, detail="files and relative_paths must have the same non-zero length")
     if len(uploads) > MAX_ARCHIVE_FILES:
-        raise HTTPException(status_code=422, detail="Skill package must contain 1-200 files")
+        raise HTTPException(status_code=422, detail=f"Skill package must contain 1-{MAX_ARCHIVE_FILES} files")
     files: dict[str, bytes] = {}
     total = 0
     for upload, path in zip(uploads, relative_paths, strict=True):
-        raw = await upload.read(MAX_PACKAGE_BYTES + 1)
+        # A browser folder upload is already expanded. Apply the expanded
+        # 500MB boundary here; the deterministic ZIP produced by
+        # ``_normalize_files`` is independently constrained to 100MB.
+        remaining = MAX_UNCOMPRESSED_BYTES - total
+        raw = await upload.read(remaining + 1)
         total += len(raw)
-        if total > MAX_PACKAGE_BYTES:
-            raise HTTPException(status_code=413, detail="Skill package exceeds 10MB")
+        if total > MAX_UNCOMPRESSED_BYTES:
+            raise HTTPException(status_code=413, detail="Expanded Skill package exceeds 500MB")
         files[path or upload.filename or ""] = raw
     return _normalize_files(files)
 
@@ -252,7 +264,7 @@ async def import_package(
     if not raw:
         raise HTTPException(status_code=422, detail="Skill package is empty")
     if len(raw) > MAX_PACKAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Skill package exceeds 10MB")
+        raise HTTPException(status_code=413, detail="Skill package exceeds 100MB")
     archive, files, skill_path = _safe_archive(raw, upload.filename or "skill.zip")
     return await _persist_package(
         db, org_id=org_id, scope_type=scope_type, scope_id=scope_id,
@@ -307,12 +319,27 @@ async def _create_version(
     if agent_package:
         enabled = bool(organization and settings.agent_skills_enabled_for(organization.slug))
     status = "pending" if executable and enabled else "ready"
+    archive_ref: str | None = None
+    inline_archive: bytes | None = archive
+    storage_status = "inline"
+    if settings.workspace_object_storage_configured:
+        try:
+            archive_ref = await storage_gateway_service.upload_skill_archive(
+                archive, organization_id=str(org_id), package_hash=package_hash,
+            )
+        except storage_gateway_service.StorageGatewayError as exc:
+            raise HTTPException(status_code=502, detail="Skill package OSS upload failed") from exc
+        inline_archive = None
+        storage_status = "stored"
     version = SkillVersion(
         skill_folder_id=folder.id,
         version_no=next_no,
         package_hash=package_hash,
         manifest=manifest,
-        archive=archive,
+        archive=inline_archive,
+        archive_ref=archive_ref,
+        archive_size=len(archive),
+        storage_status=storage_status,
         runtime=runtime,
         entrypoint=entrypoint,
         is_executable=executable,
@@ -321,16 +348,18 @@ async def _create_version(
     db.add(version)
     await db.flush()
     if status == "ready":
-        await activate_version(db, folder, version, skill_md)
+        await activate_version(db, folder, version, skill_md, archive=archive)
     return folder, version
 
 
 async def activate_version(
     db: AsyncSession, folder: SkillFolder, version: SkillVersion, skill_md: str | None = None,
+    archive: bytes | None = None,
 ) -> None:
     if version.install_status != "ready":
         raise HTTPException(status_code=409, detail="Only ready versions can be activated")
-    with zipfile.ZipFile(io.BytesIO(version.archive)) as zf:
+    package = archive if archive is not None else await load_version_archive(version)
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
         package_files = {name: zf.read(name) for name in zf.namelist() if not name.endswith("/")}
     existing = list((await db.execute(select(SkillFile).where(
         SkillFile.skill_folder_id == folder.id,
@@ -359,7 +388,7 @@ async def activate_version(
         if item is None:
             item = SkillFile(skill_folder_id=folder.id, path=normalized)
             db.add(item)
-        item.deleted_at = None
+        restore(item)
         item.size = len(raw)
         item.content_hash = hashlib.sha256(raw).hexdigest()
         item.content = content
@@ -368,18 +397,49 @@ async def activate_version(
         if item.path not in active_paths and item.deleted_at is None:
             # Package activation is a complete immutable snapshot; resources
             # removed by a newer version must not remain visible as stale files.
-            item.deleted_at = datetime.now(UTC)
+            mark_deleted(item)
     folder.active_version_id = version.id
     await db.flush()
 
 
-def read_version_resource(version: SkillVersion, path: str) -> bytes:
+async def load_version_archive(version: SkillVersion) -> bytes:
+    """Load a package during the inline-to-OSS rolling migration."""
+    if version.archive_ref:
+        raw = await storage_gateway_service.download_bytes(version.archive_ref)
+    elif version.archive:
+        raw = bytes(version.archive)
+    else:
+        raise HTTPException(status_code=410, detail="Skill package has been physically purged")
+    if len(raw) != int(version.archive_size or len(raw)):
+        raise HTTPException(status_code=409, detail="Skill package size mismatch")
+    if hashlib.sha256(raw).hexdigest() != version.package_hash:
+        raise HTTPException(status_code=409, detail="Skill package hash mismatch")
+    return raw
+
+
+async def signed_version_archive(version: SkillVersion) -> dict:
+    """Return a short-lived Runner input, with inline fallback for legacy rows."""
+    if version.archive_ref:
+        signed = await storage_gateway_service.get_signed_download(version.archive_ref)
+        return {
+            "archive_url": signed["url"],
+            "archive_headers": signed.get("headers") or {},
+            "archive_size": int(version.archive_size or 0),
+        }
+    if version.archive:
+        import base64
+        return {"archive_base64": base64.b64encode(version.archive).decode("ascii")}
+    raise HTTPException(status_code=410, detail="Skill package has been physically purged")
+
+
+async def read_version_resource(version: SkillVersion, path: str) -> bytes:
     """Read one immutable package resource with traversal-safe exact matching."""
     normalized = str(PurePosixPath(path.replace("\\", "/").lstrip("/")))
     posix = PurePosixPath(normalized)
     if not normalized or ".." in posix.parts or posix.is_absolute():
         raise HTTPException(status_code=422, detail="Unsafe Skill resource path")
-    with zipfile.ZipFile(io.BytesIO(version.archive)) as zf:
+    package = await load_version_archive(version)
+    with zipfile.ZipFile(io.BytesIO(package)) as zf:
         names = {name: name for name in zf.namelist() if not name.endswith("/")}
         actual = names.get(normalized)
         if actual is None:

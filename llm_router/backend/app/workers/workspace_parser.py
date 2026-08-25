@@ -13,11 +13,10 @@ from sqlalchemy import or_, select
 
 from app.config import settings
 from app.database import async_session_factory
-from app.models.workspace import WorkspaceFile, WorkspaceUploadSession
+from app.models.workspace import WorkspaceFile
 from app.services import (
     doc_parser,
     storage_gateway_service,
-    workspace_governance_service,
     workspace_service,
 )
 
@@ -103,36 +102,12 @@ async def parse_one(file_id: str) -> None:
             await db.commit()
 
 
-async def maintenance() -> None:
-    async with async_session_factory() as db:
-        now = datetime.now(UTC)
-        expired = list((await db.execute(select(WorkspaceUploadSession).where(
-            WorkspaceUploadSession.status == "pending", WorkspaceUploadSession.expires_at <= now,
-        ).limit(50))).scalars().all())
-        for session in expired:
-            if session.content_ref:
-                try:
-                    await storage_gateway_service.delete_object(session.content_ref)
-                except storage_gateway_service.StorageGatewayError:
-                    continue
-            session.status = "expired"
-            session.upload_url = None
-            session.upload_headers = {}
-        await workspace_governance_service.purge_expired(db)
-        await db.commit()
-
-
 async def main() -> None:
-    idle = 0
     while True:
         file_id = await claim_one()
         if file_id:
-            idle = 0
             await parse_one(file_id)
             continue
-        idle += 1
-        if idle % 30 == 0:
-            await maintenance()
         await asyncio.sleep(POLL_SECONDS)
 
 

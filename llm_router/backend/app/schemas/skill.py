@@ -121,6 +121,11 @@ class SkillVersionRead(OrmModel):
     is_executable: bool
     install_status: Literal["pending", "installing", "ready", "failed"]
     install_error: str | None = None
+    archive_ref: str | None = None
+    archive_size: int = 0
+    storage_status: Literal["inline", "stored", "purge_pending", "purged", "failed"] = "inline"
+    purge_after: datetime | None = None
+    archive_purged_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

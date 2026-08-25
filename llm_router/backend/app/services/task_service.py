@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from app.models.task import Task, TaskMessage
 from app.models.workspace import WorkspaceFile
 from app.schemas.task import TaskCreate, TaskUpdate
+from app.services.storage_lifecycle_service import mark_deleted
 from app.services.workspace_service import get_file_by_path as workspace_service_get_file_by_path
 
 # 写文件类内置工具：arguments 中 path/filename 为产出文件路径。
@@ -141,7 +142,7 @@ async def _soft_delete_task_files(db: AsyncSession, task: Task) -> int:
     files = list((await db.execute(stmt)).scalars().all())
     now = datetime.now(UTC)
     for f in files:
-        f.deleted_at = now
+        mark_deleted(f, now=now)
     if files:
         await db.flush()
     return len(files)
@@ -259,7 +260,7 @@ async def soft_delete_task_turn(
             f = await workspace_service_get_file_by_path(db, ws_uuid, path)
             if f is None:
                 continue
-            f.deleted_at = datetime.now(UTC)
+            mark_deleted(f)
             deleted_files += 1
         if deleted_files:
             await db.flush()

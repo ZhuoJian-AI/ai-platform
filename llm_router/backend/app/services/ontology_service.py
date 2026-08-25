@@ -1,6 +1,5 @@
 """本体 service — CRUD + validation."""
 
-from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -8,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.ontology import Ontology
 from app.schemas.ontology import OntologyCreate, OntologyUpdate
+from app.services.storage_lifecycle_service import mark_ontology_deleted
 from app.tools.ontology_validator import validate_ontology
 
 
@@ -42,8 +42,7 @@ async def update_ontology(db: AsyncSession, o: Ontology, data: OntologyUpdate) -
 
 
 async def soft_delete_ontology(db: AsyncSession, o: Ontology) -> None:
-    o.deleted_at = datetime.now(UTC)
-    await db.flush()
+    await mark_ontology_deleted(db, o)
 
 
 def validate(o: Ontology) -> tuple[bool, list[str]]:

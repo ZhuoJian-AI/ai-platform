@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -15,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.workspace import Workspace
 from app.schemas.workspace import WorkspaceCreate
+from app.services.storage_lifecycle_service import mark_workspace_deleted, restore
 from app.services.workspace_service import create_workspace
 
 
@@ -70,7 +70,7 @@ async def ensure_node_workspace(
 
     ws = await _get_bound_workspace_any(db, org_id, scope_type, scope_id)
     if ws is not None:
-        ws.deleted_at = None
+        restore(ws)
         ws.name = name
         # slug 仅对组织 / 部门节点有意义（取节点 slug）；团队 / 用户工作空间 slug 为节点 id，不可变。
         if scope_type in ("organization", "department") and slug and ws.slug != slug:
@@ -113,5 +113,4 @@ async def soft_delete_node_workspace(
     """节点删除时软删其绑定工作空间；文件随 workspace_id 自然失达，无需单独处理。"""
     ws = await get_bound_workspace(db, org_id, scope_type, scope_id)
     if ws is not None:
-        ws.deleted_at = datetime.now(UTC)
-        await db.flush()
+        await mark_workspace_deleted(db, ws)

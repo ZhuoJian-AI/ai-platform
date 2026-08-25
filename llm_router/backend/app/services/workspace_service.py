@@ -3,7 +3,7 @@
 import base64
 import hashlib
 import mimetypes
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from uuid import UUID
 
@@ -26,6 +26,7 @@ from app.schemas.workspace import (
     WorkspaceUpdate,
 )
 from app.services import doc_parser, storage_gateway_service
+from app.services.storage_lifecycle_service import mark_deleted, mark_workspace_deleted, restore
 
 MAX_WORKSPACE_FILE_BYTES = settings.workspace_max_file_bytes
 MAX_LLM_FILE_CHARS = 100_000
@@ -90,8 +91,7 @@ async def update_workspace(db: AsyncSession, ws: Workspace, data: WorkspaceUpdat
 
 
 async def soft_delete_workspace(db: AsyncSession, ws: Workspace) -> None:
-    ws.deleted_at = datetime.now(UTC)
-    await db.flush()
+    await mark_workspace_deleted(db, ws)
 
 
 # ── WorkspaceFile ──────────────────────────────────────────────────────
@@ -191,10 +191,9 @@ async def upsert_file(
         f.parse_error = None
         # 复活被软删的同路径记录：upsert 语义是「该路径现在应是这份内容」，
         # 旧记录的软删状态不应阻挡新写入（否则唯一约束会让 INSERT 失败）。
-        f.deleted_at = None
+        restore(f)
         f.deleted_by_user_id = None
         f.deleted_by_admin_id = None
-        f.purge_after = None
         # 合并而非覆盖：保留既有元数据（如 task_id 归属标记），仅用新值更新同名字段。
         f.metadata_ = {**(f.metadata_ or {}), **meta}
         if not meta.get("binary"):
@@ -374,12 +373,9 @@ async def soft_delete_file(
     user_id: str | UUID | None = None,
     admin_id: int | None = None,
 ) -> None:
-    f.deleted_at = datetime.now(UTC)
+    mark_deleted(f)
     f.deleted_by_user_id = user_id
     f.deleted_by_admin_id = admin_id
-    f.purge_after = datetime.fromtimestamp(
-        f.deleted_at.timestamp() + settings.workspace_trash_retention_days * 86400, tz=UTC,
-    )
     await db.flush()
 
 
@@ -700,7 +696,7 @@ async def soft_delete_folder(
         )
     )).scalars().all()
     for sf in sub_folders:
-        sf.deleted_at = now
+        mark_deleted(sf, now=now)
 
     # 前缀下文件
     sub_files = (await db.execute(
@@ -711,12 +707,11 @@ async def soft_delete_folder(
         )
     )).scalars().all()
     for sf in sub_files:
-        sf.deleted_at = now
+        mark_deleted(sf, now=now)
         sf.deleted_by_user_id = user_id
         sf.deleted_by_admin_id = admin_id
-        sf.purge_after = now + timedelta(days=settings.workspace_trash_retention_days)
 
-    folder.deleted_at = now
+    mark_deleted(folder, now=now)
     await db.flush()
 
 
@@ -752,7 +747,7 @@ async def soft_delete_folder_path(
         if item.path == normalized or item.path.startswith(prefix)
     ]
     for item in matched_folders:
-        item.deleted_at = now
+        mark_deleted(item, now=now)
 
     file_rows = (await db.execute(
         select(WorkspaceFile).where(
@@ -762,10 +757,9 @@ async def soft_delete_folder_path(
         )
     )).scalars().all()
     for item in file_rows:
-        item.deleted_at = now
+        mark_deleted(item, now=now)
         item.deleted_by_user_id = user_id
         item.deleted_by_admin_id = admin_id
-        item.purge_after = now + timedelta(days=settings.workspace_trash_retention_days)
 
     await db.flush()
     return {"folders": len(matched_folders), "files": len(file_rows)}
@@ -826,10 +820,9 @@ async def bulk_soft_delete_items(
     now = datetime.now(UTC)
     for item in selected_files:
         if item.deleted_at is None:
-            item.deleted_at = now
+            mark_deleted(item, now=now)
             item.deleted_by_user_id = user_id
             item.deleted_by_admin_id = admin_id
-            item.purge_after = now + timedelta(days=settings.workspace_trash_retention_days)
             deleted_files += 1
     await db.flush()
     return {"deleted_files": deleted_files, "deleted_folders": deleted_folders}

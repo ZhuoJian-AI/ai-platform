@@ -35,7 +35,11 @@ class Settings(BaseSettings):
     skill_runner_token: str = "skill-runner-dev-token-change-in-production"
     skill_runner_timeout_seconds: int = 120
     skill_runner_queue_wait_seconds: int = 300
-    skill_package_max_bytes: int = 10 * 1024 * 1024
+    skill_package_max_bytes: int = 100 * 1024 * 1024
+    skill_package_expanded_max_bytes: int = 500 * 1024 * 1024
+    skill_package_max_files: int = 1000
+    storage_lifecycle_interval_seconds: int = 60 * 60
+    storage_orphan_grace_days: int = 7
 
     # Single coordinator runtime (Docker-internal only).
     dsh_runtime_url: str = "http://localhost:8030"
