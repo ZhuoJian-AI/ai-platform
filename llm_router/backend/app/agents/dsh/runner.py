@@ -36,7 +36,9 @@ from app.agents.runtime_support import (
 )
 from app.auth.user_auth import CurrentUser
 from app.database import async_session_factory
+from app.models.agent_run import AgentRun
 from app.models.task import TaskMessage
+from app.services.agent_admission import agent_admission
 from app.services.message_verification import contains_unverified_tool_success_claim
 
 logger = structlog.get_logger()
@@ -136,6 +138,7 @@ async def _consume_dsh(
 ) -> None:
     request = {
         "run_id": str(state["run_id"]),
+        "user_id": str(state.get("user_id") or "platform-admin"),
         "task_id": str(state.get("task_id") or f"agent:{state.get('agent_id', '')}"),
         "run_token": run_token, "messages": _history(state), "message": state.get("request", ""),
         "system_prompt": prepared["system_prompt"], "model": {
@@ -192,6 +195,33 @@ async def _consume_dsh(
     _publish(handle, staged, {"type": "done", "usage": usage})
 
 
+async def _set_run_status(db: Any, run_id: int, status: str) -> None:
+    run = await db.get(AgentRun, run_id)
+    if run is not None:
+        run.status = status
+        await db.commit()
+
+
+async def _admitted_run(
+    state: dict, deps: dict, prepared: dict, run_token: str,
+    handle: run_registry.RunHandle | None, staged: list[dict], user_id: str,
+) -> None:
+    """Acquire a shared Redis permit before entering the DSH process."""
+    run_id = int(state["run_id"])
+    await _set_run_status(deps["db"], run_id, "queued")
+
+    async def status(value: str, position: int | None) -> None:
+        event: dict[str, Any] = {"type": "run_status", "status": value}
+        if position is not None:
+            event["position"] = position
+        _publish(handle, staged, event)
+        if value == "running":
+            await _set_run_status(deps["db"], run_id, "running")
+
+    async with agent_admission.permit(str(run_id), user_id, status):
+        await _consume_dsh(state, prepared, run_token, handle, staged)
+
+
 async def _finish(state: dict, deps: dict) -> None:
     with bind_runtime(deps, lambda _payload: None):
         await save_memory(state)
@@ -222,7 +252,10 @@ async def _run_playground(
     try:
         prepared, run_token = await _prepare(state, deps, lambda raw: staged.append(json.loads(raw)))
         try:
-            await _consume_dsh(state, prepared, run_token, handle, staged)
+            await _admitted_run(
+                state, deps, prepared, run_token, handle, staged,
+                str(state.get("user_id") or "platform-admin"),
+            )
             await _finish(state, deps)
         except Exception as exc:  # noqa: BLE001
             logger.warning("dsh_playground_failed", error=str(exc), exc_info=True)
@@ -308,7 +341,7 @@ async def run_general_agent(
     try:
         prepared, run_token = await _prepare(state, deps, lambda raw: staged.append(json.loads(raw)))
         try:
-            await _consume_dsh(state, prepared, run_token, None, staged)
+            await _admitted_run(state, deps, prepared, run_token, None, staged, str(user.id))
             await _finish(state, deps)
         except Exception as exc:  # noqa: BLE001
             logger.warning("dsh_terminal_run_failed", error=str(exc), exc_info=True)
@@ -365,7 +398,7 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
 
             prepared, run_token = await _prepare(state, deps, writer)
             handle.run_id = int(state["run_id"])
-            await _consume_dsh(state, prepared, run_token, handle, staged)
+            await _admitted_run(state, deps, prepared, run_token, handle, staged, str(user.id))
             await _finish(state, deps)
             final = json.dumps({
                 "type": "final", "session_id": state["session_id"], "run_id": state.get("run_id"),

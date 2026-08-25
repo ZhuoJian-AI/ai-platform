@@ -34,12 +34,20 @@ class Settings(BaseSettings):
     skill_runner_url: str = "http://localhost:8020"
     skill_runner_token: str = "skill-runner-dev-token-change-in-production"
     skill_runner_timeout_seconds: int = 120
+    skill_runner_queue_wait_seconds: int = 300
     skill_package_max_bytes: int = 10 * 1024 * 1024
 
     # Single coordinator runtime (Docker-internal only).
     dsh_runtime_url: str = "http://localhost:8030"
     dsh_runtime_token: str = "dsh-runtime-dev-token-change-in-production"
     dsh_runtime_timeout_seconds: int = 600
+    # Redis-backed DSH admission control shared by all Backend replicas.
+    agent_global_concurrency: int = 12
+    agent_user_concurrency: int = 2
+    agent_queue_max: int = 100
+    agent_queue_wait_seconds: int = 300
+    agent_lease_seconds: int = 60
+    agent_heartbeat_seconds: int = 15
     extension_builder_url: str = "http://localhost:8040"
     extension_builder_token: str = "extension-builder-dev-token-change-in-production"
     extension_builder_timeout_seconds: int = 600

@@ -58,6 +58,10 @@ services:
       STORAGE_GATEWAY_URL: ${STORAGE_GATEWAY_URL:-}
       STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:-}
       STORAGE_GATEWAY_TIMEOUT_SECONDS: ${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}
+      SKILL_RUNNER_MAX_CONCURRENCY: ${SKILL_RUNNER_MAX_CONCURRENCY:-4}
+      SKILL_RUNNER_MAX_QUEUE: ${SKILL_RUNNER_MAX_QUEUE:-100}
+      SKILL_RUNNER_QUEUE_WAIT_SECONDS: ${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}
+      SKILL_RUNNER_OFFICE_CONCURRENCY: ${SKILL_RUNNER_OFFICE_CONCURRENCY:-1}
     ports:
       - "127.0.0.1:8020:8020"
     volumes:
@@ -68,6 +72,9 @@ services:
       timeout: 5s
       retries: 12
     restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.50", memory: 3G, pids: 512 }
 
   dsh-runtime:
     build: ./dsh_runtime
@@ -77,6 +84,7 @@ services:
       AI_PLATFORM_BACKEND_URL: http://backend:8000
       PORT: "8030"
       EXTENSION_CACHE_ROOT: /extensions
+      DSH_RUNTIME_HARD_CONCURRENCY: ${DSH_RUNTIME_HARD_CONCURRENCY:-14}
     volumes:
       - extensioncache:/extensions
     expose:
@@ -87,6 +95,9 @@ services:
       timeout: 5s
       retries: 12
     restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 1536M }
 
   extension-builder:
     build: ./extension_builder

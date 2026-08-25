@@ -136,3 +136,32 @@ test('enforces the platform eight-step budget inside the model adapter', async (
   )
   assert(!events.some(event => event.type === 'done'))
 })
+
+test('keeps a hard safety ceiling above the platform admission limit', async () => {
+  let releaseFirst!: () => void
+  let firstEntered!: () => void
+  const release = new Promise<void>(resolve => { releaseFirst = resolve })
+  const entered = new Promise<void>(resolve => { firstEntered = resolve })
+  const backendUrl = await fakeBackend(async incoming => {
+    await body(incoming)
+    firstEntered()
+    await release
+    return textStream('完成')
+  })
+  const runtime = new DshRuntime({ backendUrl, serviceToken: 'secret', maxConcurrentRuns: 1 })
+  await runtime.start()
+  const firstEvents: RuntimeEvent[] = []
+  const first = runtime.run(request({ run_id: 'run-first' }), event => firstEvents.push(event))
+  await entered
+
+  const rejected: RuntimeEvent[] = []
+  await runtime.run(request({ run_id: 'run-second' }), event => rejected.push(event))
+  assert(rejected.some(event => event.type === 'status' && event.status === 'busy'))
+  assert(rejected.some(event => event.type === 'error' && event.code === 'RUNTIME_BUSY'))
+  assert.equal(runtime.health().active_runs, 1)
+
+  releaseFirst()
+  await first
+  assert(firstEvents.some(event => event.type === 'done'))
+  assert.equal(runtime.health().active_runs, 0)
+})

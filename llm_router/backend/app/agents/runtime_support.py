@@ -111,8 +111,16 @@ async def finalize_bg_error(
         async with async_session_factory() as db:
             if run_id is not None:
                 run = await db.get(AgentRun, run_id)
-                if run is not None and run.status == "running":
-                    run.status = "error"
+                if run is not None and run.status in {"queued", "running"}:
+                    lowered = msg.lower()
+                    if msg == "cancelled":
+                        run.status = "cancelled"
+                    elif "排队超过" in msg or "timeout" in lowered:
+                        run.status = "timeout"
+                    elif "队列已满" in msg or "queue is full" in lowered or "runtime is busy" in lowered:
+                        run.status = "busy"
+                    else:
+                        run.status = "error"
                     run.error = run_error[:500]
             db.add(AgentRunEvent(
                 run_id=run_id, task_id=str(task.id), seq=10_000_000,

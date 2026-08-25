@@ -36,7 +36,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             message="If newly created, check logs for initial password",
         )
 
-    # 孤儿 run 清理：上一进程的内存图任务已随进程死亡，残留 status='running' 的 agent_runs
+    # 孤儿 run 清理：上一进程的内存图任务与等待队列消费者已随进程死亡，
+    # 残留 queued/running 行会永远卡住（Redis 临时许可会由租约自动过期）。
     # 行会永远卡住（前端 resume 端点虽能兜底单条，但启动期一次性清扫更干净）。幂等。
     from sqlalchemy import text as _sa_text
 
@@ -44,7 +45,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         result = await session.execute(
             _sa_text(
                 "UPDATE agent_runs SET status='error', error='interrupted by server restart' "
-                "WHERE status='running'"
+                "WHERE status IN ('queued', 'running')"
             )
         )
         await session.commit()

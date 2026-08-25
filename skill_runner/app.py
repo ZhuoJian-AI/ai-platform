@@ -15,8 +15,9 @@ import signal
 import subprocess
 import tempfile
 import zipfile
+from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import AsyncIterator, Literal
 
 from builtin_tools import BuiltinToolError, execute_builtin
 from fastapi import FastAPI, Header, HTTPException
@@ -39,12 +40,72 @@ MAX_OUTPUT_FILES = 20
 BASE_NODE_MODULES = Path(os.getenv("SKILL_BASE_NODE_MODULES", "/opt/skill-node/node_modules"))
 STORAGE_GATEWAY_URL = os.getenv("STORAGE_GATEWAY_URL", "").rstrip("/")
 STORAGE_PROJECT_TOKEN = os.getenv("STORAGE_PROJECT_TOKEN", "")
+RUNNER_MAX_CONCURRENCY = int(os.getenv("SKILL_RUNNER_MAX_CONCURRENCY", "4"))
+RUNNER_MAX_QUEUE = int(os.getenv("SKILL_RUNNER_MAX_QUEUE", "100"))
+RUNNER_QUEUE_WAIT_SECONDS = int(os.getenv("SKILL_RUNNER_QUEUE_WAIT_SECONDS", "300"))
+RUNNER_OFFICE_CONCURRENCY = int(os.getenv("SKILL_RUNNER_OFFICE_CONCURRENCY", "1"))
 BUILTIN_PYTHON_PACKAGES = (
     "openpyxl", "pandas", "python-docx", "python-pptx", "PyMuPDF", "pypdf", "Pillow", "pytesseract",
 )
 BUILTIN_NODE_PACKAGES = ("exceljs",)
 
 app = FastAPI(title="AI Platform Skill Runner")
+
+
+class RunnerCapacity:
+    """A small in-process queue protecting this isolated Runner container."""
+
+    def __init__(self, limit: int, queue_limit: int, wait_seconds: int, label: str) -> None:
+        self.limit = max(1, limit)
+        self.queue_limit = max(0, queue_limit)
+        self.wait_seconds = max(1, wait_seconds)
+        self.label = label
+        self.active = 0
+        self.waiting = 0
+        self._condition = asyncio.Condition()
+
+    async def _wait_for_slot(self) -> None:
+        async with self._condition:
+            if self.waiting >= self.queue_limit:
+                raise HTTPException(status_code=429, detail=f"{self.label} queue is full")
+            self.waiting += 1
+            try:
+                await asyncio.wait_for(
+                    self._condition.wait_for(lambda: self.active < self.limit),
+                    timeout=self.wait_seconds,
+                )
+            except TimeoutError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"{self.label} remained busy for {self.wait_seconds}s",
+                ) from exc
+            finally:
+                self.waiting -= 1
+            self.active += 1
+
+    async def _release(self) -> None:
+        async with self._condition:
+            self.active = max(0, self.active - 1)
+            self._condition.notify_all()
+
+    @asynccontextmanager
+    async def slot(self) -> AsyncIterator[None]:
+        await self._wait_for_slot()
+        try:
+            yield
+        finally:
+            await self._release()
+
+    def snapshot(self) -> dict:
+        return {"active": self.active, "waiting": self.waiting, "limit": self.limit}
+
+
+EXECUTION_CAPACITY = RunnerCapacity(
+    RUNNER_MAX_CONCURRENCY, RUNNER_MAX_QUEUE, RUNNER_QUEUE_WAIT_SECONDS, "Skill Runner",
+)
+OFFICE_CAPACITY = RunnerCapacity(
+    RUNNER_OFFICE_CONCURRENCY, RUNNER_MAX_QUEUE, RUNNER_QUEUE_WAIT_SECONDS, "Office Runner",
+)
 
 
 def _command_version(argv: list[str]) -> str | None:
@@ -474,7 +535,13 @@ def _script(package: Path, requested: str | None, legacy_entrypoint: str | None)
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", **_runtime_info()}
+    return {
+        "status": "ok", **_runtime_info(),
+        "execution_capacity": EXECUTION_CAPACITY.snapshot(),
+        "office_capacity": OFFICE_CAPACITY.snapshot(),
+        "queue_limit": RUNNER_MAX_QUEUE,
+        "queue_wait_seconds": RUNNER_QUEUE_WAIT_SECONDS,
+    }
 
 
 @app.post("/install")
@@ -484,13 +551,10 @@ async def install(req: InstallRequest, x_skill_runner_token: str | None = Header
     return {"status": "ready", "package_hash": req.package_hash, "path": str(path), **metadata}
 
 
-@app.post("/execute-builtin")
-async def execute_builtin_tool(
+async def _execute_builtin_tool(
     req: BuiltinExecuteRequest,
-    x_skill_runner_token: str | None = Header(None),
 ) -> dict:
     """Execute a platform-owned file handler without loading a user Skill."""
-    _auth(x_skill_runner_token)
     if len(req.inputs) > 20:
         raise HTTPException(status_code=422, detail="Builtin tools accept at most 20 input files")
     run_root = Path(tempfile.mkdtemp(prefix=f"builtin-{req.execution_id}-"))
@@ -548,9 +612,21 @@ async def execute_builtin_tool(
         shutil.rmtree(run_root, ignore_errors=True)
 
 
-@app.post("/execute")
-async def execute(req: ExecuteRequest, x_skill_runner_token: str | None = Header(None)) -> dict:
+@app.post("/execute-builtin")
+async def execute_builtin_tool(
+    req: BuiltinExecuteRequest,
+    x_skill_runner_token: str | None = Header(None),
+) -> dict:
     _auth(x_skill_runner_token)
+    if req.tool_kind in {"spreadsheet", "document", "presentation"}:
+        async with OFFICE_CAPACITY.slot():
+            async with EXECUTION_CAPACITY.slot():
+                return await _execute_builtin_tool(req)
+    async with EXECUTION_CAPACITY.slot():
+        return await _execute_builtin_tool(req)
+
+
+async def _execute(req: ExecuteRequest) -> dict:
     package, _ = await _ensure_installed(req)
     if req.runtime not in {"python", "node", "agent_skill"}:
         raise HTTPException(status_code=422, detail="Skill is not executable")
@@ -617,3 +693,10 @@ async def execute(req: ExecuteRequest, x_skill_runner_token: str | None = Header
         return {"status": "success", "stdout": stdout[-4000:], "outputs": outputs}
     finally:
         shutil.rmtree(run_root, ignore_errors=True)
+
+
+@app.post("/execute")
+async def execute(req: ExecuteRequest, x_skill_runner_token: str | None = Header(None)) -> dict:
+    _auth(x_skill_runner_token)
+    async with EXECUTION_CAPACITY.slot():
+        return await _execute(req)

@@ -42,7 +42,7 @@ class AgentRun(TimestampMixin, Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    # running / success / error
+    # queued / running / success / error / cancelled / timeout / busy
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="running", index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # judge 评分结果（若启用判官节点）

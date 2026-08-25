@@ -705,7 +705,7 @@ async def stream_task_endpoint(
     if run is None:
         raise HTTPException(status_code=404, detail="该任务尚无执行记录")
 
-    if run.status == "running":
+    if run.status in {"queued", "running"}:
         # 情形 3：孤儿 run（进程重启后内存 handle 已失）→ 标 interrupted + 回放 + 合成 final
         run.status = "error"
         run.error = "interrupted by server restart"

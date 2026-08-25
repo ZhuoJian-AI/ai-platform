@@ -80,6 +80,10 @@ services:
       STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
       STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
       STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      SKILL_RUNNER_MAX_CONCURRENCY: "${SKILL_RUNNER_MAX_CONCURRENCY:-4}"
+      SKILL_RUNNER_MAX_QUEUE: "${SKILL_RUNNER_MAX_QUEUE:-100}"
+      SKILL_RUNNER_QUEUE_WAIT_SECONDS: "${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}"
+      SKILL_RUNNER_OFFICE_CONCURRENCY: "${SKILL_RUNNER_OFFICE_CONCURRENCY:-1}"
     expose:
       - "8020"
     volumes:
@@ -95,7 +99,7 @@ services:
     logging: *default-logging
     deploy:
       resources:
-        limits: { cpus: "1.00", memory: 2G }
+        limits: { cpus: "1.50", memory: 3G, pids: 512 }
 
   dsh-runtime:
     image: 127.0.0.1:5000/zhuojian/ai-platform-dsh-runtime-app@sha256:c59d1b9f0ac5168c1acc41616466aedfb00e1aaf6f575fff0c20e964e02f2d7e
@@ -104,6 +108,7 @@ services:
       AI_PLATFORM_BACKEND_URL: http://backend:8000
       PORT: "8030"
       EXTENSION_CACHE_ROOT: /extensions
+      DSH_RUNTIME_HARD_CONCURRENCY: "${DSH_RUNTIME_HARD_CONCURRENCY:-14}"
     expose:
       - "8030"
     volumes:
@@ -119,7 +124,7 @@ services:
     logging: *default-logging
     deploy:
       resources:
-        limits: { cpus: "0.75", memory: 1G }
+        limits: { cpus: "1.00", memory: 1536M }
 
   extension-builder:
     image: 127.0.0.1:5000/zhuojian/ai-platform-extension-builder-app@sha256:68db37c2bafc7dcb6369f8961816e81ad1b4f00d3cd04551ecdfb2b1b05585fe
@@ -162,9 +167,16 @@ services:
       SKILL_RUNNER_URL: http://skill-runner:8020
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
       SKILL_RUNNER_TIMEOUT_SECONDS: "${SKILL_RUNNER_TIMEOUT_SECONDS:-120}"
+      SKILL_RUNNER_QUEUE_WAIT_SECONDS: "${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}"
       DSH_RUNTIME_URL: http://dsh-runtime:8030
       DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
       DSH_RUNTIME_TIMEOUT_SECONDS: "${DSH_RUNTIME_TIMEOUT_SECONDS:-600}"
+      AGENT_GLOBAL_CONCURRENCY: "${AGENT_GLOBAL_CONCURRENCY:-12}"
+      AGENT_USER_CONCURRENCY: "${AGENT_USER_CONCURRENCY:-2}"
+      AGENT_QUEUE_MAX: "${AGENT_QUEUE_MAX:-100}"
+      AGENT_QUEUE_WAIT_SECONDS: "${AGENT_QUEUE_WAIT_SECONDS:-300}"
+      AGENT_LEASE_SECONDS: "${AGENT_LEASE_SECONDS:-60}"
+      AGENT_HEARTBEAT_SECONDS: "${AGENT_HEARTBEAT_SECONDS:-15}"
       EXTENSION_BUILDER_URL: http://extension-builder:8040
       EXTENSION_BUILDER_TOKEN: ${EXTENSION_BUILDER_TOKEN:?}
       EXTENSION_BUILDER_TIMEOUT_SECONDS: "${EXTENSION_BUILDER_TIMEOUT_SECONDS:-600}"
@@ -219,7 +231,7 @@ services:
     logging: *default-logging
     deploy:
       resources:
-        limits: { cpus: "1.25", memory: 2G }
+        limits: { cpus: "1.50", memory: 2560M }
 
   workspace-parser:
     image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:ed9b6c2500dab6fced7df0498f41a3c9c0ac39bfc4c1cfb464dfea113a4ebfef

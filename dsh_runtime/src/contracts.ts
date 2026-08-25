@@ -8,6 +8,7 @@ export interface ToolSpec {
 
 export interface RunRequest {
   run_id: string
+  user_id?: string
   task_id: string
   run_token: string
   messages: Array<{ role: 'user' | 'assistant'; content: string }>
@@ -21,7 +22,7 @@ export interface RunRequest {
 }
 
 export type RuntimeEvent =
-  | { type: 'status'; status: 'running' | 'completed' | 'cancelled' }
+  | { type: 'status'; status: 'running' | 'completed' | 'cancelled' | 'busy' }
   | { type: 'phase'; phase: 'llm'; index: number }
   | { type: 'text_delta'; delta: string }
   | { type: 'tool_call'; id: string; name: string; arguments: string }

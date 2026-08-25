@@ -27,6 +27,7 @@ export interface RuntimeOptions {
   backendUrl: string
   serviceToken: string
   extensionCacheRoot?: string
+  maxConcurrentRuns?: number
 }
 
 function renderHistory(messages: RunRequest['messages']): string {
@@ -116,6 +117,7 @@ export class DshRuntime {
       dsh_version: '0.1.0-rc.5',
       node: process.version,
       active_runs: this.activeByRun.size,
+      hard_concurrency_limit: this.options.maxConcurrentRuns ?? 14,
       draining: this.draining,
       max_parallel_tool_calls: 1,
       release_id: this.releaseId,
@@ -166,6 +168,14 @@ export class DshRuntime {
     if (!this.ready) throw new Error('runtime not ready')
     if (this.draining) throw new Error('runtime is draining for a reviewed extension release')
     if (this.activeByRun.has(request.run_id)) throw new Error('run already active')
+    if (this.activeByRun.size >= (this.options.maxConcurrentRuns ?? 14)) {
+      emit({ type: 'status', status: 'busy' })
+      emit({
+        type: 'error', code: 'RUNTIME_BUSY',
+        message: 'DSH Runtime is busy; retry after queued runs finish',
+      })
+      return
+    }
     if (!Number.isInteger(request.max_steps) || request.max_steps < 1 || request.max_steps > 8) {
       throw new Error('max_steps must be between 1 and 8')
     }

@@ -11,6 +11,7 @@ if (!serviceToken) throw new Error('DSH_RUNTIME_TOKEN is required')
 const runtime = new DshRuntime({
   backendUrl, serviceToken,
   extensionCacheRoot: process.env.EXTENSION_CACHE_ROOT ?? '/extensions',
+  maxConcurrentRuns: Number(process.env.DSH_RUNTIME_HARD_CONCURRENCY ?? 14),
 })
 await runtime.start()
 

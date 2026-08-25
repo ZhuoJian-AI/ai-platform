@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import io
 import json
 import zipfile
@@ -12,6 +13,56 @@ import app as runner
 import builtin_tools as builtin
 import pytest
 from PIL import Image
+
+
+@pytest.mark.asyncio
+async def test_runner_capacity_queues_and_releases_slots():
+    capacity = runner.RunnerCapacity(limit=1, queue_limit=2, wait_seconds=2, label="test")
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def first():
+        async with capacity.slot():
+            first_entered.set()
+            await release_first.wait()
+
+    async def second():
+        async with capacity.slot():
+            return "second"
+
+    first_task = asyncio.create_task(first())
+    await first_entered.wait()
+    second_task = asyncio.create_task(second())
+    await asyncio.sleep(0)
+    assert capacity.snapshot() == {"active": 1, "waiting": 1, "limit": 1}
+    release_first.set()
+    await first_task
+    assert await second_task == "second"
+    assert capacity.snapshot() == {"active": 0, "waiting": 0, "limit": 1}
+
+
+@pytest.mark.asyncio
+async def test_runner_capacity_rejects_full_queue():
+    capacity = runner.RunnerCapacity(limit=1, queue_limit=1, wait_seconds=2, label="test")
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def hold():
+        async with capacity.slot():
+            first_entered.set()
+            await release_first.wait()
+
+    holder = asyncio.create_task(hold())
+    await first_entered.wait()
+    waiting = asyncio.create_task(capacity._wait_for_slot())
+    await asyncio.sleep(0)
+    with pytest.raises(runner.HTTPException) as exc:
+        await capacity._wait_for_slot()
+    assert exc.value.status_code == 429
+    waiting.cancel()
+    await asyncio.gather(waiting, return_exceptions=True)
+    release_first.set()
+    await holder
 
 
 def _package(script_path: str, content: bytes) -> tuple[str, str]:

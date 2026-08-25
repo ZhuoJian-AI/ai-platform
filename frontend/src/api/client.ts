@@ -1452,7 +1452,7 @@ export interface TerminalTaskMessage {
 
 export interface TerminalTaskWithMessages extends TerminalTask {
   messages: TerminalTaskMessage[];
-  /** 该任务最新一次 run 的状态（agent_runs.status）：running/success/error。
+  /** 该任务最新一次 run 的状态（queued/running/success/error/cancelled/timeout/busy）。
    *  前端据此判断是否调 GET /stream 重连续接（后台 detach 执行，刷新不丢）。 */
   run_status?: string | null;
 }

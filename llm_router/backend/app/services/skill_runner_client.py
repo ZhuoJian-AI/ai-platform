@@ -105,7 +105,8 @@ async def execute_version(
         "execution_id": execution_id,
         "timeout_seconds": settings.skill_runner_timeout_seconds,
     }
-    async with httpx.AsyncClient(timeout=settings.skill_runner_timeout_seconds + 15) as client:
+    timeout = settings.skill_runner_queue_wait_seconds + settings.skill_runner_timeout_seconds + 15
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(
             f"{settings.skill_runner_url.rstrip('/')}/execute", json=payload, headers=_headers()
         )
@@ -132,7 +133,12 @@ async def execute_builtin(
         "execution_id": execution_id,
         "timeout_seconds": timeout_seconds or settings.skill_runner_timeout_seconds,
     }
-    async with httpx.AsyncClient(timeout=(timeout_seconds or settings.skill_runner_timeout_seconds) + 15) as client:
+    timeout = (
+        settings.skill_runner_queue_wait_seconds
+        + (timeout_seconds or settings.skill_runner_timeout_seconds)
+        + 15
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(
             f"{settings.skill_runner_url.rstrip('/')}/execute-builtin",
             json=payload,

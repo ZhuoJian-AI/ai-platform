@@ -83,6 +83,11 @@ interface ChatMsg {
   executionVerification?: TerminalTaskMessage['execution_verification'];
 }
 
+type RuntimeUiStatus = {
+  status: 'queued' | 'running' | 'cancelled' | 'timeout' | 'runner_busy';
+  position?: number;
+};
+
 interface InvokedSkill {
   id: string;
   name: string;
@@ -282,6 +287,7 @@ export default function Terminal() {
   const [chat, setChat] = useState<ChatMsg[]>([]);
   const [traceLog, setTraceLog] = useState<Record<string, unknown>[]>([]);
   const [streaming, setStreaming] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeUiStatus | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [activeTab, setActiveTab] = useState('resources');
   const abortRef = useRef<AbortController | null>(null);
@@ -361,6 +367,16 @@ export default function Terminal() {
 
   useEffect(() => {
     if (!selectedTask) return;
+    const restoredStatus = selectedTask.run_status;
+    setRuntimeStatus(restoredStatus === 'queued' || restoredStatus === 'running'
+      ? { status: restoredStatus }
+      : restoredStatus === 'cancelled'
+        ? { status: 'cancelled' }
+        : restoredStatus === 'timeout'
+          ? { status: 'timeout' }
+          : restoredStatus === 'busy'
+            ? { status: 'runner_busy' }
+            : null);
     // 刚创建并立即 live 执行的任务：chat 由 runStream 实时维护，跳过 DB 回放，仅切到聊天视图。
     if (skipRestoreRef.current) {
       skipRestoreRef.current = false;
@@ -373,7 +389,7 @@ export default function Terminal() {
     // 该任务有运行中的 run（后台 detach 执行）→ 自动重连：回放已产出事件 + 续接到 final。
     // 刷新页面/切走再回来不丢进度。reconnRef 防止 useEffect 重入重复发起 GET /stream。
     if (
-      selectedTask.run_status === 'running' &&
+      ['queued', 'running'].includes(selectedTask.run_status ?? '') &&
       reconnRef.current !== selectedTask.id &&
       !abortRef.current
     ) {
@@ -494,6 +510,9 @@ export default function Terminal() {
         }]);
         break;
       case 'tool_result':
+        if (evt.ok === false && /runner.*(busy|queue|繁忙|排队)/i.test(String(evt.content ?? ''))) {
+          setRuntimeStatus({ status: 'runner_busy' });
+        }
         updateTurn((bs) => {
           const next = [...bs];
           for (let j = next.length - 1; j >= 0; j--) {
@@ -507,6 +526,15 @@ export default function Terminal() {
           return next;
         });
         break;
+      case 'run_status': {
+        const status = String(evt.status ?? '');
+        if (status === 'queued') {
+          setRuntimeStatus({ status: 'queued', position: Number(evt.position) || undefined });
+        } else if (status === 'running') {
+          setRuntimeStatus({ status: 'running' });
+        }
+        break;
+      }
       case 'trace': {
         // 五类资源调用痕迹（rag/ontology/memory/data_interface）；技能走 tool_call 不走此分支
         const { category: _c, title: _t, ...rest } = evt as Record<string, unknown>;
@@ -529,10 +557,18 @@ export default function Terminal() {
         updateTurn((bs) => [...bs, { kind: 'meta', subtype: 'judge', data: evt }]);
         break;
       case 'error':
+        if (/排队|queue.*(timeout|300)/i.test(String(evt.message ?? ''))) {
+          setRuntimeStatus({ status: 'timeout' });
+        } else if (/(runtime|runner).*(busy|queue.*full)|等待队列已满/i.test(String(evt.message ?? ''))) {
+          setRuntimeStatus({ status: 'runner_busy' });
+        }
         message.error(evt.message as string);
         updateTurn((bs) => [...bs, { kind: 'text', content: `⚠️ ${evt.message}` }]);
         break;
-      // 'done' / 'final' / 'step' (legacy) — 无需特殊渲染
+      case 'done':
+        setRuntimeStatus(null);
+        break;
+      // 'final' / 'step' (legacy) — 无需特殊渲染
       default:
         break;
     }
@@ -571,6 +607,7 @@ export default function Terminal() {
       { role: 'assistant', content: '', blocks: [{ kind: 'phase', index: 0 }] },
     ]);
     setTraceLog([]);
+    setRuntimeStatus(null);
     setStreaming(true);
     const controller = new AbortController();
     abortRef.current = controller;
@@ -685,6 +722,7 @@ export default function Terminal() {
   const stopStream = () => {
     abortRef.current?.abort();
     setStreaming(false);
+    setRuntimeStatus({ status: 'cancelled' });
     // 真停后台 detach 任务（非仅断读端），避免 run 继续耗 LLM 配额
     if (selectedId) terminal.cancelTask(selectedId).catch(() => { /* 静默 */ });
   };
@@ -1048,6 +1086,20 @@ export default function Terminal() {
 
           {/* 右侧主区 */}
           <main style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#fff', minWidth: 0 }}>
+            {view === 'assistant' && runtimeStatus && (
+              <div style={{
+                margin: '10px 18px 0', padding: '8px 12px', borderRadius: 8, fontSize: 13,
+                color: runtimeStatus.status === 'timeout' || runtimeStatus.status === 'runner_busy' ? '#b45309' : '#4338ca',
+                background: runtimeStatus.status === 'timeout' || runtimeStatus.status === 'runner_busy' ? '#fffbeb' : '#eef2ff',
+                border: `1px solid ${runtimeStatus.status === 'timeout' || runtimeStatus.status === 'runner_busy' ? '#fde68a' : '#c7d2fe'}`,
+              }}>
+                {runtimeStatus.status === 'queued' && `排队中${runtimeStatus.position ? `（前方约 ${Math.max(0, runtimeStatus.position - 1)} 个任务）` : ''}，可安全离开后再回来查看`}
+                {runtimeStatus.status === 'running' && '正在执行，系统已为本任务分配运行资源'}
+                {runtimeStatus.status === 'cancelled' && '任务已取消，运行资源已释放'}
+                {runtimeStatus.status === 'timeout' && '排队已超时，未消耗模型或脚本执行资源，请稍后重试'}
+                {runtimeStatus.status === 'runner_busy' && 'Runner 当前繁忙，本轮脚本未执行或正在等待，请稍后重试'}
+              </div>
+            )}
             {view === 'workspaces' ? (
               <WorkspaceManagerView resources={resources} />
             ) : view === 'agents' ? (
