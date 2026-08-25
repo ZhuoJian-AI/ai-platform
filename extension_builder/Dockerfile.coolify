@@ -1,5 +1,6 @@
 ARG AI_PLATFORM_EXTENSION_BUILDER_DEPS_BASE
 ARG AI_PLATFORM_NODE22_BASE
+ARG SOURCE_COMMIT=unknown
 FROM ${AI_PLATFORM_EXTENSION_BUILDER_DEPS_BASE} AS build
 
 WORKDIR /app
@@ -8,6 +9,9 @@ COPY src ./src
 RUN pnpm build && pnpm --config.trust-lockfile=true prune --prod
 
 FROM ${AI_PLATFORM_NODE22_BASE}
+ARG SOURCE_COMMIT
+ENV SOURCE_COMMIT=${SOURCE_COMMIT}
+LABEL org.opencontainers.image.revision=${SOURCE_COMMIT}
 ENV NODE_ENV=production \
     HOME=/tmp/builder-home \
     NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
