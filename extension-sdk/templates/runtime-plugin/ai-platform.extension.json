@@ -1,0 +1,19 @@
+{
+  "name": "Example Runtime Plugin",
+  "slug": "example-runtime-plugin",
+  "version": "0.1.0",
+  "description": "Minimal Cordis/DSH runtime adapter",
+  "type": "runtime_plugin",
+  "layer": "hook_guard",
+  "operation": "add",
+  "entry": "index.mjs",
+  "export_name": "default",
+  "provides": ["example-hook"],
+  "requires": [],
+  "conflicts": [],
+  "dsh_version": "0.1.0-rc.5",
+  "config_schema": { "type": "object", "additionalProperties": false },
+  "default_config": {},
+  "health_check": "healthCheck",
+  "smoke_test": "smokeTest"
+}

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resolve } from 'node:path'
-import { compatibleDsh, compatibleNode, safeEntry, validSystemTools } from '../builder.js'
+import { compatibleDsh, compatibleNode, resolveExtensionSlot, safeEntry, validSystemTools } from '../builder.js'
 
 test('rejects entry paths escaping the package root', () => {
   const root = resolve('/tmp/extension')
@@ -26,4 +26,16 @@ test('system tool declarations require schema, risk and side-effect metadata', (
     type: 'object', properties: {},
   }, risk_level: 'low', required_platform_capabilities: [], side_effects: false }]), true)
   assert.equal(validSystemTools([{ name: 'lookup', description: 'lookup' }]), false)
+})
+
+test('preserves platform layer and enforces coordinator replacement', () => {
+  assert.deepEqual(resolveExtensionSlot('runtime_plugin', {
+    layer: 'memory_context', operation: 'replace', provides: ['memory-provider'],
+  }), { layer: 'memory_context', operation: 'replace', warning: null })
+  assert.deepEqual(resolveExtensionSlot('runtime_plugin', {
+    layer: 'coordinator', operation: 'add', provides: ['coordinator'],
+  }), { layer: 'coordinator', operation: 'replace', warning: null })
+  assert.equal(resolveExtensionSlot('system_tool', {
+    layer: 'system_tool', operation: 'replace', provides: [],
+  }).warning, '扩展层 system_tool 不支持替换操作')
 })

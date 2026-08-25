@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hmac
+import re
 from collections import Counter
+from urllib.parse import urlparse
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, HTTPException, Query, Response, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +17,7 @@ from app.auth.admin_auth import CurrentAdmin, require_super_admin
 from app.config import settings
 from app.database import get_db
 from app.models.platform_extension import (
+    PlatformExtensionCatalogEntry,
     PlatformExtensionRelease,
     PlatformExtensionReleaseEvent,
     PlatformExtensionSource,
@@ -22,6 +25,7 @@ from app.models.platform_extension import (
 from app.schemas.platform_extension import (
     ExtensionApproveRequest,
     ExtensionArtifactSign,
+    ExtensionCatalogImportRequest,
     ExtensionCatalogItem,
     ExtensionImportGithub,
     ExtensionImportNpm,
@@ -32,6 +36,7 @@ from app.schemas.platform_extension import (
     ExtensionSourceRead,
 )
 from app.services import platform_extension_service, storage_gateway_service
+from app.services.platform_extension_discovery import sync_discovery_catalog
 
 router = APIRouter(prefix="/platform/extensions")
 
@@ -81,17 +86,148 @@ async def overview(
         runtime_health=await runtime_health(),
         source_counts=dict(Counter(row.status for row in sources)),
         release_counts=dict(Counter(row.status for row in releases)),
-        core_plugins=[row for row in catalog if row["source"] == "core" and row["kind"] != "system_tool"],
-        system_tools=[row for row in catalog if row["kind"] == "system_tool"],
+        core_plugins=[row for row in catalog if row["source"] == "official" and row["kind"] != "system_tool"],
+        system_tools=[row for row in catalog if row["source"] == "official" and row["kind"] == "system_tool"],
     )
 
 
 @router.get("/catalog", response_model=list[ExtensionCatalogItem])
 async def catalog(
+    q: str | None = Query(None, max_length=200),
+    source: str | None = Query(None, max_length=30),
+    layer: str | None = Query(None, max_length=50),
+    compatibility: str | None = Query(None, max_length=30),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(3000, ge=1, le=3000),
     auth: CurrentAdmin = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await platform_extension_service.list_catalog(db, auth.id)
+    return await platform_extension_service.list_catalog(
+        db, auth.id, query=q, source_filter=source, layer=layer,
+        compatibility=compatibility, offset=offset, limit=limit,
+    )
+
+
+@router.post("/catalog/sync")
+async def sync_catalog(
+    auth: CurrentAdmin = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await sync_discovery_catalog(db)
+    await platform_extension_service.record_event(
+        db,
+        event_type="catalog_synced",
+        actor_admin_id=auth.id,
+        status="ok" if result["status"] == "ok" else result["status"],
+        details=result,
+    )
+    await db.commit()
+    return result
+
+
+async def _catalog_entry(db: AsyncSession, entry_id: UUID) -> PlatformExtensionCatalogEntry:
+    row = await db.get(PlatformExtensionCatalogEntry, entry_id)
+    if not row or not row.is_active:
+        raise HTTPException(status_code=404, detail="Catalog entry not found")
+    return row
+
+
+@router.get("/catalog/{entry_id}", response_model=ExtensionCatalogItem)
+async def catalog_detail(
+    entry_id: UUID,
+    _: CurrentAdmin = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return platform_extension_service.catalog_entry_to_item(await _catalog_entry(db, entry_id))
+
+
+@router.post("/catalog/{entry_id}/import", response_model=ExtensionSourceRead, status_code=202)
+async def import_catalog_entry(
+    entry_id: UUID,
+    data: ExtensionCatalogImportRequest,
+    background: BackgroundTasks,
+    auth: CurrentAdmin = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    entry = await _catalog_entry(db, entry_id)
+    if entry.compatibility_status == "incompatible":
+        raise HTTPException(status_code=409, detail="This catalog entry is not publishable on the SaaS runtime")
+    selected_source = data.source or ("npm" if entry.package_name else "github")
+    if selected_source == "npm":
+        if not entry.package_name:
+            raise HTTPException(status_code=422, detail="Catalog entry has no npm package")
+        if not data.version or not re.fullmatch(
+            r"v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", data.version
+        ):
+            raise HTTPException(status_code=422, detail="An exact npm semantic version is required")
+        source_type, locator, requested_version = "npm", entry.package_name, data.version
+    elif selected_source == "github":
+        if not entry.repository:
+            raise HTTPException(status_code=422, detail="Catalog entry has no GitHub repository")
+        parsed_host = (urlparse(entry.repository).hostname or "").lower()
+        if parsed_host not in {"github.com", "www.github.com"}:
+            raise HTTPException(status_code=422, detail="Only github.com catalog repositories are importable")
+        if not data.ref:
+            raise HTTPException(status_code=422, detail="A GitHub branch, tag or commit is required")
+        source_type, locator, requested_version = "github", entry.repository, data.ref
+    row = await platform_extension_service.create_source(
+        db,
+        source_type=source_type,
+        locator=locator,
+        requested_version=requested_version,
+        admin_id=auth.id,
+    )
+    row.build_report = {**(row.build_report or {}), "catalog_entry_id": str(entry.id)}
+    await db.commit()
+    await db.refresh(row)
+    background.add_task(platform_extension_service.process_source_build, row.id)
+    return row
+
+
+@router.post("/catalog/{entry_id}/adaptation-brief")
+async def adaptation_brief(
+    entry_id: UUID,
+    _: CurrentAdmin = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    entry = await _catalog_entry(db, entry_id)
+    reasons = "\n".join(f"- {reason}" for reason in entry.compatibility_reasons) or "- 尚无自动判断结果"
+    brief = f"""# AI Platform DSH扩展适配任务：{entry.name}
+
+## 固定来源
+
+- 目录来源：{entry.provider}
+- npm：{entry.package_name or '无'}
+- GitHub：{entry.repository or '无'}
+- 目标能力层：{entry.layer}
+- 操作类型：{entry.operation}
+- 当前平台：DSH 0.1.0-rc.5 / Node 22.19.0
+
+## 当前兼容性结论
+
+{reasons}
+
+## 必须完成
+
+1. 阅读并固定插件精确npm版本或Git Commit，不使用latest、分支浮动版本或未锁定依赖。
+2. 按仓库 `extension-sdk/manifest.schema.json` 提供 `ai-platform.extension.json`。
+3. Runtime插件导出Cordis插件；系统工具导出与声明Schema一一对应的handler。
+4. 不直接访问PostgreSQL、OSS长期密钥或租户数据，只通过AI Platform能力桥接。
+5. 提供health_check和smoke_test，验证加载、释放、失败清理及重复装配。
+6. 运行隔离构建和候选Context验证；只提交适配器、清单、锁文件和测试。
+
+## 验收
+
+- 导入后状态不得为“需要适配器”或“不兼容”。
+- 候选发布必须保持恰好一个协调器，且不得覆盖平台受保护工具名。
+- 候选失败不得影响当前活动Runtime，发布失败必须能够回滚。
+"""
+    filename = re.sub(r"[^a-zA-Z0-9._-]+", "-", entry.slug).strip("-") or "extension"
+    return Response(
+        brief,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="adapt-{filename}.md"'},
+    )
 
 
 @router.get("/sources", response_model=list[ExtensionSourceRead])

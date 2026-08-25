@@ -3,11 +3,59 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+
+
+class PlatformExtensionCatalogEntry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Read-only discovery metadata. Catalog synchronization never executes code."""
+
+    __tablename__ = "platform_extension_catalog_entries"
+    __table_args__ = (
+        UniqueConstraint("provider", "external_key", name="uq_platform_extension_catalog_provider_key"),
+        Index("ix_platform_extension_catalog_layer_status", "layer", "compatibility_status"),
+    )
+
+    provider: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    external_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    slug: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    package_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    version: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    available_versions: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    repository: Mapped[str | None] = mapped_column(Text, nullable=True)
+    homepage: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str] = mapped_column(String(100), nullable=False, default="unknown", index=True)
+    layer: Mapped[str] = mapped_column(String(50), nullable=False, default="unknown", index=True)
+    operation: Mapped[str] = mapped_column(String(30), nullable=False, default="add")
+    kind: Mapped[str] = mapped_column(String(30), nullable=False, default="adapter_required")
+    trust_level: Mapped[str] = mapped_column(String(30), nullable=False, default="community")
+    runtime_requirements: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    compatibility_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="needs_adapter", index=True
+    )
+    compatibility_reasons: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    metadata_payload: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+    last_synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
 
 
 class PlatformExtensionSource(UUIDPrimaryKeyMixin, TimestampMixin, Base):

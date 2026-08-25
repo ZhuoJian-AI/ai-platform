@@ -1,0 +1,9 @@
+{
+  "name": "@example/ai-platform-system-tool",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": "./index.mjs",
+  "engines": { "node": ">=22.19.0 <23" },
+  "dependencies": {}
+}

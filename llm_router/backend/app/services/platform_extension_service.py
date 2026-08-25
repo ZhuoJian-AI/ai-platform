@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.dsh import client as dsh_client
 from app.database import async_session_factory
 from app.models.platform_extension import (
+    PlatformExtensionCatalogEntry,
     PlatformExtensionRelease,
     PlatformExtensionReleaseEvent,
     PlatformExtensionSource,
@@ -114,9 +115,76 @@ async def _next_release_version(db: AsyncSession) -> int:
     return int((await db.execute(select(func.max(PlatformExtensionRelease.version_no)))).scalar() or 0) + 1
 
 
-async def list_catalog(db: AsyncSession, admin_id: int) -> list[dict]:
+def _core_catalog_row(row: dict) -> dict:
+    layer = {
+        "dsh-agent-loop": "coordinator",
+        "dsh-llm-runtime": "model_adapter",
+        "dsh-session": "runtime",
+        "dsh-system-prompt": "runtime",
+        "dsh-tools": "runtime",
+        "dsh-agent": "runtime",
+    }.get(row["slug"], "system_tool" if row["kind"] == "system_tool" else "runtime")
+    warnings = row.get("compatibility_warnings") or []
+    return {
+        **row,
+        "id": None,
+        "source": "official",
+        "layer": layer,
+        "operation": "replace" if layer == "coordinator" else "add",
+        "trust_level": "platform",
+        "runtime_requirements": {"node": "22.19.0", "dsh": "0.1.0-rc.5"},
+        "compatibility_status": "needs_adapter" if row["kind"] == "adapter_required" else "compatible",
+        "compatibility_reasons": warnings,
+        "repository": "https://github.com/deepseek-ai/deepseek-harness",
+        "homepage": "https://deepseek.com/harness/",
+        "package_name": f"@deepseek-ai/{row['slug']}" if row["slug"].startswith("dsh-") else None,
+        "available_versions": [row["version"]] if row["version"] != "platform" else [],
+        "category": "official",
+        "metadata": {},
+    }
+
+
+def catalog_entry_to_item(row: PlatformExtensionCatalogEntry) -> dict:
+    return {
+        "id": row.id,
+        "slug": row.slug,
+        "name": row.name,
+        "version": row.version or "待选择",
+        "description": row.description,
+        "kind": row.kind,
+        "source": row.provider,
+        "status": row.compatibility_status,
+        "removable": True,
+        "capabilities": [],
+        "compatibility_warnings": row.compatibility_reasons,
+        "layer": row.layer,
+        "operation": row.operation,
+        "trust_level": row.trust_level,
+        "runtime_requirements": row.runtime_requirements,
+        "compatibility_status": row.compatibility_status,
+        "compatibility_reasons": row.compatibility_reasons,
+        "repository": row.repository,
+        "homepage": row.homepage,
+        "package_name": row.package_name,
+        "available_versions": row.available_versions,
+        "category": row.category,
+        "metadata": row.metadata_payload,
+    }
+
+
+async def list_catalog(
+    db: AsyncSession,
+    admin_id: int,
+    *,
+    query: str | None = None,
+    source_filter: str | None = None,
+    layer: str | None = None,
+    compatibility: str | None = None,
+    offset: int = 0,
+    limit: int = 3000,
+) -> list[dict]:
     active = await ensure_baseline(db, admin_id)
-    rows = catalog_items()
+    rows = [_core_catalog_row(row) for row in catalog_items()]
     plugin_states = {
         str(item.get("slug")): item.get("enabled", True)
         for item in (active.manifest or {}).get("plugins") or []
@@ -129,6 +197,17 @@ async def list_catalog(db: AsyncSession, admin_id: int) -> list[dict]:
         states = tool_states if row["kind"] == "system_tool" else plugin_states
         if row["slug"] in states:
             row["status"] = "enabled" if states[row["slug"]] else "disabled"
+    discovery = list(
+        (await db.execute(
+            select(PlatformExtensionCatalogEntry)
+            .where(
+                PlatformExtensionCatalogEntry.is_active.is_(True),
+                PlatformExtensionCatalogEntry.provider == "community",
+            )
+            .order_by(PlatformExtensionCatalogEntry.name)
+        )).scalars().all()
+    )
+    rows.extend(catalog_entry_to_item(row) for row in discovery)
     sources = list(
         (await db.execute(select(PlatformExtensionSource).order_by(PlatformExtensionSource.created_at.desc())))
         .scalars()
@@ -138,6 +217,7 @@ async def list_catalog(db: AsyncSession, admin_id: int) -> list[dict]:
         manifest = source.manifest or {}
         rows.append(
             {
+                "id": None,
                 "slug": manifest.get("slug") or f"source-{source.id}",
                 "name": manifest.get("name") or source.locator,
                 "version": manifest.get("version") or source.resolved_version or source.requested_version or "unknown",
@@ -148,9 +228,39 @@ async def list_catalog(db: AsyncSession, admin_id: int) -> list[dict]:
                 "removable": True,
                 "capabilities": manifest.get("provides") or [],
                 "compatibility_warnings": (source.compatibility or {}).get("warnings") or [],
+                "layer": (manifest.get("layer") or (
+                    "coordinator" if "coordinator" in (manifest.get("provides") or []) else "system_tool"
+                    if manifest.get("type") == "system_tool" else "runtime"
+                )),
+                "operation": manifest.get("operation") or (
+                    "replace" if "coordinator" in (manifest.get("provides") or []) else "add"
+                ),
+                "trust_level": "platform_reviewed" if source.review_status == "approved" else "external",
+                "runtime_requirements": manifest.get("runtime_requirements") or {},
+                "compatibility_status": "compatible" if source.status == "ready" else source.status,
+                "compatibility_reasons": (source.compatibility or {}).get("warnings") or [],
+                "repository": source.locator if source.source_type == "github" else None,
+                "homepage": None,
+                "package_name": source.locator if source.source_type == "npm" else None,
+                "available_versions": [source.resolved_version] if source.resolved_version else [],
+                "category": "imported",
+                "metadata": {"source_id": str(source.id), "review_status": source.review_status},
             }
         )
-    return rows
+    normalized_query = (query or "").strip().lower()
+    filtered = [
+        row for row in rows
+        if (not source_filter or row["source"] == source_filter)
+        and (not layer or row["layer"] == layer)
+        and (not compatibility or row["compatibility_status"] == compatibility)
+        and (
+            not normalized_query
+            or normalized_query in " ".join(
+                [row["name"], row["slug"], row.get("description") or "", row.get("package_name") or ""]
+            ).lower()
+        )
+    ]
+    return filtered[max(0, offset):max(0, offset) + max(1, min(limit, 3000))]
 
 
 async def create_source(
@@ -333,6 +443,27 @@ async def create_release(
                 }
             )
     enabled_extensions = [item for item in manifest.get("external_extensions", []) if item.get("enabled", True)]
+    replacement_slots: dict[str, str] = {}
+    replaceable_layers = {"coordinator", "memory_context", "rag_strategy", "model_adapter"}
+    for item in enabled_extensions:
+        default_layer = "coordinator" if "coordinator" in (item.get("provides") or []) else "runtime"
+        layer = str(item.get("layer") or default_layer)
+        operation = str(item.get("operation") or ("replace" if layer == "coordinator" else "add"))
+        if operation != "replace":
+            continue
+        if layer not in replaceable_layers:
+            raise HTTPException(status_code=409, detail=f"Layer {layer} does not support replacement")
+        if layer in replacement_slots:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A release cannot replace slot {layer} more than once",
+            )
+        replacement_slots[layer] = str(item.get("slug"))
+    manifest["replacement_slots"] = replacement_slots
+    if "coordinator" in replacement_slots:
+        for plugin in manifest.get("plugins", []):
+            if "coordinator" in (plugin.get("capabilities") or []):
+                plugin["enabled"] = False
     slugs = [str(item.get("slug")) for item in enabled_extensions]
     if len(slugs) != len(set(slugs)):
         raise HTTPException(status_code=409, detail="A release cannot contain duplicate extension slugs")

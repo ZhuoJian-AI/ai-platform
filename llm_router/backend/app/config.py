@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     extension_builder_timeout_seconds: int = 600
     extension_archive_max_bytes: int = 25 * 1024 * 1024
     extension_artifact_max_bytes: int = 100 * 1024 * 1024
+    extension_catalog_community_url: str = "https://awesome-dsh-plugin.com/plugins.json"
+    extension_catalog_sync_timeout_seconds: int = 90
     original_preview_enabled: bool = False
     # Native file preview is part of the staging-wide workspace experience;
     # keep the emergency deployment switch but no tenant allowlist.

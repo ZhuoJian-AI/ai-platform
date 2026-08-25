@@ -17,6 +17,7 @@ from app.models.memory import Memory
 from app.models.ontology import Ontology, OntologyFile, OntologyFolder
 from app.models.organization import Organization
 from app.models.platform_extension import (
+    PlatformExtensionCatalogEntry,
     PlatformExtensionRelease,
     PlatformExtensionReleaseEvent,
     PlatformExtensionSource,
@@ -52,6 +53,7 @@ __all__ = [
     "AuditLog",
     "BudgetUsage",
     "PlatformExtensionSource",
+    "PlatformExtensionCatalogEntry",
     "PlatformExtensionRelease",
     "PlatformExtensionReleaseEvent",
     # 智能体平台

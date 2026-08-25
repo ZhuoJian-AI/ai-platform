@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   Alert, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input,
-  Modal, Progress, Row, Select, Space, Statistic, Table, Tag, Timeline, Typography, Upload, message,
+  Modal, Progress, Row, Select, Space, Statistic, Table, Tag, Timeline, Typography, Upload, message, Tabs,
 } from 'antd';
 import {
   ApiOutlined, CheckCircleOutlined, CloudDownloadOutlined, CloudServerOutlined,
   CodeOutlined, DeploymentUnitOutlined, ExclamationCircleOutlined, HistoryOutlined,
   InboxOutlined, LinkOutlined, PlayCircleOutlined, ReloadOutlined, RollbackOutlined,
-  SafetyCertificateOutlined, ToolOutlined,
+  SafetyCertificateOutlined, ToolOutlined, SearchOutlined, GithubOutlined, DownloadOutlined,
 } from '@ant-design/icons';
 import {
   platformExtensions,
@@ -73,6 +73,14 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
   const [importOpen, setImportOpen] = useState(false);
   const [releaseOpen, setReleaseOpen] = useState(false);
   const [detail, setDetail] = useState<PlatformExtensionSource | null>(null);
+  const [catalogDetail, setCatalogDetail] = useState<PlatformExtensionCatalogItem | null>(null);
+  const [catalogQuery, setCatalogQuery] = useState('');
+  const [catalogTab, setCatalogTab] = useState<'compatible' | 'adapter' | 'all' | 'installed'>('compatible');
+  const [catalogLayer, setCatalogLayer] = useState<string>('');
+  const [catalogSource, setCatalogSource] = useState<string>('');
+  const [catalogImport, setCatalogImport] = useState<PlatformExtensionCatalogItem | null>(null);
+  const [catalogImportSource, setCatalogImportSource] = useState<'npm' | 'github'>('npm');
+  const [catalogImportForm] = Form.useForm();
   const [importType, setImportType] = useState<'npm' | 'github' | 'archive'>('npm');
   const [archive, setArchive] = useState<File | null>(null);
   const [importForm] = Form.useForm();
@@ -82,7 +90,7 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
     if (!quiet) setLoading(true);
     try {
       const [nextOverview, nextCatalog, nextSources, nextReleases, nextEvents] = await Promise.all([
-        platformExtensions.overview(), platformExtensions.catalog(), platformExtensions.sources(),
+        platformExtensions.overview(), platformExtensions.catalog({ limit: 3000 }), platformExtensions.sources(),
         platformExtensions.releases(), platformExtensions.events(),
       ]);
       setOverview(nextOverview); setCatalog(nextCatalog); setSources(nextSources); setReleases(nextReleases); setEvents(nextEvents);
@@ -99,6 +107,25 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
   }, [sources, refresh]);
 
   const approvedSources = useMemo(() => sources.filter(item => item.status === 'ready' && item.review_status === 'approved'), [sources]);
+  const installedSourceIds = useMemo(() => new Set(
+    ((overview?.active_release?.manifest?.external_extensions || []) as Array<Record<string, unknown>>)
+      .filter(item => item.enabled !== false && typeof item.source_id === 'string')
+      .map(item => item.source_id as string),
+  ), [overview]);
+  const filteredCatalog = useMemo(() => catalog.filter(item => {
+    const haystack = `${item.name} ${item.slug} ${item.description} ${item.package_name || ''}`.toLowerCase();
+    if (catalogQuery && !haystack.includes(catalogQuery.toLowerCase())) return false;
+    if (catalogLayer && item.layer !== catalogLayer) return false;
+    if (catalogSource && item.source !== catalogSource) return false;
+    if (catalogTab === 'compatible' && item.compatibility_status !== 'compatible') return false;
+    if (catalogTab === 'adapter' && item.compatibility_status !== 'needs_adapter') return false;
+    if (catalogTab === 'installed') {
+      const sourceId = String(item.metadata?.source_id || '');
+      const isBuiltinActive = item.source === 'official' && item.status === 'enabled';
+      if (!isBuiltinActive && (!sourceId || !installedSourceIds.has(sourceId))) return false;
+    }
+    return true;
+  }), [catalog, catalogLayer, catalogQuery, catalogSource, catalogTab, installedSourceIds]);
 
   const runAction = async (key: string, action: () => Promise<unknown>, success: string) => {
     setActionLoading(key);
@@ -119,6 +146,34 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
       return platformExtensions.importArchive(archive!);
     }, '已进入隔离构建，不会自动发布');
     setImportOpen(false); importForm.resetFields(); setArchive(null);
+  };
+
+  const syncCatalog = () => runAction('catalog-sync', () => platformExtensions.syncCatalog(), '目录同步完成；远端失败时保留上次快照');
+
+  const openCatalogImport = (item: PlatformExtensionCatalogItem) => {
+    const version = item.available_versions?.[0] || item.version || '';
+    const source = item.package_name ? 'npm' : 'github';
+    setCatalogImportSource(source);
+    catalogImportForm.setFieldsValue({ source, version, ref: version && version !== '待选择' ? version : 'main' });
+    setCatalogImport(item);
+  };
+
+  const submitCatalogImport = async () => {
+    if (!catalogImport?.id) return;
+    const values = await catalogImportForm.validateFields();
+    await runAction(`catalog-import-${catalogImport.id}`, () => platformExtensions.importCatalog(catalogImport.id!, values), '已导入候选并开始隔离构建');
+    setCatalogImport(null);
+  };
+
+  const downloadAdaptationBrief = async (item: PlatformExtensionCatalogItem) => {
+    if (!item.id) return;
+    await runAction(`brief-${item.id}`, async () => {
+      const markdown = await platformExtensions.adaptationBrief(item.id!);
+      const href = URL.createObjectURL(new Blob([markdown], { type: 'text/markdown;charset=utf-8' }));
+      const anchor = document.createElement('a');
+      anchor.href = href; anchor.download = `adapt-${item.slug}.md`; anchor.click();
+      URL.revokeObjectURL(href);
+    }, 'Codex 适配任务已生成');
   };
 
   const submitRelease = async () => {
@@ -162,7 +217,8 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
       </div>
       <Space>
         <Button icon={<ReloadOutlined />} onClick={() => void refresh()} loading={loading}>刷新</Button>
-        {section === 'catalog' && <Button type="primary" icon={<CloudDownloadOutlined />} onClick={() => setImportOpen(true)}>导入外部插件</Button>}
+        {section === 'catalog' && <Button icon={<ReloadOutlined />} loading={actionLoading === 'catalog-sync'} onClick={() => void syncCatalog()}>同步插件目录</Button>}
+        {section === 'catalog' && <Button type="primary" icon={<CloudDownloadOutlined />} onClick={() => setImportOpen(true)}>手工导入</Button>}
         {section === 'releases' && <Button type="primary" icon={<DeploymentUnitOutlined />} onClick={() => openRelease()}>创建候选发布</Button>}
       </Space>
     </div>
@@ -191,7 +247,20 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
     </>;
   };
 
-  const renderRuntime = () => <Row gutter={[14, 14]}>
+  const renderRuntime = () => {
+    const external = (overview?.active_release?.manifest?.external_extensions || []) as Array<Record<string, any>>;
+    const replacementSlots = (overview?.active_release?.manifest?.replacement_slots || {}) as Record<string, string>;
+    return <>
+      <Card title="当前完整装配" style={{ marginBottom: 16 }}>
+        <Descriptions size="small" column={{ xs: 1, md: 2, xl: 3 }}>
+          <Descriptions.Item label="活动协调器">{replacementSlots.coordinator || (overview?.core_plugins.find(item => item.layer === 'coordinator' && item.status === 'enabled')?.name ?? 'Agent Loop')}</Descriptions.Item>
+          <Descriptions.Item label="外部 Runtime 插件">{external.filter(item => item.enabled !== false && item.type === 'runtime_plugin').length}</Descriptions.Item>
+          <Descriptions.Item label="外部系统工具">{external.filter(item => item.enabled !== false && item.type === 'system_tool').length}</Descriptions.Item>
+          <Descriptions.Item label="发布校验和"><Typography.Text code>{String(overview?.active_release?.checksum || 'baseline').slice(0, 16)}</Typography.Text></Descriptions.Item>
+          <Descriptions.Item label="替换插槽">{Object.keys(replacementSlots).length ? <Space wrap>{Object.entries(replacementSlots).map(([layer, slug]) => <Tag color="purple" key={layer}>{layer} → {slug}</Tag>)}</Space> : '无'}</Descriptions.Item>
+        </Descriptions>
+      </Card>
+      <Row gutter={[14, 14]}>
     {(overview?.core_plugins || []).map(item => <Col xs={24} md={12} xl={8} key={item.slug}>
       <Card style={{ height: '100%' }}>
         <Space align="start" style={{ width: '100%', justifyContent: 'space-between' }}>
@@ -202,7 +271,18 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
         {item.compatibility_warnings.map(text => <Alert key={text} type="warning" showIcon message={text} style={{ marginTop: 12 }} />)}
       </Card>
     </Col>)}
-  </Row>;
+    {external.filter(item => item.enabled !== false).map(item => <Col xs={24} md={12} xl={8} key={item.slug}>
+      <Card style={{ height: '100%', borderColor: `${WB.primary}55` }}>
+        <Space align="start" style={{ width: '100%', justifyContent: 'space-between' }}>
+          <div><b>{item.name || item.slug}</b><div style={{ color: WB.textAux, marginTop: 4 }}>{item.slug} · {item.version}</div></div>
+          <Tag color="cyan">外部审核</Tag>
+        </Space>
+        <div style={{ marginTop: 14 }}><KindTag kind={item.type} /><Tag>{item.layer || 'runtime'}</Tag>{item.operation === 'replace' && <Tag color="purple">替换插槽</Tag>}</div>
+      </Card>
+    </Col>)}
+      </Row>
+    </>;
+  };
 
   const renderTools = () => <Table rowKey="slug" loading={loading} dataSource={overview?.system_tools || []} pagination={false} columns={[
     { title: '工具大类', dataIndex: 'name', render: (_: string, row: PlatformExtensionCatalogItem) => <Space><ToolOutlined style={{ color: WB.primary }} /><div><b>{row.name}</b><div style={{ color: WB.textAux, fontSize: FS.micro }}>{row.description}</div></div></Space> },
@@ -211,15 +291,52 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
     { title: '作用', width: 160, render: () => <Typography.Text type="secondary">仍经过模式与权限过滤</Typography.Text> },
   ]} />;
 
+  const compatibilityTag = (item: PlatformExtensionCatalogItem) => {
+    if (item.compatibility_status === 'compatible') return <Tag color="green">平台兼容</Tag>;
+    if (item.compatibility_status === 'needs_adapter') return <Tag color="orange">需要 Codex 适配</Tag>;
+    return <Tag color="red">当前不可发布</Tag>;
+  };
+
   const renderCatalog = () => <>
-    <Card title="平台审核仓库" extra={<Tag color="blue">当前基线能力</Tag>} style={{ marginBottom: 16 }}>
-      <Table rowKey={(row) => `${row.source}-${row.slug}`} size="small" pagination={false} dataSource={catalog.filter(item => item.source !== 'external')} columns={[
-        { title: '扩展', render: (_: unknown, row: PlatformExtensionCatalogItem) => <div><b>{row.name}</b><div style={{ color: WB.textAux }}>{row.slug} · {row.version}</div></div> },
-        { title: '真实类型', dataIndex: 'kind', render: (value: string) => <KindTag kind={value} /> },
-        { title: '状态', dataIndex: 'status', render: (value: string) => <StatusTag status={value} /> },
+    <Alert showIcon type="info" style={{ marginBottom: 16 }} message="发现不等于安装" description="社区目录只同步元数据。点击导入后仍会经过隔离构建、人工审核、候选 Context 验证和全局发布；只有正式发布才改变 DSH Runtime。" />
+    <Card style={{ marginBottom: 16 }} styles={{ body: { padding: 16 } }}>
+      <Space wrap style={{ width: '100%', justifyContent: 'space-between' }}>
+        <Input allowClear prefix={<SearchOutlined />} value={catalogQuery} onChange={event => setCatalogQuery(event.target.value)} placeholder="搜索插件、包名或能力" style={{ width: 320 }} />
+        <Space wrap>
+          <Select allowClear value={catalogSource || undefined} onChange={value => setCatalogSource(value || '')} placeholder="来源" style={{ width: 150 }} options={[
+            { value: 'official', label: 'DSH 官方' }, { value: 'community', label: '社区目录' }, { value: 'reviewed', label: '平台审核' }, { value: 'external', label: '手工导入' },
+          ]} />
+          <Select allowClear value={catalogLayer || undefined} onChange={value => setCatalogLayer(value || '')} placeholder="能力层" style={{ width: 170 }} options={[
+            ['coordinator', '协调器'], ['runtime', 'Runtime 基础'], ['memory_context', '记忆/上下文'], ['rag_strategy', 'RAG 策略'], ['system_tool', '系统工具'], ['model_adapter', '模型适配器'], ['hook_guard', 'Hook / Guard'], ['skill_mcp', 'Skill / MCP'], ['ui_plugin', 'UI 插件'], ['library', '运行库'],
+          ].map(([value, label]) => ({ value, label }))} />
+        </Space>
+      </Space>
+      <Tabs activeKey={catalogTab} onChange={key => setCatalogTab(key as typeof catalogTab)} style={{ marginTop: 8 }} items={[
+        { key: 'compatible', label: '平台兼容' }, { key: 'adapter', label: '待适配' }, { key: 'all', label: '全部社区' }, { key: 'installed', label: '已安装' },
       ]} />
     </Card>
-    <Card title="外部导入" extra={<Typography.Text type="secondary">npm / GitHub / ZIP</Typography.Text>}>
+    {filteredCatalog.length ? <Row gutter={[14, 14]} style={{ marginBottom: 16 }}>
+      {filteredCatalog.map(item => <Col xs={24} md={12} xl={8} key={`${item.source}-${item.id || item.slug}`}>
+        <Card hoverable style={{ height: '100%' }} actions={[
+          <Button type="link" key="detail" onClick={() => setCatalogDetail(item)}>查看详情</Button>,
+          item.id && item.compatibility_status !== 'incompatible'
+            ? <Button type="link" icon={<CloudDownloadOutlined />} key="import" onClick={() => openCatalogImport(item)}>{item.compatibility_status === 'compatible' ? '导入候选' : '导入检查'}</Button>
+            : <Typography.Text key="readonly" type="secondary">仅供发现</Typography.Text>,
+          item.compatibility_status === 'needs_adapter' && item.id
+            ? <Button type="link" icon={<DownloadOutlined />} key="adapt" loading={actionLoading === `brief-${item.id}`} onClick={() => void downloadAdaptationBrief(item)}>Codex 适配</Button>
+            : null,
+        ]}>
+          <Space align="start" style={{ width: '100%', justifyContent: 'space-between' }}>
+            <div style={{ minWidth: 0 }}><Typography.Text strong ellipsis>{item.name}</Typography.Text><div style={{ color: WB.textAux, fontSize: FS.micro, marginTop: 3 }}>{item.package_name || item.slug} · {item.version || '版本未知'}</div></div>
+            {item.source === 'official' ? <Tag color="blue">官方</Tag> : item.source === 'community' ? <Tag>社区</Tag> : <Tag color="cyan">平台审核</Tag>}
+          </Space>
+          <Typography.Paragraph ellipsis={{ rows: 2 }} style={{ minHeight: 44, margin: '14px 0 10px', color: WB.textAux }}>{item.description || '暂无描述'}</Typography.Paragraph>
+          <Space wrap><KindTag kind={item.kind} /><Tag>{item.layer || 'unknown'}</Tag>{item.operation === 'replace' && <Tag color="purple">替换插槽</Tag>}{compatibilityTag(item)}</Space>
+          {!!item.metadata?.stars && <div style={{ marginTop: 12, color: WB.textAux }}>★ {Number(item.metadata.stars).toLocaleString()} · 下载 {Number(item.metadata.downloads || 0).toLocaleString()}</div>}
+        </Card>
+      </Col>)}
+    </Row> : <Card style={{ marginBottom: 16 }}><Empty description="当前筛选下没有插件；首次使用请点击“同步插件目录”" /></Card>}
+    <Card title="导入与审核" extra={<Typography.Text type="secondary">Builder 状态 · npm / GitHub / ZIP</Typography.Text>}>
       <Table rowKey="id" loading={loading} dataSource={sources} locale={{ emptyText: <Empty description="尚未导入外部插件" /> }} columns={[
         { title: '来源', render: (_: unknown, row: PlatformExtensionSource) => <div><b>{row.manifest?.name || row.locator}</b><div style={{ color: WB.textAux }}>{row.source_type} · {row.resolved_version || row.requested_version || '待解析'}</div></div> },
         { title: '类型', render: (_: unknown, row: PlatformExtensionSource) => row.manifest?.type ? <KindTag kind={row.manifest.type} /> : '—' },
@@ -241,12 +358,25 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
     {!row.is_active && ['superseded', 'active'].includes(row.status) && <Button size="small" icon={<RollbackOutlined />} onClick={() => void runAction(`rollback-${row.id}`, () => platformExtensions.rollbackRelease(row.id), '已复制历史快照为新回滚草稿')}>基于此版本回滚</Button>}
   </Space>;
 
+  const releaseDiff = (row: PlatformExtensionRelease) => {
+    const current = (overview?.active_release?.manifest?.external_extensions || []) as Array<Record<string, any>>;
+    const candidate = (row.manifest?.external_extensions || []) as Array<Record<string, any>>;
+    const currentSlugs = new Set(current.filter(item => item.enabled !== false).map(item => String(item.slug)));
+    const candidateSlugs = new Set(candidate.filter(item => item.enabled !== false).map(item => String(item.slug)));
+    const added = [...candidateSlugs].filter(slug => !currentSlugs.has(slug));
+    const removed = [...currentSlugs].filter(slug => !candidateSlugs.has(slug));
+    const replacements = Object.entries((row.manifest?.replacement_slots || {}) as Record<string, string>);
+    if (!added.length && !removed.length && !replacements.length) return <Typography.Text type="secondary">无扩展差异</Typography.Text>;
+    return <Space wrap>{added.map(slug => <Tag color="green" key={`a-${slug}`}>+ {slug}</Tag>)}{removed.map(slug => <Tag color="red" key={`r-${slug}`}>− {slug}</Tag>)}{replacements.map(([layer, slug]) => <Tag color="purple" key={`x-${layer}`}>{layer} → {slug}</Tag>)}</Space>;
+  };
+
   const renderReleases = () => <>
     <Card title="不可变发布版本" style={{ marginBottom: 16 }}>
       <Table rowKey="id" loading={loading} dataSource={releases} columns={[
         { title: '版本', width: 100, render: (_: unknown, row: PlatformExtensionRelease) => <b>v{row.version_no}</b> },
         { title: '名称', dataIndex: 'name' },
         { title: '校验和', dataIndex: 'checksum', render: (value: string) => <Typography.Text code>{value.slice(0, 16)}</Typography.Text> },
+        { title: '相对当前版本', render: (_: unknown, row: PlatformExtensionRelease) => releaseDiff(row) },
         { title: '状态', dataIndex: 'status', render: (value: string) => <StatusTag status={value} /> },
         { title: '激活时间', dataIndex: 'activated_at', render: (value: string | null) => value ? new Date(value).toLocaleString() : '—' },
         { title: '操作', width: 230, render: releaseActions },
@@ -271,6 +401,15 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
       {section === 'releases' && renderReleases()}
     </div>
 
+    <Modal title={`导入候选：${catalogImport?.name || ''}`} open={!!catalogImport} onCancel={() => setCatalogImport(null)} onOk={() => void submitCatalogImport()} confirmLoading={!!catalogImport?.id && actionLoading === `catalog-import-${catalogImport.id}`} okText="导入并隔离构建">
+      <Alert type="info" showIcon message="不会立即安装到生产 Runtime" description="该操作只把固定版本导入现有 Builder。构建完成后仍需人工审核、候选验证和正式发布。" style={{ marginBottom: 16 }} />
+      <Form form={catalogImportForm} layout="vertical">
+        {catalogImport?.package_name && catalogImport?.repository && <Form.Item name="source" label="检查来源" rules={[{ required: true }]}><Select onChange={value => setCatalogImportSource(value)} options={[{ value: 'npm', label: 'npm 精确版本' }, { value: 'github', label: 'GitHub Tag / Commit' }]} /></Form.Item>}
+        {catalogImportSource === 'npm' ? <Form.Item name="version" label="精确 npm 版本" rules={[{ required: true, message: '必须固定精确版本' }, { pattern: /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/, message: '请输入精确语义化版本，不能使用 latest' }]}><Input placeholder="1.2.3" /></Form.Item>
+          : <Form.Item name="ref" label="GitHub Tag / Branch / Commit" rules={[{ required: true }]}><Input placeholder="优先使用完整 Commit SHA" /></Form.Item>}
+      </Form>
+    </Modal>
+
     <Modal title="导入外部平台插件" open={importOpen} onCancel={() => setImportOpen(false)} onOk={() => void submitImport()} confirmLoading={actionLoading === 'import'} okText="导入并隔离构建" width={640}>
       <Alert type="warning" showIcon message="导入不会自动发布" description="包会在无数据库、OSS长期密钥和模型密钥的 Builder 中构建。只有审核通过的真实 DSH/系统工具插件才能进入候选发布。" style={{ marginBottom: 16 }} />
       <Select value={importType} onChange={value => { setImportType(value); importForm.resetFields(); }} style={{ width: '100%', marginBottom: 16 }} options={[
@@ -287,7 +426,7 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
       <Form form={releaseForm} layout="vertical">
         <Form.Item name="name" label="发布名称" rules={[{ required: true }]}><Input placeholder="例如：Runtime 稳定版 + 审核工具集" /></Form.Item>
         <Alert type="info" showIcon message="候选版本保存完整快照" description="取消选择已安装插件即表示卸载；选择新的协调器时会自动停用内置 Agent Loop。" style={{ marginBottom: 16 }} />
-        <Form.Item name="source_ids" label="启用的已审核外部插件"><Select mode="multiple" placeholder="不选择则只使用平台内置能力" options={approvedSources.map(item => ({ value: item.id, label: `${item.manifest?.name || item.locator} · ${item.resolved_version || ''}` }))} /></Form.Item>
+        <Form.Item name="source_ids" label="启用的已审核外部插件"><Select mode="multiple" placeholder="不选择则只使用平台内置能力" options={approvedSources.map(item => ({ value: item.id, label: `${item.manifest?.name || item.locator} · ${item.resolved_version || ''} · ${item.manifest?.layer || 'runtime'}${item.manifest?.operation === 'replace' ? '（替换）' : ''}` }))} /></Form.Item>
         <Form.Item name="enabled_tool_groups" label="启用的系统工具组"><Select mode="multiple" options={(overview?.system_tools || []).map(item => ({ value: item.slug, label: item.name }))} /></Form.Item>
       </Form>
     </Modal>
@@ -304,6 +443,24 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
         {detail.error && <Alert type="error" showIcon icon={<ExclamationCircleOutlined />} message="不能发布" description={detail.error} />}
         {(detail.compatibility?.warnings || []).map((warning: string) => <Alert key={warning} type="warning" showIcon message={warning} />)}
         <Card size="small" title="自动构建报告"><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 360, overflow: 'auto' }}>{JSON.stringify(detail.build_report, null, 2)}</pre></Card>
+      </Space>}
+    </Drawer>
+    <Drawer width={680} title={catalogDetail?.name || '市场插件详情'} open={!!catalogDetail} onClose={() => setCatalogDetail(null)}>
+      {catalogDetail && <Space direction="vertical" size={16} style={{ width: '100%' }}>
+        <Descriptions bordered size="small" column={1}>
+          <Descriptions.Item label="来源">{catalogDetail.source} · {catalogDetail.trust_level}</Descriptions.Item>
+          <Descriptions.Item label="包 / 仓库"><Space wrap>{catalogDetail.package_name || '无 npm 包'}{catalogDetail.repository && <Button type="link" size="small" icon={<GithubOutlined />} href={catalogDetail.repository} target="_blank">打开仓库</Button>}</Space></Descriptions.Item>
+          <Descriptions.Item label="能力层"><Tag>{catalogDetail.layer}</Tag> {catalogDetail.operation === 'replace' ? <Tag color="purple">替换现有插槽</Tag> : <Tag color="blue">新增能力</Tag>}</Descriptions.Item>
+          <Descriptions.Item label="真实类型"><KindTag kind={catalogDetail.kind} /></Descriptions.Item>
+          <Descriptions.Item label="兼容性">{compatibilityTag(catalogDetail)}</Descriptions.Item>
+          <Descriptions.Item label="运行要求"><Typography.Text code>{JSON.stringify(catalogDetail.runtime_requirements || {})}</Typography.Text></Descriptions.Item>
+        </Descriptions>
+        <Typography.Paragraph>{catalogDetail.description || '暂无描述'}</Typography.Paragraph>
+        {catalogDetail.compatibility_reasons.map(reason => <Alert key={reason} type={catalogDetail.compatibility_status === 'incompatible' ? 'error' : 'warning'} showIcon message={reason} />)}
+        <Space>
+          {catalogDetail.compatibility_status !== 'incompatible' && catalogDetail.id && <Button type="primary" icon={<CloudDownloadOutlined />} onClick={() => { setCatalogDetail(null); openCatalogImport(catalogDetail); }}>{catalogDetail.compatibility_status === 'compatible' ? '导入候选' : '导入检查'}</Button>}
+          {catalogDetail.compatibility_status === 'needs_adapter' && catalogDetail.id && <Button type="primary" icon={<DownloadOutlined />} onClick={() => void downloadAdaptationBrief(catalogDetail)}>生成 Codex 适配任务</Button>}
+        </Space>
       </Space>}
     </Drawer>
   </div>;

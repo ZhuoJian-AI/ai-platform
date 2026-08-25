@@ -37,6 +37,27 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return resp.json();
 }
 
+async function requestText(path: string, options?: RequestInit): Promise<string> {
+  const token = localStorage.getItem('ai_infra_token');
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const resp = await fetch(`${BASE_URL}${path}`, { ...options, headers: { ...headers, ...(options?.headers as Record<string, string> | undefined) } });
+  if (resp.status === 401) {
+    const stored = localStorage.getItem('ai_infra_admin');
+    localStorage.removeItem('ai_infra_token');
+    localStorage.removeItem('ai_infra_admin');
+    let slug: string | null = null;
+    try { slug = stored ? JSON.parse(stored)?.organization_slug ?? null : null; } catch { slug = null; }
+    window.location.href = slug ? `/${slug}/login` : '/login';
+    throw new ApiError(401, 'Session expired');
+  }
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new ApiError(resp.status, body.detail || resp.statusText, body);
+  }
+  return resp.text();
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -1813,16 +1834,29 @@ export const memory = {
 export type PlatformExtensionKind = 'runtime_plugin' | 'system_tool' | 'library' | 'adapter_required' | 'incompatible';
 
 export interface PlatformExtensionCatalogItem {
+  id: string | null;
   slug: string;
   name: string;
   version: string;
   description: string;
   kind: PlatformExtensionKind;
-  source: 'core' | 'reviewed' | 'external';
+  source: 'core' | 'official' | 'community' | 'reviewed' | 'external';
   status: string;
   removable: boolean;
   capabilities: string[];
   compatibility_warnings: string[];
+  layer: string;
+  operation: 'add' | 'replace';
+  trust_level: string;
+  runtime_requirements: Record<string, unknown>;
+  compatibility_status: string;
+  compatibility_reasons: string[];
+  repository: string | null;
+  homepage: string | null;
+  package_name: string | null;
+  available_versions: string[];
+  category: string;
+  metadata: Record<string, any>;
 }
 
 export interface PlatformExtensionSource {
@@ -1887,7 +1921,17 @@ export interface PlatformExtensionOverview {
 
 export const platformExtensions = {
   overview: () => request<PlatformExtensionOverview>('/api/v1/platform/extensions/overview'),
-  catalog: () => request<PlatformExtensionCatalogItem[]>('/api/v1/platform/extensions/catalog'),
+  catalog: (params: { q?: string; source?: string; layer?: string; compatibility?: string; offset?: number; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== '') qs.set(key, String(value)); });
+    return request<PlatformExtensionCatalogItem[]>(`/api/v1/platform/extensions/catalog${qs.size ? `?${qs}` : ''}`);
+  },
+  syncCatalog: () => request<Record<string, any>>('/api/v1/platform/extensions/catalog/sync', { method: 'POST' }),
+  catalogDetail: (id: string) => request<PlatformExtensionCatalogItem>(`/api/v1/platform/extensions/catalog/${id}`),
+  importCatalog: (id: string, data: { source?: 'npm' | 'github'; version?: string; ref?: string }) => request<PlatformExtensionSource>(
+    `/api/v1/platform/extensions/catalog/${id}/import`, { method: 'POST', body: JSON.stringify(data) },
+  ),
+  adaptationBrief: (id: string) => requestText(`/api/v1/platform/extensions/catalog/${id}/adaptation-brief`, { method: 'POST' }),
   sources: () => request<PlatformExtensionSource[]>('/api/v1/platform/extensions/sources'),
   source: (id: string) => request<PlatformExtensionSource>(`/api/v1/platform/extensions/sources/${id}`),
   importNpm: (packageName: string, version: string) => request<PlatformExtensionSource>(

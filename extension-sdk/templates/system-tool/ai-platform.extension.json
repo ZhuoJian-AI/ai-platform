@@ -1,0 +1,25 @@
+{
+  "name": "Example System Tool",
+  "slug": "example-system-tool",
+  "version": "0.1.0",
+  "description": "Minimal platform-managed DSH tool adapter",
+  "type": "system_tool",
+  "layer": "system_tool",
+  "operation": "add",
+  "entry": "index.mjs",
+  "export_name": "default",
+  "provides": ["example-tool"],
+  "requires": [],
+  "conflicts": [],
+  "dsh_version": "0.1.0-rc.5",
+  "health_check": "healthCheck",
+  "smoke_test": "smokeTest",
+  "tools": [{
+    "name": "example_lookup",
+    "description": "Look up an example value through the platform bridge",
+    "input_schema": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] },
+    "risk_level": "low",
+    "side_effects": false,
+    "required_platform_capabilities": []
+  }]
+}

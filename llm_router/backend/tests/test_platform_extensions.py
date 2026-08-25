@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import platform_extensions as extension_api
 from app.models.admin import Admin
-from app.models.platform_extension import PlatformExtensionSource
-from app.services import platform_extension_service
+from app.models.platform_extension import PlatformExtensionCatalogEntry, PlatformExtensionSource
+from app.services import platform_extension_discovery, platform_extension_service
 
 
 @pytest.mark.asyncio
@@ -140,13 +140,159 @@ async def test_reviewed_coordinator_is_snapshotted_and_replaces_builtin(
         json={
             "name": "reviewed coordinator candidate",
             "source_ids": [str(source.id)],
-            "config": {"disabled_plugins": ["dsh-agent-loop"]},
+            "config": {},
         },
     )
     assert response.status_code == 201
     manifest = response.json()["manifest"]
     assert manifest["external_extensions"][0]["slug"] == "reviewed-coordinator"
     assert next(item for item in manifest["plugins"] if item["slug"] == "dsh-agent-loop")["enabled"] is False
+    assert manifest["replacement_slots"] == {"coordinator": "reviewed-coordinator"}
+
+
+@pytest.mark.asyncio
+async def test_community_catalog_search_detail_and_adaptation_brief(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    entry = PlatformExtensionCatalogEntry(
+        provider="community",
+        external_key="dsh-example-adapter",
+        slug="dsh-example-adapter",
+        name="Example Adapter",
+        description="Community plugin requiring the platform adapter SDK",
+        package_name="dsh-example-adapter",
+        version="1.2.3",
+        available_versions=["1.2.3"],
+        repository="https://github.com/example/dsh-example-adapter",
+        category="workflow",
+        layer="coordinator",
+        operation="replace",
+        kind="adapter_required",
+        trust_level="community",
+        runtime_requirements={"node": ">=22"},
+        compatibility_status="needs_adapter",
+        compatibility_reasons=["缺少 AI Platform 扩展清单"],
+        metadata_payload={"stars": 42},
+        is_active=True,
+    )
+    db_session.add(entry)
+    await db_session.flush()
+
+    response = await client.get(
+        "/api/v1/platform/extensions/catalog",
+        params={"source": "community", "layer": "coordinator", "q": "Example"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["id"] == str(entry.id)
+    assert payload[0]["operation"] == "replace"
+
+    detail = await client.get(f"/api/v1/platform/extensions/catalog/{entry.id}")
+    assert detail.status_code == 200
+    assert detail.json()["compatibility_status"] == "needs_adapter"
+
+    brief = await client.post(f"/api/v1/platform/extensions/catalog/{entry.id}/adaptation-brief")
+    assert brief.status_code == 200
+    assert "AI Platform DSH扩展适配任务" in brief.text
+    assert "dsh-example-adapter" in brief.text
+
+
+@pytest.mark.asyncio
+async def test_catalog_sync_keeps_last_community_snapshot_on_remote_failure(
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    entry = PlatformExtensionCatalogEntry(
+        provider="community",
+        external_key="retained-plugin",
+        slug="retained-plugin",
+        name="Retained Plugin",
+        description="Last known good community metadata",
+        layer="runtime",
+        operation="add",
+        kind="adapter_required",
+        trust_level="community",
+        compatibility_status="needs_adapter",
+        is_active=True,
+    )
+    db_session.add(entry)
+    await db_session.flush()
+
+    class FailingClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, _url):
+            raise RuntimeError("catalog unavailable")
+
+    monkeypatch.setattr(
+        platform_extension_discovery.httpx,
+        "AsyncClient",
+        lambda **_kwargs: FailingClient(),
+    )
+    result = await platform_extension_discovery.sync_discovery_catalog(db_session)
+
+    assert result["status"] == "stale"
+    assert result["community"] == 1
+    retained = await db_session.get(PlatformExtensionCatalogEntry, entry.id)
+    assert retained is not None and retained.is_active is True
+
+
+@pytest.mark.asyncio
+async def test_catalog_candidate_can_prefer_github_over_npm(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    async def skip_build(_source_id):
+        return None
+
+    monkeypatch.setattr(platform_extension_service, "process_source_build", skip_build)
+    entry = PlatformExtensionCatalogEntry(
+        provider="community",
+        external_key="dual-source-plugin",
+        slug="dual-source-plugin",
+        name="Dual Source Plugin",
+        description="Available from npm and GitHub",
+        package_name="dual-source-plugin",
+        repository="https://github.com/example/dual-source-plugin",
+        layer="runtime",
+        operation="add",
+        kind="adapter_required",
+        trust_level="community",
+        compatibility_status="needs_adapter",
+        is_active=True,
+    )
+    db_session.add(entry)
+    await db_session.flush()
+
+    response = await client.post(
+        f"/api/v1/platform/extensions/catalog/{entry.id}/import",
+        json={"source": "github", "ref": "abc123"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["source_type"] == "github"
+    assert response.json()["locator"] == entry.repository
+    assert response.json()["requested_version"] == "abc123"
+
+
+def test_community_classifier_distinguishes_coordinator_and_ui_plugins():
+    coordinator = platform_extension_discovery.classify_community(
+        {"name": "dsh-omni-router", "category": "workflow", "description": {"en": "agent orchestrator"}}
+    )
+    assert coordinator["layer"] == "coordinator"
+    assert coordinator["operation"] == "replace"
+    ui_plugin = platform_extension_discovery.classify_community(
+        {"name": "dsh-theme", "category": "theme", "description": {"en": "web theme"}}
+    )
+    assert ui_plugin["layer"] == "ui_plugin"
+    assert ui_plugin["compatibility_status"] == "incompatible"
 
 
 @pytest.mark.asyncio

@@ -253,6 +253,27 @@ export function compatibleDsh(requirement: unknown): boolean {
   }
 }
 
+export function resolveExtensionSlot(
+  kind: string,
+  explicit: Record<string, unknown> | null,
+): { layer: string; operation: 'add' | 'replace'; warning: string | null } {
+  const provides = Array.isArray(explicit?.provides) ? explicit.provides : []
+  const inferredLayer = provides.includes('coordinator') ? 'coordinator' : kind === 'system_tool' ? 'system_tool' : 'runtime'
+  const allowedLayers = new Set([
+    'coordinator', 'runtime', 'memory_context', 'rag_strategy', 'system_tool',
+    'model_adapter', 'hook_guard', 'skill_mcp', 'ui_plugin', 'library', 'unknown',
+  ])
+  const requestedLayer = typeof explicit?.layer === 'string' ? explicit.layer : inferredLayer
+  const layer = allowedLayers.has(requestedLayer) ? requestedLayer : 'unknown'
+  const requestedOperation = explicit?.operation === 'replace' ? 'replace' : 'add'
+  const operation = layer === 'coordinator' ? 'replace' : requestedOperation
+  let warning = requestedLayer !== layer ? `未知扩展层：${requestedLayer}` : null
+  if (!warning && operation === 'replace' && !['coordinator', 'memory_context', 'rag_strategy', 'model_adapter'].includes(layer)) {
+    warning = `扩展层 ${layer} 不支持替换操作`
+  }
+  return { layer, operation, warning }
+}
+
 export async function buildExtension(request: BuildRequest): Promise<Record<string, unknown>> {
   const work = await mkdtemp(join(tmpdir(), `extension-${randomUUID()}-`))
   try {
@@ -299,6 +320,10 @@ export async function buildExtension(request: BuildRequest): Promise<Record<stri
     if (!compatibleDsh(dshRequirement)) {
       warnings.push(`DSH 版本要求 ${String(dshRequirement)} 与平台 DSH 0.1.0-rc.5 不兼容`)
     }
+    const provides = Array.isArray(explicit?.provides) ? explicit.provides : []
+    const slot = resolveExtensionSlot(kind, explicit)
+    const { layer, operation } = slot
+    if (slot.warning) warnings.push(slot.warning)
 
     if (await exists(join(root, 'pnpm-lock.yaml'))) {
       await run('pnpm', ['install', '--frozen-lockfile', '--ignore-scripts'], root)
@@ -317,9 +342,11 @@ export async function buildExtension(request: BuildRequest): Promise<Record<stri
       version: explicit?.version ?? pkg.version ?? request.version ?? '0.0.0',
       description: explicit?.description ?? pkg.description ?? '',
       type: kind,
+      layer,
+      operation,
       entry,
       export_name: explicit?.export_name ?? 'default',
-      provides: explicit?.provides ?? [],
+      provides,
       requires: explicit?.requires ?? [],
       conflicts: explicit?.conflicts ?? [],
       config_schema: explicit?.config_schema ?? {},
@@ -329,6 +356,7 @@ export async function buildExtension(request: BuildRequest): Promise<Record<stri
       tools: explicit?.tools ?? [],
       node_engine: nodeEngine ?? null,
       dsh_version: dshRequirement,
+      runtime_requirements: { node: nodeEngine ?? null, dsh: dshRequirement },
     }
     const protocolValid = kind === 'runtime_plugin'
       ? (explicit ? Array.isArray(explicit.provides) : inferredDsh)

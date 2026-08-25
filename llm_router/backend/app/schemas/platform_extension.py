@@ -13,16 +13,35 @@ ExtensionKind = Literal["runtime_plugin", "system_tool", "library", "adapter_req
 
 
 class ExtensionCatalogItem(BaseModel):
+    id: UUID | None = None
     slug: str
     name: str
     version: str
     description: str
     kind: ExtensionKind
-    source: Literal["core", "reviewed", "external"]
+    source: Literal["core", "official", "community", "reviewed", "external"]
     status: str
     removable: bool = True
     capabilities: list[str] = Field(default_factory=list)
     compatibility_warnings: list[str] = Field(default_factory=list)
+    layer: str = "unknown"
+    operation: Literal["add", "replace"] = "add"
+    trust_level: str = "platform"
+    runtime_requirements: dict = Field(default_factory=dict)
+    compatibility_status: str = "compatible"
+    compatibility_reasons: list[str] = Field(default_factory=list)
+    repository: str | None = None
+    homepage: str | None = None
+    package_name: str | None = None
+    available_versions: list[str] = Field(default_factory=list)
+    category: str = "unknown"
+    metadata: dict = Field(default_factory=dict)
+
+
+class ExtensionCatalogImportRequest(BaseModel):
+    source: Literal["npm", "github"] | None = None
+    version: str | None = Field(None, max_length=100)
+    ref: str | None = Field(None, max_length=255)
 
 
 class ExtensionImportNpm(BaseModel):
