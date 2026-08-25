@@ -1,6 +1,7 @@
 ARG AI_PLATFORM_FRONTEND_DEPS_BASE
 ARG AI_PLATFORM_NGINX_BASE=nginx:1.27-alpine
 ARG SOURCE_COMMIT=unknown
+ARG SOURCE_REPOSITORY=https://github.com/ZhuoJian-AI/ai-platform
 FROM ${AI_PLATFORM_FRONTEND_DEPS_BASE} AS builder
 
 WORKDIR /app
@@ -9,8 +10,10 @@ RUN npm run build
 
 FROM ${AI_PLATFORM_NGINX_BASE}
 ARG SOURCE_COMMIT
+ARG SOURCE_REPOSITORY
 ENV SOURCE_COMMIT=${SOURCE_COMMIT}
-LABEL org.opencontainers.image.revision=${SOURCE_COMMIT}
+LABEL org.opencontainers.image.revision=${SOURCE_COMMIT} \
+      org.opencontainers.image.source=${SOURCE_REPOSITORY}
 COPY nginx.coolify.conf /etc/nginx/nginx.conf
 COPY --from=builder /app/dist /usr/share/nginx/html
 EXPOSE 80
