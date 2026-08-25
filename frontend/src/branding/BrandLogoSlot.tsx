@@ -29,7 +29,7 @@ interface BrandLogoSlotProps {
   style?: CSSProperties;
 }
 
-/** 统一品牌 Logo 槽，保留位点标记并渲染同一份灼见 AiSEE SVG。 */
+/** 统一品牌 Logo 槽，保留位点标记并渲染灼见品牌 SVG。 */
 export default function BrandLogoSlot({ slot, width, height, style }: BrandLogoSlotProps) {
   return (
     <span
@@ -40,7 +40,7 @@ export default function BrandLogoSlot({ slot, width, height, style }: BrandLogoS
     >
       <img
         src={BRAND_LOGO_URL}
-        alt="灼见 AiSEE"
+        alt="灼见"
         draggable={false}
         style={{ display: 'block', width: '100%', height: '100%', objectFit: 'contain' }}
       />

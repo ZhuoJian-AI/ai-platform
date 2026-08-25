@@ -36,6 +36,20 @@ class ExtensionCatalogItem(BaseModel):
     available_versions: list[str] = Field(default_factory=list)
     category: str = "unknown"
     metadata: dict = Field(default_factory=dict)
+    lifecycle_status: str = "available"
+    installed: bool = False
+    installed_version: str | None = None
+    active_source_id: UUID | None = None
+    latest_source_id: UUID | None = None
+
+
+class ExtensionCatalogPage(BaseModel):
+    items: list[ExtensionCatalogItem] = Field(default_factory=list)
+    page: int = 1
+    page_size: int = 48
+    total: int = 0
+    counts: dict[str, int] = Field(default_factory=dict)
+    sync: dict = Field(default_factory=dict)
 
 
 class ExtensionCatalogImportRequest(BaseModel):

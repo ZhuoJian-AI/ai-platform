@@ -27,6 +27,7 @@ from app.schemas.platform_extension import (
     ExtensionArtifactSign,
     ExtensionCatalogImportRequest,
     ExtensionCatalogItem,
+    ExtensionCatalogPage,
     ExtensionImportGithub,
     ExtensionImportNpm,
     ExtensionOverview,
@@ -105,6 +106,29 @@ async def catalog(
     return await platform_extension_service.list_catalog(
         db, auth.id, query=q, source_filter=source, layer=layer,
         compatibility=compatibility, offset=offset, limit=limit,
+    )
+
+
+@router.get("/catalog/page", response_model=ExtensionCatalogPage)
+async def catalog_page(
+    q: str | None = Query(None, max_length=200),
+    source: str | None = Query(None, max_length=30),
+    layer: str | None = Query(None, max_length=50),
+    state: str = Query("all", pattern="^(compatible|adapter|all|installed)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(48, ge=1, le=48),
+    auth: CurrentAdmin = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await platform_extension_service.catalog_page(
+        db,
+        auth.id,
+        query=q,
+        source_filter=source,
+        layer=layer,
+        state=state,
+        page=page,
+        page_size=page_size,
     )
 
 

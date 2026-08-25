@@ -40,6 +40,7 @@ import RouterMonitor from './pages/monitor/RouterMonitor';
 import AgentMonitor from './pages/monitor/AgentMonitor';
 import ToolMonitor from './pages/monitor/ToolMonitor';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from './branding/BrandLogoSlot';
+import { BRAND_TITLES, useBrandTitle } from './branding/brand';
 import PlatformExtensions from './pages/platform/PlatformExtensions';
 
 interface MenuEntry {
@@ -165,6 +166,8 @@ function AppLayout() {
   const navigate = useNavigate();
   const { admin, logout, isSuperAdmin, isOrgScoped } = useAuth();
   const [helpOpen, setHelpOpen] = useState(false);
+
+  useBrandTitle(isOrgScoped() ? BRAND_TITLES.organization : BRAND_TITLES.platform);
 
   // BRAND_LOGO_SLOT: 管理端浏览器标签图标。
   useEffect(() => {

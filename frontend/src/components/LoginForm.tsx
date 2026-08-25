@@ -7,6 +7,7 @@ import type { AdminUser } from '../context/AuthContext';
 import { WB, WB_FONT, FS, antdTheme } from './finder/theme';
 import ContactUs from './ContactUs';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, type BrandLogoSlotId } from '../branding/BrandLogoSlot';
+import { BRAND_TITLES } from '../branding/brand';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -98,7 +99,7 @@ export default function LoginForm({ slug, orgName }: LoginFormProps) {
       {orgName || slug}
     </span>
   ) : undefined;
-  const subtitle = slug ? `组织管理端 · ${slug}` : '企业级AI基础设施 · 平台管理';
+  const subtitle = slug ? BRAND_TITLES.organization : BRAND_TITLES.platform;
 
   return (
     <>

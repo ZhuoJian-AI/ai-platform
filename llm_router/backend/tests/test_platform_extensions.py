@@ -7,7 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import platform_extensions as extension_api
 from app.models.admin import Admin
-from app.models.platform_extension import PlatformExtensionCatalogEntry, PlatformExtensionSource
+from app.models.platform_extension import (
+    PlatformExtensionCatalogEntry,
+    PlatformExtensionRelease,
+    PlatformExtensionSource,
+)
 from app.services import platform_extension_discovery, platform_extension_service
 
 
@@ -280,6 +284,126 @@ async def test_catalog_candidate_can_prefer_github_over_npm(
     assert response.json()["source_type"] == "github"
     assert response.json()["locator"] == entry.repository
     assert response.json()["requested_version"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_catalog_page_is_server_paginated_with_real_counts(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    for index in range(50):
+        db_session.add(PlatformExtensionCatalogEntry(
+            provider="community",
+            external_key=f"paged-plugin-{index:02d}",
+            slug=f"paged-plugin-{index:02d}",
+            name=f"Paged Plugin {index:02d}",
+            description="Pagination contract fixture",
+            package_name=f"paged-plugin-{index:02d}",
+            category="workflow",
+            layer="runtime",
+            operation="add",
+            kind="adapter_required",
+            trust_level="community",
+            compatibility_status="needs_adapter",
+            is_active=True,
+        ))
+    await db_session.flush()
+
+    response = await client.get(
+        "/api/v1/platform/extensions/catalog/page",
+        params={"q": "Paged Plugin", "state": "adapter", "page": 2, "page_size": 48},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 50
+    assert payload["page"] == 2
+    assert len(payload["items"]) == 2
+    assert payload["counts"]["adapter"] == 50
+    assert payload["counts"]["installed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_catalog_merges_import_source_and_marks_only_active_release_installed(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    await client.get("/api/v1/platform/extensions/overview")
+    entry = PlatformExtensionCatalogEntry(
+        provider="community",
+        external_key="installed-community-plugin",
+        slug="installed-community-plugin",
+        name="Installed Community Plugin",
+        description="Linked catalog and source fixture",
+        package_name="installed-community-plugin",
+        category="workflow",
+        layer="runtime",
+        operation="add",
+        kind="adapter_required",
+        trust_level="community",
+        compatibility_status="needs_adapter",
+        is_active=True,
+    )
+    db_session.add(entry)
+    await db_session.flush()
+    source = await _approved_source(
+        db_session,
+        {
+            "name": entry.name,
+            "slug": entry.slug,
+            "version": "2.0.0",
+            "type": "runtime_plugin",
+            "entry": "dist/index.js",
+            "provides": ["extra-runtime"],
+        },
+    )
+    source.source_type = "npm"
+    source.locator = entry.package_name
+    source.build_report = {"catalog_entry_id": str(entry.id), "tests": "passed"}
+    active = (
+        await db_session.execute(select(PlatformExtensionRelease).where(
+            PlatformExtensionRelease.is_active.is_(True)
+        ))
+    ).scalar_one()
+    active.manifest = {
+        **active.manifest,
+        "external_extensions": [{
+            **source.manifest,
+            "source_id": str(source.id),
+            "enabled": True,
+        }],
+    }
+    await db_session.flush()
+
+    response = await client.get(
+        "/api/v1/platform/extensions/catalog/page",
+        params={"q": entry.name, "state": "installed"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert len(payload["items"]) == 1
+    item = payload["items"][0]
+    assert item["id"] == str(entry.id)
+    assert item["installed"] is True
+    assert item["lifecycle_status"] == "installed"
+    assert item["installed_version"] == "2.0.0"
+    assert item["latest_source_id"] == str(source.id)
+
+
+@pytest.mark.asyncio
+async def test_catalog_sync_returns_busy_when_redis_lock_is_held(
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    async def busy_lock():
+        return None, None, False, None
+
+    monkeypatch.setattr(platform_extension_discovery, "_acquire_sync_lock", busy_lock)
+    result = await platform_extension_discovery.sync_discovery_catalog(db_session)
+
+    assert result["status"] == "busy"
 
 
 def test_community_classifier_distinguishes_coordinator_and_ui_plugins():

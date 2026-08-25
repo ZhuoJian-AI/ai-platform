@@ -8,12 +8,15 @@ import { WB, FS } from '../../components/finder/theme';
 import { auth as authApi, terminal, type OrgInfo } from '../../api/client';
 import { useUserAuth, type TerminalUserState } from '../../context/UserAuthContext';
 import { BRAND_LOGO_SLOTS, applyBrandFavicon } from '../../branding/BrandLogoSlot';
+import { BRAND_TITLES, useBrandTitle } from '../../branding/brand';
 
 /**
  * 终端用户登录页（/{slug}/terminal/login）：组织员工经 slug 登录，进入灼见。
  * 进入时按 slug 公开查询组织名展示在登录框上方；登录成功后跳转 /{slug}/terminal。
  */
 export default function UserLoginPage() {
+  useBrandTitle(BRAND_TITLES.terminal);
+
   const { slug = '' } = useParams<{ slug: string }>();
   const navigate = useNavigate();
   const { login } = useUserAuth();
@@ -81,7 +84,7 @@ export default function UserLoginPage() {
               {org?.name || slug}
             </span>
           }
-          subtitle="灼见 · 用户登录"
+          subtitle={BRAND_TITLES.terminal}
         >
           <Form name="user-login" onFinish={onFinish} autoComplete="off">
             <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]}>
