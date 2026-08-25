@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-import base64
 import asyncio
+import base64
+import hashlib
 import io
 import json
+import os
+import time
 import zipfile
 from pathlib import Path
 
 import app as runner
 import builtin_tools as builtin
+import httpx
 import pytest
 from PIL import Image
 
@@ -71,7 +75,6 @@ def _package(script_path: str, content: bytes) -> tuple[str, str]:
         zf.writestr("SKILL.md", "---\nname: Test\ndescription: Test script\n---\n")
         zf.writestr(script_path, content)
     raw = out.getvalue()
-    import hashlib
     return hashlib.sha256(raw).hexdigest(), base64.b64encode(raw).decode("ascii")
 
 
@@ -82,8 +85,67 @@ def _package_files(files: dict[str, bytes]) -> tuple[str, str]:
         for path, content in files.items():
             zf.writestr(path, content)
     raw = out.getvalue()
-    import hashlib
     return hashlib.sha256(raw).hexdigest(), base64.b64encode(raw).decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_signed_archive_download_verifies_size_and_checksum(monkeypatch):
+    package_hash, encoded = _package("scripts/run.py", b"print('ok')")
+    raw = base64.b64decode(encoded)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL("https://storage.invalid/package.zip")
+        assert request.headers["x-download-token"] == "short-lived"
+        return httpx.Response(200, content=raw)
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def client_factory(*_args, **_kwargs):
+        return real_client(transport=transport)
+
+    monkeypatch.setattr(runner.httpx, "AsyncClient", client_factory)
+    request = runner.InstallRequest(
+        package_hash=package_hash,
+        archive_url="https://storage.invalid/package.zip",
+        archive_headers={"X-Download-Token": "short-lived"},
+        archive_size=len(raw),
+        runtime="agent_skill",
+    )
+    assert await runner._load_archive(request) == raw
+
+
+def test_skill_archive_rejects_duplicate_and_unsafe_paths(tmp_path):
+    duplicate = io.BytesIO()
+    with zipfile.ZipFile(duplicate, "w") as archive:
+        archive.writestr("SKILL.md", "one")
+        archive.writestr("skill.md", "two")
+    with pytest.raises(runner.HTTPException, match="Duplicate archive path"):
+        runner._extract(duplicate.getvalue(), tmp_path / "duplicate")
+
+    unsafe = io.BytesIO()
+    with zipfile.ZipFile(unsafe, "w") as archive:
+        archive.writestr("../outside.py", "blocked")
+    with pytest.raises(runner.HTTPException, match="Unsafe archive path"):
+        runner._extract(unsafe.getvalue(), tmp_path / "unsafe")
+
+
+def test_skill_archive_enforces_file_count_and_expanded_size(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "MAX_PACKAGE_FILES", 1)
+    too_many = io.BytesIO()
+    with zipfile.ZipFile(too_many, "w") as archive:
+        archive.writestr("SKILL.md", "manifest")
+        archive.writestr("scripts/run.py", "print('x')")
+    with pytest.raises(runner.HTTPException, match="more than 1 files"):
+        runner._extract(too_many.getvalue(), tmp_path / "many")
+
+    monkeypatch.setattr(runner, "MAX_PACKAGE_FILES", 1000)
+    monkeypatch.setattr(runner, "MAX_EXPANDED_PACKAGE_BYTES", 4)
+    expanded = io.BytesIO()
+    with zipfile.ZipFile(expanded, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("SKILL.md", "12345")
+    with pytest.raises(runner.HTTPException, match="Expanded Skill package"):
+        runner._extract(expanded.getvalue(), tmp_path / "expanded")
 
 
 @pytest.mark.asyncio
@@ -111,6 +173,123 @@ target.write_text(source.read_text(encoding='utf-8').upper(), encoding='utf-8')
     assert result["status"] == "success"
     assert result["outputs"][0]["name"] == "cleaned.txt"
     assert base64.b64decode(result["outputs"][0]["content_base64"]).decode() == "HELLO"
+
+
+@pytest.mark.asyncio
+async def test_skill_process_does_not_inherit_platform_secrets(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "CACHE_ROOT", tmp_path / "cache")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://must-not-leak")
+    monkeypatch.setenv("REDIS_URL", "redis://must-not-leak")
+    monkeypatch.setenv("MODEL_API_KEY", "must-not-leak")
+    script = b"""import json
+import os
+from pathlib import Path
+
+names = ["DATABASE_URL", "REDIS_URL", "MODEL_API_KEY"]
+Path(os.environ["SKILL_OUTPUT_DIR"], "environment.json").write_text(
+    json.dumps({name: os.environ.get(name) for name in names}), encoding="utf-8"
+)
+"""
+    package_hash, archive = _package("scripts/environment.py", script)
+    result = await runner.execute(
+        runner.ExecuteRequest(
+            package_hash=package_hash,
+            archive_base64=archive,
+            runtime="agent_skill",
+            script_path="scripts/environment.py",
+            execution_id=11,
+        ),
+        runner.RUNNER_TOKEN,
+    )
+    output = next(item for item in result["outputs"] if item["name"] == "environment.json")
+    assert json.loads(base64.b64decode(output["content_base64"])) == {
+        "DATABASE_URL": None,
+        "REDIS_URL": None,
+        "MODEL_API_KEY": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_execution_temp_directory_is_removed(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "CACHE_ROOT", tmp_path / "cache")
+    created: list[Path] = []
+    real_mkdtemp = runner.tempfile.mkdtemp
+
+    def tracked_mkdtemp(*args, **kwargs):
+        path = Path(real_mkdtemp(*args, **kwargs))
+        if str(kwargs.get("prefix", "")).startswith("run-"):
+            created.append(path)
+        return str(path)
+
+    monkeypatch.setattr(runner.tempfile, "mkdtemp", tracked_mkdtemp)
+    package_hash, archive = _package("scripts/run.py", b"print('done')")
+    await runner.execute(
+        runner.ExecuteRequest(
+            package_hash=package_hash,
+            archive_base64=archive,
+            runtime="agent_skill",
+            script_path="scripts/run.py",
+            execution_id=12,
+        ),
+        runner.RUNNER_TOKEN,
+    )
+    assert len(created) == 1
+    assert not created[0].exists()
+
+
+@pytest.mark.asyncio
+async def test_runner_cache_removes_expired_failed_and_lru_entries(tmp_path, monkeypatch):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setattr(runner, "CACHE_ROOT", cache)
+    monkeypatch.setattr(runner, "CACHE_RETENTION_SECONDS", 60)
+    monkeypatch.setattr(runner, "FAILED_TEMP_RETENTION_SECONDS", 30)
+    monkeypatch.setattr(runner, "CACHE_MAX_BYTES", 12)
+    runner._ACTIVE_PACKAGE_HASHES.clear()
+
+    old_hash = "a" * 64
+    old = cache / old_hash
+    old.mkdir()
+    (old / "payload").write_bytes(b"old")
+    (old / ".last_used").touch()
+    os.utime(old / ".last_used", (time.time() - 120, time.time() - 120))
+
+    failed = cache / "install-failed"
+    failed.mkdir()
+    (failed / "payload").write_bytes(b"failed")
+    os.utime(failed, (time.time() - 60, time.time() - 60))
+
+    least_recent_hash = "b" * 64
+    least_recent = cache / least_recent_hash
+    least_recent.mkdir()
+    (least_recent / "payload").write_bytes(b"12345678")
+    (least_recent / ".last_used").touch()
+    os.utime(least_recent / ".last_used", (time.time() - 20, time.time() - 20))
+
+    recent_hash = "c" * 64
+    recent = cache / recent_hash
+    recent.mkdir()
+    (recent / "payload").write_bytes(b"abcdefgh")
+    (recent / ".last_used").touch()
+
+    active_hash = "d" * 64
+    active = cache / active_hash
+    active.mkdir()
+    (active / "payload").write_bytes(b"active-cache")
+    (active / ".last_used").touch()
+    runner._ACTIVE_PACKAGE_HASHES.add(active_hash)
+    try:
+        result = await runner._cleanup_cache()
+    finally:
+        runner._ACTIVE_PACKAGE_HASHES.discard(active_hash)
+
+    assert not old.exists()
+    assert not failed.exists()
+    assert not least_recent.exists()
+    assert not recent.exists()
+    assert active.exists()
+    assert result["removed_entries"] == 4
+    assert result["active_entries"] == 1
 
 
 @pytest.mark.asyncio
@@ -217,6 +396,8 @@ async def test_pyproject_takes_precedence_over_requirements(tmp_path: Path, monk
 async def test_node_and_bash_scripts_execute_directly(
     tmp_path, monkeypatch, script_path: str, content: bytes, output_name: str, expected: bytes,
 ):
+    if script_path.endswith(".sh") and runner._command_version(["bash", "--version"]) is None:
+        pytest.skip("A functional Bash interpreter is not available on this host")
     monkeypatch.setattr(runner, "CACHE_ROOT", tmp_path / "cache")
     package_hash, archive = _package(script_path, content)
     result = await runner.execute(runner.ExecuteRequest(

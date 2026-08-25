@@ -84,10 +84,23 @@ services:
       SKILL_RUNNER_MAX_QUEUE: "${SKILL_RUNNER_MAX_QUEUE:-100}"
       SKILL_RUNNER_QUEUE_WAIT_SECONDS: "${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}"
       SKILL_RUNNER_OFFICE_CONCURRENCY: "${SKILL_RUNNER_OFFICE_CONCURRENCY:-1}"
+      SKILL_PACKAGE_MAX_BYTES: "${SKILL_PACKAGE_MAX_BYTES:-104857600}"
+      SKILL_PACKAGE_EXPANDED_MAX_BYTES: "${SKILL_PACKAGE_EXPANDED_MAX_BYTES:-524288000}"
+      SKILL_PACKAGE_MAX_FILES: "${SKILL_PACKAGE_MAX_FILES:-1000}"
+      SKILL_CACHE_RETENTION_SECONDS: "${SKILL_CACHE_RETENTION_SECONDS:-604800}"
+      SKILL_CACHE_MAX_BYTES: "${SKILL_CACHE_MAX_BYTES:-10737418240}"
+      SKILL_FAILED_TEMP_RETENTION_SECONDS: "${SKILL_FAILED_TEMP_RETENTION_SECONDS:-3600}"
     expose:
       - "8020"
     volumes:
       - skill_cache:/cache
+    read_only: true
+    tmpfs:
+      - /tmp:size=1073741824,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/health', timeout=3)"]
       interval: 10s
@@ -263,6 +276,37 @@ services:
     deploy:
       resources:
         limits: { cpus: "0.75", memory: 1536M }
+
+  storage-lifecycle:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:119bfccf2ac71e90366adae1fca972bd527c14223756c00c5f27be290b7196cb
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?}
+      DATABASE_URL: ${DATABASE_URL:?}
+      REDIS_URL: ${REDIS_URL:?}
+      WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-true}"
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
+      STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
+      STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-https://oss-cn-hongkong.aliyuncs.com}"
+      STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      STORAGE_LIFECYCLE_INTERVAL_SECONDS: "${STORAGE_LIFECYCLE_INTERVAL_SECONDS:-3600}"
+      SKILL_RUNNER_URL: http://skill-runner:8020
+      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
+    command: ["python", "-m", "app.workers.storage_lifecycle"]
+    depends_on:
+      backend:
+        condition: service_healthy
+      skill-runner:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   frontend:
     image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:52d6abcbba6e874630b3fde6529660fddeed8815e9671d57df30dc27f2386718

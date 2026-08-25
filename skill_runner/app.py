@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import importlib.metadata
 import io
 import json
@@ -14,14 +15,16 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import time
 import zipfile
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
-from typing import AsyncIterator, Literal
+from typing import Literal
 
+import httpx
 from builtin_tools import BuiltinToolError, execute_builtin
 from fastapi import FastAPI, Header, HTTPException
-import httpx
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, Field
@@ -33,7 +36,11 @@ except ModuleNotFoundError:  # pragma: no cover - production Runner is Python 3.
 
 CACHE_ROOT = Path(os.getenv("SKILL_CACHE_ROOT", "/cache")).resolve()
 RUNNER_TOKEN = os.getenv("SKILL_RUNNER_TOKEN", "skill-runner-dev-token-change-in-production")
-MAX_PACKAGE_BYTES = 10 * 1024 * 1024
+MAX_PACKAGE_BYTES = int(os.getenv("SKILL_PACKAGE_MAX_BYTES", str(100 * 1024 * 1024)))
+MAX_EXPANDED_PACKAGE_BYTES = int(
+    os.getenv("SKILL_PACKAGE_EXPANDED_MAX_BYTES", str(500 * 1024 * 1024))
+)
+MAX_PACKAGE_FILES = int(os.getenv("SKILL_PACKAGE_MAX_FILES", "1000"))
 MAX_OUTPUT_BYTES = 100 * 1024 * 1024
 INLINE_TRANSFER_BYTES = 10 * 1024 * 1024
 MAX_OUTPUT_FILES = 20
@@ -44,12 +51,18 @@ RUNNER_MAX_CONCURRENCY = int(os.getenv("SKILL_RUNNER_MAX_CONCURRENCY", "4"))
 RUNNER_MAX_QUEUE = int(os.getenv("SKILL_RUNNER_MAX_QUEUE", "100"))
 RUNNER_QUEUE_WAIT_SECONDS = int(os.getenv("SKILL_RUNNER_QUEUE_WAIT_SECONDS", "300"))
 RUNNER_OFFICE_CONCURRENCY = int(os.getenv("SKILL_RUNNER_OFFICE_CONCURRENCY", "1"))
+CACHE_RETENTION_SECONDS = int(os.getenv("SKILL_CACHE_RETENTION_SECONDS", str(7 * 24 * 60 * 60)))
+CACHE_MAX_BYTES = int(os.getenv("SKILL_CACHE_MAX_BYTES", str(10 * 1024 * 1024 * 1024)))
+FAILED_TEMP_RETENTION_SECONDS = int(os.getenv("SKILL_FAILED_TEMP_RETENTION_SECONDS", "3600"))
 BUILTIN_PYTHON_PACKAGES = (
     "openpyxl", "pandas", "python-docx", "python-pptx", "PyMuPDF", "pypdf", "Pillow", "pytesseract",
 )
 BUILTIN_NODE_PACKAGES = ("exceljs",)
 
 app = FastAPI(title="AI Platform Skill Runner")
+_CACHE_LOCK = asyncio.Lock()
+_ACTIVE_PACKAGE_HASHES: set[str] = set()
+_INSTALL_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 class RunnerCapacity:
@@ -113,6 +126,8 @@ def _command_version(argv: list[str]) -> str | None:
         result = subprocess.run(argv, capture_output=True, timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
+    if result.returncode != 0:
+        return None
     raw = result.stdout or result.stderr or b""
     value = raw.decode("utf-8", errors="replace").strip().splitlines()
     return value[0] if value else None
@@ -144,7 +159,10 @@ def _runtime_info() -> dict:
 
 class InstallRequest(BaseModel):
     package_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    archive_base64: str
+    archive_base64: str | None = None
+    archive_url: str | None = None
+    archive_headers: dict[str, str] = Field(default_factory=dict)
+    archive_size: int | None = Field(None, ge=1, le=MAX_PACKAGE_BYTES)
     runtime: str
     entrypoint: str | None = None
 
@@ -190,18 +208,70 @@ def _decode_archive(encoded: str) -> bytes:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Invalid package encoding") from exc
     if not raw or len(raw) > MAX_PACKAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Package must be 1 byte to 10MB")
+        raise HTTPException(
+            status_code=413,
+            detail=f"Package must be 1 byte to {MAX_PACKAGE_BYTES // (1024 * 1024)}MB",
+        )
+    return raw
+
+
+async def _load_archive(req: InstallRequest) -> bytes:
+    if bool(req.archive_base64) == bool(req.archive_url):
+        raise HTTPException(
+            status_code=422,
+            detail="Exactly one of archive_base64 or archive_url is required",
+        )
+    if req.archive_base64:
+        raw = _decode_archive(req.archive_base64)
+    else:
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            async with (
+                httpx.AsyncClient(timeout=300, trust_env=False, follow_redirects=False) as client,
+                client.stream("GET", req.archive_url, headers=req.archive_headers) as response,
+            ):
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes(1024 * 1024):
+                    total += len(chunk)
+                    if total > MAX_PACKAGE_BYTES:
+                        raise HTTPException(status_code=413, detail="Skill package exceeds 100MB")
+                    chunks.append(chunk)
+        except HTTPException:
+            raise
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail="Unable to download Skill package") from exc
+        raw = b"".join(chunks)
+    if req.archive_size is not None and len(raw) != req.archive_size:
+        raise HTTPException(status_code=422, detail="Skill package size does not match metadata")
+    if hashlib.sha256(raw).hexdigest() != req.package_hash:
+        raise HTTPException(status_code=422, detail="Skill package checksum mismatch")
     return raw
 
 
 def _extract(raw: bytes, target: Path) -> None:
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            for info in zf.infolist():
+            entries = zf.infolist()
+            file_entries = [item for item in entries if not item.is_dir()]
+            if len(file_entries) > MAX_PACKAGE_FILES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Skill package contains more than {MAX_PACKAGE_FILES} files",
+                )
+            expanded_size = sum(item.file_size for item in file_entries)
+            if expanded_size > MAX_EXPANDED_PACKAGE_BYTES:
+                raise HTTPException(status_code=413, detail="Expanded Skill package exceeds 500MB")
+            seen_paths: set[str] = set()
+            for info in entries:
                 name = info.filename.replace("\\", "/").lstrip("/")
                 path = PurePosixPath(name)
                 if not name or ".." in path.parts or path.is_absolute():
                     raise HTTPException(status_code=422, detail="Unsafe archive path")
+                normalized = path.as_posix().casefold()
+                if normalized in seen_paths:
+                    raise HTTPException(status_code=422, detail="Duplicate archive path")
+                seen_paths.add(normalized)
                 destination = (target / Path(*path.parts)).resolve()
                 if target not in destination.parents and destination != target:
                     raise HTTPException(status_code=422, detail="Unsafe archive path")
@@ -209,16 +279,52 @@ def _extract(raw: bytes, target: Path) -> None:
                     destination.mkdir(parents=True, exist_ok=True)
                 else:
                     destination.parent.mkdir(parents=True, exist_ok=True)
-                    destination.write_bytes(zf.read(info))
+                    with zf.open(info) as source, destination.open("wb") as output:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
     except zipfile.BadZipFile as exc:
         raise HTTPException(status_code=422, detail="Invalid ZIP package") from exc
+
+
+_CHILD_ENV_ALLOWLIST = {
+    "PATH", "HOME", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    # Windows needs these process-level values to start Python/Node reliably. They
+    # describe the operating system and temporary directory, not platform secrets.
+    "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATHEXT", "COMSPEC",
+    "PIP_INDEX_URL", "PIP_TRUSTED_HOST", "PIP_DEFAULT_TIMEOUT", "PIP_RETRIES",
+    "NPM_CONFIG_REGISTRY", "NPM_CONFIG_FETCH_RETRIES", "NPM_CONFIG_FETCH_RETRY_MINTIMEOUT",
+    "NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT", "NPM_CONFIG_FETCH_TIMEOUT", "NODE_PATH",
+}
+
+
+def _child_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
+    result = {key: value for key, value in os.environ.items() if key in _CHILD_ENV_ALLOWLIST}
+    result.update(extra or {})
+    result.setdefault("HOME", "/tmp/skill-home" if os.name == "posix" else tempfile.gettempdir())
+    result.setdefault("LANG", "C.UTF-8")
+    return result
+
+
+def _remove_tree(path: Path) -> None:
+    """Remove an execution tree even when its mounted inputs were made read-only."""
+    if not path.exists():
+        return
+    for item in sorted(path.rglob("*"), reverse=True):
+        try:
+            item.chmod(0o700 if item.is_dir() else 0o600)
+        except OSError:
+            pass
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    shutil.rmtree(path, ignore_errors=True)
 
 
 async def _run(argv: list[str], cwd: Path, timeout: int, env: dict[str, str] | None = None) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *argv,
         cwd=str(cwd),
-        env={**os.environ, **(env or {})},
+        env=_child_environment(env),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         creationflags=0,
@@ -378,67 +484,162 @@ def _validate_runtime_compatibility(root: Path) -> list[str]:
     return warnings
 
 
+def _cache_entry_size(path: Path) -> int:
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _touch_cache_entry(path: Path) -> None:
+    marker = path / ".last_used"
+    marker.touch(exist_ok=True)
+
+
+def _cache_last_used(path: Path) -> float:
+    marker = path / ".last_used"
+    try:
+        return (marker if marker.exists() else path).stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+async def _cleanup_cache() -> dict[str, int]:
+    CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    async with _CACHE_LOCK:
+        now = time.time()
+        removed_entries = 0
+        removed_bytes = 0
+        entries: list[tuple[Path, str, float, int]] = []
+        for path in list(CACHE_ROOT.iterdir()):
+            if not path.is_dir():
+                continue
+            name = path.name
+            if name.startswith("install-"):
+                try:
+                    age = now - path.stat().st_mtime
+                except OSError:
+                    continue
+                if age >= FAILED_TEMP_RETENTION_SECONDS:
+                    size = _cache_entry_size(path)
+                    shutil.rmtree(path, ignore_errors=True)
+                    removed_entries += 1
+                    removed_bytes += size
+                continue
+            if not re.fullmatch(r"[0-9a-f]{64}", name):
+                continue
+            size = _cache_entry_size(path)
+            last_used = _cache_last_used(path)
+            entries.append((path, name, last_used, size))
+
+        survivors: list[tuple[Path, str, float, int]] = []
+        for path, package_hash, last_used, size in entries:
+            if package_hash not in _ACTIVE_PACKAGE_HASHES and now - last_used >= CACHE_RETENTION_SECONDS:
+                shutil.rmtree(path, ignore_errors=True)
+                removed_entries += 1
+                removed_bytes += size
+            else:
+                survivors.append((path, package_hash, last_used, size))
+
+        total_bytes = sum(item[3] for item in survivors)
+        for path, package_hash, _, size in sorted(survivors, key=lambda item: item[2]):
+            if total_bytes <= CACHE_MAX_BYTES:
+                break
+            if package_hash in _ACTIVE_PACKAGE_HASHES:
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            total_bytes -= size
+            removed_entries += 1
+            removed_bytes += size
+        return {
+            "cache_bytes": max(total_bytes, 0),
+            "removed_entries": removed_entries,
+            "removed_bytes": removed_bytes,
+            "active_entries": len(_ACTIVE_PACKAGE_HASHES),
+        }
+
+
 async def _ensure_installed(req: InstallRequest) -> tuple[Path, dict]:
     CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    package_dir = (CACHE_ROOT / req.package_hash).resolve()
-    marker = package_dir / ".ready"
-    if marker.exists():
-        metadata_file = package_dir / ".install.json"
-        metadata = json.loads(metadata_file.read_text(encoding="utf-8")) if metadata_file.exists() else {
-            **_runtime_info(), "installed_dependencies": {"python": [], "node": []}, "compatibility_warnings": [],
-        }
-        return package_dir, metadata
-    temp = Path(tempfile.mkdtemp(prefix=f"install-{req.package_hash[:8]}-", dir=CACHE_ROOT))
-    try:
-        _extract(_decode_archive(req.archive_base64), temp)
-        warnings = _validate_runtime_compatibility(temp)
-        needs_python = req.runtime == "python" or (
-            req.runtime == "agent_skill"
-            and any((temp / name).exists() for name in ("requirements.txt", "pyproject.toml"))
-        )
-        needs_node = req.runtime == "node" or (req.runtime == "agent_skill" and (temp / "package.json").exists())
-        if needs_python:
-            venv = temp / ".venv"
-            code, _, err = await _run(["python", "-m", "venv", "--system-site-packages", str(venv)], temp, 120)
-            if code:
-                raise HTTPException(status_code=422, detail=err[-2000:])
-            python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-            if (temp / "pyproject.toml").exists():
-                code, _, err = await _run([str(python), "-m", "pip", "install", "."], temp, 300)
-                if code:
-                    raise HTTPException(status_code=422, detail=err[-2000:])
-            elif (temp / "requirements.txt").exists():
-                code, _, err = await _run(
-                    [str(python), "-m", "pip", "install", "-r", str(temp / "requirements.txt")], temp, 300,
-                )
-                if code:
-                    raise HTTPException(status_code=422, detail=err[-2000:])
-        if needs_node and (temp / "package.json").exists():
-            command = (
-                ["npm", "ci", "--omit=dev"]
-                if (temp / "package-lock.json").exists()
-                else ["npm", "install", "--omit=dev"]
+    await _cleanup_cache()
+    lock = _INSTALL_LOCKS.setdefault(req.package_hash, asyncio.Lock())
+    async with lock:
+        package_dir = (CACHE_ROOT / req.package_hash).resolve()
+        marker = package_dir / ".ready"
+        if marker.exists():
+            _touch_cache_entry(package_dir)
+            metadata_file = package_dir / ".install.json"
+            metadata = json.loads(metadata_file.read_text(encoding="utf-8")) if metadata_file.exists() else {
+                **_runtime_info(), "installed_dependencies": {"python": [], "node": []}, "compatibility_warnings": [],
+            }
+            return package_dir, metadata
+        temp = Path(tempfile.mkdtemp(prefix=f"install-{req.package_hash[:8]}-", dir=CACHE_ROOT))
+        try:
+            _extract(await _load_archive(req), temp)
+            warnings = _validate_runtime_compatibility(temp)
+            needs_python = req.runtime == "python" or (
+                req.runtime == "agent_skill"
+                and any((temp / name).exists() for name in ("requirements.txt", "pyproject.toml"))
             )
-            code, _, err = await _run(command, temp, 300)
-            if code:
-                raise HTTPException(status_code=422, detail=err[-2000:])
-        metadata = {
-            **_runtime_info(),
-            "installed_dependencies": _dependency_declarations(temp),
-            "compatibility_warnings": warnings,
-        }
-        # The cache entry does not exist until the atomically prepared temp
-        # directory is renamed into place. Write the marker inside that temp
-        # directory so a partially installed package can never look ready.
-        (temp / ".install.json").write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
-        (temp / ".ready").write_text("ready", encoding="utf-8")
-        if package_dir.exists():
-            shutil.rmtree(package_dir)
-        temp.replace(package_dir)
-        return package_dir, metadata
-    except Exception:
-        shutil.rmtree(temp, ignore_errors=True)
-        raise
+            needs_node = req.runtime == "node" or (req.runtime == "agent_skill" and (temp / "package.json").exists())
+            if needs_python:
+                venv = temp / ".venv"
+                code, _, err = await _run(["python", "-m", "venv", "--system-site-packages", str(venv)], temp, 120)
+                if code:
+                    raise HTTPException(status_code=422, detail=err[-2000:])
+                python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+                if (temp / "pyproject.toml").exists():
+                    code, _, err = await _run([str(python), "-m", "pip", "install", "."], temp, 300)
+                    if code:
+                        raise HTTPException(status_code=422, detail=err[-2000:])
+                elif (temp / "requirements.txt").exists():
+                    code, _, err = await _run(
+                        [str(python), "-m", "pip", "install", "-r", str(temp / "requirements.txt")], temp, 300,
+                    )
+                    if code:
+                        raise HTTPException(status_code=422, detail=err[-2000:])
+            if needs_node and (temp / "package.json").exists():
+                command = (
+                    ["npm", "ci", "--omit=dev"]
+                    if (temp / "package-lock.json").exists()
+                    else ["npm", "install", "--omit=dev"]
+                )
+                code, _, err = await _run(command, temp, 300)
+                if code:
+                    raise HTTPException(status_code=422, detail=err[-2000:])
+            metadata = {
+                **_runtime_info(),
+                "installed_dependencies": _dependency_declarations(temp),
+                "compatibility_warnings": warnings,
+            }
+            (temp / ".install.json").write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+            (temp / ".ready").write_text("ready", encoding="utf-8")
+            _touch_cache_entry(temp)
+            if package_dir.exists():
+                shutil.rmtree(package_dir)
+            temp.replace(package_dir)
+            return package_dir, metadata
+        except Exception:
+            # Keep failed install state briefly for local diagnosis; the hourly/LRU
+            # cleanup removes it after FAILED_TEMP_RETENTION_SECONDS.
+            try:
+                (temp / ".failed").write_text(str(time.time()), encoding="utf-8")
+            except OSError:
+                pass
+            raise
+        finally:
+            # This finally block runs before ``async with lock`` releases the
+            # lock. Schedule the bounded lock-map cleanup for the next loop
+            # turn, after __aexit__ has completed.
+            def discard_install_lock() -> None:
+                if _INSTALL_LOCKS.get(req.package_hash) is lock and not lock.locked():
+                    _INSTALL_LOCKS.pop(req.package_hash, None)
+
+            asyncio.get_running_loop().call_soon(discard_install_lock)
 
 
 def _safe_name(name: str) -> str:
@@ -457,15 +658,17 @@ async def _materialize_input(item: InputFile, path: Path) -> None:
     elif item.download_url:
         total = 0
         try:
-            async with httpx.AsyncClient(timeout=300, trust_env=False, follow_redirects=False) as client:
-                async with client.stream("GET", item.download_url, headers=item.download_headers) as response:
-                    response.raise_for_status()
-                    with path.open("wb") as handle:
-                        async for chunk in response.aiter_bytes(1024 * 1024):
-                            total += len(chunk)
-                            if total > MAX_OUTPUT_BYTES:
-                                raise HTTPException(status_code=413, detail=f"Input {item.name} exceeds 100MB")
-                            handle.write(chunk)
+            async with (
+                httpx.AsyncClient(timeout=300, trust_env=False, follow_redirects=False) as client,
+                client.stream("GET", item.download_url, headers=item.download_headers) as response,
+            ):
+                response.raise_for_status()
+                with path.open("wb") as handle:
+                    async for chunk in response.aiter_bytes(1024 * 1024):
+                        total += len(chunk)
+                        if total > MAX_OUTPUT_BYTES:
+                            raise HTTPException(status_code=413, detail=f"Input {item.name} exceeds 100MB")
+                        handle.write(chunk)
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=f"Unable to download input {item.name}") from exc
         if item.expected_size is not None and total != item.expected_size:
@@ -535,12 +738,18 @@ def _script(package: Path, requested: str | None, legacy_entrypoint: str | None)
 
 @app.get("/health")
 async def health() -> dict:
+    cache = await _cleanup_cache()
     return {
         "status": "ok", **_runtime_info(),
         "execution_capacity": EXECUTION_CAPACITY.snapshot(),
         "office_capacity": OFFICE_CAPACITY.snapshot(),
         "queue_limit": RUNNER_MAX_QUEUE,
         "queue_wait_seconds": RUNNER_QUEUE_WAIT_SECONDS,
+        "cache": {
+            **cache,
+            "retention_seconds": CACHE_RETENTION_SECONDS,
+            "max_bytes": CACHE_MAX_BYTES,
+        },
     }
 
 
@@ -549,6 +758,29 @@ async def install(req: InstallRequest, x_skill_runner_token: str | None = Header
     _auth(x_skill_runner_token)
     path, metadata = await _ensure_installed(req)
     return {"status": "ready", "package_hash": req.package_hash, "path": str(path), **metadata}
+
+
+@app.post("/cache/cleanup")
+async def cleanup_cache(x_skill_runner_token: str | None = Header(None)) -> dict:
+    _auth(x_skill_runner_token)
+    return {"status": "ok", **await _cleanup_cache()}
+
+
+@app.delete("/cache/{package_hash}")
+async def delete_cache_entry(
+    package_hash: str,
+    x_skill_runner_token: str | None = Header(None),
+) -> dict:
+    _auth(x_skill_runner_token)
+    if not re.fullmatch(r"[0-9a-f]{64}", package_hash):
+        raise HTTPException(status_code=422, detail="Invalid package hash")
+    async with _CACHE_LOCK:
+        if package_hash in _ACTIVE_PACKAGE_HASHES:
+            raise HTTPException(status_code=409, detail="Skill package is currently executing")
+        path = (CACHE_ROOT / package_hash).resolve()
+        removed_bytes = _cache_entry_size(path) if path.exists() else 0
+        shutil.rmtree(path, ignore_errors=True)
+    return {"status": "deleted", "package_hash": package_hash, "removed_bytes": removed_bytes}
 
 
 async def _execute_builtin_tool(
@@ -619,20 +851,21 @@ async def execute_builtin_tool(
 ) -> dict:
     _auth(x_skill_runner_token)
     if req.tool_kind in {"spreadsheet", "document", "presentation"}:
-        async with OFFICE_CAPACITY.slot():
-            async with EXECUTION_CAPACITY.slot():
-                return await _execute_builtin_tool(req)
+        async with OFFICE_CAPACITY.slot(), EXECUTION_CAPACITY.slot():
+            return await _execute_builtin_tool(req)
     async with EXECUTION_CAPACITY.slot():
         return await _execute_builtin_tool(req)
 
 
 async def _execute(req: ExecuteRequest) -> dict:
-    package, _ = await _ensure_installed(req)
-    if req.runtime not in {"python", "node", "agent_skill"}:
-        raise HTTPException(status_code=422, detail="Skill is not executable")
-    entrypoint, language = _script(package, req.script_path, req.entrypoint)
-    run_root = Path(tempfile.mkdtemp(prefix=f"run-{req.execution_id}-"))
+    _ACTIVE_PACKAGE_HASHES.add(req.package_hash)
     try:
+        package, _ = await _ensure_installed(req)
+        if req.runtime not in {"python", "node", "agent_skill"}:
+            raise HTTPException(status_code=422, detail="Skill is not executable")
+        entrypoint, language = _script(package, req.script_path, req.entrypoint)
+        run_root = Path(tempfile.mkdtemp(prefix=f"run-{req.execution_id}-"))
+        _touch_cache_entry(package)
         skill_dir, input_dir, output_dir = run_root / "skill", run_root / "input", run_root / "output"
         shutil.copytree(package, skill_dir, ignore=shutil.ignore_patterns(".venv", "node_modules", ".ready"))
         input_dir.mkdir()
@@ -692,7 +925,9 @@ async def _execute(req: ExecuteRequest) -> dict:
             outputs.append(await _serialize_output(path, path.relative_to(output_dir).as_posix()))
         return {"status": "success", "stdout": stdout[-4000:], "outputs": outputs}
     finally:
-        shutil.rmtree(run_root, ignore_errors=True)
+        if "run_root" in locals():
+            _remove_tree(run_root)
+        _ACTIVE_PACKAGE_HASHES.discard(req.package_hash)
 
 
 @app.post("/execute")

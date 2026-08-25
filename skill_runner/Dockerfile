@@ -18,6 +18,21 @@ ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     SKILL_BASE_NODE_MODULES=/opt/skill-node/node_modules \
     NODE_PATH=/opt/skill-node/node_modules
 
+# The Runner owns Office conversion for executable Skills. Keep the base
+# capability in the image so an uploaded Skill does not need (and is not
+# allowed) to install system packages at runtime. CJK fonts prevent Chinese
+# documents from rendering as empty boxes during headless conversion.
+RUN sed -i 's|deb.debian.org/debian|mirrors.aliyun.com/debian|g; s|security.debian.org/debian-security|mirrors.aliyun.com/debian-security|g' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=5 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        libreoffice-core-nogui \
+        libreoffice-writer-nogui \
+        libreoffice-calc-nogui \
+        libreoffice-impress-nogui \
+        fonts-wqy-microhei \
+    && rm -rf /var/lib/apt/lists/*
+
 # Node comes from the official, fixed Node 20 LTS image instead of Debian's
 # moving nodejs package.  Both stages use Debian bookworm, so the binary and
 # its bundled npm installation share the same ABI.
@@ -39,6 +54,14 @@ RUN mkdir -p /opt/skill-node \
     && npm cache clean --force
 COPY app.py .
 COPY builtin_tools.py .
+
+# User supplied scripts never run as root. Named volumes mounted at /cache
+# inherit this directory ownership on first creation.
+RUN groupadd --gid 10001 skillrunner \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp/skill-home skillrunner \
+    && mkdir -p /cache /tmp/skill-home \
+    && chown -R skillrunner:skillrunner /cache /tmp/skill-home /app
+USER 10001:10001
 
 EXPOSE 8020
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8020"]

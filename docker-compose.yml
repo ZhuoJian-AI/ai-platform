@@ -62,10 +62,23 @@ services:
       SKILL_RUNNER_MAX_QUEUE: ${SKILL_RUNNER_MAX_QUEUE:-100}
       SKILL_RUNNER_QUEUE_WAIT_SECONDS: ${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}
       SKILL_RUNNER_OFFICE_CONCURRENCY: ${SKILL_RUNNER_OFFICE_CONCURRENCY:-1}
+      SKILL_PACKAGE_MAX_BYTES: ${SKILL_PACKAGE_MAX_BYTES:-104857600}
+      SKILL_PACKAGE_EXPANDED_MAX_BYTES: ${SKILL_PACKAGE_EXPANDED_MAX_BYTES:-524288000}
+      SKILL_PACKAGE_MAX_FILES: ${SKILL_PACKAGE_MAX_FILES:-1000}
+      SKILL_CACHE_RETENTION_SECONDS: ${SKILL_CACHE_RETENTION_SECONDS:-604800}
+      SKILL_CACHE_MAX_BYTES: ${SKILL_CACHE_MAX_BYTES:-10737418240}
+      SKILL_FAILED_TEMP_RETENTION_SECONDS: ${SKILL_FAILED_TEMP_RETENTION_SECONDS:-3600}
     ports:
       - "127.0.0.1:8020:8020"
     volumes:
       - skillcache:/cache
+    read_only: true
+    tmpfs:
+      - /tmp:size=1073741824,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/health', timeout=3)"]
       interval: 5s

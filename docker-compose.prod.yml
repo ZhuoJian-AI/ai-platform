@@ -105,3 +105,33 @@ services:
     tmpfs:
       - /tmp:size=1073741824,mode=1777
     restart: unless-stopped
+
+  storage-lifecycle:
+    build: ./llm_router/backend
+    container_name: ai_infra_storage_lifecycle
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY}
+      DATABASE_URL: postgresql+asyncpg://ai_infra:ai_infra@postgres:5432/ai_infra
+      REDIS_URL: redis://redis:6379/0
+      WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-false}"
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-}"
+      STORAGE_PROJECT_TOKEN: "${STORAGE_PROJECT_TOKEN:-}"
+      STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-}"
+      STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-}"
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      STORAGE_LIFECYCLE_INTERVAL_SECONDS: "${STORAGE_LIFECYCLE_INTERVAL_SECONDS:-3600}"
+      SKILL_RUNNER_URL: http://skill-runner:8020
+      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:-skill-runner-local-dev-token}
+    command: ["python", "-m", "app.workers.storage_lifecycle"]
+    depends_on:
+      backend:
+        condition: service_healthy
+      skill-runner:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 384M }
