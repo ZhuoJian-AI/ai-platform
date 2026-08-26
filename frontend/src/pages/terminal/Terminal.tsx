@@ -968,6 +968,23 @@ export default function Terminal() {
             </div>
 
             <nav style={{ padding: '4px 8px' }}>
+              {terminalApplications.length > 0 && (
+                <div style={{ padding: '6px 10px 4px', fontSize: 11, color: '#9ca3af', fontWeight: 600, letterSpacing: .4 }}>企业应用</div>
+              )}
+              {terminalApplications.map((application) => (
+                <div
+                  key={application.id}
+                  onClick={() => { setSelectedApplicationId(application.id); setView('application'); }}
+                  style={navItemStyle(view === 'application' && selectedApplicationId === application.id)}
+                >
+                  {application.icon_url
+                    ? <img src={application.icon_url} alt="" style={{ width: 17, height: 17, borderRadius: 5, objectFit: 'cover' }} />
+                    : <AppstoreOutlined style={{ fontSize: 16 }} />}
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{application.name}</span>
+                  {application.assistant_enabled && <Tag color="purple" bordered={false} style={{ margin: '0 0 0 auto', fontSize: 9, lineHeight: '17px' }}>AI</Tag>}
+                </div>
+              ))}
+              {terminalApplications.length > 0 && <div style={{ height: 1, background: '#e5e7eb', margin: '8px 10px' }} />}
               <div onClick={() => setView('workspaces')} style={navItemStyle(view === 'workspaces')}>
                 <FolderOpenOutlined style={{ fontSize: 16 }} />
                 <span>工作空间</span>
@@ -984,22 +1001,6 @@ export default function Terminal() {
                 <ThunderboltOutlined style={{ fontSize: 16 }} />
                 <span>技能</span>
               </div>
-              {terminalApplications.length > 0 && (
-                <div style={{ padding: '12px 10px 4px', fontSize: 11, color: '#9ca3af', fontWeight: 600, letterSpacing: .4 }}>企业应用</div>
-              )}
-              {terminalApplications.map((application) => (
-                <div
-                  key={application.id}
-                  onClick={() => { setSelectedApplicationId(application.id); setView('application'); }}
-                  style={navItemStyle(view === 'application' && selectedApplicationId === application.id)}
-                >
-                  {application.icon_url
-                    ? <img src={application.icon_url} alt="" style={{ width: 17, height: 17, borderRadius: 5, objectFit: 'cover' }} />
-                    : <AppstoreOutlined style={{ fontSize: 16 }} />}
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{application.name}</span>
-                  {application.assistant_enabled && <Tag color="purple" bordered={false} style={{ margin: '0 0 0 auto', fontSize: 9, lineHeight: '17px' }}>AI</Tag>}
-                </div>
-              ))}
             </nav>
 
             {/* 任务列表 */}
