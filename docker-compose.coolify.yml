@@ -309,7 +309,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   frontend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:cfdedce540290ccf5bdacdc4c2b9b6e71d8e6c3fd1c13b135c3da59b13f5fd58
+    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:88d6e5a715a6b6dd3a2a266742548a88ba0eb1b6833358df48e1c4958e02b161
     expose:
       - "80"
     depends_on:
