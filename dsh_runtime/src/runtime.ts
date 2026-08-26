@@ -299,6 +299,18 @@ export class DshRuntime {
             signal: exec.signal,
             runId: active.request.run_id,
             taskId: active.request.task_id,
+            invokePlatformTool: async (name, bridgeArgs) => {
+              const result = await executePlatformTool({
+                backendUrl: this.options.backendUrl,
+                serviceToken: this.options.serviceToken,
+                runToken: active.request.run_token,
+                name,
+                arguments: bridgeArgs,
+                signal: exec.signal,
+              })
+              if (!result.ok) throw new Error(result.content || `platform bridge tool ${name} failed`)
+              return result.value ?? { ok: true, content: result.content }
+            },
           })
         }
         const result = await executePlatformTool({

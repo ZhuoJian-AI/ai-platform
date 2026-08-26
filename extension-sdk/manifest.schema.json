@@ -21,6 +21,7 @@
     "dsh_version": { "type": "string" },
     "config_schema": { "type": "object" },
     "default_config": { "type": "object" },
+    "platform_adapted": { "type": "boolean", "default": false },
     "health_check": { "type": ["string", "object", "null"] },
     "smoke_test": { "type": ["string", "object", "null"] },
     "tools": {

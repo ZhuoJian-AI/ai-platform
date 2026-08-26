@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
-import { verifyRelease, type ReleaseManifest } from '../extensions.js'
+import { systemToolFactoryInput, verifyRelease, type ReleaseManifest } from '../extensions.js'
 
 function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`
@@ -80,4 +80,23 @@ test('rejects a release built for a different fixed Node runtime', () => {
   const manifest = baseline()
   manifest.node_version = '20.18.0'
   assert.throws(() => verifyRelease(request(manifest)), /requires Node 20.18.0/)
+})
+
+test('system tool factory receives config and a run-scoped platform bridge', async () => {
+  const input = systemToolFactoryInput('example-tool', { endpoint: 'https://example.test' })
+  assert.equal(input.endpoint, 'https://example.test')
+  assert.deepEqual(input.config, { endpoint: 'https://example.test' })
+  const bridge = input.platformBridge as { invoke(name: string, args: unknown, context: unknown): Promise<unknown> }
+  const calls: unknown[] = []
+  const result = await bridge.invoke('workspace_list_files', { path: '/' }, {
+    signal: new AbortController().signal,
+    runId: 'run-1',
+    taskId: 'task-1',
+    invokePlatformTool: async (name: string, args: unknown) => {
+      calls.push([name, args])
+      return { ok: true }
+    },
+  })
+  assert.deepEqual(result, { ok: true })
+  assert.deepEqual(calls, [['workspace_list_files', { path: '/' }]])
 })

@@ -26,12 +26,37 @@ export interface ReleaseRequest {
 
 export type ExternalToolHandler = (
   args: unknown,
-  context: { signal: AbortSignal; runId: string; taskId: string },
+  context: ExternalToolContext,
 ) => unknown | Promise<unknown>
+
+export interface ExternalToolContext {
+  signal: AbortSignal
+  runId: string
+  taskId: string
+  invokePlatformTool(name: string, args: unknown): Promise<unknown>
+}
 
 export interface LoadedExtensions {
   items: Array<{ slug: string; version: string; checksum: string; checks?: Record<string, unknown> }>
   tools: Map<string, ExternalToolHandler>
+}
+
+export function systemToolFactoryInput(
+  slug: string,
+  config: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...config,
+    config,
+    platformBridge: {
+      invoke: async (name: string, args: unknown, context: ExternalToolContext): Promise<unknown> => {
+        if (!context || typeof context.invokePlatformTool !== 'function') {
+          throw new Error(`system tool ${slug} invoked the platform bridge outside a run`)
+        }
+        return await context.invokePlatformTool(name, args)
+      },
+    },
+  }
 }
 
 async function runDeclaredCheck(
@@ -200,8 +225,9 @@ export async function loadExternalExtensions(
     const module = await import(`${pathToFileURL(entry).href}?sha=${String(item.artifact_sha256)}`) as Record<string, unknown>
     if (item.type === 'system_tool') {
       const factory = module.createTools ?? module[String(item.export_name ?? 'default')]
+      const config = (item.default_config ?? {}) as Record<string, unknown>
       const produced = typeof factory === 'function'
-        ? await factory(item.default_config ?? {})
+        ? await factory(systemToolFactoryInput(String(item.slug), config))
         : module.tools ?? factory
       const handlers = produced && typeof produced === 'object'
         ? produced as Record<string, unknown>
