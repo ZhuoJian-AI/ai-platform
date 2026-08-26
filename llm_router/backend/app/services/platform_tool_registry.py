@@ -60,6 +60,10 @@ async def active_external_tool_defs(
     for extension in (release.manifest or {}).get("external_extensions") or []:
         if extension.get("enabled", True) is False or extension.get("type") != "system_tool":
             continue
+        if organization_id in {
+            str(value) for value in (extension.get("disabled_organization_ids") or [])
+        }:
+            continue
         for tool in extension.get("tools") or []:
             modes = set(tool.get("allowed_modes") or ["craft"])
             organizations = set(str(value) for value in (tool.get("allowed_organization_ids") or []))

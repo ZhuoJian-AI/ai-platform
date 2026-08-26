@@ -12,7 +12,7 @@ from app.models.platform_extension import (
     PlatformExtensionRelease,
     PlatformExtensionSource,
 )
-from app.services import platform_extension_discovery, platform_extension_service
+from app.services import platform_extension_discovery, platform_extension_service, platform_tool_registry
 
 
 @pytest.mark.asyncio
@@ -137,8 +137,10 @@ async def test_reviewed_coordinator_is_snapshotted_and_replaces_builtin(
             "type": "runtime_plugin",
             "entry": "dist/index.js",
             "provides": ["coordinator"],
+            "platform_adapted": True,
         },
     )
+    source.build_report = {"tests": "passed", "codex_adaptation": {"commit": "abc123"}}
     response = await client.post(
         "/api/v1/platform/extensions/releases",
         json={
@@ -466,3 +468,222 @@ async def test_builder_artifact_signing_rejects_invalid_internal_token(client: A
         },
     )
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_system_tool_one_click_install_persists_config_and_scope(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    await client.get("/api/v1/platform/extensions/overview")
+    source = await _approved_source(
+        db_session,
+        {
+            "name": "Reviewed Lookup",
+            "slug": "reviewed-lookup",
+            "version": "1.0.0",
+            "type": "system_tool",
+            "entry": "dist/index.js",
+            "config_schema": {
+                "type": "object",
+                "required": ["endpoint"],
+                "properties": {"endpoint": {"type": "string"}},
+                "additionalProperties": False,
+            },
+            "tools": [{
+                "name": "reviewed_lookup",
+                "description": "Lookup reviewed data",
+                "input_schema": {"type": "object", "properties": {}},
+                "risk_level": "low",
+                "required_platform_capabilities": [],
+                "side_effects": False,
+            }],
+        },
+    )
+
+    async def signed(_ref):
+        return {"url": "https://example.test/artifact.tar.gz", "headers": {}}
+
+    async def validate(_release_id, _manifest, _checksum):
+        return {"ok": True, "checks": {"health": "ok"}}
+
+    async def activate(release_id, _manifest, checksum):
+        return {"ok": True, "release_id": release_id, "checksum": checksum}
+
+    monkeypatch.setattr(platform_extension_service.storage_gateway_service, "get_signed_download", signed)
+    monkeypatch.setattr(platform_extension_service.dsh_client, "validate_release", validate)
+    monkeypatch.setattr(platform_extension_service.dsh_client, "activate_release", activate)
+    blocked_org = "11111111-1111-1111-1111-111111111111"
+    response = await client.post(
+        f"/api/v1/platform/extensions/sources/{source.id}/install",
+        json={"config": {"endpoint": "https://api.example.test"}, "disabled_organization_ids": [blocked_org]},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "active"
+    extension = payload["manifest"]["external_extensions"][0]
+    assert extension["default_config"] == {"endpoint": "https://api.example.test"}
+    assert extension["disabled_organization_ids"] == [blocked_org]
+
+
+@pytest.mark.asyncio
+async def test_system_tool_runtime_scope_disable_and_rollback(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    monkeypatch,
+):
+    await client.get("/api/v1/platform/extensions/overview")
+    source = await _approved_source(
+        db_session,
+        {
+            "name": "Scoped Lookup",
+            "slug": "scoped-lookup",
+            "version": "1.0.0",
+            "type": "system_tool",
+            "entry": "dist/index.js",
+            "config_schema": {"type": "object", "properties": {}},
+            "tools": [{
+                "name": "scoped_lookup",
+                "description": "Lookup data inside the selected organization scope",
+                "input_schema": {"type": "object", "properties": {}},
+                "risk_level": "low",
+                "required_platform_capabilities": [],
+                "side_effects": False,
+                "allowed_modes": ["craft"],
+                "required_user_roles": ["member"],
+            }],
+        },
+    )
+
+    async def signed(_ref):
+        return {"url": "https://example.test/artifact.tar.gz", "headers": {}}
+
+    async def validate(_release_id, _manifest, _checksum):
+        return {"ok": True, "checks": {"health": "ok"}}
+
+    async def activate(release_id, _manifest, checksum):
+        return {"ok": True, "release_id": release_id, "checksum": checksum}
+
+    monkeypatch.setattr(platform_extension_service.storage_gateway_service, "get_signed_download", signed)
+    monkeypatch.setattr(platform_extension_service.dsh_client, "validate_release", validate)
+    monkeypatch.setattr(platform_extension_service.dsh_client, "activate_release", activate)
+    blocked_org = "11111111-1111-1111-1111-111111111111"
+    allowed_org = "22222222-2222-2222-2222-222222222222"
+
+    installed = await client.post(
+        f"/api/v1/platform/extensions/sources/{source.id}/install",
+        json={"config": {}, "disabled_organization_ids": [blocked_org]},
+    )
+    assert installed.status_code == 200
+    assert await platform_tool_registry.active_external_tool_defs(
+        db_session, organization_id=blocked_org, user_role="member", exec_mode="craft"
+    ) == []
+    assert await platform_tool_registry.active_external_tool_defs(
+        db_session, organization_id=allowed_org, user_role="member", exec_mode="ask"
+    ) == []
+    allowed = await platform_tool_registry.active_external_tool_defs(
+        db_session, organization_id=allowed_org, user_role="member", exec_mode="craft"
+    )
+    assert allowed[0]["function"]["name"] == "scoped_lookup"
+
+    disabled = await client.post(f"/api/v1/platform/extensions/sources/{source.id}/disable")
+    assert disabled.status_code == 200
+    assert await platform_tool_registry.active_external_tool_defs(
+        db_session, organization_id=allowed_org, user_role="member", exec_mode="craft"
+    ) == []
+
+    restored = await client.post(f"/api/v1/platform/extensions/sources/{source.id}/rollback")
+    assert restored.status_code == 200
+    restored_tools = await platform_tool_registry.active_external_tool_defs(
+        db_session, organization_id=allowed_org, user_role="member", exec_mode="craft"
+    )
+    assert restored_tools[0]["function"]["name"] == "scoped_lookup"
+
+
+@pytest.mark.asyncio
+async def test_system_tool_config_is_validated_before_candidate_creation(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    source = await _approved_source(
+        db_session,
+        {
+            "name": "Configured Tool",
+            "slug": "configured-tool",
+            "version": "1.0.0",
+            "type": "system_tool",
+            "entry": "dist/index.js",
+            "config_schema": {
+                "type": "object",
+                "required": ["api_key"],
+                "properties": {"api_key": {"type": "string"}},
+            },
+            "tools": [{
+                "name": "configured_lookup", "description": "lookup",
+                "input_schema": {"type": "object", "properties": {}},
+                "risk_level": "low", "required_platform_capabilities": [], "side_effects": False,
+            }],
+        },
+    )
+    response = await client.post(
+        f"/api/v1/platform/extensions/sources/{source.id}/test",
+        json={"config": {}, "disabled_organization_ids": []},
+    )
+    assert response.status_code == 422
+    assert "api_key is required" in str(response.json()["detail"])
+
+
+def test_system_tool_config_validation_keeps_boolean_and_number_types_distinct():
+    errors = platform_extension_service.validate_extension_config(
+        {
+            "type": "object",
+            "properties": {
+                "retries": {"type": "integer"},
+                "enabled": {"type": "boolean"},
+            },
+        },
+        {"retries": True, "enabled": 1},
+    )
+    assert "retries must be integer" in errors
+    assert "enabled must be boolean" in errors
+
+
+@pytest.mark.asyncio
+async def test_runtime_candidate_requires_codex_adaptation_marker(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    await client.get("/api/v1/platform/extensions/overview")
+    source = await _approved_source(
+        db_session,
+        {
+            "name": "Unadapted Loop", "slug": "unadapted-loop", "version": "1.0.0",
+            "type": "runtime_plugin", "entry": "dist/index.js", "provides": ["coordinator"],
+        },
+    )
+    response = await client.post(
+        "/api/v1/platform/extensions/releases",
+        json={"name": "must be rejected", "source_ids": [str(source.id)], "config": {}},
+    )
+    assert response.status_code == 409
+    assert "Codex platform adaptation" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_source_exports_complete_codex_adaptation_package(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    source = await _approved_source(
+        db_session,
+        {
+            "name": "Candidate Loop", "slug": "candidate-loop", "version": "1.0.0",
+            "type": "runtime_plugin", "entry": "dist/index.js", "provides": ["coordinator"],
+        },
+    )
+    response = await client.get(f"/api/v1/platform/extensions/sources/{source.id}/adaptation-package")
+    assert response.status_code == 200
+    assert "Runtime Codex 适配任务包" in response.text
+    assert "dsh_runtime/src/runtime.ts" in response.text
+    assert "回滚" in response.text

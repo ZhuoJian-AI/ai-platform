@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import re
 from collections import Counter
 from urllib.parse import urlparse
@@ -22,6 +23,7 @@ from app.models.platform_extension import (
     PlatformExtensionReleaseEvent,
     PlatformExtensionSource,
 )
+from app.models.agent_run import AgentRun, AgentRunEvent
 from app.schemas.platform_extension import (
     ExtensionApproveRequest,
     ExtensionArtifactSign,
@@ -35,6 +37,8 @@ from app.schemas.platform_extension import (
     ExtensionReleaseEventRead,
     ExtensionReleaseRead,
     ExtensionSourceRead,
+    ExtensionToolInstallRequest,
+    ExtensionToolExecutionRead,
 )
 from app.services import platform_extension_service, storage_gateway_service
 from app.services.platform_extension_discovery import sync_discovery_catalog
@@ -346,6 +350,185 @@ async def source_detail(
     db: AsyncSession = Depends(get_db),
 ):
     return await _source(db, source_id)
+
+
+def _adaptation_package_markdown(source: PlatformExtensionSource) -> str:
+    manifest = source.manifest or {}
+    build = source.build_report or {}
+    compatibility = source.compatibility or {}
+    return f"""# AI Platform Runtime Codex 适配任务包
+
+## 固定输入
+
+- 来源类型：{source.source_type}
+- 来源：{source.locator}
+- 请求版本：{source.requested_version or '无'}
+- 解析版本：{source.resolved_version or '无'}
+- Commit：{source.commit_sha or '无'}
+- SHA-256：{source.artifact_sha256 or '构建尚未成功'}
+- 当前平台：DSH 0.1.0-rc.5 / Node 22.19.0
+
+## 自动识别结果
+
+```json
+{json.dumps(manifest, ensure_ascii=False, indent=2)}
+```
+
+## 隔离构建与兼容报告
+
+```json
+{json.dumps({'build_report': build, 'compatibility': compatibility, 'error': source.error}, ensure_ascii=False, indent=2)}
+```
+
+## 平台保护边界
+
+1. 不得绕过 FastAPI 的组织、用户、工作空间和企业接口鉴权。
+2. LLM Runtime、Session Store、System Prompt、Tool Runtime、Agent Registry 必须保留。
+3. 协调器必须始终恰好一个；替换 Agent Loop 必须保持现有 SSE、取消、8 步预算和执行轨迹契约。
+4. 插件不得直接持有 PostgreSQL、Redis、OSS、模型或 DSH 长期密钥。
+5. 平台工具通过内部 Tool Bridge 调用；不得覆盖受保护的平台工具名。
+
+## Codex 实施范围
+
+- 建议分支：`feat/adapt-{manifest.get('slug') or 'runtime-extension'}`
+- 重点模块：`dsh_runtime/src/extensions.ts`、`dsh_runtime/src/runtime.ts`、`extension-sdk/`
+- 补齐 `ai-platform.extension.json`、固定锁文件、适配器、healthCheck、smokeTest 和契约测试。
+- 将清单标记 `platform_adapted: true`，并在构建报告记录 `codex_adaptation.commit`。
+
+## 验收与回滚
+
+- 候选 Context 可加载、调用、取消、释放并重复装配。
+- Backend、DSH、Builder 与前端构建全绿。
+- 发布失败不得改变当前活动发布；回滚使用上一不可变发布快照。
+"""
+
+
+@router.get("/sources/{source_id}/adaptation-package")
+async def source_adaptation_package(
+    source_id: UUID,
+    _: CurrentAdmin = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await _source(db, source_id)
+    filename = re.sub(r"[^a-zA-Z0-9._-]+", "-", str((row.manifest or {}).get("slug") or row.id))
+    return Response(
+        _adaptation_package_markdown(row),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="adapt-{filename}.md"'},
+    )
+
+
+@router.post("/sources/{source_id}/test", response_model=ExtensionReleaseRead)
+async def test_system_tool(
+    source_id: UUID,
+    data: ExtensionToolInstallRequest,
+    auth: CurrentAdmin = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await platform_extension_service.prepare_system_tool_release(
+        db,
+        await _source(db, source_id),
+        admin_id=auth.id,
+        config=data.config,
+        disabled_organization_ids=data.disabled_organization_ids,
+        publish=False,
+    )
+
+
+@router.post("/sources/{source_id}/install", response_model=ExtensionReleaseRead)
+async def install_system_tool(
+    source_id: UUID,
+    data: ExtensionToolInstallRequest,
+    auth: CurrentAdmin = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await platform_extension_service.prepare_system_tool_release(
+        db,
+        await _source(db, source_id),
+        admin_id=auth.id,
+        config=data.config,
+        disabled_organization_ids=data.disabled_organization_ids,
+        publish=True,
+    )
+    if row.status != "active":
+        raise HTTPException(status_code=502, detail=row.error or "System tool candidate validation failed")
+    return row
+
+
+@router.post("/sources/{source_id}/disable", response_model=ExtensionReleaseRead)
+async def disable_system_tool(
+    source_id: UUID,
+    auth: CurrentAdmin = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await platform_extension_service.disable_system_tool(
+        db, await _source(db, source_id), admin_id=auth.id
+    )
+    if row.status != "active":
+        raise HTTPException(status_code=502, detail=row.error or "System tool disable failed")
+    return row
+
+
+@router.post("/sources/{source_id}/rollback", response_model=ExtensionReleaseRead)
+async def rollback_system_tool(
+    source_id: UUID,
+    auth: CurrentAdmin = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await platform_extension_service.rollback_system_tool(
+        db, await _source(db, source_id), admin_id=auth.id
+    )
+    if row.status != "active":
+        raise HTTPException(status_code=502, detail=row.error or "System tool rollback failed")
+    return row
+
+
+@router.get("/sources/{source_id}/executions", response_model=list[ExtensionToolExecutionRead])
+async def system_tool_executions(
+    source_id: UUID,
+    limit: int = Query(100, ge=1, le=500),
+    _: CurrentAdmin = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return real, persisted DSH results for the tools exported by a source."""
+
+    source = await _source(db, source_id)
+    if (source.manifest or {}).get("type") != "system_tool":
+        raise HTTPException(status_code=409, detail="Execution history is only available for system tools")
+    tool_names = sorted({
+        str(tool.get("name"))
+        for tool in (source.manifest or {}).get("tools") or []
+        if tool.get("name")
+    })
+    if not tool_names:
+        return []
+    rows = (
+        await db.execute(
+            select(AgentRunEvent, AgentRun)
+            .join(AgentRun, AgentRun.id == AgentRunEvent.run_id)
+            .where(
+                AgentRunEvent.payload["type"].astext == "tool_result",
+                AgentRunEvent.payload["name"].astext.in_(tool_names),
+            )
+            .order_by(AgentRunEvent.created_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    return [
+        ExtensionToolExecutionRead(
+            run_id=run.id,
+            organization_id=str(run.organization_id),
+            task_id=run.task_id,
+            user_id=run.user_id,
+            exec_mode=run.exec_mode,
+            run_status=run.status,
+            tool_name=str(event.payload.get("name") or ""),
+            ok=bool(event.payload.get("ok")),
+            result_preview=str(event.payload.get("content") or "")[:1000],
+            created_at=event.created_at,
+        )
+        for event, run in rows
+    ]
 
 
 @router.post("/sources/{source_id}/retry", response_model=ExtensionSourceRead, status_code=202)

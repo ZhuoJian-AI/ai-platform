@@ -602,11 +602,23 @@ async def create_release(
 ) -> PlatformExtensionRelease:
     active = await ensure_baseline(db, admin_id)
     manifest = json.loads(json.dumps(active.manifest))
+    active_extensions_by_source = {
+        str(item.get("source_id")): item
+        for item in (active.manifest or {}).get("external_extensions") or []
+        if item.get("source_id")
+    }
+    active_extensions_by_slug = {
+        str(item.get("slug")): item
+        for item in (active.manifest or {}).get("external_extensions") or []
+        if item.get("slug")
+    }
     # A candidate is a complete immutable snapshot. Rebuild external entries
     # from the explicit selection so removing a source really uninstalls it.
     manifest["external_extensions"] = []
     disabled = set(config.get("disabled_plugins") or [])
     disabled_tool_groups = set(config.get("disabled_tool_groups") or [])
+    extension_configs = config.get("extension_configs") or {}
+    extension_disabled_organizations = config.get("extension_disabled_organization_ids") or {}
     for plugin in manifest.get("plugins", []):
         if plugin.get("slug") in disabled:
             if plugin.get("required") and "coordinator" not in (plugin.get("capabilities") or []):
@@ -630,6 +642,27 @@ async def create_release(
                 raise HTTPException(status_code=409, detail=f"Source {source.id} needs an adapter")
             if not source.artifact_ref or not source.artifact_sha256:
                 raise HTTPException(status_code=409, detail=f"Source {source.id} has no verified build artifact")
+            if kind == "runtime_plugin" and not (
+                (source.manifest or {}).get("platform_adapted") is True
+                and (source.build_report or {}).get("codex_adaptation")
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Runtime source {source.id} requires a reviewed Codex platform adaptation",
+                )
+            active_extension = active_extensions_by_source.get(str(source.id)) or active_extensions_by_slug.get(
+                str((source.manifest or {}).get("slug") or "")
+            ) or {}
+            source_config = extension_configs.get(str(source.id), extension_configs.get(str(
+                (source.manifest or {}).get("slug") or ""
+            ), active_extension.get("default_config", (source.manifest or {}).get("default_config") or {})))
+            disabled_orgs = extension_disabled_organizations.get(
+                str(source.id),
+                extension_disabled_organizations.get(
+                    str((source.manifest or {}).get("slug") or ""),
+                    active_extension.get("disabled_organization_ids") or [],
+                ),
+            )
             manifest.setdefault("external_extensions", []).append(
                 {
                     **source.manifest,
@@ -638,6 +671,8 @@ async def create_release(
                     "artifact_sha256": source.artifact_sha256,
                     "enabled": True,
                     "capabilities": (source.manifest or {}).get("provides") or [],
+                    "default_config": source_config,
+                    "disabled_organization_ids": [str(value) for value in disabled_orgs],
                 }
             )
     enabled_extensions = [item for item in manifest.get("external_extensions", []) if item.get("enabled", True)]
@@ -820,6 +855,7 @@ async def publish_release(
             db, event_type="publish_completed", actor_admin_id=admin_id, release_id=release.id, details=result
         )
         await db.commit()
+        await db.refresh(release)
     except Exception as exc:
         await db.rollback()
         release = await db.get(PlatformExtensionRelease, release_id)
@@ -855,6 +891,7 @@ async def publish_release(
                 details={"restored_release_id": previous_snapshot[0]},
             )
         await db.commit()
+        await db.refresh(release)
     return release
 
 
@@ -886,6 +923,162 @@ async def rollback_release(
         details={"target_release_id": str(target.id)},
     )
     return copy
+
+
+def validate_extension_config(schema: dict, value: dict) -> list[str]:
+    """Validate the useful, deterministic subset of JSON Schema used by tool settings.
+
+    Full JSON Schema execution is intentionally not delegated to plugin code. The
+    builder owns code checks; this validator protects the settings UI/API contract.
+    """
+    errors: list[str] = []
+    if not schema:
+        return errors
+    if schema.get("type", "object") != "object":
+        return ["config_schema root must be an object"]
+    properties = schema.get("properties") or {}
+    for name in schema.get("required") or []:
+        if name not in value or value[name] is None or value[name] == "":
+            errors.append(f"{name} is required")
+    expected_types = {
+        "string": str,
+        "integer": int,
+        "number": (int, float),
+        "boolean": bool,
+        "object": dict,
+        "array": list,
+    }
+    for name, item in value.items():
+        declaration = properties.get(name)
+        if not declaration:
+            if schema.get("additionalProperties") is False:
+                errors.append(f"{name} is not allowed")
+            continue
+        declared_type = declaration.get("type")
+        expected = expected_types.get(declared_type)
+        type_matches = isinstance(item, expected) if expected else True
+        # bool subclasses int in Python, but JSON Schema keeps them distinct.
+        if declared_type in {"integer", "number"} and isinstance(item, bool):
+            type_matches = False
+        if not type_matches:
+            errors.append(f"{name} must be {declaration.get('type')}")
+    return errors
+
+
+def _active_source_ids(active: PlatformExtensionRelease, *, excluding_slug: str | None = None) -> list[UUID]:
+    values: list[UUID] = []
+    for item in (active.manifest or {}).get("external_extensions") or []:
+        if item.get("enabled", True) is False or item.get("slug") == excluding_slug:
+            continue
+        try:
+            values.append(UUID(str(item["source_id"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return values
+
+
+async def prepare_system_tool_release(
+    db: AsyncSession,
+    source: PlatformExtensionSource,
+    *,
+    admin_id: int,
+    config: dict,
+    disabled_organization_ids: list[UUID],
+    publish: bool,
+) -> PlatformExtensionRelease:
+    """Validate or install one reviewed system tool as a complete snapshot.
+
+    The previous active release remains untouched until candidate validation and
+    Runtime activation both succeed.
+    """
+    manifest = source.manifest or {}
+    if manifest.get("type") != "system_tool":
+        raise HTTPException(status_code=409, detail="Only system_tool extensions support one-click installation")
+    if source.status not in {"review_required", "ready"}:
+        raise HTTPException(status_code=409, detail="The system tool must pass isolated build first")
+    config_errors = validate_extension_config(manifest.get("config_schema") or {}, config)
+    if config_errors:
+        raise HTTPException(status_code=422, detail={"message": "Invalid system tool config", "errors": config_errors})
+    # Super-admin one-click installation is the review decision for system tools.
+    if source.review_status != "approved":
+        await approve_source(db, source, admin_id=admin_id, approved=True, note="system tool one-click review")
+    active = await ensure_baseline(db, admin_id)
+    active_config = (active.manifest or {}).get("release_config") or {}
+    existing_configs = active_config.get("extension_configs") or {}
+    existing_disabled = active_config.get("extension_disabled_organization_ids") or {}
+    slug = str(manifest.get("slug") or "")
+    source_ids = [*_active_source_ids(active, excluding_slug=slug), source.id]
+    release = await create_release(
+        db,
+        name=f"{'安装' if publish else '连接测试'}系统工具：{manifest.get('name') or slug}",
+        source_ids=source_ids,
+        config={
+            **active_config,
+            "extension_configs": {**existing_configs, str(source.id): config},
+            "extension_disabled_organization_ids": {
+                **existing_disabled,
+                str(source.id): [str(value) for value in disabled_organization_ids],
+            },
+            "lifecycle_action": "install" if publish else "connection_test",
+        },
+        admin_id=admin_id,
+    )
+    release = await validate_release(db, release, admin_id)
+    if release.status != "ready":
+        await db.flush()
+        return release
+    if publish:
+        release = await publish_release(db, release, admin_id)
+    return release
+
+
+async def disable_system_tool(
+    db: AsyncSession,
+    source: PlatformExtensionSource,
+    *,
+    admin_id: int,
+) -> PlatformExtensionRelease:
+    manifest = source.manifest or {}
+    if manifest.get("type") != "system_tool":
+        raise HTTPException(status_code=409, detail="Only system tools can be disabled here")
+    active = await ensure_baseline(db, admin_id)
+    slug = str(manifest.get("slug") or "")
+    if not any(item.get("slug") == slug for item in (active.manifest or {}).get("external_extensions") or []):
+        raise HTTPException(status_code=409, detail="System tool is not active")
+    release = await create_release(
+        db,
+        name=f"停用系统工具：{manifest.get('name') or slug}",
+        source_ids=_active_source_ids(active, excluding_slug=slug),
+        config={**((active.manifest or {}).get("release_config") or {}), "lifecycle_action": "disable"},
+        admin_id=admin_id,
+    )
+    release = await validate_release(db, release, admin_id)
+    if release.status == "ready":
+        release = await publish_release(db, release, admin_id)
+    return release
+
+
+async def rollback_system_tool(
+    db: AsyncSession,
+    source: PlatformExtensionSource,
+    *,
+    admin_id: int,
+) -> PlatformExtensionRelease:
+    slug = str((source.manifest or {}).get("slug") or "")
+    releases = list((await db.execute(
+        select(PlatformExtensionRelease).order_by(PlatformExtensionRelease.version_no.desc())
+    )).scalars().all())
+    target = next((row for row in releases if row.status == "superseded" and any(
+        item.get("slug") == slug and item.get("enabled", True)
+        for item in (row.manifest or {}).get("external_extensions") or []
+    )), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="No previous immutable version exists for this system tool")
+    release = await rollback_release(db, target, admin_id=admin_id)
+    release = await validate_release(db, release, admin_id)
+    if release.status == "ready":
+        release = await publish_release(db, release, admin_id)
+    return release
 
 
 async def sync_active_release_to_runtime() -> None:

@@ -108,6 +108,28 @@ class ExtensionApproveRequest(BaseModel):
     note: str | None = Field(None, max_length=1000)
 
 
+class ExtensionToolInstallRequest(BaseModel):
+    """Configuration used for validate/install/upgrade of a system tool."""
+
+    config: dict = Field(default_factory=dict)
+    disabled_organization_ids: list[UUID] = Field(default_factory=list)
+
+
+class ExtensionToolExecutionRead(BaseModel):
+    """A persisted DSH tool result associated with an installed system tool."""
+
+    run_id: int
+    organization_id: str
+    task_id: str | None = None
+    user_id: str | None = None
+    exec_mode: str
+    run_status: str
+    tool_name: str
+    ok: bool
+    result_preview: str
+    created_at: datetime
+
+
 class ExtensionReleaseCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     source_ids: list[UUID] = Field(default_factory=list)
