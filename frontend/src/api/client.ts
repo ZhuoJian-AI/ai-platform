@@ -2032,6 +2032,19 @@ export interface PlatformExtensionEvent {
   created_at: string;
 }
 
+export interface PlatformSystemToolExecution {
+  run_id: number;
+  organization_id: string;
+  task_id: string | null;
+  user_id: string | null;
+  exec_mode: string;
+  run_status: string;
+  tool_name: string;
+  ok: boolean;
+  result_preview: string;
+  created_at: string;
+}
+
 export interface PlatformExtensionOverview {
   active_release: PlatformExtensionRelease | null;
   runtime_health: Record<string, any>;
@@ -2094,6 +2107,26 @@ export const platformExtensions = {
   approveSource: (id: string, approved: boolean, note?: string) => request<PlatformExtensionSource>(
     `/api/v1/platform/extensions/sources/${id}/approve`,
     { method: 'POST', body: JSON.stringify({ approved, note: note || null }) },
+  ),
+  sourceAdaptationPackage: (id: string) => requestText(
+    `/api/v1/platform/extensions/sources/${id}/adaptation-package`,
+  ),
+  testSystemTool: (id: string, config: Record<string, unknown>, disabledOrganizationIds: string[] = []) =>
+    request<PlatformExtensionRelease>(`/api/v1/platform/extensions/sources/${id}/test`, {
+      method: 'POST', body: JSON.stringify({ config, disabled_organization_ids: disabledOrganizationIds }),
+    }),
+  installSystemTool: (id: string, config: Record<string, unknown>, disabledOrganizationIds: string[] = []) =>
+    request<PlatformExtensionRelease>(`/api/v1/platform/extensions/sources/${id}/install`, {
+      method: 'POST', body: JSON.stringify({ config, disabled_organization_ids: disabledOrganizationIds }),
+    }),
+  disableSystemTool: (id: string) => request<PlatformExtensionRelease>(
+    `/api/v1/platform/extensions/sources/${id}/disable`, { method: 'POST' },
+  ),
+  rollbackSystemTool: (id: string) => request<PlatformExtensionRelease>(
+    `/api/v1/platform/extensions/sources/${id}/rollback`, { method: 'POST' },
+  ),
+  systemToolExecutions: (id: string, limit = 100) => request<PlatformSystemToolExecution[]>(
+    `/api/v1/platform/extensions/sources/${id}/executions?limit=${limit}`,
   ),
   releases: () => request<PlatformExtensionRelease[]>('/api/v1/platform/extensions/releases'),
   createRelease: (name: string, sourceIds: string[], config: Record<string, unknown> = {}) =>

@@ -18,6 +18,7 @@ import {
   type PlatformExtensionOverview,
   type PlatformExtensionRelease,
   type PlatformExtensionSource,
+  type PlatformSystemToolExecution,
   type StorageLifecycleOverview,
 } from '../../api/client';
 import { WB, FS } from '../../components/finder/theme';
@@ -101,6 +102,12 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
   const [archive, setArchive] = useState<File | null>(null);
   const [importForm] = Form.useForm();
   const [releaseForm] = Form.useForm();
+  const [toolConfigSource, setToolConfigSource] = useState<PlatformExtensionSource | null>(null);
+  const [toolConfigForm] = Form.useForm();
+  const [toolExecutionSource, setToolExecutionSource] = useState<PlatformExtensionSource | null>(null);
+  const [toolExecutions, setToolExecutions] = useState<PlatformSystemToolExecution[]>([]);
+  const [toolExecutionsLoading, setToolExecutionsLoading] = useState(false);
+  const [modal, modalContextHolder] = Modal.useModal();
 
   const refresh = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -154,13 +161,31 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
   }, [sources, refresh, refreshCatalog]);
 
   const approvedSources = useMemo(() => sources.filter(item => item.status === 'ready' && item.review_status === 'approved'), [sources]);
+  const publishableSources = useMemo(() => approvedSources.filter(item => (
+    item.manifest?.type === 'system_tool'
+    || (item.manifest?.type === 'runtime_plugin' && item.manifest?.platform_adapted && item.build_report?.codex_adaptation)
+  )), [approvedSources]);
+  const activeExternal = useMemo(() => (
+    (overview?.active_release?.manifest?.external_extensions || []) as Array<Record<string, any>>
+  ).filter(item => item.enabled !== false), [overview]);
+  const activeExternalBySlug = useMemo(() => new Map(
+    activeExternal.map(item => [String(item.slug), item]),
+  ), [activeExternal]);
+  const systemToolSources = useMemo(() => sources.filter(item => item.manifest?.type === 'system_tool'), [sources]);
+  const runtimeSources = useMemo(() => sources.filter(item => item.manifest?.type === 'runtime_plugin'), [sources]);
 
-  const runAction = async (key: string, action: () => Promise<unknown>, success: string) => {
+  const runAction = async (key: string, action: () => Promise<unknown>, success: string): Promise<boolean> => {
     setActionLoading(key);
-    try { await action(); message.success(success); await Promise.all([refresh(true), refreshCatalog(true)]); }
+    try {
+      await action();
+      message.success(success);
+      await Promise.all([refresh(true), refreshCatalog(true)]);
+      return true;
+    }
     catch (error) {
       message.error(error instanceof Error ? error.message : '操作失败');
       await Promise.all([refresh(true), refreshCatalog(true)]);
+      return false;
     }
     finally { setActionLoading(null); }
   };
@@ -204,10 +229,80 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
     }, 'Codex 适配任务已生成');
   };
 
+  const downloadSourceAdaptationPackage = async (source: PlatformExtensionSource) => {
+    await runAction(`source-adapt-${source.id}`, async () => {
+      const markdown = await platformExtensions.sourceAdaptationPackage(source.id);
+      const href = URL.createObjectURL(new Blob([markdown], { type: 'text/markdown;charset=utf-8' }));
+      const anchor = document.createElement('a');
+      anchor.href = href; anchor.download = `adapt-${source.manifest?.slug || source.id}.md`; anchor.click();
+      URL.revokeObjectURL(href);
+    }, 'Runtime Codex 适配任务包已生成');
+  };
+
+  const openToolConfig = (source: PlatformExtensionSource) => {
+    const active = activeExternalBySlug.get(String(source.manifest?.slug || ''));
+    toolConfigForm.setFieldsValue({
+      config_json: JSON.stringify(active?.default_config || source.manifest?.default_config || {}, null, 2),
+      disabled_organization_ids: active?.disabled_organization_ids || [],
+    });
+    setToolConfigSource(source);
+  };
+
+  const parsedToolConfig = async () => {
+    const values = await toolConfigForm.validateFields();
+    try {
+      const config = JSON.parse(values.config_json || '{}') as unknown;
+      if (!config || Array.isArray(config) || typeof config !== 'object') {
+        throw new Error('配置必须是有效的 JSON 对象');
+      }
+      return {
+        config: config as Record<string, unknown>,
+        disabledOrganizations: (values.disabled_organization_ids || []) as string[],
+      };
+    } catch {
+      throw new Error('配置必须是有效的 JSON 对象');
+    }
+  };
+
+  const openToolExecutions = async (source: PlatformExtensionSource) => {
+    setToolExecutionSource(source);
+    setToolExecutionsLoading(true);
+    try {
+      setToolExecutions(await platformExtensions.systemToolExecutions(source.id));
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '调用记录加载失败');
+    } finally {
+      setToolExecutionsLoading(false);
+    }
+  };
+
+  const submitToolConnectionTest = async () => {
+    if (!toolConfigSource) return;
+    const values = await parsedToolConfig();
+    await runAction(`tool-test-${toolConfigSource.id}`, () => platformExtensions.testSystemTool(
+      toolConfigSource.id, values.config, values.disabledOrganizations,
+    ), '候选 Context 连接测试通过');
+  };
+
+  const submitToolInstall = async () => {
+    if (!toolConfigSource) return;
+    const values = await parsedToolConfig();
+    const installed = await runAction(`tool-install-${toolConfigSource.id}`, () => platformExtensions.installSystemTool(
+      toolConfigSource.id, values.config, values.disabledOrganizations,
+    ), '系统工具已安装并进入活动目录');
+    if (installed) setToolConfigSource(null);
+  };
+
+  const installToolWithDefaults = (source: PlatformExtensionSource) => runAction(
+    `tool-install-${source.id}`,
+    () => platformExtensions.installSystemTool(source.id, source.manifest?.default_config || {}, []),
+    '系统工具已安装并进入活动目录',
+  );
+
   const submitRelease = async () => {
     const values = await releaseForm.validateFields();
     const sourceIds = values.source_ids || [];
-    const selectedSources = approvedSources.filter(item => sourceIds.includes(item.id));
+    const selectedSources = publishableSources.filter(item => sourceIds.includes(item.id));
     const replacesCoordinator = selectedSources.some(item => (item.manifest?.provides || []).includes('coordinator'));
     const enabledToolGroups = new Set<string>(values.enabled_tool_groups || []);
     const disabledToolGroups = (overview?.system_tools || [])
@@ -325,15 +420,53 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
       </Card>
     </Col>)}
       </Row>
+      {!!runtimeSources.length && <Card title="Runtime 候选（必须经 Codex 代码适配）" style={{ marginTop: 16 }}>
+        <Table rowKey="id" pagination={false} dataSource={runtimeSources} columns={[
+          { title: '候选', render: (_: unknown, row: PlatformExtensionSource) => <div><b>{row.manifest?.name || row.locator}</b><div style={{ color: WB.textAux }}>{row.manifest?.slug || '未识别'} · {row.resolved_version || row.requested_version || '待解析'}</div></div> },
+          { title: '构建', dataIndex: 'status', render: (value: string) => <StatusTag status={value} /> },
+          { title: '兼容结论', render: (_: unknown, row: PlatformExtensionSource) => row.manifest?.platform_adapted && row.build_report?.codex_adaptation ? <Tag color="green">已有 Codex 适配标记</Tag> : <Tag color="orange">禁止直接替换核心 Runtime</Tag> },
+          { title: '操作', width: 220, render: (_: unknown, row: PlatformExtensionSource) => <Space><Button size="small" onClick={() => setDetail(row)}>报告</Button><Button size="small" type="primary" icon={<DownloadOutlined />} loading={actionLoading === `source-adapt-${row.id}`} onClick={() => void downloadSourceAdaptationPackage(row)}>Codex 任务包</Button></Space> },
+        ]} />
+      </Card>}
     </>;
   };
 
-  const renderTools = () => <Table rowKey="slug" loading={loading} dataSource={overview?.system_tools || []} pagination={false} columns={[
-    { title: '工具大类', dataIndex: 'name', render: (_: string, row: PlatformExtensionCatalogItem) => <Space><ToolOutlined style={{ color: WB.primary }} /><div><b>{row.name}</b><div style={{ color: WB.textAux, fontSize: FS.micro }}>{row.description}</div></div></Space> },
-    { title: '注册给 DSH 的工具', dataIndex: 'capabilities', render: (values: string[]) => values.length ? <Space wrap>{values.map(value => <Tag key={value}>{value}</Tag>)}</Space> : <Typography.Text type="secondary">运行期动态企业接口</Typography.Text> },
-    { title: '状态', dataIndex: 'status', width: 120, render: (value: string) => <StatusTag status={value} /> },
-    { title: '作用', width: 160, render: () => <Typography.Text type="secondary">仍经过模式与权限过滤</Typography.Text> },
-  ]} />;
+  const renderTools = () => <>
+    <Alert type="info" showIcon message="系统工具可以一键安装，核心 Runtime 不可以" description="工具构建、配置和连接测试通过后进入活动目录；每次聊天仍按模式、企业开关、用户权限和任务资源动态过滤。" style={{ marginBottom: 16 }} />
+    <Card title="平台内置工具" style={{ marginBottom: 16 }}>
+      <Table rowKey="slug" loading={loading} dataSource={overview?.system_tools || []} pagination={false} columns={[
+        { title: '工具大类', dataIndex: 'name', render: (_: string, row: PlatformExtensionCatalogItem) => <Space><ToolOutlined style={{ color: WB.primary }} /><div><b>{row.name}</b><div style={{ color: WB.textAux, fontSize: FS.micro }}>{row.description}</div></div></Space> },
+        { title: '注册给 DSH 的工具', dataIndex: 'capabilities', render: (values: string[]) => values.length ? <Space wrap>{values.map(value => <Tag key={value}>{value}</Tag>)}</Space> : <Typography.Text type="secondary">运行期动态企业接口</Typography.Text> },
+        { title: '状态', dataIndex: 'status', width: 120, render: (value: string) => <StatusTag status={value} /> },
+        { title: '作用', width: 180, render: () => <Typography.Text type="secondary">平台代码维护，不从市场卸载</Typography.Text> },
+      ]} />
+    </Card>
+    <Card title="已导入系统工具" extra={<Typography.Text type="secondary">安装 / 配置 / 测试 / 停用 / 回滚</Typography.Text>}>
+      <Table rowKey="id" loading={loading} dataSource={systemToolSources} locale={{ emptyText: <Empty description="尚未导入标准 system_tool 插件" /> }} columns={[
+        { title: '系统工具', render: (_: unknown, row: PlatformExtensionSource) => <div><b>{row.manifest?.name || row.locator}</b><div style={{ color: WB.textAux }}>{row.manifest?.slug || '未识别'} · {row.resolved_version || row.requested_version || '待解析'}</div></div> },
+        { title: '工具 Schema', render: (_: unknown, row: PlatformExtensionSource) => <Space wrap>{(row.manifest?.tools || []).map((tool: any) => <Tag key={tool.name}>{tool.name}</Tag>)}</Space> },
+        { title: '风险', render: (_: unknown, row: PlatformExtensionSource) => <Space wrap>{[...new Set((row.manifest?.tools || []).map((tool: any) => tool.risk_level))].map(value => <Tag color={value === 'high' || value === 'critical' ? 'red' : value === 'medium' ? 'orange' : 'green'} key={String(value)}>{String(value)}</Tag>)}</Space> },
+        { title: '状态', width: 140, render: (_: unknown, row: PlatformExtensionSource) => activeExternalBySlug.has(String(row.manifest?.slug || '')) ? <StatusTag status="active" /> : <StatusTag status={row.status} /> },
+        { title: '操作', width: 430, render: (_: unknown, row: PlatformExtensionSource) => {
+          const slug = String(row.manifest?.slug || '');
+          const active = activeExternalBySlug.has(slug);
+          const hasConfig = Object.keys(row.manifest?.config_schema?.properties || {}).length > 0;
+          const canRollback = releases.some(release => release.status === 'superseded'
+            && ((release.manifest?.external_extensions || []) as Array<Record<string, unknown>>)
+              .some(extension => extension.source_id === row.id || extension.slug === slug));
+          return <Space wrap>
+            <Button size="small" onClick={() => setDetail(row)}>报告</Button>
+            <Button size="small" icon={<HistoryOutlined />} onClick={() => void openToolExecutions(row)}>调用记录</Button>
+            {!active && ['ready', 'review_required'].includes(row.status) && (hasConfig
+              ? <Button size="small" type="primary" onClick={() => openToolConfig(row)}>配置并安装</Button>
+              : <Button size="small" type="primary" loading={actionLoading === `tool-install-${row.id}`} onClick={() => void installToolWithDefaults(row)}>一键安装</Button>)}
+            {active && <><Button size="small" onClick={() => openToolConfig(row)}>配置 / 测试</Button><Button size="small" danger loading={actionLoading === `tool-disable-${row.id}`} onClick={() => modal.confirm({ title: `停用 ${row.manifest?.name || row.locator}？`, content: '将创建并发布不包含该工具的新快照，历史版本仍可回滚。', onOk: () => runAction(`tool-disable-${row.id}`, () => platformExtensions.disableSystemTool(row.id), '系统工具已停用') })}>停用</Button></>}
+            {canRollback && <Button size="small" icon={<RollbackOutlined />} loading={actionLoading === `tool-rollback-${row.id}`} onClick={() => void runAction(`tool-rollback-${row.id}`, () => platformExtensions.rollbackSystemTool(row.id), '已恢复历史不可变版本')}>回滚</Button>}
+          </Space>;
+        } },
+      ]} />
+    </Card>
+  </>;
 
   const compatibilityTag = (item: PlatformExtensionCatalogItem) => {
     if (item.compatibility_status === 'compatible') return <Tag color="green">平台兼容</Tag>;
@@ -413,7 +546,8 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
           <Button size="small" onClick={() => setDetail(row)}>详情</Button>
           {['failed', 'incompatible'].includes(row.status) && <Button size="small" icon={<ReloadOutlined />} loading={actionLoading === `retry-${row.id}`} onClick={() => void runAction(`retry-${row.id}`, () => platformExtensions.retrySource(row.id), '已重新提交隔离构建')}>重试</Button>}
           {row.status === 'review_required' && <Button size="small" type="primary" icon={<CheckCircleOutlined />} loading={actionLoading === `approve-${row.id}`} onClick={() => void runAction(`approve-${row.id}`, () => platformExtensions.approveSource(row.id, true), '已加入审核仓库')}>审核通过</Button>}
-          {row.status === 'ready' && row.review_status === 'approved' && <Button size="small" type="primary" icon={<DeploymentUnitOutlined />} onClick={() => openRelease(row.id)}>创建候选</Button>}
+          {row.status === 'ready' && row.review_status === 'approved' && row.manifest?.type === 'system_tool' && <Button size="small" type="primary" icon={<ToolOutlined />} onClick={() => openToolConfig(row)}>安装工具</Button>}
+          {row.manifest?.type === 'runtime_plugin' && <Button size="small" icon={<DownloadOutlined />} loading={actionLoading === `source-adapt-${row.id}`} onClick={() => void downloadSourceAdaptationPackage(row)}>Codex 适配包</Button>}
         </Space> },
       ]} />
     </Card>
@@ -421,7 +555,7 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
 
   const releaseActions = (_: unknown, row: PlatformExtensionRelease) => <Space wrap>
     {['draft', 'failed'].includes(row.status) && <Button size="small" icon={<SafetyCertificateOutlined />} loading={actionLoading === `validate-${row.id}`} onClick={() => void runAction(`validate-${row.id}`, () => platformExtensions.validateRelease(row.id), '候选验证完成')}>验证</Button>}
-    {row.status === 'ready' && <Button size="small" type="primary" icon={<DeploymentUnitOutlined />} loading={actionLoading === `publish-${row.id}`} onClick={() => Modal.confirm({ title: `发布 v${row.version_no}？`, content: '系统会先排空当前任务，再切换 Runtime Context；失败将保留当前版本。', okText: '确认发布', onOk: () => runAction(`publish-${row.id}`, () => platformExtensions.publishRelease(row.id), '发布并健康确认完成') })}>发布</Button>}
+    {row.status === 'ready' && <Button size="small" type="primary" icon={<DeploymentUnitOutlined />} loading={actionLoading === `publish-${row.id}`} onClick={() => modal.confirm({ title: `发布 v${row.version_no}？`, content: '系统会先排空当前任务，再切换 Runtime Context；失败将保留当前版本。', okText: '确认发布', onOk: () => runAction(`publish-${row.id}`, () => platformExtensions.publishRelease(row.id), '发布并健康确认完成') })}>发布</Button>}
     {!row.is_active && ['superseded', 'active'].includes(row.status) && <Button size="small" icon={<RollbackOutlined />} onClick={() => void runAction(`rollback-${row.id}`, () => platformExtensions.rollbackRelease(row.id), '已复制历史快照为新回滚草稿')}>基于此版本回滚</Button>}
   </Space>;
 
@@ -459,6 +593,7 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
   </>;
 
   return <div style={{ height: '100%', overflow: 'auto', background: '#f7f8fb' }}>
+    {modalContextHolder}
     {header}
     <div style={{ padding: 20, maxWidth: 1500, width: '100%', margin: '0 auto' }}>
       {section === 'overview' && renderOverview()}
@@ -493,8 +628,33 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
       <Form form={releaseForm} layout="vertical">
         <Form.Item name="name" label="发布名称" rules={[{ required: true }]}><Input placeholder="例如：Runtime 稳定版 + 审核工具集" /></Form.Item>
         <Alert type="info" showIcon message="候选版本保存完整快照" description="取消选择已安装插件即表示卸载；选择新的协调器时会自动停用内置 Agent Loop。" style={{ marginBottom: 16 }} />
-        <Form.Item name="source_ids" label="启用的已审核外部插件"><Select mode="multiple" placeholder="不选择则只使用平台内置能力" options={approvedSources.map(item => ({ value: item.id, label: `${item.manifest?.name || item.locator} · ${item.resolved_version || ''} · ${item.manifest?.layer || 'runtime'}${item.manifest?.operation === 'replace' ? '（替换）' : ''}` }))} /></Form.Item>
+        <Form.Item name="source_ids" label="启用的已审核外部插件"><Select mode="multiple" placeholder="不选择则只使用平台内置能力" options={publishableSources.map(item => ({ value: item.id, label: `${item.manifest?.name || item.locator} · ${item.resolved_version || ''} · ${item.manifest?.layer || 'runtime'}${item.manifest?.operation === 'replace' ? '（Codex 已适配替换）' : ''}` }))} /></Form.Item>
         <Form.Item name="enabled_tool_groups" label="启用的系统工具组"><Select mode="multiple" options={(overview?.system_tools || []).map(item => ({ value: item.slug, label: item.name }))} /></Form.Item>
+      </Form>
+    </Modal>
+
+    <Modal
+      title={`系统工具配置：${toolConfigSource?.manifest?.name || ''}`}
+      open={!!toolConfigSource}
+      onCancel={() => setToolConfigSource(null)}
+      footer={<Space>
+        <Button onClick={() => setToolConfigSource(null)}>取消</Button>
+        <Button loading={!!toolConfigSource && actionLoading === `tool-test-${toolConfigSource.id}`} onClick={() => void submitToolConnectionTest()}>连接测试</Button>
+        <Button type="primary" loading={!!toolConfigSource && actionLoading === `tool-install-${toolConfigSource.id}`} onClick={() => void submitToolInstall()}>{toolConfigSource && activeExternalBySlug.has(String(toolConfigSource.manifest?.slug || '')) ? '保存并发布新版本' : '安装并启用'}</Button>
+      </Space>}
+      width={720}
+    >
+      <Alert type="info" showIcon message="配置只进入不可变发布快照" description="连接测试在候选 DSH Context 中执行；测试或升级失败不会替换当前活动版本。企业禁用列表为空时默认对所有企业启用。" style={{ marginBottom: 16 }} />
+      <Form form={toolConfigForm} layout="vertical">
+        <Form.Item label="配置 Schema">
+          <pre style={{ margin: 0, maxHeight: 180, overflow: 'auto', padding: 12, borderRadius: 8, background: '#f5f6f8' }}>{JSON.stringify(toolConfigSource?.manifest?.config_schema || { type: 'object', properties: {} }, null, 2)}</pre>
+        </Form.Item>
+        <Form.Item name="config_json" label="工具配置（JSON）" rules={[{ required: true }]}>
+          <Input.TextArea autoSize={{ minRows: 7, maxRows: 16 }} spellCheck={false} />
+        </Form.Item>
+        <Form.Item name="disabled_organization_ids" label="停用企业 UUID（可选）" extra="按回车添加；这些企业不会在运行时看到该工具。">
+          <Select mode="tags" tokenSeparators={[',', ' ']} placeholder="默认对所有企业启用" />
+        </Form.Item>
       </Form>
     </Modal>
 
@@ -511,6 +671,28 @@ export default function PlatformExtensions({ section }: { section: ExtensionSect
         {(detail.compatibility?.warnings || []).map((warning: string) => <Alert key={warning} type="warning" showIcon message={warning} />)}
         <Card size="small" title="自动构建报告"><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 360, overflow: 'auto' }}>{JSON.stringify(detail.build_report, null, 2)}</pre></Card>
       </Space>}
+    </Drawer>
+    <Drawer
+      width={760}
+      title={`调用记录：${toolExecutionSource?.manifest?.name || ''}`}
+      open={!!toolExecutionSource}
+      onClose={() => setToolExecutionSource(null)}
+    >
+      <Alert type="info" showIcon message="仅展示真实持久化的 DSH tool_result" description="没有工具调用的普通回答不会出现在这里。" style={{ marginBottom: 16 }} />
+      <Table
+        rowKey={row => `${row.run_id}-${row.tool_name}-${row.created_at}`}
+        loading={toolExecutionsLoading}
+        dataSource={toolExecutions}
+        locale={{ emptyText: <Empty description="暂无真实调用记录" /> }}
+        pagination={{ pageSize: 20 }}
+        columns={[
+          { title: '工具', dataIndex: 'tool_name', width: 180, render: value => <Typography.Text code>{value}</Typography.Text> },
+          { title: '结果', dataIndex: 'ok', width: 90, render: value => <Tag color={value ? 'green' : 'red'}>{value ? '成功' : '失败'}</Tag> },
+          { title: '企业 / 用户', render: (_: unknown, row: PlatformSystemToolExecution) => <div>{row.organization_id}<div style={{ color: WB.textAux }}>{row.user_id || '平台管理员'}</div></div> },
+          { title: '时间', dataIndex: 'created_at', width: 180, render: value => new Date(value).toLocaleString() },
+          { title: '详情', dataIndex: 'result_preview', render: value => <Typography.Paragraph ellipsis={{ rows: 2, expandable: true, symbol: '展开' }} style={{ margin: 0 }}>{value || '—'}</Typography.Paragraph> },
+        ]}
+      />
     </Drawer>
     <Drawer width={680} title={catalogDetail?.name || '市场插件详情'} open={!!catalogDetail} onClose={() => setCatalogDetail(null)}>
       {catalogDetail && <Space direction="vertical" size={16} style={{ width: '100%' }}>
