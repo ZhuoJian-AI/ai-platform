@@ -8,7 +8,9 @@ from app.auth.user_auth import CurrentUser
 from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.department import Department
 from app.models.organization import Organization
+from app.models.skill import SkillFile, SkillFolder
 from app.models.team import Team
+from app.models.tool_call_log import ToolCallLog
 from app.models.user import User
 from app.schemas.enterprise_application import (
     EnterpriseApplicationCreate,
@@ -152,3 +154,54 @@ async def test_cross_tenant_scope_and_binding_targets_are_rejected(db_session):
             ),
         ])
     assert getattr(binding_error.value, "status_code", None) == 422
+
+
+@pytest.mark.asyncio
+async def test_application_overview_resolves_tools_without_double_counting_skill_wrapper(db_session):
+    org, _, _, _, _ = await _organization_tree(db_session)
+    connector = ToolConnector(
+        organization_id=org.id, name="Production API", slug=f"production-{uuid4().hex[:6]}",
+        base_url="https://production.example.test", auth_type="none", health_status="healthy",
+    )
+    db_session.add(connector)
+    await db_session.flush()
+    endpoints = [
+        ToolEndpoint(connector_id=connector.id, name=f"query_progress_{index}", method="GET", path=f"/progress/{index}")
+        for index in range(4)
+    ]
+    skill = SkillFolder(
+        organization_id=org.id, scope_type="organization", scope_id=None,
+        name="Production API Skill", slug=f"production-api-{uuid4().hex[:6]}", is_active=True,
+    )
+    db_session.add_all([*endpoints, skill])
+    await db_session.flush()
+    db_session.add(SkillFile(skill_folder_id=skill.id, path="skill.md", size=20, content="# Production API"))
+
+    application = await service.create_application(db_session, org.id, EnterpriseApplicationCreate(
+        name="Production Collaboration", slug="production-overview",
+        entry_url="https://production.example.test/app",
+    ))
+    bindings = [
+        EnterpriseApplicationToolBindingInput(
+            target_type="tool_endpoint", target_id=endpoint.id, operation="query",
+        )
+        for endpoint in endpoints
+    ]
+    bindings.append(EnterpriseApplicationToolBindingInput(
+        target_type="skill_folder", target_id=skill.id, operation="query",
+    ))
+    application = await service.replace_tool_bindings(db_session, application, bindings)
+    db_session.add(ToolCallLog(
+        organization_id=org.id, connector_id=connector.id, endpoint_id=endpoints[0].id,
+        method="GET", path=endpoints[0].path, status_code=200, latency_ms=42,
+    ))
+    await db_session.flush()
+
+    overview = await service.get_application_overview(db_session, application)
+
+    assert overview["operation_counts"]["query"] == 4
+    assert overview["direct_capability_count"] == 4
+    assert overview["skill_binding_count"] == 1
+    assert len(overview["capabilities"]) == 5
+    assert overview["recent_calls"][0]["capability_name"] == endpoints[0].name
+    assert overview["recent_calls"][0]["status"] == "success"

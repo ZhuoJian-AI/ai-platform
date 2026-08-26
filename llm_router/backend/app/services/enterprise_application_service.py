@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, with_loader_criteria
 
@@ -19,6 +19,7 @@ from app.models.enterprise_application import (
     EnterpriseApplicationToolBinding,
 )
 from app.models.skill import SkillFolder
+from app.models.tool_call_log import ToolCallLog
 from app.schemas.enterprise_application import (
     EnterpriseApplicationCreate,
     EnterpriseApplicationGrantInput,
@@ -258,6 +259,169 @@ async def replace_tool_bindings(
             )
     await db.flush()
     return await get_application(db, row.id)  # type: ignore[return-value]
+
+
+async def get_application_overview(db: AsyncSession, row: EnterpriseApplication) -> dict:
+    """Resolve opaque application bindings into an administrator-facing read model."""
+    active_bindings = [
+        binding for binding in row.tool_bindings
+        if binding.deleted_at is None
+    ]
+    endpoint_ids = {
+        UUID(str(binding.target_id)) for binding in active_bindings
+        if binding.target_type == "tool_endpoint"
+    }
+    interface_ids = {
+        UUID(str(binding.target_id)) for binding in active_bindings
+        if binding.target_type == "data_interface"
+    }
+    skill_ids = {
+        UUID(str(binding.target_id)) for binding in active_bindings
+        if binding.target_type == "skill_folder"
+    }
+
+    endpoints: dict[str, tuple[ToolEndpoint, ToolConnector]] = {}
+    if endpoint_ids:
+        result = await db.execute(
+            select(ToolEndpoint, ToolConnector)
+            .join(ToolConnector, ToolEndpoint.connector_id == ToolConnector.id)
+            .where(
+                ToolEndpoint.id.in_(endpoint_ids),
+                ToolConnector.organization_id == row.organization_id,
+                ToolEndpoint.deleted_at.is_(None),
+                ToolConnector.deleted_at.is_(None),
+            )
+        )
+        endpoints = {str(endpoint.id): (endpoint, connector) for endpoint, connector in result.all()}
+
+    interfaces: dict[str, tuple[DataInterface, DataSystem]] = {}
+    if interface_ids:
+        result = await db.execute(
+            select(DataInterface, DataSystem)
+            .join(DataSystem, DataInterface.data_system_id == DataSystem.id)
+            .where(
+                DataInterface.id.in_(interface_ids),
+                DataSystem.organization_id == row.organization_id,
+                DataInterface.deleted_at.is_(None),
+                DataSystem.deleted_at.is_(None),
+            )
+        )
+        interfaces = {str(item.id): (item, system) for item, system in result.all()}
+
+    skills: dict[str, SkillFolder] = {}
+    if skill_ids:
+        result = await db.execute(
+            select(SkillFolder).where(
+                SkillFolder.id.in_(skill_ids),
+                SkillFolder.organization_id == row.organization_id,
+                SkillFolder.deleted_at.is_(None),
+            )
+        )
+        skills = {str(item.id): item for item in result.scalars().all()}
+
+    capabilities: list[dict] = []
+    for binding in active_bindings:
+        target_id = str(binding.target_id)
+        common = {
+            "binding_id": binding.id,
+            "target_type": binding.target_type,
+            "target_id": UUID(target_id),
+            "operation": binding.operation,
+            "binding_active": binding.is_active,
+        }
+        if binding.target_type == "tool_endpoint" and target_id in endpoints:
+            endpoint, connector = endpoints[target_id]
+            capabilities.append({
+                **common,
+                "name": endpoint.name,
+                "source_name": connector.name,
+                "description": endpoint.description,
+                "method": endpoint.method,
+                "path": endpoint.path,
+                "target_active": endpoint.is_active and connector.is_active,
+                "health_status": connector.health_status,
+            })
+        elif binding.target_type == "data_interface" and target_id in interfaces:
+            interface, system = interfaces[target_id]
+            capabilities.append({
+                **common,
+                "name": interface.name,
+                "source_name": system.name,
+                "description": interface.description,
+                "method": interface.method,
+                "path": interface.path,
+                "target_active": interface.is_active and system.is_active,
+                "health_status": None,
+            })
+        elif binding.target_type == "skill_folder" and target_id in skills:
+            skill = skills[target_id]
+            capabilities.append({
+                **common,
+                "name": skill.name,
+                "source_name": "Skill 运行包",
+                "description": None,
+                "method": None,
+                "path": None,
+                "target_active": skill.is_active,
+                "health_status": "ready" if skill.is_installed else "unavailable",
+            })
+
+    # Connector-generated Skill wrappers and their direct endpoints may coexist.
+    # Count the direct business APIs when present so the administrator does not
+    # see the same capability twice; Skill-only applications still count Skills.
+    direct_capabilities = [item for item in capabilities if item["target_type"] != "skill_folder"]
+    counted_capabilities = direct_capabilities or capabilities
+    operation_counts = {operation: 0 for operation in OPERATION_PERMISSION}
+    for item in counted_capabilities:
+        if item["binding_active"] and item["target_active"]:
+            operation_counts[item["operation"]] += 1
+
+    recent_calls: list[dict] = []
+    call_filters = []
+    if endpoint_ids:
+        call_filters.append(ToolCallLog.endpoint_id.in_(endpoint_ids))
+    if skill_ids:
+        call_filters.append(ToolCallLog.skill_id.in_(skill_ids))
+    if call_filters:
+        result = await db.execute(
+            select(ToolCallLog)
+            .where(
+                ToolCallLog.organization_id == row.organization_id,
+                or_(*call_filters),
+            )
+            .order_by(ToolCallLog.created_at.desc())
+            .limit(20)
+        )
+        endpoint_names = {key: value[0].name for key, value in endpoints.items()}
+        skill_names = {key: value.name for key, value in skills.items()}
+        for call in result.scalars().all():
+            failed = bool(call.error) or bool(call.status_code and call.status_code >= 400)
+            recent_calls.append({
+                "id": call.id,
+                "capability_name": (
+                    endpoint_names.get(str(call.endpoint_id))
+                    or skill_names.get(str(call.skill_id))
+                    or call.path
+                    or "未知工具"
+                ),
+                "method": call.method,
+                "path": call.path,
+                "status": "failed" if failed else "success",
+                "status_code": call.status_code,
+                "latency_ms": call.latency_ms,
+                "error": call.error,
+                "created_at": call.created_at,
+            })
+
+    return {
+        "application_id": row.id,
+        "operation_counts": operation_counts,
+        "active_capability_count": sum(operation_counts.values()),
+        "direct_capability_count": len(direct_capabilities),
+        "skill_binding_count": len([item for item in capabilities if item["target_type"] == "skill_folder"]),
+        "capabilities": capabilities,
+        "recent_calls": recent_calls,
+    }
 
 
 def effective_permissions(row: EnterpriseApplication, user: CurrentUser) -> set[str]:

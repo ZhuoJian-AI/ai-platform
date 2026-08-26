@@ -8,6 +8,7 @@ import {
   RobotOutlined, SafetyCertificateOutlined, SettingOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ApiError, connectors, dataInterfaces, enterpriseApplications, skillStore,
   type EnterpriseApplication,
@@ -67,6 +68,8 @@ function grantScopeValue(
 
 export default function EnterpriseApplications({ section }: { section: EnterpriseApplicationsSection }) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [orgId, setOrgId] = useState<string>();
   const [editing, setEditing] = useState<EnterpriseApplication | null>(null);
   const [appModalOpen, setAppModalOpen] = useState(false);
@@ -114,11 +117,16 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   const selectedApp = apps.find((item) => item.id === selectedAppId) ?? apps[0];
 
   useEffect(() => {
+    const requestedApp = searchParams.get('app');
+    if (requestedApp && apps.some((item) => item.id === requestedApp)) {
+      setSelectedAppId(requestedApp);
+      return;
+    }
     if (!selectedAppId && apps[0]) setSelectedAppId(apps[0].id);
     if (selectedAppId && apps.length && !apps.some((item) => item.id === selectedAppId)) {
       setSelectedAppId(apps[0]?.id);
     }
-  }, [apps, selectedAppId]);
+  }, [apps, selectedAppId, searchParams]);
 
   const orgTree = useMemo(() => {
     if (!orgId) return [];
@@ -305,12 +313,13 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   const renderApplications = () => (
     <Table dataSource={apps} rowKey="id" loading={isLoading} pagination={{ pageSize: 20 }} columns={[
       { title: '应用', dataIndex: 'name', width: 220, render: (name: string, row: EnterpriseApplication) => (
-        <Space><AppstoreOutlined style={{ color: '#6366f1' }} /><div><div>{name}</div><Typography.Text type="secondary">{row.slug}</Typography.Text></div></Space>
+        <Space><AppstoreOutlined style={{ color: '#6366f1' }} /><div><Button type="link" style={{ padding: 0, height: 'auto', fontWeight: 600 }} onClick={() => navigate(`/enterprise-apps/${row.id}`)}>{name}</Button><div><Typography.Text type="secondary">{row.slug}</Typography.Text></div></div></Space>
       ) },
       { title: '入口地址', dataIndex: 'entry_url', ellipsis: true },
       { title: '展示', dataIndex: 'display_mode', width: 100, render: (value: string) => <Tag>{value === 'embedded' ? '平台内嵌' : '外部打开'}</Tag> },
       { title: '状态', width: 150, render: (_: unknown, row: EnterpriseApplication) => <Space><Tag color={row.is_active ? 'green' : 'default'}>{row.is_active ? '启用' : '停用'}</Tag><Tag>{row.health_status}</Tag></Space> },
       { title: '操作', width: 260, render: (_: unknown, row: EnterpriseApplication) => <Space>
+        <Button size="small" type="primary" onClick={() => navigate(`/enterprise-apps/${row.id}`)}>管理</Button>
         <Button size="small" icon={<ThunderboltOutlined />} loading={testApp.isPending} onClick={() => testApp.mutate(row.id)}>测试</Button>
         <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>编辑</Button>
         <Button size="small" danger icon={<DeleteOutlined />} onClick={() => setDeleteTarget(row)}>删除</Button>

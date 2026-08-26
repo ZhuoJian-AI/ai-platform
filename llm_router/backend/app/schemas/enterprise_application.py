@@ -134,3 +134,40 @@ class EnterpriseApplicationHealthRead(BaseModel):
     status: Literal["healthy", "unhealthy"]
     status_code: int | None = None
     detail: str | None = None
+
+
+class EnterpriseApplicationCapabilityRead(BaseModel):
+    binding_id: UUID
+    target_type: ApplicationTarget
+    target_id: UUID
+    operation: ApplicationOperation
+    name: str
+    source_name: str
+    description: str | None = None
+    method: str | None = None
+    path: str | None = None
+    binding_active: bool
+    target_active: bool
+    health_status: str | None = None
+
+
+class EnterpriseApplicationRecentCallRead(BaseModel):
+    id: int
+    capability_name: str
+    method: str | None = None
+    path: str | None = None
+    status: Literal["success", "failed"]
+    status_code: int | None = None
+    latency_ms: int | None = None
+    error: str | None = None
+    created_at: datetime
+
+
+class EnterpriseApplicationOverviewRead(BaseModel):
+    application_id: UUID
+    operation_counts: dict[str, int]
+    active_capability_count: int
+    direct_capability_count: int
+    skill_binding_count: int
+    capabilities: list[EnterpriseApplicationCapabilityRead] = Field(default_factory=list)
+    recent_calls: list[EnterpriseApplicationRecentCallRead] = Field(default_factory=list)

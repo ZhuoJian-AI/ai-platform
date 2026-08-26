@@ -44,6 +44,7 @@ import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from './branding/B
 import { BRAND_TITLES, useBrandTitle } from './branding/brand';
 import PlatformExtensions from './pages/platform/PlatformExtensions';
 import EnterpriseApplications from './pages/apps/EnterpriseApplications';
+import EnterpriseApplicationDetail from './pages/apps/EnterpriseApplicationDetail';
 
 interface MenuEntry {
   path: string;
@@ -139,6 +140,7 @@ const SUBSYSTEMS: Subsystem[] = [
     ],
     routes: [
       { path: '/enterprise-apps', element: <EnterpriseApplications section="applications" /> },
+      { path: '/enterprise-apps/:appId', element: <EnterpriseApplicationDetail /> },
       { path: '/enterprise-apps/navigation', element: <EnterpriseApplications section="navigation" /> },
       { path: '/enterprise-apps/permissions', element: <EnterpriseApplications section="permissions" /> },
       { path: '/enterprise-apps/assistant', element: <EnterpriseApplications section="assistant" /> },

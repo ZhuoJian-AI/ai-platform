@@ -22,6 +22,7 @@ from app.schemas.enterprise_application import (
     EnterpriseApplicationGrantsReplace,
     EnterpriseApplicationHealthRead,
     EnterpriseApplicationLaunchRead,
+    EnterpriseApplicationOverviewRead,
     EnterpriseApplicationRead,
     EnterpriseApplicationToolBindingsReplace,
     EnterpriseApplicationUpdate,
@@ -75,6 +76,17 @@ async def get_application_endpoint(
     row = await _application_or_404(db, app_id)
     assert_org_access(auth, row.organization_id)
     return row
+
+
+@router.get("/applications/{app_id}/overview", response_model=EnterpriseApplicationOverviewRead)
+async def get_application_overview_endpoint(
+    app_id: UUID,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await _application_or_404(db, app_id)
+    assert_org_access(auth, row.organization_id)
+    return await service.get_application_overview(db, row)
 
 
 @router.patch("/applications/{app_id}", response_model=EnterpriseApplicationRead)

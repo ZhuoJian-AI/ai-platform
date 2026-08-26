@@ -1,0 +1,330 @@
+import { useMemo, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import {
+  Alert, Button, Card, Descriptions, Empty, Form, Input, Modal, Select, Space,
+  Switch, Table, Tabs, Tag, Typography, message,
+} from 'antd';
+import {
+  ApiOutlined, AppstoreOutlined, ArrowLeftOutlined, CheckCircleOutlined,
+  CloudServerOutlined, EditOutlined, ExportOutlined, LinkOutlined, LockOutlined,
+  PlayCircleOutlined, RobotOutlined, SafetyCertificateOutlined, ThunderboltOutlined,
+} from '@ant-design/icons';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  ApiError, enterpriseApplications,
+  type EnterpriseApplicationCapability,
+  type EnterpriseApplicationInput,
+  type EnterpriseApplicationOperation,
+  type EnterpriseApplicationPermission,
+} from '../../api/client';
+import { FinderShell } from '../../components/finder/primitives';
+import { useOrgTree } from '../../hooks/useOrgTree';
+import './EnterpriseApplicationDetail.css';
+
+const OPERATION_META: Record<EnterpriseApplicationOperation, { label: string; color: string }> = {
+  query: { label: '查询', color: '#2563eb' },
+  create: { label: '新增', color: '#059669' },
+  update: { label: '更新', color: '#d97706' },
+  delete: { label: '删除', color: '#dc2626' },
+  export: { label: '导出', color: '#7c3aed' },
+};
+
+const PERMISSION_LABEL: Record<EnterpriseApplicationPermission, string> = {
+  view: '访问应用',
+  ai_query: 'AI 查询',
+  ai_create: 'AI 新增',
+  ai_update: 'AI 更新',
+  ai_delete: 'AI 删除',
+  export: '导出',
+};
+
+const TARGET_LABEL = {
+  tool_endpoint: '连接器端点',
+  data_interface: '数据接口',
+  skill_folder: 'Skill 运行包',
+};
+
+function errorText(error: unknown, fallback: string) {
+  return error instanceof ApiError ? error.message : fallback;
+}
+
+function statusLabel(capability: EnterpriseApplicationCapability) {
+  if (!capability.binding_active) return <Tag>绑定已停用</Tag>;
+  if (!capability.target_active) return <Tag color="red">资源不可用</Tag>;
+  if (capability.health_status === 'healthy' || capability.health_status === 'ready') {
+    return <Tag color="green">可调用</Tag>;
+  }
+  if (capability.health_status === 'unhealthy' || capability.health_status === 'unavailable') {
+    return <Tag color="red">检查失败</Tag>;
+  }
+  return <Tag color="blue">已启用</Tag>;
+}
+
+export default function EnterpriseApplicationDetail() {
+  const { appId = '' } = useParams();
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const { nodeMap } = useOrgTree();
+  const [editOpen, setEditOpen] = useState(false);
+  const [form] = Form.useForm();
+
+  const appQuery = useQuery({
+    queryKey: ['enterprise-application', appId],
+    queryFn: () => enterpriseApplications.get(appId),
+    enabled: !!appId,
+  });
+  const overviewQuery = useQuery({
+    queryKey: ['enterprise-application-overview', appId],
+    queryFn: () => enterpriseApplications.overview(appId),
+    enabled: !!appId,
+  });
+  const app = appQuery.data;
+  const overview = overviewQuery.data;
+
+  const refresh = () => Promise.all([
+    qc.invalidateQueries({ queryKey: ['enterprise-application', appId] }),
+    qc.invalidateQueries({ queryKey: ['enterprise-application-overview', appId] }),
+  ]);
+
+  const updateApp = useMutation({
+    mutationFn: (values: Partial<EnterpriseApplicationInput>) => enterpriseApplications.update(appId, values),
+    onSuccess: () => {
+      setEditOpen(false);
+      refresh();
+      message.success('应用配置已保存');
+    },
+    onError: (error) => message.error(errorText(error, '保存失败')),
+  });
+  const testApp = useMutation({
+    mutationFn: () => enterpriseApplications.test(appId),
+    onSuccess: (result) => {
+      refresh();
+      if (result.status === 'healthy') message.success(`页面连接正常${result.status_code ? `（HTTP ${result.status_code}）` : ''}`);
+      else message.error(result.detail || '页面连接失败');
+    },
+    onError: (error) => message.error(errorText(error, '连接测试失败')),
+  });
+
+  const scopeLabel = (scopeType: string, scopeId: string | null) => {
+    const prefix = scopeType === 'organization' ? 'org' : scopeType === 'department' ? 'dept' : scopeType;
+    return nodeMap.get(`${prefix}:${scopeId ?? app?.organization_id ?? ''}`)?.name
+      ?? (scopeType === 'organization' ? '全企业' : scopeId ?? '未知范围');
+  };
+
+  const operationCards = (['query', 'create', 'update', 'delete'] as EnterpriseApplicationOperation[]).map((operation) => ({
+    operation,
+    value: overview?.operation_counts[operation] ?? 0,
+    ...OPERATION_META[operation],
+  }));
+
+  const openEdit = () => {
+    if (!app) return;
+    form.setFieldsValue({
+      name: app.name,
+      description: app.description,
+      entry_url: app.entry_url,
+      display_mode: app.display_mode,
+      is_active: app.is_active,
+      assistant_enabled: app.assistant_enabled,
+      assistant_prompt: app.assistant_prompt,
+    });
+    setEditOpen(true);
+  };
+
+  const capabilityColumns = useMemo(() => [
+    {
+      title: 'AI 工具', dataIndex: 'name',
+      render: (name: string, row: EnterpriseApplicationCapability) => (
+        <div className="app-detail-tool-name">
+          <Typography.Text strong>{name}</Typography.Text>
+          <Typography.Text type="secondary">{row.description || `${row.source_name}提供的业务能力`}</Typography.Text>
+        </div>
+      ),
+    },
+    { title: '来源', dataIndex: 'source_name', width: 180 },
+    {
+      title: '接口', width: 290,
+      render: (_: unknown, row: EnterpriseApplicationCapability) => row.path ? (
+        <Space size={6}><Tag color="blue">{row.method || 'CALL'}</Tag><Typography.Text code>{row.path}</Typography.Text></Space>
+      ) : <Tag>{TARGET_LABEL[row.target_type]}</Tag>,
+    },
+    {
+      title: '权限动作', dataIndex: 'operation', width: 110,
+      render: (operation: EnterpriseApplicationOperation) => (
+        <Tag color={OPERATION_META[operation].color}>{OPERATION_META[operation].label}</Tag>
+      ),
+    },
+    { title: '状态', width: 110, render: (_: unknown, row: EnterpriseApplicationCapability) => statusLabel(row) },
+  ], []);
+
+  if (appQuery.isLoading || overviewQuery.isLoading) {
+    return <FinderShell><div className="app-detail-loading">正在汇总企业应用配置…</div></FinderShell>;
+  }
+  if (!app) {
+    return <FinderShell><Empty description="应用不存在或无权访问" /></FinderShell>;
+  }
+
+  const permissionTable = (
+    <Table
+      rowKey="id"
+      pagination={false}
+      dataSource={app.grants}
+      locale={{ emptyText: '尚未授权任何部门，普通用户看不到此应用' }}
+      columns={[
+        {
+          title: '可使用范围',
+          render: (_: unknown, row) => <Space><Tag>{row.scope_type}</Tag><Typography.Text strong>{scopeLabel(row.scope_type, row.scope_id)}</Typography.Text></Space>,
+        },
+        {
+          title: '应用与 AI 权限', dataIndex: 'permissions',
+          render: (permissions: EnterpriseApplicationPermission[]) => (
+            <Space wrap>{permissions.map((permission) => (
+              <Tag key={permission} color={permission === 'view' ? 'blue' : permission === 'ai_delete' ? 'red' : 'purple'}>
+                {PERMISSION_LABEL[permission]}
+              </Tag>
+            ))}</Space>
+          ),
+        },
+        {
+          title: '结论', width: 180,
+          render: (_: unknown, row) => row.permissions.includes('ai_query')
+            ? <Typography.Text type="success"><CheckCircleOutlined /> AI 可在此范围调用</Typography.Text>
+            : <Typography.Text type="secondary"><LockOutlined /> 仅查看应用</Typography.Text>,
+        },
+      ]}
+    />
+  );
+
+  const recentCallsTable = (
+    <Table
+      rowKey="id"
+      pagination={false}
+      dataSource={overview?.recent_calls ?? []}
+      locale={{ emptyText: '暂无工具调用记录；应用页面访问不会被计为 AI 工具调用' }}
+      columns={[
+        { title: '工具', dataIndex: 'capability_name' },
+        { title: '接口', width: 300, render: (_: unknown, row) => <Space><Tag>{row.method || 'CALL'}</Tag><Typography.Text code>{row.path || '-'}</Typography.Text></Space> },
+        { title: '结果', width: 110, render: (_: unknown, row) => <Tag color={row.status === 'success' ? 'green' : 'red'}>{row.status === 'success' ? '成功' : '失败'}</Tag> },
+        { title: '耗时', width: 100, render: (_: unknown, row) => row.latency_ms == null ? '-' : `${row.latency_ms} ms` },
+        { title: '时间', dataIndex: 'created_at', width: 190, render: (value: string) => new Date(value).toLocaleString('zh-CN') },
+      ]}
+    />
+  );
+
+  const capabilitiesPanel = (
+    <div className="app-detail-section-stack">
+      <div className="app-detail-metrics">
+        {operationCards.map((item) => (
+          <Card key={item.operation} className="app-detail-metric-card">
+            <div className="app-detail-metric-icon" style={{ color: item.color }}><ThunderboltOutlined /></div>
+            <div><div className="app-detail-metric-value">{item.value}</div><div className="app-detail-metric-label">{item.label}工具</div></div>
+          </Card>
+        ))}
+      </div>
+      <Card
+        title={<Space><ApiOutlined />AI 实际可调用能力</Space>}
+        extra={<Button type="link" onClick={() => navigate(`/enterprise-apps/assistant?app=${app.id}`)}>管理工具绑定</Button>}
+      >
+        <Alert
+          showIcon
+          type="info"
+          message={`当前应用配置 ${overview?.direct_capability_count ?? 0} 个业务接口${overview?.skill_binding_count ? `，另有 ${overview.skill_binding_count} 个运行包负责执行` : ''}。只有启用且用户具备对应权限的能力才会注册给 AI。`}
+          style={{ marginBottom: 16 }}
+        />
+        <Table rowKey="binding_id" pagination={false} dataSource={overview?.capabilities ?? []} columns={capabilityColumns} />
+      </Card>
+      <Card title={<Space><SafetyCertificateOutlined />部门权限</Space>} extra={<Button type="link" onClick={() => navigate(`/enterprise-apps/permissions?app=${app.id}`)}>编辑权限</Button>}>
+        {permissionTable}
+      </Card>
+      <div className="app-detail-two-columns">
+        <Card title={<Space><RobotOutlined />业务小助手</Space>}>
+          <Descriptions column={1} size="small">
+            <Descriptions.Item label="状态"><Tag color={app.assistant_enabled ? 'green' : 'default'}>{app.assistant_enabled ? '已启用' : '未启用'}</Tag></Descriptions.Item>
+            <Descriptions.Item label="业务提示词">{app.assistant_prompt ? '已配置' : '使用平台默认提示词'}</Descriptions.Item>
+            <Descriptions.Item label="绑定能力">{overview?.active_capability_count ?? 0} 个动作</Descriptions.Item>
+          </Descriptions>
+          <Button type="link" style={{ paddingInline: 0 }} onClick={() => navigate(`/enterprise-apps/assistant?app=${app.id}`)}>查看助手配置</Button>
+        </Card>
+        <Card title={<Space><CloudServerOutlined />最近工具调用</Space>}>
+          {(overview?.recent_calls.length ?? 0) > 0 ? (
+            <div className="app-detail-call-summary">
+              {overview?.recent_calls.slice(0, 3).map((call) => (
+                <div key={call.id}><span>{call.capability_name}</span><Tag color={call.status === 'success' ? 'green' : 'red'}>{call.status === 'success' ? '成功' : '失败'}</Tag></div>
+              ))}
+            </div>
+          ) : <Typography.Text type="secondary">尚无真实工具调用</Typography.Text>}
+        </Card>
+      </div>
+    </div>
+  );
+
+  const tabItems = [
+    {
+      key: 'overview', label: '应用概览',
+      children: (
+        <div className="app-detail-two-columns">
+          <Card title="应用状态">
+            <Descriptions column={1}>
+              <Descriptions.Item label="运行状态"><Tag color={app.is_active ? 'green' : 'default'}>{app.is_active ? '已启用' : '已停用'}</Tag></Descriptions.Item>
+              <Descriptions.Item label="页面连接"><Tag color={app.health_status === 'healthy' ? 'green' : 'default'}>{app.health_status === 'healthy' ? '正常' : app.health_status}</Tag></Descriptions.Item>
+              <Descriptions.Item label="展示方式">{app.display_mode === 'embedded' ? '平台内嵌' : '外部打开'}</Descriptions.Item>
+              <Descriptions.Item label="工具动作">{overview?.active_capability_count ?? 0}</Descriptions.Item>
+            </Descriptions>
+          </Card>
+          <Card title="管理员下一步">
+            <Space direction="vertical" align="start">
+              <Button type="link" icon={<ApiOutlined />} onClick={() => navigate(`/enterprise-apps/assistant?app=${app.id}`)}>确认 AI 能调用哪些接口</Button>
+              <Button type="link" icon={<SafetyCertificateOutlined />} onClick={() => navigate(`/enterprise-apps/permissions?app=${app.id}`)}>设置哪些部门可以使用</Button>
+              <Button type="link" icon={<RobotOutlined />} onClick={() => navigate(`/enterprise-apps/assistant?app=${app.id}`)}>配置业务小助手</Button>
+            </Space>
+          </Card>
+        </div>
+      ),
+    },
+    {
+      key: 'page', label: '页面入口',
+      children: <Card><Descriptions bordered column={1}><Descriptions.Item label="入口地址"><Typography.Text copyable>{app.entry_url}</Typography.Text></Descriptions.Item><Descriptions.Item label="打开方式">{app.display_mode === 'embedded' ? '平台内嵌（iframe）' : '新窗口打开'}</Descriptions.Item><Descriptions.Item label="连接状态">{app.health_status}</Descriptions.Item></Descriptions></Card>,
+    },
+    { key: 'capabilities', label: `AI 能力 ${overview?.direct_capability_count ?? 0}`, children: capabilitiesPanel },
+    { key: 'permissions', label: `部门权限 ${app.grants.length}`, children: <Card extra={<Button type="primary" onClick={() => navigate(`/enterprise-apps/permissions?app=${app.id}`)}>编辑权限</Button>}>{permissionTable}</Card> },
+    {
+      key: 'assistant', label: '业务助手',
+      children: <Card><Descriptions bordered column={1}><Descriptions.Item label="启用状态">{app.assistant_enabled ? '已启用' : '未启用'}</Descriptions.Item><Descriptions.Item label="提示词">{app.assistant_prompt || '未单独配置，使用平台默认提示词'}</Descriptions.Item><Descriptions.Item label="AI 工具">{overview?.direct_capability_count ?? 0} 个业务接口</Descriptions.Item></Descriptions><Button type="primary" style={{ marginTop: 16 }} onClick={() => navigate(`/enterprise-apps/assistant?app=${app.id}`)}>管理助手与工具</Button></Card>,
+    },
+    { key: 'calls', label: '调用记录', children: <Card>{recentCallsTable}</Card> },
+  ];
+
+  return (
+    <FinderShell>
+      <div className="app-detail-page">
+        <div className="app-detail-header">
+          <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => navigate('/enterprise-apps')}>返回应用</Button>
+          <div className="app-detail-identity">
+            <div className="app-detail-logo"><AppstoreOutlined /></div>
+            <div>
+              <div className="app-detail-title-row"><Typography.Title level={3}>{app.name}</Typography.Title><Tag color={app.is_active ? 'green' : 'default'}>{app.is_active ? '已启用' : '已停用'}</Tag><Tag color={app.health_status === 'healthy' ? 'blue' : 'default'}>{app.health_status === 'healthy' ? '页面正常' : '页面待检查'}</Tag>{(overview?.operation_counts.query ?? 0) > 0 && <Tag color="purple">AI 查询可用</Tag>}</div>
+              <Typography.Text type="secondary">{app.description || '企业业务应用'} · {app.slug}</Typography.Text>
+            </div>
+          </div>
+          <Space>
+            <Button icon={<PlayCircleOutlined />} loading={testApp.isPending} onClick={() => testApp.mutate()}>检查连接</Button>
+            <Button icon={<ExportOutlined />} onClick={() => window.open(app.entry_url, '_blank', 'noopener,noreferrer')}>打开应用</Button>
+            <Button type="primary" icon={<EditOutlined />} onClick={openEdit}>编辑配置</Button>
+          </Space>
+        </div>
+        <Tabs defaultActiveKey="capabilities" items={tabItems} className="app-detail-tabs" />
+      </div>
+
+      <Modal title="编辑企业应用" open={editOpen} onCancel={() => setEditOpen(false)} onOk={() => form.submit()} confirmLoading={updateApp.isPending} width={680} forceRender>
+        <Form form={form} layout="vertical" onFinish={(values) => updateApp.mutate(values)}>
+          <Form.Item name="name" label="应用名称" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="description" label="说明"><Input.TextArea rows={2} /></Form.Item>
+          <Form.Item name="entry_url" label="入口地址" rules={[{ required: true }, { type: 'url' }]}><Input prefix={<LinkOutlined />} /></Form.Item>
+          <Form.Item name="display_mode" label="打开方式"><Select options={[{ value: 'embedded', label: '平台内嵌（iframe）' }, { value: 'external', label: '外部打开' }]} /></Form.Item>
+          <Form.Item name="assistant_prompt" label="业务助手提示词"><Input.TextArea rows={4} /></Form.Item>
+          <Space size={32}><Form.Item name="is_active" label="启用应用" valuePropName="checked"><Switch /></Form.Item><Form.Item name="assistant_enabled" label="启用业务助手" valuePropName="checked"><Switch /></Form.Item></Space>
+        </Form>
+      </Modal>
+    </FinderShell>
+  );
+}

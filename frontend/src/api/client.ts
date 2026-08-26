@@ -1482,9 +1482,47 @@ export interface EnterpriseApplicationLaunch {
   permissions: EnterpriseApplicationPermission[];
 }
 
+export interface EnterpriseApplicationCapability {
+  binding_id: string;
+  target_type: EnterpriseApplicationTarget;
+  target_id: string;
+  operation: EnterpriseApplicationOperation;
+  name: string;
+  source_name: string;
+  description: string | null;
+  method: string | null;
+  path: string | null;
+  binding_active: boolean;
+  target_active: boolean;
+  health_status: string | null;
+}
+
+export interface EnterpriseApplicationRecentCall {
+  id: number;
+  capability_name: string;
+  method: string | null;
+  path: string | null;
+  status: 'success' | 'failed';
+  status_code: number | null;
+  latency_ms: number | null;
+  error: string | null;
+  created_at: string;
+}
+
+export interface EnterpriseApplicationOverview {
+  application_id: string;
+  operation_counts: Record<EnterpriseApplicationOperation, number>;
+  active_capability_count: number;
+  direct_capability_count: number;
+  skill_binding_count: number;
+  capabilities: EnterpriseApplicationCapability[];
+  recent_calls: EnterpriseApplicationRecentCall[];
+}
+
 export const enterpriseApplications = {
   list: (orgId: string) => request<EnterpriseApplication[]>(`/api/v1/organizations/${orgId}/applications`),
   get: (id: string) => request<EnterpriseApplication>(`/api/v1/applications/${id}`),
+  overview: (id: string) => request<EnterpriseApplicationOverview>(`/api/v1/applications/${id}/overview`),
   create: (orgId: string, data: EnterpriseApplicationInput) =>
     request<EnterpriseApplication>(`/api/v1/organizations/${orgId}/applications`, {
       method: 'POST', body: JSON.stringify(data),
