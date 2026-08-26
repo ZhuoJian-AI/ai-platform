@@ -37,6 +37,7 @@ from app.models.skill import SkillExecution, SkillFolder, SkillVersion
 from app.schemas.rag import RagRetrieveRequest
 from app.schemas.workspace import WorkspaceFileCreate
 from app.services import (
+    enterprise_application_service,
     memory_service,
     multimodal_service,
     scope_service,
@@ -1247,6 +1248,10 @@ async def _build_tools(
             continue
         if user is not None and not skill_scope_service.user_can_use_folder(user, folder):
             continue
+        if user is not None and not await enterprise_application_service.target_allowed_for_user(
+            db, user, "skill_folder", folder.id,
+        ):
+            continue
         version = await db.get(SkillVersion, folder.active_version_id) if folder.active_version_id else None
         if version is not None and version.install_status != "ready":
             continue
@@ -1316,6 +1321,10 @@ async def _build_tools(
             except (ValueError, AttributeError):
                 ep = None
             if not (ep and ep.is_active):
+                continue
+            if user is not None and not await enterprise_application_service.target_allowed_for_user(
+                db, user, "tool_endpoint", ep.id,
+            ):
                 continue
             # OpenAI-compatible providers only accept [a-zA-Z0-9_-] tool names.
             # Imported operationIds are not guaranteed to follow that rule.
@@ -1440,6 +1449,10 @@ async def _execute_code_skill(
     version: SkillVersion = entry["version"]
     if user is None or not skill_scope_service.user_can_use_folder(user, folder):
         return json.dumps({"status": "error", "error": "Skill is outside the current user scope"})
+    if not await enterprise_application_service.target_allowed_for_user(
+        db, user, "skill_folder", folder.id,
+    ):
+        return json.dumps({"status": "error", "error": "Enterprise application permission required"})
     # Re-check mutable authorization/lifecycle state immediately before each
     # execution. A Skill may be disabled, upgraded, or revoked after the LLM
     # received its tool schema but before it returns the tool call.
@@ -1588,6 +1601,10 @@ async def _resolve_agent_skill(state: AgentState, entry: dict, params: dict) -> 
     version: SkillVersion = selected["version"]
     if user is None or not skill_scope_service.user_can_use_folder(user, folder):
         return None, "Skill is outside the current user scope"
+    if not await enterprise_application_service.target_allowed_for_user(
+        db, user, "skill_folder", folder.id,
+    ):
+        return None, "Enterprise application permission required"
     await db.refresh(folder)
     await db.refresh(version)
     if not folder.is_active or str(folder.active_version_id or "") != str(version.id):
@@ -1755,6 +1772,17 @@ async def _execute_tool_call(
         return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
     folder: SkillFolder = entry["folder"]
     ep: ToolEndpoint = entry["endpoint"]
+    user = deps.get("user")
+    if user is not None:
+        skill_allowed = await enterprise_application_service.target_allowed_for_user(
+            db, user, "skill_folder", folder.id,
+        )
+        endpoint_allowed = await enterprise_application_service.target_allowed_for_user(
+            db, user, "tool_endpoint", ep.id,
+        )
+        if not skill_allowed or not endpoint_allowed:
+            msg = "Enterprise application permission required"
+            return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
     conn = await db.get(ToolConnector, ep.connector_id)
     if conn is None:
         msg = "connector not found"
@@ -1859,6 +1887,25 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
         except Exception as exc:  # noqa: BLE001
             logger.warning("load_data_interfaces_failed", error=str(exc))
             interfaces = []
+        interfaces = [
+            item for item in interfaces
+            if await enterprise_application_service.target_allowed_for_user(
+                db, user, "data_interface", item.id,
+            )
+        ]
+        application_id = state.get("application_id")
+        if application_id:
+            application, permissions = await enterprise_application_service.assert_application_permission(
+                db, application_id, user, "view",
+            )
+            page_context = json.dumps(state.get("page_context") or {}, ensure_ascii=False, default=str)
+            system_prompt = (
+                f"{system_prompt}\n\n[当前企业应用]\n"
+                f"应用：{application.name}（{application.slug}）\n"
+                f"允许操作：{', '.join(sorted(permissions))}\n"
+                f"页面上下文：{page_context}\n"
+                "只能执行允许操作；页面上下文是用户当前界面状态，不得把它当作工具执行结果。"
+            )
         system_names = sorted({(item.system.name if item.system else "?") for item in interfaces})
         if interfaces:
             lines = []

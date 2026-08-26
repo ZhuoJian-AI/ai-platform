@@ -11,6 +11,11 @@ from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.data_interface import DataInterface, DataSystem
 from app.models.department import Department
 from app.models.dlp_rule import DlpRule
+from app.models.enterprise_application import (
+    EnterpriseApplication,
+    EnterpriseApplicationGrant,
+    EnterpriseApplicationToolBinding,
+)
 from app.models.judge import JudgeTemplate
 from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.models.memory import Memory
@@ -49,6 +54,9 @@ __all__ = [
     "LlmProvider",
     "ModelDeployment",
     "DlpRule",
+    "EnterpriseApplication",
+    "EnterpriseApplicationGrant",
+    "EnterpriseApplicationToolBinding",
     "RoutingPolicy",
     "AuditLog",
     "BudgetUsage",

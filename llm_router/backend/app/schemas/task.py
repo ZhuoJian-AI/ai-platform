@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas._base import MetaReadModel
 from app.services.message_verification import classify_execution_verification
@@ -27,6 +27,8 @@ class TaskConfig(BaseModel):
     # 前缀拼到运行时 system_prompt 最前。承载场景 persona + 不可由本体/目录推导的
     # 业务规则 + 输出骨架，使终端用户 composer 只需写目标+对象，不必复制整套提示词。
     template_agent_id: str | None = None
+    # 企业业务模块上下文；仅在用户具备该应用 view 权限时允许创建/运行。
+    application_id: UUID | None = None
 
 
 class TaskCreate(BaseModel):
@@ -55,6 +57,18 @@ class TaskRunRequest(BaseModel):
     #   显式传 UUID → 该次用此智能体（load_config 拼 persona + 继承 skill_ids/model_alias）
     #   显式传 null/空 → 强制通用智能体（不绑模板，纯 GENERAL_SYSTEM_PROMPT）
     template_agent_id: str | None = None
+    # 业务小助手可逐轮覆盖任务绑定应用；页面上下文只在本轮使用，不写回任务配置。
+    application_id: UUID | None = None
+    page_context: dict = Field(default_factory=dict)
+
+    @field_validator("page_context")
+    @classmethod
+    def limit_page_context(cls, value: dict) -> dict:
+        import json
+
+        if len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")) > 16_384:
+            raise ValueError("page_context exceeds 16KB")
+        return value
 
 
 class ExecutionVerification(BaseModel):

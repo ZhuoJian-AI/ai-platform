@@ -3,7 +3,6 @@ import {
   type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent,
   type Dispatch, type FormEvent, type KeyboardEvent, type ReactNode, type SetStateAction,
 } from 'react';
-import { useParams } from 'react-router-dom';
 import {
   ConfigProvider, Button, Typography, Input, Tag, Drawer, Dropdown, Tabs, Empty, Spin,
   message, Tree, Avatar, Popover, Tooltip,
@@ -11,7 +10,7 @@ import {
 import {
   PlusOutlined, SendOutlined, RobotOutlined, SettingOutlined, FileTextOutlined,
   LogoutOutlined, DatabaseOutlined, PartitionOutlined,
-  UnorderedListOutlined, BookOutlined, ApiOutlined, DashboardOutlined,
+  UnorderedListOutlined, BookOutlined, ApiOutlined,
   FolderOpenOutlined, MoreOutlined, ThunderboltOutlined,
   AppstoreOutlined, CheckCircleOutlined,
   RightOutlined, DownOutlined,
@@ -26,7 +25,7 @@ import {
   terminal, type TaskConfig, type TerminalTask, type TerminalTaskMessage,
   type TerminalResources, type TerminalMemoryItem, type TerminalModels, type TerminalAgent, type WorkspaceFileListItem,
   type TerminalTaskWithMessages,
-  type SkillFolderSummary, type WorkspaceFileSummary,
+  type SkillFolderSummary, type WorkspaceFileSummary, type TerminalEnterpriseApplication,
   WORKSPACE_MAX_FILE_BYTES,
 } from '../../api/client';
 import { useUserAuth } from '../../context/UserAuthContext';
@@ -36,7 +35,7 @@ import WorkspaceManagerView from './WorkspaceManagerView';
 import KnowledgeBaseView from './KnowledgeBaseView';
 import SkillManagerView from './SkillManagerView';
 import AgentManagerView from './AgentManagerView';
-import AifabeiDashboardView from './AifabeiDashboardView';
+import EnterpriseApplicationView from './EnterpriseApplicationView';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from '../../branding/BrandLogoSlot';
 import { BRAND_TITLES, useBrandTitle } from '../../branding/brand';
@@ -272,10 +271,8 @@ const EXEC_LABEL: Record<TaskConfig['exec_mode'], string> = { craft: 'Craft', as
 export default function Terminal() {
   useBrandTitle(BRAND_TITLES.terminal);
 
-  const { slug = '' } = useParams<{ slug: string }>();
   const { user, logout } = useUserAuth();
   const qc = useQueryClient();
-  const isAifabei = (slug || user?.organization_slug || '').trim().toLowerCase() === 'aifabei';
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -307,12 +304,14 @@ export default function Terminal() {
   const [inputAttachments, setInputAttachments] = useState<ComposerAttachment[]>([]);
   const [draftAttachmentKey, setDraftAttachmentKey] = useState(() => crypto.randomUUID());
   const [config, setConfig] = useState<TaskConfig>(DEFAULT_CONFIG);
+  const [pageContext, setPageContext] = useState<Record<string, unknown>>({});
   const [cfgOpen, setCfgOpen] = useState(false);
   // 终端「选智能体」逐次覆盖（不落库）：选中后随 /run 发送；null=通用智能体。
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
-  // 左侧功能菜单视图：助理（任务对话）/ 工作空间 / 智能体 / 知识库 / 技能 / 租户演示模块
-  const [view, setView] = useState<'assistant' | 'workspaces' | 'agents' | 'knowledge' | 'skills' | 'aifabei_dashboard'>('assistant');
+  // 左侧功能菜单视图：平台核心能力 + 按授权动态加载的企业应用。
+  const [view, setView] = useState<'assistant' | 'workspaces' | 'agents' | 'knowledge' | 'skills' | 'application'>('assistant');
+  const [selectedApplicationId, setSelectedApplicationId] = useState<string | null>(null);
 
   // 跟随输入（选中任务后的对话）
   const [followUp, setFollowUp] = useState('');
@@ -335,6 +334,10 @@ export default function Terminal() {
     queryKey: ['terminal-task-agent-options'],
     queryFn: async () => (await terminal.agents()).agents,
   });
+  const { data: terminalApplications = [] } = useQuery<TerminalEnterpriseApplication[]>({
+    queryKey: ['terminal-applications'], queryFn: () => terminal.applications(),
+  });
+  const selectedApplication = terminalApplications.find((item) => item.id === selectedApplicationId) ?? null;
   // 智能体 chip 文案：选中显示名称，未选=通用智能体。
   const agentLabel = selectedAgentId
     ? (agentsList.find((a) => a.id === selectedAgentId)?.name ?? '已选')
@@ -600,6 +603,7 @@ export default function Terminal() {
 
   const runStream = useCallback(async (
     taskId: string, msg: string, attachments: MessageAttachment[] = [], invokedSkills: InvokedSkill[] = [],
+    applicationId?: string | null, currentPageContext: Record<string, unknown> = {},
   ) => {
     // 乐观载入：立即显示用户消息 + 一个「思考中」回合，第一时间给反馈
     // 该轮若选了智能体，把智能体名挂到用户消息上，气泡内按技能 chip 同款展示（逐次覆盖、不落库）。
@@ -618,6 +622,7 @@ export default function Terminal() {
       const resp = await terminal.runTaskStream(
         taskId, msg, controller.signal, selectedAgentId, attachments.map((item) => item.file_id),
         invokedSkills.map((item) => item.id),
+        applicationId, currentPageContext,
       );
       if (!resp.ok || !resp.body) {
         const err = await resp.json().catch(() => ({}));
@@ -769,7 +774,8 @@ export default function Terminal() {
       const invokedSkills = [...inputSkills];
       setInputSkills([]);
       setInputAttachments([]);
-      await runStream(task.id, msg, attachmentSnapshots, invokedSkills);
+      await runStream(task.id, msg, attachmentSnapshots, invokedSkills, config.application_id, pageContext);
+      setPageContext({});
     } catch (e) {
       message.error((e as Error).message);
     }
@@ -793,7 +799,7 @@ export default function Terminal() {
     setFollowUp('');
     setFollowUpSkills([]);
     setFollowUpAttachments([]);
-    await runStream(selectedId, msg, attachmentSnapshots, invokedSkills);
+    await runStream(selectedId, msg, attachmentSnapshots, invokedSkills, taskConfig.application_id, {});
   };
 
   const newTask = () => {
@@ -811,6 +817,8 @@ export default function Terminal() {
     setFollowUpSkills([]);
     setDraftAttachmentKey(crypto.randomUUID());
     setConfig(DEFAULT_CONFIG);
+    setPageContext({});
+    setSelectedApplicationId(null);
     setView('assistant');
   };
 
@@ -976,13 +984,22 @@ export default function Terminal() {
                 <ThunderboltOutlined style={{ fontSize: 16 }} />
                 <span>技能</span>
               </div>
-              {isAifabei && (
-                <div onClick={() => setView('aifabei_dashboard')} style={navItemStyle(view === 'aifabei_dashboard')}>
-                  <DashboardOutlined style={{ fontSize: 16 }} />
-                  <span>AI看板</span>
-                  <Tag color="purple" bordered={false} style={{ margin: '0 0 0 auto', fontSize: 9, lineHeight: '17px' }}>演示</Tag>
-                </div>
+              {terminalApplications.length > 0 && (
+                <div style={{ padding: '12px 10px 4px', fontSize: 11, color: '#9ca3af', fontWeight: 600, letterSpacing: .4 }}>企业应用</div>
               )}
+              {terminalApplications.map((application) => (
+                <div
+                  key={application.id}
+                  onClick={() => { setSelectedApplicationId(application.id); setView('application'); }}
+                  style={navItemStyle(view === 'application' && selectedApplicationId === application.id)}
+                >
+                  {application.icon_url
+                    ? <img src={application.icon_url} alt="" style={{ width: 17, height: 17, borderRadius: 5, objectFit: 'cover' }} />
+                    : <AppstoreOutlined style={{ fontSize: 16 }} />}
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{application.name}</span>
+                  {application.assistant_enabled && <Tag color="purple" bordered={false} style={{ margin: '0 0 0 auto', fontSize: 9, lineHeight: '17px' }}>AI</Tag>}
+                </div>
+              ))}
             </nav>
 
             {/* 任务列表 */}
@@ -1069,7 +1086,7 @@ export default function Terminal() {
                 content={
                   <div style={{ minWidth: 160 }}>
                     <div style={{ marginBottom: 8, fontSize: 12, color: '#9ca3af' }}>
-                      {user?.organization_name || slug}
+                      {user?.organization_name || user?.organization_slug || '企业用户'}
                     </div>
                     <Button block icon={<DownloadOutlined />} onClick={exportSkillsPack} style={{ marginBottom: 8 }}>
                       导出 Skills
@@ -1111,12 +1128,14 @@ export default function Terminal() {
               <KnowledgeBaseView />
             ) : view === 'skills' ? (
               <SkillManagerView />
-            ) : view === 'aifabei_dashboard' && isAifabei ? (
-              <AifabeiDashboardView onAskAI={(prompt) => {
+            ) : view === 'application' && selectedApplication ? (
+              <EnterpriseApplicationView application={selectedApplication} onAskAI={(prompt, context) => {
                 setView('assistant');
                 setSelectedId(null);
                 setComposerOpen(true);
                 setInput(prompt);
+                setConfig((current) => ({ ...current, application_id: selectedApplication.id }));
+                setPageContext(context);
               }} />
             ) : composerOpen ? (
               <HomeView

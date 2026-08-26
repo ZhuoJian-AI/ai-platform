@@ -106,6 +106,7 @@ from app.schemas.workspace import (
 )
 from app.services import (
     doc_parser,
+    enterprise_application_service,
     memory_service,
     rag_service,
     scope_service,
@@ -532,6 +533,10 @@ async def memory_endpoint(
 async def create_task_endpoint(
     data: TaskCreate, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
+    if data.config.application_id:
+        await enterprise_application_service.assert_application_permission(
+            db, data.config.application_id, cu, "view",
+        )
     # 未显式选择工作空间/模型时，填入用户默认（个人工作空间 + 最近一次使用的模型）。
     if data.config.workspace_id is None or data.config.model_alias is None:
         defaults = await _user_defaults(db, cu)
@@ -576,6 +581,10 @@ async def update_task_endpoint(
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
     task = await _get_owned_task(db, task_id, cu)
+    if data.config is not None and data.config.application_id:
+        await enterprise_application_service.assert_application_permission(
+            db, data.config.application_id, cu, "view",
+        )
     await task_service.update_task(db, task, data)
     await db.commit()
     return task
@@ -619,6 +628,15 @@ async def run_task_endpoint(
     # 旧任务 config 可能缺 workspace_id，运行时按用户默认补齐。
     # 模型必须显式选择（创建时未选且无最近使用默认则空）——不选模型不允许执行。
     cfg = dict(task.config or {})
+    provided = data.model_dump(exclude_unset=True)
+    if "application_id" in provided:
+        cfg["application_id"] = str(provided["application_id"]) if provided["application_id"] else None
+    cfg["page_context"] = dict(data.page_context or {})
+    if cfg.get("application_id"):
+        _, application_permissions = await enterprise_application_service.assert_application_permission(
+            db, cfg["application_id"], cu, "view",
+        )
+        cfg["application_permissions"] = sorted(application_permissions)
     if not cfg.get("workspace_id"):
         defaults = await _user_defaults(db, cu)
         if defaults["workspace_id"]:
@@ -639,7 +657,6 @@ async def run_task_endpoint(
     # 逐次运行覆盖智能体（不落库）：
     #   字段未传 → 沿用 task.config.template_agent_id（向后兼容 demo 旧 /run 调用）
     #   显式传（UUID 或 null/空）→ 覆盖：UUID 用此智能体，null 强制通用智能体。
-    provided = data.model_dump(exclude_unset=True)
     if "template_agent_id" in provided:
         tpl = provided["template_agent_id"]
         cfg["template_agent_id"] = (tpl or None)

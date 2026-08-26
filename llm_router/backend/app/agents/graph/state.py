@@ -27,6 +27,8 @@ class AgentState(TypedDict, total=False):
     # general 模式：可选引用一个 Agent 行作「场景模板」，其 system_prompt 作为
     # persona/policy 前缀拼到 GENERAL_SYSTEM_PROMPT 之前（load_config 解析填充 base_prompt）。
     template_agent_id: str | None
+    application_id: str | None
+    page_context: dict
 
     # ── Agent 配置（load_config 节点填充）──
     system_prompt: str

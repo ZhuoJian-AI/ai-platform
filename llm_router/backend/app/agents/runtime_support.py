@@ -56,6 +56,8 @@ def general_initial_state(
         "model_alias": config.get("model_alias") or "default",
         "exec_mode": config.get("exec_mode") or "craft",
         "template_agent_id": config.get("template_agent_id"),
+        "application_id": config.get("application_id"),
+        "page_context": dict(config.get("page_context") or {}),
         "attachment_files": list(attachment_files or []),
         "referenced_file_ids": [str(item["file_id"]) for item in (attachment_files or [])],
     }
@@ -67,6 +69,10 @@ def user_message_metadata(initial: AgentState) -> dict:
         metadata["attachments"] = attachments
     if invoked := list(initial.get("invoked_skills") or []):
         metadata["invoked_skills"] = invoked
+    if initial.get("application_id"):
+        metadata["application_id"] = initial["application_id"]
+    if initial.get("page_context"):
+        metadata["page_context"] = initial["page_context"]
     return metadata
 
 

@@ -60,7 +60,7 @@ async def create_task(
         session_id=f"task-{uuid.uuid4()}",
         title=data.title.strip() if data.title.strip() else make_task_title(data.message),
         message=data.message,
-        config=data.config.model_dump(),
+        config=data.config.model_dump(mode="json"),
         status="active",
     )
     db.add(task)
@@ -107,7 +107,8 @@ async def get_task(db: AsyncSession, task_id: UUID) -> Task | None:
 async def update_task(db: AsyncSession, task: Task, data: TaskUpdate) -> Task:
     values = data.model_dump(exclude_unset=True)
     if "config" in values and values["config"] is not None:
-        task.config = values.pop("config")
+        config = values.pop("config")
+        task.config = config.model_dump(mode="json") if hasattr(config, "model_dump") else config
     for field, value in values.items():
         setattr(task, field, value)
     await db.flush()

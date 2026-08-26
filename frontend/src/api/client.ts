@@ -1431,7 +1431,85 @@ export interface TaskConfig {
   /** 终端「选智能体」逐次运行覆盖（不落库）：UUID=该次用此智能体；null=通用智能体（不绑模板）。
    *  注意：此字段仅前端态，不写入 task.config；run 请求里随消息一起发送，由后端 exclude_unset 判定覆盖。 */
   template_agent_id?: string | null;
+  /** 企业业务应用上下文；为空时保持原有通用助手行为。 */
+  application_id?: string | null;
 }
+
+export type EnterpriseApplicationPermission =
+  | 'view' | 'ai_query' | 'ai_create' | 'ai_update' | 'ai_delete' | 'export';
+export type EnterpriseApplicationScope = 'organization' | 'department' | 'team' | 'user';
+export type EnterpriseApplicationTarget = 'tool_endpoint' | 'data_interface' | 'skill_folder';
+export type EnterpriseApplicationOperation = 'query' | 'create' | 'update' | 'delete' | 'export';
+
+export interface EnterpriseApplicationGrant {
+  id: string; application_id: string; organization_id: string;
+  scope_type: EnterpriseApplicationScope; scope_id: string | null;
+  permissions: EnterpriseApplicationPermission[];
+  created_at: string; updated_at: string;
+}
+
+export interface EnterpriseApplicationToolBinding {
+  id: string; application_id: string; organization_id: string;
+  target_type: EnterpriseApplicationTarget; target_id: string;
+  operation: EnterpriseApplicationOperation; is_active: boolean;
+  created_at: string; updated_at: string;
+}
+
+export interface EnterpriseApplication {
+  id: string; organization_id: string; name: string; slug: string;
+  description: string | null; icon_url: string | null; entry_url: string;
+  display_mode: 'embedded' | 'external'; sort_order: number; is_active: boolean;
+  assistant_enabled: boolean; assistant_prompt: string | null;
+  assistant_config: Record<string, unknown>; health_status: string;
+  grants: EnterpriseApplicationGrant[];
+  tool_bindings: EnterpriseApplicationToolBinding[];
+  created_at: string; updated_at: string;
+}
+
+export type EnterpriseApplicationInput = Pick<EnterpriseApplication,
+  'name' | 'slug' | 'entry_url' | 'display_mode' | 'sort_order' | 'is_active' | 'assistant_enabled'
+> & Partial<Pick<EnterpriseApplication, 'description' | 'icon_url' | 'assistant_prompt' | 'assistant_config'>>;
+
+export interface TerminalEnterpriseApplication {
+  id: string; name: string; slug: string; description: string | null;
+  icon_url: string | null; display_mode: 'embedded' | 'external';
+  sort_order: number; assistant_enabled: boolean;
+  permissions: EnterpriseApplicationPermission[];
+}
+
+export interface EnterpriseApplicationLaunch {
+  application_id: string; url: string; display_mode: 'embedded' | 'external';
+  permissions: EnterpriseApplicationPermission[];
+}
+
+export const enterpriseApplications = {
+  list: (orgId: string) => request<EnterpriseApplication[]>(`/api/v1/organizations/${orgId}/applications`),
+  get: (id: string) => request<EnterpriseApplication>(`/api/v1/applications/${id}`),
+  create: (orgId: string, data: EnterpriseApplicationInput) =>
+    request<EnterpriseApplication>(`/api/v1/organizations/${orgId}/applications`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+  update: (id: string, data: Partial<EnterpriseApplicationInput>) =>
+    request<EnterpriseApplication>(`/api/v1/applications/${id}`, {
+      method: 'PATCH', body: JSON.stringify(data),
+    }),
+  delete: (id: string) => request<void>(`/api/v1/applications/${id}`, { method: 'DELETE' }),
+  replaceGrants: (id: string, grants: Array<{
+    scope_type: EnterpriseApplicationScope; scope_id: string | null;
+    permissions: EnterpriseApplicationPermission[];
+  }>) => request<EnterpriseApplication>(`/api/v1/applications/${id}/grants`, {
+    method: 'PUT', body: JSON.stringify({ grants }),
+  }),
+  replaceToolBindings: (id: string, bindings: Array<{
+    target_type: EnterpriseApplicationTarget; target_id: string;
+    operation: EnterpriseApplicationOperation; is_active: boolean;
+  }>) => request<EnterpriseApplication>(`/api/v1/applications/${id}/tool-bindings`, {
+    method: 'PUT', body: JSON.stringify({ bindings }),
+  }),
+  test: (id: string) => request<{ status: 'healthy' | 'unhealthy'; status_code: number | null; detail: string | null }>(
+    `/api/v1/applications/${id}/test`, { method: 'POST' },
+  ),
+};
 
 export interface TerminalAgent {
   id: string; name: string; slug: string;
@@ -1509,6 +1587,10 @@ export const terminal = {
   resources: () => userRequest<TerminalResources>('/api/v1/terminal/resources'),
   models: () => userRequest<TerminalModels>('/api/v1/terminal/models'),
   agents: () => userRequest<{ agents: TerminalAgent[] }>('/api/v1/terminal/agents'),
+  applications: () => userRequest<TerminalEnterpriseApplication[]>('/api/v1/terminal/applications'),
+  launchApplication: (id: string) => userRequest<EnterpriseApplicationLaunch>(
+    `/api/v1/terminal/applications/${id}/launch`, { method: 'POST' },
+  ),
   // ── 终端智能体管理（用户级）：列表展示权限范围内可见、改删仅限自己创建的 ──
   listAgents: (scope?: { scope_type: string; scope_id?: string | null }) => {
     const url = scope
@@ -1591,22 +1673,24 @@ export const terminal = {
   runTask: (
     id: string, message: string, template_agent_id?: string | null,
     attachment_file_ids: string[] = [], invoked_skill_ids: string[] = [],
+    application_id?: string | null, page_context: Record<string, unknown> = {},
   ) =>
     userRequest<{ assistant: string; steps: unknown[]; usage: Record<string, number>; run_id: number; latency_ms: number }>(
       `/api/v1/terminal/tasks/${id}/run`,
-      { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null, attachment_file_ids, invoked_skill_ids }) },
+      { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null, attachment_file_ids, invoked_skill_ids, application_id: application_id ?? null, page_context }) },
     ),
   /** 流式执行：返回原始 Response，由调用方解析 SSE（仿 AgentPlayground）。
    *  template_agent_id 逐次覆盖（不落库）：undefined=沿用 task.config；null=通用；UUID=该次用此智能体。 */
   runTaskStream: (
     id: string, message: string, signal: AbortSignal,
     template_agent_id?: string | null, attachment_file_ids: string[] = [],
-    invoked_skill_ids: string[] = [],
+    invoked_skill_ids: string[] = [], application_id?: string | null,
+    page_context: Record<string, unknown> = {},
   ) =>
     fetch(`${BASE_URL}/api/v1/terminal/tasks/${id}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem(USER_TOKEN_KEY) || ''}` },
-      body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null, attachment_file_ids, invoked_skill_ids }),
+      body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null, attachment_file_ids, invoked_skill_ids, application_id: application_id ?? null, page_context }),
       signal,
     }),
   /** resume：重连/回放一个运行中或已完成的 run（后台 detach 执行，刷新不丢）。 */

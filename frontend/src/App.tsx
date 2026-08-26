@@ -9,6 +9,7 @@ import {
   ApiOutlined, BarChartOutlined, QuestionCircleOutlined, ReadOutlined,
   MoreOutlined, PhoneOutlined,
   AppstoreAddOutlined, DeploymentUnitOutlined, ShopOutlined, HistoryOutlined,
+  AppstoreOutlined, LinkOutlined, SettingOutlined, RightOutlined, DownOutlined,
 } from '@ant-design/icons';
 import { WB, WB_FONT, FS, antdTheme } from './components/finder/theme';
 import { AuthProvider, useAuth, RequireAuth } from './context/AuthContext';
@@ -42,6 +43,7 @@ import ToolMonitor from './pages/monitor/ToolMonitor';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from './branding/BrandLogoSlot';
 import { BRAND_TITLES, useBrandTitle } from './branding/brand';
 import PlatformExtensions from './pages/platform/PlatformExtensions';
+import EnterpriseApplications from './pages/apps/EnterpriseApplications';
 
 interface MenuEntry {
   path: string;
@@ -128,6 +130,21 @@ const SUBSYSTEMS: Subsystem[] = [
     ],
   },
   {
+    key: 'enterprise_apps', label: '企业应用', icon: <AppstoreOutlined />, built: true,
+    menu: [
+      { path: '/enterprise-apps', label: '应用管理', icon: <AppstoreOutlined /> },
+      { path: '/enterprise-apps/navigation', label: '导航配置', icon: <SettingOutlined /> },
+      { path: '/enterprise-apps/permissions', label: '应用权限', icon: <SafetyOutlined /> },
+      { path: '/enterprise-apps/assistant', label: '业务助手', icon: <LinkOutlined /> },
+    ],
+    routes: [
+      { path: '/enterprise-apps', element: <EnterpriseApplications section="applications" /> },
+      { path: '/enterprise-apps/navigation', element: <EnterpriseApplications section="navigation" /> },
+      { path: '/enterprise-apps/permissions', element: <EnterpriseApplications section="permissions" /> },
+      { path: '/enterprise-apps/assistant', element: <EnterpriseApplications section="assistant" /> },
+    ],
+  },
+  {
     key: 'platform_extensions', label: '平台扩展', icon: <AppstoreAddOutlined />, built: true,
     menu: [
       { path: '/platform/extensions', label: '扩展总览', icon: <AppstoreAddOutlined />, superOnly: true },
@@ -166,6 +183,9 @@ function AppLayout() {
   const navigate = useNavigate();
   const { admin, logout, isSuperAdmin, isOrgScoped } = useAuth();
   const [helpOpen, setHelpOpen] = useState(false);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set(
+    SUBSYSTEMS.filter((subsystem) => subsystem.built).map((subsystem) => subsystem.key),
+  ));
 
   useBrandTitle(isOrgScoped() ? BRAND_TITLES.organization : BRAND_TITLES.platform);
 
@@ -173,6 +193,11 @@ function AppLayout() {
   useEffect(() => {
     return applyBrandFavicon(BRAND_LOGO_SLOTS.platformFavicon);
   }, []);
+
+  useEffect(() => {
+    const active = SUBSYSTEMS.find((subsystem) => subsystem.menu.some((item) => item.path === location.pathname));
+    if (active) setExpandedGroups((current) => current.has(active.key) ? current : new Set([...current, active.key]));
+  }, [location.pathname]);
 
   const ROLE_LABELS: Record<string, string> = { super_admin: '超管', admin: '管理员', org_admin: '组织管理员' };
 
@@ -209,12 +234,21 @@ function AppLayout() {
             {SUBSYSTEMS.filter((s) => s.built).map((s) => {
               const items = s.menu.filter((m) => !m.hidden && (!m.superOnly || isSuperAdmin()));
               if (items.length === 0) return null;
+              const expanded = expandedGroups.has(s.key);
               return (
                 <div key={s.key} style={{ marginBottom: 6 }}>
-                  <div style={{ fontSize: FS.micro, fontWeight: 600, color: WB.textAux, letterSpacing: 0.4, textTransform: 'uppercase', padding: '8px 18px 2px' }}>
-                    {s.label}
+                  <div
+                    onClick={() => setExpandedGroups((current) => {
+                      const next = new Set(current);
+                      if (next.has(s.key)) next.delete(s.key); else next.add(s.key);
+                      return next;
+                    })}
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: FS.micro, fontWeight: 600, color: WB.textAux, letterSpacing: 0.4, textTransform: 'uppercase', padding: '8px 14px 4px 18px', userSelect: 'none' }}
+                  >
+                    <span style={{ display: 'inline-flex', fontSize: 10 }}>{expanded ? <DownOutlined /> : <RightOutlined />}</span>
+                    <span>{s.label}</span>
                   </div>
-                  {items.map((m) => {
+                  {expanded && items.map((m) => {
                     const active = location.pathname === m.path;
                     return (
                       <div
