@@ -115,7 +115,7 @@ services:
         limits: { cpus: "1.50", memory: 3G, pids: 512 }
 
   dsh-runtime:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-dsh-runtime-app@sha256:a8d4d048d9a7d988ec649b8e8193178f514cce8ab86b350e62a2e78f51597182
+    image: 127.0.0.1:5000/zhuojian/ai-platform-dsh-runtime-app@sha256:80c706d06398c3dac3b63b76894a89a0680caf79778818270f07d730a9098ba4
     environment:
       DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
       AI_PLATFORM_BACKEND_URL: http://backend:8000
@@ -164,7 +164,7 @@ services:
         limits: { cpus: "1.00", memory: 1G, pids: 256 }
 
   backend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:6faa34089fb9f91793530a1ad2281e8191cf5567d1e9f55d08fd7ea170d6ccc3
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5823fed9415c0e550dab75574bf0571b6a35b917bcb8245362d6a1150d0f20ec
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -247,7 +247,7 @@ services:
         limits: { cpus: "1.50", memory: 2560M }
 
   workspace-parser:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:6faa34089fb9f91793530a1ad2281e8191cf5567d1e9f55d08fd7ea170d6ccc3
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5823fed9415c0e550dab75574bf0571b6a35b917bcb8245362d6a1150d0f20ec
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -278,7 +278,7 @@ services:
         limits: { cpus: "0.75", memory: 1536M }
 
   storage-lifecycle:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:6faa34089fb9f91793530a1ad2281e8191cf5567d1e9f55d08fd7ea170d6ccc3
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5823fed9415c0e550dab75574bf0571b6a35b917bcb8245362d6a1150d0f20ec
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -309,7 +309,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   frontend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:7414deba45af0f02bb8adb2e0f324689e63110fa0125f06708dde8e22e508b38
+    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:cfdedce540290ccf5bdacdc4c2b9b6e71d8e6c3fd1c13b135c3da59b13f5fd58
     expose:
       - "80"
     depends_on:
