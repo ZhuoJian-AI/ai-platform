@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:presentation": "node scripts/test-workspace-presentation.mjs",
     "test:e2e:attachments": "node scripts/e2e-chat-attachments.mjs",
     "preview": "vite preview",
     "lint": "eslint ."

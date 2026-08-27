@@ -41,7 +41,11 @@ import ConfirmModal from '../../components/finder/ConfirmModal';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from '../../branding/BrandLogoSlot';
 import { BRAND_TITLES, useBrandTitle } from '../../branding/brand';
 import './TerminalApplicationShell.css';
-import { redactArtifactIdentifiers, workspaceDisplayName } from '../../utils/workspacePresentation';
+import {
+  presentAssistantMarkdown,
+  removeAttachmentReferenceTokens,
+  workspaceDisplayName,
+} from '../../utils/workspacePresentation';
 
 /** WorkBuddy 配色（参考 HTML 的 tailwind theme）。 */
 const WB = {
@@ -2505,7 +2509,14 @@ function ChatView(props: {
                           })}
                         </div>
                       )}
-                      <div style={{ fontSize: 14, color: '#1f2937', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{renderUserContent(m.content, messageSkillMap, fileRefMap, m.agentName)}</div>
+                      <div style={{ fontSize: 14, color: '#1f2937', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+                        {renderUserContent(
+                          removeAttachmentReferenceTokens(m.content, (m.attachments ?? []).map((item) => item.file_id)),
+                          messageSkillMap,
+                          fileRefMap,
+                          m.agentName,
+                        )}
+                      </div>
                     </div>
                   </>
                 ) : (
@@ -2582,6 +2593,7 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
   const blocks = msg.blocks;
   const hasLiveBlocks = blocks && blocks.length > 0;
   const verification = msg.executionVerification ?? verificationFromBlocks(blocks);
+  const structuredArtifacts = msg.artifacts ?? [];
   // 兜底：无 blocks（历史回放）直接渲染 content markdown
   if (!hasLiveBlocks) {
     return (
@@ -2589,8 +2601,12 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
         <AvatarHeader />
         <div style={{ background: WB.botMsg, border: `1px solid ${WB.border}`, borderRadius: '16px 16px 16px 4px', boxShadow: '0 1px 2px rgba(0,0,0,0.04)', padding: 16 }}>
           <ExecutionStatus verification={verification} streaming={streaming} />
-          <div className="wb-md"><Md onLink={onLink} files={fileLinks}>{msg.content || '(无内容)'}</Md></div>
-          <ArtifactGallery artifacts={msg.artifacts ?? []} fileLinks={fileLinks} streaming={streaming} onLink={onLink} />
+          <div className="wb-md">
+            <Md onLink={onLink} files={fileLinks} hideLegacyArtifactTable={structuredArtifacts.length > 0}>
+              {msg.content || '(无内容)'}
+            </Md>
+          </div>
+          <ArtifactGallery artifacts={structuredArtifacts} fileLinks={fileLinks} streaming={streaming} onLink={onLink} />
         </div>
       </div>
     );
@@ -2598,7 +2614,7 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
 
   const lastBlock = blocks![blocks!.length - 1];
   const thinking = streaming && (lastBlock.kind === 'phase' || (lastBlock.kind === 'tool_call' && lastBlock.running));
-  const artifacts = msg.artifacts?.length ? msg.artifacts : extractArtifacts(blocks);
+  const artifacts = structuredArtifacts.length ? structuredArtifacts : extractArtifacts(blocks);
   const artifactPaths = new Set(artifacts.map((artifact) => artifact.path).filter(Boolean));
   const legacyChanges = extractFileChanges(blocks).filter((file) => !artifactPaths.has(file.path));
 
@@ -2630,7 +2646,7 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
             const showCursor = streaming && isLast;
             return (
               <div key={i} className="wb-md" style={{ marginTop: 4 }}>
-                <Md onLink={onLink} files={fileLinks}>{b.content}</Md>
+                <Md onLink={onLink} files={fileLinks} hideLegacyArtifactTable={structuredArtifacts.length > 0}>{b.content}</Md>
                 {showCursor && <span className="wb-cursor" />}
               </div>
             );
@@ -3135,13 +3151,20 @@ function TraceChip({ b }: { b: Extract<Block, { kind: 'trace' }> }) {
 
 // ── Markdown 渲染 ────────────────────────────────────────────────────────
 
-function Md({ children, onLink, files }: { children: string; onLink: (href: string) => void; files: ChatFileLink[] }) {
+function Md({
+  children, onLink, files, hideLegacyArtifactTable = false,
+}: {
+  children: string;
+  onLink: (href: string) => void;
+  files: ChatFileLink[];
+  hideLegacyArtifactTable?: boolean;
+}) {
   // 先把正文里裸出现的「工作空间文件名」自动包成 markdown 链接，再交给 ReactMarkdown 渲染
-  const redacted = redactArtifactIdentifiers(children, files.map((file) => ({
+  const redacted = presentAssistantMarkdown(children, files.map((file) => ({
     id: file.id,
     path: file.path,
     original_filename: file.originalName,
-  })));
+  })), hideLegacyArtifactTable);
   const src = linkifyFiles(redacted, files);
   return (
     <ReactMarkdown
