@@ -48,6 +48,10 @@ try {
     removeAttachmentReferenceTokens('请检查 @not-an-attachment', [attachmentId]),
     '请检查 @not-an-attachment',
   );
+  assert.equal(
+    removeAttachmentReferenceTokens('请修改这些文件 @19ca9e41-4b2b-4e0f-8b1f-bc85b3a8e0a6', []),
+    '请修改这些文件',
+  );
 
   assert.equal(presentAssistantMarkdown(legacy, [], false).includes('file_id'), true);
   assert.equal(presentAssistantMarkdown(legacy, [], true).includes('file_id'), false);

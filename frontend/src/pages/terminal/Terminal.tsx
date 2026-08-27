@@ -2498,7 +2498,7 @@ function ChatView(props: {
                                 type="button"
                                 disabled={unavailable}
                                 onClick={() => onLink(availablePath || attachment.path)}
-                                title={unavailable ? '文件已不存在或不可访问' : attachment.path}
+                                title={unavailable ? '文件已不存在或不可访问' : `打开 ${attachment.name}`}
                                 style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', border: `1px solid ${unavailable ? '#e5e7eb' : '#d8dcf4'}`, background: unavailable ? '#f3f4f6' : '#fff', borderRadius: 8, padding: '7px 9px', cursor: unavailable ? 'not-allowed' : 'pointer', color: unavailable ? '#9ca3af' : '#374151', textAlign: 'left' }}
                               >
                                 <FileTextOutlined style={{ color: unavailable ? '#9ca3af' : WB.primary }} />
@@ -2646,7 +2646,7 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
             const showCursor = streaming && isLast;
             return (
               <div key={i} className="wb-md" style={{ marginTop: 4 }}>
-                <Md onLink={onLink} files={fileLinks} hideLegacyArtifactTable={structuredArtifacts.length > 0}>{b.content}</Md>
+                <Md onLink={onLink} files={fileLinks} hideLegacyArtifactTable={artifacts.length > 0}>{b.content}</Md>
                 {showCursor && <span className="wb-cursor" />}
               </div>
             );
