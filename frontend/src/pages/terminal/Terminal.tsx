@@ -37,6 +37,7 @@ import KnowledgeBaseView from './KnowledgeBaseView';
 import SkillManagerView from './SkillManagerView';
 import AgentManagerView from './AgentManagerView';
 import EnterpriseApplicationView from './EnterpriseApplicationView';
+import CrossDepartmentWorkItemsView from './CrossDepartmentWorkItemsView';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from '../../branding/BrandLogoSlot';
 import { BRAND_TITLES, useBrandTitle } from '../../branding/brand';
@@ -68,12 +69,12 @@ const DEFAULT_CONFIG: TaskConfig = {
   exec_mode: 'craft',
 };
 
-type TerminalView = 'assistant' | 'workspaces' | 'agents' | 'knowledge' | 'skills' | 'application';
+type TerminalView = 'assistant' | 'workspaces' | 'agents' | 'knowledge' | 'skills' | 'application' | 'work-items';
 
 function viewFromQuery(search: string): TerminalView {
   const value = new URLSearchParams(search).get('view');
   if (value === 'workspace') return 'workspaces';
-  if (value === 'agents' || value === 'knowledge' || value === 'skills' || value === 'application') return value;
+  if (value === 'agents' || value === 'knowledge' || value === 'skills' || value === 'application' || value === 'work-items') return value;
   return 'assistant';
 }
 
@@ -1076,6 +1077,9 @@ export default function Terminal() {
               <Tooltip title="工作空间" placement="right">
                 <button type="button" className="terminal-app-rail__button" aria-label="工作空间" onClick={() => setView('workspaces')}><FolderOpenOutlined /></button>
               </Tooltip>
+              <Tooltip title="跨部门待办" placement="right">
+                <button type="button" className="terminal-app-rail__button" aria-label="跨部门待办" onClick={() => setView('work-items')}><PartitionOutlined /></button>
+              </Tooltip>
               <Tooltip title="智能体" placement="right">
                 <button type="button" className="terminal-app-rail__button" aria-label="智能体" onClick={() => setView('agents')}><RobotOutlined /></button>
               </Tooltip>
@@ -1119,6 +1123,10 @@ export default function Terminal() {
                 </div>
               ))}
               {terminalApplications.length > 0 && <div style={{ height: 1, background: '#e5e7eb', margin: '8px 10px' }} />}
+              <div onClick={() => setView('work-items')} style={navItemStyle(view === 'work-items')}>
+                <PartitionOutlined style={{ fontSize: 16 }} />
+                <span>跨部门待办</span>
+              </div>
               <div onClick={() => setView('workspaces')} style={navItemStyle(view === 'workspaces')}>
                 <FolderOpenOutlined style={{ fontSize: 16 }} />
                 <span>工作空间</span>
@@ -1261,7 +1269,9 @@ export default function Terminal() {
                 {runtimeStatus.status === 'runner_busy' && 'Runner 当前繁忙，本轮脚本未执行或正在等待，请稍后重试'}
               </div>
             )}
-            {view === 'workspaces' ? (
+            {view === 'work-items' ? (
+              <CrossDepartmentWorkItemsView />
+            ) : view === 'workspaces' ? (
               <WorkspaceManagerView resources={resources} />
             ) : view === 'agents' ? (
               <AgentManagerView />

@@ -1,6 +1,20 @@
 """Tenant business applications embedded in the terminal and their access grants."""
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from datetime import datetime
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -34,6 +48,13 @@ class EnterpriseApplication(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin
 
     grants = relationship("EnterpriseApplicationGrant", back_populates="application", lazy="selectin")
     tool_bindings = relationship("EnterpriseApplicationToolBinding", back_populates="application", lazy="selectin")
+    integration = relationship(
+        "EnterpriseApplicationIntegration",
+        back_populates="application",
+        lazy="selectin",
+        uselist=False,
+    )
+    event_routes = relationship("EnterpriseApplicationEventRoute", back_populates="application", lazy="selectin")
 
 
 class EnterpriseApplicationGrant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
@@ -70,6 +91,8 @@ class EnterpriseApplicationGrant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDelete
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
     scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     permissions: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # Empty means every module, preserving the behaviour of grants created before 0043.
+    module_keys: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
     application = relationship("EnterpriseApplication", back_populates="grants")
 
@@ -110,3 +133,117 @@ class EnterpriseApplicationToolBinding(UUIDPrimaryKeyMixin, TimestampMixin, Soft
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     application = relationship("EnterpriseApplication", back_populates="tool_bindings")
+
+
+class EnterpriseApplicationIntegration(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Private connection state for one independently deployed subsystem."""
+
+    __tablename__ = "enterprise_application_integrations"
+    __table_args__ = (
+        UniqueConstraint("application_id", name="uq_enterprise_application_integration_app"),
+        CheckConstraint(
+            "sync_status IN ('unconfigured','ready','syncing','healthy','error')",
+            name="ck_enterprise_application_integration_status",
+        ),
+    )
+
+    application_id: Mapped[str] = mapped_column(
+        ForeignKey("enterprise_applications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    manifest_url: Mapped[str] = mapped_column(Text, nullable=False)
+    events_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auth_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    protocol_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    manifest: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    cursor_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    sync_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    sync_status: Mapped[str] = mapped_column(String(20), nullable=False, default="ready")
+    last_manifest_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_event_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    application = relationship("EnterpriseApplication", back_populates="integration")
+
+
+class EnterpriseApplicationEvent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Immutable receipt used for replay-safe subsystem event ingestion."""
+
+    __tablename__ = "enterprise_application_events"
+    __table_args__ = (
+        UniqueConstraint("application_id", "event_id", name="uq_enterprise_application_event_id"),
+        UniqueConstraint("application_id", "source_sequence", name="uq_enterprise_application_event_sequence"),
+    )
+
+    application_id: Mapped[str] = mapped_column(
+        ForeignKey("enterprise_applications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    source_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_type: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    module_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    entity_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    entity_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    action: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class EnterpriseApplicationEventRoute(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
+    """Administrator-owned rule that turns a subsystem event into a scoped work item."""
+
+    __tablename__ = "enterprise_application_event_routes"
+    __table_args__ = (
+        CheckConstraint(
+            "target_scope_type IN ('organization','department','team','user')",
+            name="ck_enterprise_application_event_route_scope_type",
+        ),
+    )
+
+    application_id: Mapped[str] = mapped_column(
+        ForeignKey("enterprise_applications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(160), nullable=False)
+    module_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    target_scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    target_module_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    application = relationship("EnterpriseApplication", back_populates="event_routes")
+
+
+class CrossDepartmentWorkItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Central, department-scoped notification produced from a subsystem event."""
+
+    __tablename__ = "cross_department_work_items"
+    __table_args__ = (
+        UniqueConstraint("route_id", "source_event_id", name="uq_cross_department_work_item_route_event"),
+        CheckConstraint("status IN ('open','done')", name="ck_cross_department_work_item_status"),
+    )
+
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_application_id: Mapped[str] = mapped_column(
+        ForeignKey("enterprise_applications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    route_id: Mapped[str] = mapped_column(
+        ForeignKey("enterprise_application_event_routes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_event_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
+    target_scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    target_scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    target_module_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    source_context: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

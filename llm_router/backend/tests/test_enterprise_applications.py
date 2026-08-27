@@ -2,11 +2,14 @@
 
 from uuid import uuid4
 
+import httpx
 import pytest
+from sqlalchemy import select
 
 from app.auth.user_auth import CurrentUser
 from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.department import Department
+from app.models.enterprise_application import CrossDepartmentWorkItem, EnterpriseApplicationEvent
 from app.models.organization import Organization
 from app.models.skill import SkillFile, SkillFolder
 from app.models.team import Team
@@ -14,10 +17,13 @@ from app.models.tool_call_log import ToolCallLog
 from app.models.user import User
 from app.schemas.enterprise_application import (
     EnterpriseApplicationCreate,
+    EnterpriseApplicationEventRouteInput,
     EnterpriseApplicationGrantInput,
+    EnterpriseApplicationIntegrationInput,
     EnterpriseApplicationToolBindingInput,
 )
 from app.services import enterprise_application_service as service
+from app.services import subsystem_integration_service as integration_service
 
 
 async def _organization_tree(db_session):
@@ -61,14 +67,17 @@ async def test_application_is_hidden_by_default_and_grants_union_across_existing
     application = await service.replace_grants(db_session, application, [
         EnterpriseApplicationGrantInput(
             scope_type="department", scope_id=department.id, permissions=["view", "ai_query"],
+            module_keys=["factory_progress"],
         ),
         EnterpriseApplicationGrantInput(
             scope_type="team", scope_id=team.id, permissions=["ai_update", "export"],
+            module_keys=["factory_progress"],
         ),
     ])
     visible = await service.list_applications_for_user(db_session, current)
     assert len(visible) == 1
     assert visible[0][1] == {"view", "ai_query", "ai_update", "export"}
+    assert service.effective_module_keys(application, current) == ["factory_progress"]
 
     application.is_active = False
     await db_session.flush()
@@ -205,3 +214,93 @@ async def test_application_overview_resolves_tools_without_double_counting_skill
     assert len(overview["capabilities"]) == 5
     assert overview["recent_calls"][0]["capability_name"] == endpoints[0].name
     assert overview["recent_calls"][0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_subsystem_sync_is_replay_safe_and_routes_work_items(db_session, monkeypatch):
+    org, _, department, _, _ = await _organization_tree(db_session)
+    application = await service.create_application(
+        db_session,
+        org.id,
+        EnterpriseApplicationCreate(
+            name="Garment Production",
+            slug="garment-production-collaboration",
+            entry_url="https://garment.example.test/",
+        ),
+    )
+    integration = await integration_service.configure_integration(
+        db_session,
+        application,
+        EnterpriseApplicationIntegrationInput(
+            manifest_url="https://garment.example.test/api/integration/manifest",
+            auth_token="test-integration-token",
+        ),
+    )
+    assert integration.auth_token_encrypted != "test-integration-token"
+    await integration_service.replace_routes(
+        db_session,
+        application,
+        [EnterpriseApplicationEventRouteInput(
+            name="生产款号更新通知设计部",
+            event_type="production.style.saved",
+            module_key="style_hub",
+            target_scope_type="department",
+            target_scope_id=department.id,
+            target_module_key="style_design",
+        )],
+    )
+
+    manifest = {
+        "protocol": "zhuojian-subsystem",
+        "version": 1,
+        "applicationSlug": application.slug,
+        "applicationName": "爱法贝生产协同",
+        "modules": [{"key": "style_hub", "name": "款号资料中心"}],
+        "eventFeed": {"path": "/api/integration/events"},
+    }
+    event = {
+        "sequence": 1,
+        "eventId": "event-1",
+        "eventType": "production.style.saved",
+        "moduleKey": "style_hub",
+        "entityType": "style",
+        "entityId": "203A023",
+        "action": "saved",
+        "occurredAt": "2026-08-27T12:00:00+08:00",
+        "payload": {"styles": ["203A023"]},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer test-integration-token"
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=manifest)
+        after = int(request.url.params.get("after", "0"))
+        return httpx.Response(
+            200,
+            json={"items": [event] if after == 0 else [], "nextAfter": 1, "hasMore": False},
+        )
+
+    original_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        integration_service.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: original_client(transport=transport),
+    )
+
+    first = await integration_service.sync_integration(db_session, application)
+    second = await integration_service.sync_integration(db_session, application)
+    assert first == {
+        "status": "healthy",
+        "manifest_updated": True,
+        "received_events": 1,
+        "created_work_items": 1,
+        "cursor_sequence": 1,
+        "detail": None,
+    }
+    assert second["status"] == "healthy"
+    assert second["received_events"] == 0
+    assert len((await db_session.execute(select(EnterpriseApplicationEvent))).scalars().all()) == 1
+    work_items = list((await db_session.execute(select(CrossDepartmentWorkItem))).scalars().all())
+    assert len(work_items) == 1
+    assert work_items[0].title == "生产款号更新通知设计部：203A023"

@@ -62,7 +62,9 @@ def presentation_dict(
 ) -> dict[str, Any]:
     meta = metadata or {}
     source_kind, task_id = infer_source(path, meta)
-    created = meta.get("source_created_at") or created_at
+    # A persisted row timestamp is authoritative when the caller has it.  The
+    # metadata timestamp remains the fallback for legacy/task payloads.
+    created = created_at or meta.get("source_created_at")
     if isinstance(created, datetime):
         created = created.isoformat()
     return {

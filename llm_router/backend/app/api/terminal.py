@@ -648,7 +648,12 @@ async def run_task_endpoint(
         page_application_slug = cfg["page_context"].get("application_slug")
         if page_application_slug and page_application_slug != application.slug:
             raise HTTPException(status_code=400, detail="页面上下文与当前应用不匹配")
+        allowed_module_keys = enterprise_application_service.effective_module_keys(application, cu)
+        page_module_key = cfg["page_context"].get("module_key")
+        if page_module_key and allowed_module_keys and page_module_key not in allowed_module_keys:
+            raise HTTPException(status_code=403, detail="当前账号无权访问该业务子模块")
         cfg["application_permissions"] = sorted(application_permissions)
+        cfg["application_module_keys"] = allowed_module_keys
     if not cfg.get("workspace_id"):
         defaults = await _user_defaults(db, cu)
         if defaults["workspace_id"]:

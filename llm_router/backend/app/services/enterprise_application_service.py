@@ -125,7 +125,7 @@ async def replace_grants(
     row: EnterpriseApplication,
     grants: list[EnterpriseApplicationGrantInput],
 ) -> EnterpriseApplication:
-    normalized: dict[tuple[str, str | None], list[str]] = {}
+    normalized: dict[tuple[str, str | None], tuple[list[str], list[str]]] = {}
     for item in grants:
         sid = await skill_scope_service.validate_scope_target(
             db,
@@ -135,7 +135,7 @@ async def replace_grants(
         )
         permissions = [value for value in item.permissions if value in PERMISSIONS]
         if permissions:
-            normalized[(item.scope_type, sid)] = permissions
+            normalized[(item.scope_type, sid)] = (permissions, item.module_keys)
 
     all_grants = list(
         (
@@ -154,9 +154,9 @@ async def replace_grants(
         if key not in normalized:
             grant.deleted_at = now
         else:
-            grant.permissions = normalized[key]
+            grant.permissions, grant.module_keys = normalized[key]
             grant.deleted_at = None
-    for (scope_type, scope_id), permissions in normalized.items():
+    for (scope_type, scope_id), (permissions, module_keys) in normalized.items():
         if (scope_type, scope_id) not in current:
             db.add(
                 EnterpriseApplicationGrant(
@@ -165,6 +165,7 @@ async def replace_grants(
                     scope_type=scope_type,
                     scope_id=scope_id,
                     permissions=permissions,
+                    module_keys=module_keys,
                 )
             )
     await db.flush()
@@ -433,6 +434,18 @@ def effective_permissions(row: EnterpriseApplication, user: CurrentUser) -> set[
         if grant.deleted_at is None and (grant.scope_type, grant.scope_id or None) in scopes:
             permissions.update(value for value in (grant.permissions or []) if value in PERMISSIONS)
     return permissions
+
+
+def effective_module_keys(row: EnterpriseApplication, user: CurrentUser) -> list[str]:
+    """Return allowed module keys; an empty list means unrestricted for compatibility."""
+    scopes = set(scope_service.effective_scope_set(user))
+    matching = [
+        grant for grant in row.grants
+        if grant.deleted_at is None and (grant.scope_type, grant.scope_id or None) in scopes
+    ]
+    if not matching or any(not (grant.module_keys or []) for grant in matching):
+        return []
+    return sorted({key for grant in matching for key in (grant.module_keys or [])})
 
 
 async def list_applications_for_user(

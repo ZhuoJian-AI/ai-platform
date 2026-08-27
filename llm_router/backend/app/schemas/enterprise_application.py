@@ -45,11 +45,20 @@ class EnterpriseApplicationGrantInput(BaseModel):
     scope_type: ApplicationScope
     scope_id: UUID | None = None
     permissions: list[ApplicationPermission] = Field(default_factory=list)
+    module_keys: list[str] = Field(default_factory=list, max_length=200)
 
     @field_validator("permissions")
     @classmethod
     def unique_permissions(cls, value: list[ApplicationPermission]) -> list[ApplicationPermission]:
         return list(dict.fromkeys(value))
+
+    @field_validator("module_keys")
+    @classmethod
+    def valid_module_keys(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in value if item.strip()]
+        if any(len(item) > 120 for item in cleaned):
+            raise ValueError("module key must be 120 characters or fewer")
+        return list(dict.fromkeys(cleaned))
 
 
 class EnterpriseApplicationGrantsReplace(BaseModel):
@@ -74,6 +83,7 @@ class EnterpriseApplicationGrantRead(OrmModel):
     scope_type: str
     scope_id: str | None
     permissions: list[str]
+    module_keys: list[str]
     created_at: datetime
     updated_at: datetime
 
@@ -121,6 +131,7 @@ class TerminalEnterpriseApplicationRead(BaseModel):
     sort_order: int
     assistant_enabled: bool
     permissions: list[str]
+    module_keys: list[str] = Field(default_factory=list)
 
 
 class EnterpriseApplicationLaunchRead(BaseModel):
@@ -128,6 +139,85 @@ class EnterpriseApplicationLaunchRead(BaseModel):
     url: str
     display_mode: str
     permissions: list[str]
+    module_keys: list[str] = Field(default_factory=list)
+
+
+class EnterpriseApplicationIntegrationInput(BaseModel):
+    manifest_url: AnyHttpUrl
+    auth_token: str | None = Field(None, min_length=16, max_length=4096)
+    clear_auth_token: bool = False
+    sync_enabled: bool = True
+
+
+class EnterpriseApplicationIntegrationRead(BaseModel):
+    application_id: UUID
+    manifest_url: str
+    events_url: str | None
+    protocol_version: int
+    manifest: dict = Field(default_factory=dict)
+    modules: list[dict] = Field(default_factory=list)
+    cursor_sequence: int
+    sync_enabled: bool
+    sync_status: str
+    token_configured: bool
+    last_manifest_sync_at: datetime | None
+    last_event_sync_at: datetime | None
+    last_error: str | None
+
+
+class EnterpriseApplicationSyncRead(BaseModel):
+    status: Literal["healthy", "error"]
+    manifest_updated: bool = False
+    received_events: int = 0
+    created_work_items: int = 0
+    cursor_sequence: int = 0
+    detail: str | None = None
+
+
+class EnterpriseApplicationEventRouteInput(BaseModel):
+    name: str = Field(..., min_length=1, max_length=160)
+    event_type: str = Field(..., min_length=1, max_length=160)
+    module_key: str | None = Field(None, max_length=120)
+    target_scope_type: ApplicationScope
+    target_scope_id: UUID | None = None
+    target_module_key: str | None = Field(None, max_length=120)
+    is_active: bool = True
+
+
+class EnterpriseApplicationEventRoutesReplace(BaseModel):
+    routes: list[EnterpriseApplicationEventRouteInput] = Field(default_factory=list, max_length=500)
+
+
+class EnterpriseApplicationEventRouteRead(OrmModel):
+    id: UUID
+    application_id: UUID
+    name: str
+    event_type: str
+    module_key: str | None
+    target_scope_type: str
+    target_scope_id: str | None
+    target_module_key: str | None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class CrossDepartmentWorkItemRead(OrmModel):
+    id: UUID
+    source_application_id: UUID
+    source_event_id: str
+    title: str
+    status: str
+    target_scope_type: str
+    target_scope_id: str | None
+    target_module_key: str | None
+    source_context: dict
+    created_at: datetime
+    updated_at: datetime
+
+
+class CrossDepartmentWorkItemUpdate(BaseModel):
+    status: Literal["open", "done"]
 
 
 class EnterpriseApplicationHealthRead(BaseModel):

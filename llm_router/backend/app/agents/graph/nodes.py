@@ -461,6 +461,8 @@ async def _execute_platform_file_tool(
             output_items.append({
                 "file_id": str(saved.id),
                 "display_name": original,
+                "name": original,
+                "path": saved.path,
                 "parse_status": saved.parse_status,
             })
         return json.dumps({
@@ -568,6 +570,7 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 return json.dumps({
                     "status": "success", "tool": name,
                     "outputs": [{"file_id": str(saved.id), "display_name": filename,
+                                 "name": filename, "path": saved.path,
                                  "mime_type": "image/png", "width": width, "height": height,
                                  "parse_status": saved.parse_status}],
                     "revised_prompt": result.revised_prompt,
@@ -1582,6 +1585,7 @@ async def _execute_code_skill(
             output_ids.append(str(saved.id))
             output_items.append({
                 "file_id": str(saved.id), "display_name": original,
+                "name": original, "path": saved.path,
                 "parse_status": saved.parse_status,
             })
         execution.status = "success"

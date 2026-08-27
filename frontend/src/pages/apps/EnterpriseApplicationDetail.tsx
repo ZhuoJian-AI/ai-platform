@@ -1,13 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Alert, Button, Card, Descriptions, Empty, Form, Input, Modal, Select, Space,
-  Switch, Table, Tabs, Tag, Typography, message,
+  Switch, Table, Tabs, Tag, TreeSelect, Typography, message,
 } from 'antd';
 import {
   ApiOutlined, AppstoreOutlined, ArrowLeftOutlined, CheckCircleOutlined,
   CloudServerOutlined, EditOutlined, ExportOutlined, LinkOutlined, LockOutlined,
-  PlayCircleOutlined, RobotOutlined, SafetyCertificateOutlined, ThunderboltOutlined,
+  PlayCircleOutlined, PlusOutlined, RobotOutlined, SafetyCertificateOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -64,9 +64,12 @@ export default function EnterpriseApplicationDetail() {
   const { appId = '' } = useParams();
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const { nodeMap } = useOrgTree();
+  const { nodeMap, treeData } = useOrgTree();
   const [editOpen, setEditOpen] = useState(false);
+  const [routeOpen, setRouteOpen] = useState(false);
   const [form] = Form.useForm();
+  const [integrationForm] = Form.useForm();
+  const [routeForm] = Form.useForm();
 
   const appQuery = useQuery({
     queryKey: ['enterprise-application', appId],
@@ -78,8 +81,28 @@ export default function EnterpriseApplicationDetail() {
     queryFn: () => enterpriseApplications.overview(appId),
     enabled: !!appId,
   });
+  const integrationQuery = useQuery({
+    queryKey: ['enterprise-application-integration', appId],
+    queryFn: () => enterpriseApplications.integration(appId),
+    enabled: !!appId,
+    retry: false,
+  });
+  const routesQuery = useQuery({
+    queryKey: ['enterprise-application-event-routes', appId],
+    queryFn: () => enterpriseApplications.eventRoutes(appId),
+    enabled: !!appId,
+  });
   const app = appQuery.data;
   const overview = overviewQuery.data;
+
+  useEffect(() => {
+    if (!app) return;
+    integrationForm.setFieldsValue({
+      manifest_url: integrationQuery.data?.manifest_url || `${app.entry_url.replace(/\/$/, '')}/api/integration/manifest`,
+      auth_token: '',
+      sync_enabled: integrationQuery.data?.sync_enabled ?? true,
+    });
+  }, [app, integrationForm, integrationQuery.data]);
 
   const refresh = () => Promise.all([
     qc.invalidateQueries({ queryKey: ['enterprise-application', appId] }),
@@ -103,6 +126,63 @@ export default function EnterpriseApplicationDetail() {
       else message.error(result.detail || '页面连接失败');
     },
     onError: (error) => message.error(errorText(error, '连接测试失败')),
+  });
+  const configureIntegration = useMutation({
+    mutationFn: (values: { manifest_url: string; auth_token?: string; sync_enabled: boolean }) =>
+      enterpriseApplications.configureIntegration(appId, values),
+    onSuccess: (result) => {
+      qc.setQueryData(['enterprise-application-integration', appId], result);
+      integrationForm.setFieldValue('auth_token', '');
+      message.success('子系统连接已保存，密钥不会回显');
+    },
+    onError: (error) => message.error(errorText(error, '连接配置保存失败')),
+  });
+  const syncIntegration = useMutation({
+    mutationFn: () => enterpriseApplications.syncIntegration(appId),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ['enterprise-application-integration', appId] });
+      if (result.status === 'healthy') {
+        message.success(`同步完成：新增 ${result.received_events} 个事件，生成 ${result.created_work_items} 个跨部门待办`);
+      } else message.error(result.detail || '子系统同步失败');
+    },
+    onError: (error) => message.error(errorText(error, '子系统同步失败')),
+  });
+  const routePayload = (route: NonNullable<typeof routesQuery.data>[number]) => ({
+    name: route.name,
+    event_type: route.event_type,
+    module_key: route.module_key,
+    target_scope_type: route.target_scope_type,
+    target_scope_id: route.target_scope_id,
+    target_module_key: route.target_module_key,
+    is_active: route.is_active,
+  });
+  const saveRoute = useMutation({
+    mutationFn: (values: { name: string; module_key?: string; target_scope: string; target_module_key?: string }) => {
+      const [prefix, id] = values.target_scope.split(':', 2);
+      const scopeType = prefix === 'org' ? 'organization' : prefix === 'dept' ? 'department' : prefix as 'team' | 'user';
+      return enterpriseApplications.replaceEventRoutes(appId, [
+        ...(routesQuery.data ?? []).map(routePayload),
+        {
+          name: values.name, event_type: '*', module_key: values.module_key || null,
+          target_scope_type: scopeType, target_scope_id: scopeType === 'organization' ? null : id,
+          target_module_key: values.target_module_key || null, is_active: true,
+        },
+      ]);
+    },
+    onSuccess: () => {
+      setRouteOpen(false);
+      routeForm.resetFields();
+      qc.invalidateQueries({ queryKey: ['enterprise-application-event-routes', appId] });
+      message.success('跨部门分发规则已保存');
+    },
+    onError: (error) => message.error(errorText(error, '分发规则保存失败')),
+  });
+  const removeRoute = useMutation({
+    mutationFn: (routeId: string) => enterpriseApplications.replaceEventRoutes(
+      appId, (routesQuery.data ?? []).filter((route) => route.id !== routeId).map(routePayload),
+    ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['enterprise-application-event-routes', appId] }),
+    onError: (error) => message.error(errorText(error, '移除规则失败')),
   });
 
   const scopeLabel = (scopeType: string, scopeId: string | null) => {
@@ -285,6 +365,63 @@ export default function EnterpriseApplicationDetail() {
       key: 'page', label: '页面入口',
       children: <Card><Descriptions bordered column={1}><Descriptions.Item label="入口地址"><Typography.Text copyable>{app.entry_url}</Typography.Text></Descriptions.Item><Descriptions.Item label="打开方式">{app.display_mode === 'embedded' ? '平台内嵌（iframe）' : '新窗口打开'}</Descriptions.Item><Descriptions.Item label="连接状态">{app.health_status}</Descriptions.Item></Descriptions></Card>,
     },
+    {
+      key: 'integration', label: '系统联通',
+      children: (
+        <div className="app-detail-section-stack">
+          <Alert
+            showIcon type="info" message="页面更新与业务数据同步是两条链路"
+            description="iframe 负责实时显示子系统页面；这里的 HTTPS 连接负责发现模块、增量接收业务事件，并按管理员规则生成跨部门待办。中央平台不会复制子系统业务表。"
+          />
+          <Card title={<Space><CloudServerOutlined />子系统连接</Space>} extra={integrationQuery.data && (
+            <Button type="primary" loading={syncIntegration.isPending} onClick={() => syncIntegration.mutate()}>立即同步</Button>
+          )}>
+            <Form
+              form={integrationForm} layout="vertical"
+              initialValues={{
+                manifest_url: integrationQuery.data?.manifest_url || `${app.entry_url.replace(/\/$/, '')}/api/integration/manifest`,
+                auth_token: '', sync_enabled: integrationQuery.data?.sync_enabled ?? true,
+              }}
+              onFinish={(values) => configureIntegration.mutate(values)}
+            >
+              <Form.Item name="manifest_url" label="系统清单地址" extra="必须与应用入口同域；生产环境必须使用 HTTPS。" rules={[{ required: true }, { type: 'url' }]}>
+                <Input prefix={<LinkOutlined />} placeholder="https://业务系统/api/integration/manifest" />
+              </Form.Item>
+              <Form.Item name="auth_token" label={integrationQuery.data?.token_configured ? '连接密钥（已配置，留空表示不修改）' : '连接密钥'}>
+                <Input.Password autoComplete="new-password" placeholder="只在保存时发送，平台加密保存且不回显" />
+              </Form.Item>
+              <Space size={24} align="start">
+                <Form.Item name="sync_enabled" valuePropName="checked"><Switch checkedChildren="自动同步" unCheckedChildren="暂停同步" /></Form.Item>
+                <Button type="primary" htmlType="submit" loading={configureIntegration.isPending}>保存连接</Button>
+              </Space>
+            </Form>
+            {integrationQuery.data && <Descriptions bordered size="small" column={2}>
+              <Descriptions.Item label="同步状态"><Tag color={integrationQuery.data.sync_status === 'healthy' ? 'green' : integrationQuery.data.sync_status === 'error' ? 'red' : 'blue'}>{integrationQuery.data.sync_status}</Tag></Descriptions.Item>
+              <Descriptions.Item label="已接收游标">{integrationQuery.data.cursor_sequence}</Descriptions.Item>
+              <Descriptions.Item label="发现模块">{integrationQuery.data.modules.length} 个</Descriptions.Item>
+              <Descriptions.Item label="最近同步">{integrationQuery.data.last_event_sync_at ? new Date(integrationQuery.data.last_event_sync_at).toLocaleString('zh-CN') : '尚未同步'}</Descriptions.Item>
+              {integrationQuery.data.last_error && <Descriptions.Item label="最近错误" span={2}><Typography.Text type="danger">{integrationQuery.data.last_error}</Typography.Text></Descriptions.Item>}
+            </Descriptions>}
+          </Card>
+          <Card title="已发现的业务子模块">
+            <Space wrap>{integrationQuery.data?.modules.length ? integrationQuery.data.modules.map((item) => {
+              const key = item.key || item.moduleKey || 'unknown';
+              return <Tag key={key} color="blue">{item.name || item.moduleName || key} · {key}</Tag>;
+            }) : <Typography.Text type="secondary">首次同步成功后自动显示；之后子系统新增模块也会自动更新。</Typography.Text>}</Space>
+          </Card>
+          <Card title="跨部门分发规则" extra={<Button icon={<PlusOutlined />} onClick={() => setRouteOpen(true)} disabled={!integrationQuery.data?.modules.length}>新增规则</Button>}>
+            <Alert showIcon type="success" message="规则只传递业务变化，不复制对方数据库" description="例如：生产部“款号资料中心”变化后，为设计部生成待办；设计部进入自己的系统继续处理。" style={{ marginBottom: 14 }} />
+            <Table rowKey="id" pagination={false} dataSource={routesQuery.data ?? []} locale={{ emptyText: '尚未配置跨部门分发规则' }} columns={[
+              { title: '规则', dataIndex: 'name' },
+              { title: '来源子模块', dataIndex: 'module_key', render: (value: string | null) => value || '全部模块' },
+              { title: '接收范围', render: (_: unknown, row) => scopeLabel(row.target_scope_type, row.target_scope_id) },
+              { title: '进入目标模块', dataIndex: 'target_module_key', render: (value: string | null) => value || '跨部门待办' },
+              { title: '操作', width: 90, render: (_: unknown, row) => <Button size="small" danger loading={removeRoute.isPending} onClick={() => removeRoute.mutate(row.id)}>移除</Button> },
+            ]} />
+          </Card>
+        </div>
+      ),
+    },
     { key: 'capabilities', label: `AI 能力 ${overview?.direct_capability_count ?? 0}`, children: capabilitiesPanel },
     { key: 'permissions', label: `部门权限 ${app.grants.length}`, children: <Card extra={<Button type="primary" onClick={() => navigate(`/enterprise-apps/permissions?app=${app.id}`)}>编辑权限</Button>}>{permissionTable}</Card> },
     {
@@ -323,6 +460,16 @@ export default function EnterpriseApplicationDetail() {
           <Form.Item name="display_mode" label="打开方式"><Select options={[{ value: 'embedded', label: '平台内嵌（iframe）' }, { value: 'external', label: '外部打开' }]} /></Form.Item>
           <Form.Item name="assistant_prompt" label="业务助手提示词"><Input.TextArea rows={4} /></Form.Item>
           <Space size={32}><Form.Item name="is_active" label="启用应用" valuePropName="checked"><Switch /></Form.Item><Form.Item name="assistant_enabled" label="启用业务助手" valuePropName="checked"><Switch /></Form.Item></Space>
+        </Form>
+      </Modal>
+      <Modal title="新增跨部门分发规则" open={routeOpen} onCancel={() => setRouteOpen(false)} onOk={() => routeForm.submit()} confirmLoading={saveRoute.isPending} forceRender>
+        <Form form={routeForm} layout="vertical" onFinish={(values) => saveRoute.mutate(values)}>
+          <Form.Item name="name" label="规则名称" rules={[{ required: true }]}><Input placeholder="例如：款号资料更新后通知设计部" /></Form.Item>
+          <Form.Item name="module_key" label="来源子模块" extra="选择“全部模块”时，这个系统的任何业务更新都会通知接收方。">
+            <Select allowClear placeholder="全部模块" options={(integrationQuery.data?.modules ?? []).map((item) => ({ value: item.key || item.moduleKey, label: item.name || item.moduleName || item.key || item.moduleKey }))} />
+          </Form.Item>
+          <Form.Item name="target_scope" label="接收部门、团队或人员" rules={[{ required: true }]}><TreeSelect treeData={treeData} treeDefaultExpandAll showSearch treeNodeFilterProp="title" placeholder="例如：设计部" /></Form.Item>
+          <Form.Item name="target_module_key" label="目标模块标识（可选）" extra="目标部门有独立系统时填写其模块 key；暂未接入时留空，先进入平台跨部门待办。"><Input placeholder="例如：style_design" /></Form.Item>
         </Form>
       </Modal>
     </FinderShell>
