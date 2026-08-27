@@ -181,11 +181,12 @@ async def test_skill_process_does_not_inherit_platform_secrets(tmp_path, monkeyp
     monkeypatch.setenv("DATABASE_URL", "postgresql://must-not-leak")
     monkeypatch.setenv("REDIS_URL", "redis://must-not-leak")
     monkeypatch.setenv("MODEL_API_KEY", "must-not-leak")
+    monkeypatch.setenv("STORAGE_PROJECT_TOKEN", "must-not-leak")
     script = b"""import json
 import os
 from pathlib import Path
 
-names = ["DATABASE_URL", "REDIS_URL", "MODEL_API_KEY"]
+names = ["DATABASE_URL", "REDIS_URL", "MODEL_API_KEY", "STORAGE_PROJECT_TOKEN"]
 Path(os.environ["SKILL_OUTPUT_DIR"], "environment.json").write_text(
     json.dumps({name: os.environ.get(name) for name in names}), encoding="utf-8"
 )
@@ -205,6 +206,7 @@ Path(os.environ["SKILL_OUTPUT_DIR"], "environment.json").write_text(
         "DATABASE_URL": None,
         "REDIS_URL": None,
         "MODEL_API_KEY": None,
+        "STORAGE_PROJECT_TOKEN": None,
     }
 
 
@@ -212,6 +214,7 @@ Path(os.environ["SKILL_OUTPUT_DIR"], "environment.json").write_text(
 async def test_runner_refuses_work_when_platform_secrets_are_present(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://must-not-leak")
     monkeypatch.setenv("MASTER_ENCRYPTION_KEY", "must-not-leak")
+    monkeypatch.setenv("STORAGE_PROJECT_TOKEN", "must-not-leak")
 
     with pytest.raises(runner.HTTPException) as exc:
         await runner.health()
@@ -219,7 +222,20 @@ async def test_runner_refuses_work_when_platform_secrets_are_present(monkeypatch
     assert exc.value.status_code == 503
     assert "DATABASE_URL" in exc.value.detail
     assert "MASTER_ENCRYPTION_KEY" in exc.value.detail
+    assert "STORAGE_PROJECT_TOKEN" in exc.value.detail
     assert "must-not-leak" not in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_large_output_returns_inline_without_storage_credentials(tmp_path):
+    output = tmp_path / "large.bin"
+    raw = b"x" * (10 * 1024 * 1024 + 1)
+    output.write_bytes(raw)
+
+    serialized = await runner._serialize_output(output, "large.bin")
+
+    assert "content_ref" not in serialized
+    assert base64.b64decode(serialized["content_base64"]) == raw
 
 
 @pytest.mark.asyncio

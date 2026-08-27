@@ -42,11 +42,8 @@ MAX_EXPANDED_PACKAGE_BYTES = int(
 )
 MAX_PACKAGE_FILES = int(os.getenv("SKILL_PACKAGE_MAX_FILES", "1000"))
 MAX_OUTPUT_BYTES = 100 * 1024 * 1024
-INLINE_TRANSFER_BYTES = 10 * 1024 * 1024
 MAX_OUTPUT_FILES = 20
 BASE_NODE_MODULES = Path(os.getenv("SKILL_BASE_NODE_MODULES", "/opt/skill-node/node_modules"))
-STORAGE_GATEWAY_URL = os.getenv("STORAGE_GATEWAY_URL", "").rstrip("/")
-STORAGE_PROJECT_TOKEN = os.getenv("STORAGE_PROJECT_TOKEN", "")
 RUNNER_MAX_CONCURRENCY = int(os.getenv("SKILL_RUNNER_MAX_CONCURRENCY", "4"))
 RUNNER_MAX_QUEUE = int(os.getenv("SKILL_RUNNER_MAX_QUEUE", "100"))
 RUNNER_QUEUE_WAIT_SECONDS = int(os.getenv("SKILL_RUNNER_QUEUE_WAIT_SECONDS", "300"))
@@ -74,6 +71,7 @@ FORBIDDEN_PLATFORM_SECRET_KEYS = (
     "MES_API_KEY",
     "DSH_RUNTIME_TOKEN",
     "EXTENSION_BUILDER_TOKEN",
+    "STORAGE_PROJECT_TOKEN",
 )
 
 app = FastAPI(title="AI Platform Skill Runner")
@@ -709,37 +707,10 @@ async def _serialize_output(path: Path, relative_path: str, mime_type: str | Non
     if size > MAX_OUTPUT_BYTES:
         raise HTTPException(status_code=413, detail=f"Output {path.name} exceeds 100MB")
     base = {"name": path.name, "relative_path": relative_path, "size": size, "mime_type": mime_type}
-    if size <= INLINE_TRANSFER_BYTES:
-        return {**base, "content_base64": base64.b64encode(path.read_bytes()).decode("ascii")}
-    if not STORAGE_GATEWAY_URL or not STORAGE_PROJECT_TOKEN:
-        raise HTTPException(status_code=503, detail="Large Skill output requires Storage Gateway")
-    headers = {"Authorization": f"Bearer {STORAGE_PROJECT_TOKEN}"}
-    content_type = mime_type or "application/octet-stream"
-    async def chunks():
-        with path.open("rb") as handle:
-            while True:
-                chunk = await asyncio.to_thread(handle.read, 1024 * 1024)
-                if not chunk:
-                    break
-                yield chunk
-    try:
-        async with httpx.AsyncClient(timeout=300, trust_env=False) as client:
-            signed = await client.post(
-                f"{STORAGE_GATEWAY_URL}/v1/uploads/sign", headers=headers,
-                json={"filename": path.name, "content_type": content_type, "size_bytes": size},
-            )
-            signed.raise_for_status()
-            payload = signed.json()
-            upload_headers = {str(k): str(v) for k, v in (payload.get("headers") or {}).items()}
-            upload_headers.setdefault("Content-Length", str(size))
-            upload = await client.put(
-                str(payload["url"]), headers=upload_headers,
-                content=chunks(),
-            )
-            upload.raise_for_status()
-            return {**base, "content_ref": f"oss://{payload['object_key']}", "etag": upload.headers.get("etag", "").strip('"')}
-    except (httpx.HTTPError, KeyError, ValueError, TypeError) as exc:
-        raise HTTPException(status_code=502, detail=f"Unable to upload large output {path.name}") from exc
+    # Return output only across the authenticated Runner-to-backend channel.
+    # The trusted backend persists it through Storage Gateway, so executable
+    # Skills never share the project-wide storage credential.
+    return {**base, "content_base64": base64.b64encode(path.read_bytes()).decode("ascii")}
 
 
 def _script(package: Path, requested: str | None, legacy_entrypoint: str | None) -> tuple[Path, str]:
