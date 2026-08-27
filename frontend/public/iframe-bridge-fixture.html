@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>灼见 iframe Bridge 验收夹具</title>
+    <style>
+      :root { font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif; color: #14213d; background: #f4f7fb; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+      main { width: min(680px, calc(100vw - 48px)); padding: 32px; border: 1px solid #dce5f1; border-radius: 18px; background: #fff; box-shadow: 0 16px 48px rgb(30 64 175 / 10%); }
+      h1 { margin: 0 0 10px; font-size: 24px; }
+      p { color: #60708a; line-height: 1.7; }
+      code { padding: 3px 8px; border-radius: 6px; background: #eef3fb; color: #245ba7; }
+      #status { margin-top: 20px; padding: 14px 16px; border-radius: 10px; background: #eefbf4; color: #147a4d; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>iframe Bridge 验收夹具</h1>
+      <p>该页面只用于中央 SaaS 发布验收。它发送固定、无敏感信息的模块上下文，用于确认业务小助手能够识别当前模块和业务对象。</p>
+      <p>模块：<code>工厂进度监测</code>　对象：<code>203A023</code></p>
+      <div id="status">等待中央平台握手…</div>
+    </main>
+    <script>
+      (() => {
+        const status = document.getElementById('status');
+        const context = {
+          type: 'zhuojian:context',
+          version: 1,
+          application_slug: 'iframe-bridge-fixture',
+          route: '/factory-progress',
+          module_key: 'factory_progress',
+          module_name: '工厂进度监测',
+          entity_type: 'style',
+          entity_id: '203A023',
+          filters: { season: '26秋' },
+          selection: { rows: ['203A023'] },
+          data_version: 'fixture-v1'
+        };
+        const notifyReady = () => window.parent.postMessage({ type: 'zhuojian:ready', version: 1 }, window.location.origin);
+        const sendContext = () => {
+          window.parent.postMessage(context, window.location.origin);
+          status.textContent = '上下文已发送，可打开业务小助手核对模块与对象。';
+        };
+        window.addEventListener('message', (event) => {
+          if (event.source !== window.parent || event.origin !== window.location.origin) return;
+          if (event.data?.type === 'zhuojian:host-ready' && event.data?.version === 1) sendContext();
+        });
+        notifyReady();
+      })();
+    </script>
+  </body>
+</html>
