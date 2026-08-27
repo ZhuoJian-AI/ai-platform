@@ -54,6 +54,7 @@ RUN mkdir -p /opt/skill-node \
     && npm cache clean --force
 COPY app.py .
 COPY builtin_tools.py .
+COPY --chmod=755 entrypoint.sh /usr/local/bin/skill-runner-entrypoint
 
 # User supplied scripts never run as root. Named volumes mounted at /cache
 # inherit this directory ownership on first creation.
@@ -64,4 +65,5 @@ RUN groupadd --gid 10001 skillrunner \
 USER 10001:10001
 
 EXPOSE 8020
+ENTRYPOINT ["/usr/local/bin/skill-runner-entrypoint"]
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8020"]
