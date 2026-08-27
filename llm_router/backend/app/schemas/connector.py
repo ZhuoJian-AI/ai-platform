@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
 
 from app.schemas._base import OrmModel
 
@@ -93,3 +93,32 @@ class ConnectorSkillPublishRequest(BaseModel):
     slug: str = Field(..., max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str | None = None
     endpoint_ids: list[UUID] = Field(..., min_length=1)
+
+
+class OpenApiInspectRequest(BaseModel):
+    """Preview an OpenAPI document before a connector is persisted."""
+
+    url: AnyHttpUrl | None = None
+    content: str | None = Field(None, max_length=2_000_000)
+
+    @model_validator(mode="after")
+    def require_one_source(self):
+        if bool(self.url) == bool(self.content and self.content.strip()):
+            raise ValueError("Provide exactly one of url or content")
+        return self
+
+
+class OpenApiPreviewEndpoint(BaseModel):
+    name: str
+    method: str
+    path: str
+    description: str = ""
+    params_schema: dict = Field(default_factory=dict)
+    response_schema: dict = Field(default_factory=dict)
+
+
+class OpenApiInspectRead(BaseModel):
+    title: str | None = None
+    version: str | None = None
+    spec: dict
+    endpoints: list[OpenApiPreviewEndpoint]

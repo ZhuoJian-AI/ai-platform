@@ -963,6 +963,16 @@ export interface ToolTestResult {
   status_code: number | null; latency_ms: number; body: unknown; error: string | null;
 }
 
+export interface OpenApiPreviewEndpoint {
+  name: string; method: string; path: string; description: string;
+  params_schema: Record<string, unknown>; response_schema: Record<string, unknown>;
+}
+
+export interface OpenApiInspection {
+  title: string | null; version: string | null; spec: Record<string, unknown>;
+  endpoints: OpenApiPreviewEndpoint[];
+}
+
 export const connectors = {
   list: (orgId: string) => request<ToolConnector[]>(`/api/v1/organizations/${orgId}/connectors`),
   get: (id: string) => request<ToolConnector>(`/api/v1/connectors/${id}`),
@@ -971,6 +981,10 @@ export const connectors = {
   update: (id: string, data: Partial<ToolConnector> & { auth_config?: Record<string, unknown> }) =>
     request<ToolConnector>(`/api/v1/connectors/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) => request<void>(`/api/v1/connectors/${id}`, { method: 'DELETE' }),
+  inspectSpec: (orgId: string, data: { url?: string; content?: string }) =>
+    request<OpenApiInspection>(`/api/v1/organizations/${orgId}/connectors/inspect-spec`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
   importSpec: (id: string) => request<ToolEndpoint[]>(`/api/v1/connectors/${id}/import-spec`, { method: 'POST' }),
   publishSkill: (id: string, data: { name: string; slug: string; description?: string; endpoint_ids: string[] }) =>
     request<SkillFolder>(`/api/v1/connectors/${id}/publish-skill`, {

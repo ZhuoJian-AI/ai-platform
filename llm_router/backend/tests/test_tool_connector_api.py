@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tool_call_log import ToolCallLog
 from app.tools.ontology_validator import validate_ontology
+from app.tools.openapi_loader import parse_openapi_document
 from app.tools.spec_parser import endpoint_to_skill_definition, parse_spec
 
 
@@ -56,6 +57,22 @@ def test_parse_spec_and_skill_definition():
     assert skill_def["parameters"]["required"] == ["id"]
 
 
+def test_parse_openapi_document_accepts_yaml_and_rejects_invalid_content():
+    parsed = parse_openapi_document(
+        """openapi: 3.0.0
+info:
+  title: Purchase API
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+"""
+    )
+    assert parsed["info"]["title"] == "Purchase API"
+    with pytest.raises(ValueError, match="missing the openapi/swagger version"):
+        parse_openapi_document('{"paths":{"/orders":{}}}')
+
+
 # ── ontology_validator unit ──
 
 def test_validate_ontology_ok_and_errors():
@@ -98,6 +115,32 @@ async def test_connector_and_spec_import(client: AsyncClient):
 
     eps = await client.get(f"/api/v1/connectors/{conn_id}/endpoints")
     assert len(eps.json()) >= 2
+
+
+@pytest.mark.asyncio
+async def test_inspect_openapi_spec_without_persisting_connector(client: AsyncClient):
+    org_id = await _make_org(client, "inspect-spec-org")
+    inspected = await client.post(
+        f"/api/v1/organizations/{org_id}/connectors/inspect-spec",
+        json={"content": """openapi: 3.0.0
+info:
+  title: Purchase API
+  version: v1
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      summary: 查询采购订单
+"""},
+    )
+    assert inspected.status_code == 200
+    body = inspected.json()
+    assert body["title"] == "Purchase API"
+    assert body["version"] == "v1"
+    assert body["endpoints"][0]["name"] == "listOrders"
+
+    connectors_response = await client.get(f"/api/v1/organizations/{org_id}/connectors")
+    assert connectors_response.json() == []
 
 
 @pytest.mark.asyncio

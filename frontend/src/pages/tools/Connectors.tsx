@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Button, Card, Modal, Table, Tag, Form, Input, Select, Typography, Space,
   message, Switch, Alert,
@@ -15,6 +16,7 @@ import OrgSelect from '../../components/OrgSelect';
 import JsonEditor from '../../components/JsonEditor';
 import { FinderShell, TitleBar } from '../../components/finder/primitives';
 import ConfirmModal from '../../components/finder/ConfirmModal';
+import ConnectorOnboardingWizard from './ConnectorOnboardingWizard';
 
 const TYPE_LABELS: Record<string, string> = {
   erp: 'ERP', mes: 'MES', crm: 'CRM', hrm: 'HRM', scm: 'SCM', other: '其他',
@@ -25,7 +27,9 @@ const slugify = (value: string) => value
 
 export default function Connectors() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [orgId, setOrgId] = useState<string | undefined>();
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<ToolConnector | null>(null);
   const [form] = Form.useForm();
@@ -174,7 +178,10 @@ export default function Connectors() {
         icon={<ApiOutlined />}
         title="连接器"
         titleExtra={<OrgSelect value={orgId} onChange={setOrgId} />}
-        extra={<Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={!orgId}>新建连接器</Button>}
+        extra={<Space>
+          <Button icon={<PlusOutlined />} onClick={openCreate} disabled={!orgId}>高级新建</Button>
+          <Button type="primary" icon={<RocketOutlined />} onClick={() => setOnboardingOpen(true)} disabled={!orgId}>接入业务系统</Button>
+        </Space>}
       />
 
       <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
@@ -182,8 +189,8 @@ export default function Connectors() {
           type="info"
           showIcon
           style={{ marginBottom: 12 }}
-          message="连接器负责真实调用企业 API；数据接口页面只展示接口说明，不会发起请求。"
-          description="最简流程：创建连接器 → 导入或手工添加端点 → 测试 → 勾选端点发布为 Skill。发布后，组织成员可在聊天中让智能体调用。"
+          message="用“接入业务系统”向导一次完成页面入口、REST API、部门权限和 AI Skill。"
+          description="连接器负责真实调用企业 API；数据接口页面只展示接口说明，不会发起请求。熟悉接口配置的管理员仍可使用“高级新建”。"
         />
         <Table
           dataSource={list ?? []} rowKey="id" loading={isLoading} pagination={{ pageSize: 20 }}
@@ -371,6 +378,19 @@ export default function Connectors() {
         onCancel={() => setConfirm(null)}
         onOk={() => { if (confirm) del.mutate(confirm.id); setConfirm(null); }}
       />
+      {orgId && (
+        <ConnectorOnboardingWizard
+          open={onboardingOpen}
+          orgId={orgId}
+          onClose={() => setOnboardingOpen(false)}
+          onCompleted={(applicationId) => {
+            setOnboardingOpen(false);
+            qc.invalidateQueries({ queryKey: ['connectors', orgId] });
+            qc.invalidateQueries({ queryKey: ['enterprise-applications', orgId] });
+            navigate(`/enterprise-apps/${applicationId}`);
+          }}
+        />
+      )}
       <ConfirmModal
         open={!!endpointConfirm}
         title={<>确定删除端点「{endpointConfirm?.name}」？</>}

@@ -1,9 +1,9 @@
 """Tool connector CRUD + spec import + endpoint test/publish API."""
 
 import json
-
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,8 @@ from app.models.connector import ToolConnector
 from app.schemas.connector import (
     ConnectorSkillPublishRequest,
     EndpointTestRequest,
+    OpenApiInspectRead,
+    OpenApiInspectRequest,
     ToolConnectorCreate,
     ToolConnectorRead,
     ToolConnectorUpdate,
@@ -44,6 +46,8 @@ from app.services.connector_service import (
 )
 from app.services.skill_store_service import create_folder, list_folders, upsert_file
 from app.tools.executor import execute_endpoint
+from app.tools.openapi_loader import fetch_openapi_document, parse_openapi_document
+from app.tools.spec_parser import parse_spec
 
 router = APIRouter()
 
@@ -105,6 +109,36 @@ async def delete_connector_endpoint(
 
 
 # ── Spec import ──
+
+@router.post(
+    "/organizations/{org_id}/connectors/inspect-spec",
+    response_model=OpenApiInspectRead,
+)
+async def inspect_openapi_spec_endpoint(
+    org_id: UUID,
+    data: OpenApiInspectRequest,
+    _: CurrentAdmin = Depends(require_org_access_write),
+):
+    """Validate and preview an OpenAPI document without saving credentials or connector state."""
+    try:
+        spec = (
+            await fetch_openapi_document(str(data.url))
+            if data.url
+            else parse_openapi_document(data.content or "")
+        )
+    except (ValueError, UnicodeDecodeError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)[:500]) from exc
+
+    endpoints = parse_spec(spec)
+    if not endpoints:
+        raise HTTPException(status_code=422, detail="OpenAPI document has no supported REST endpoints")
+    info = spec.get("info") if isinstance(spec.get("info"), dict) else {}
+    return OpenApiInspectRead(
+        title=info.get("title"),
+        version=info.get("version"),
+        spec=spec,
+        endpoints=endpoints,
+    )
 
 @router.post("/connectors/{conn_id}/import-spec", response_model=list[ToolEndpointRead])
 async def import_spec_endpoint(
