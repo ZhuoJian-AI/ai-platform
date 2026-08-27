@@ -18,17 +18,25 @@ from app.auth.admin_auth import (
 from app.auth.user_auth import CurrentUser, require_user
 from app.database import get_db
 from app.schemas.enterprise_application import (
+    CrossDepartmentWorkItemRead,
+    CrossDepartmentWorkItemUpdate,
     EnterpriseApplicationCreate,
+    EnterpriseApplicationEventRouteRead,
+    EnterpriseApplicationEventRoutesReplace,
     EnterpriseApplicationGrantsReplace,
     EnterpriseApplicationHealthRead,
+    EnterpriseApplicationIntegrationInput,
+    EnterpriseApplicationIntegrationRead,
     EnterpriseApplicationLaunchRead,
     EnterpriseApplicationOverviewRead,
     EnterpriseApplicationRead,
+    EnterpriseApplicationSyncRead,
     EnterpriseApplicationToolBindingsReplace,
     EnterpriseApplicationUpdate,
     TerminalEnterpriseApplicationRead,
 )
 from app.services import enterprise_application_service as service
+from app.services import subsystem_integration_service as integration_service
 
 router = APIRouter()
 
@@ -136,6 +144,82 @@ async def replace_application_tool_bindings_endpoint(
     return await service.replace_tool_bindings(db, row, data.bindings)
 
 
+@router.get(
+    "/applications/{app_id}/integration",
+    response_model=EnterpriseApplicationIntegrationRead,
+)
+async def get_application_integration_endpoint(
+    app_id: UUID,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await _application_or_404(db, app_id)
+    assert_org_access(auth, row.organization_id)
+    integration = await integration_service.get_integration(db, row.id)
+    if integration is None:
+        raise HTTPException(status_code=404, detail="Subsystem integration is not configured")
+    return integration_service.integration_read(integration)
+
+
+@router.put(
+    "/applications/{app_id}/integration",
+    response_model=EnterpriseApplicationIntegrationRead,
+)
+async def configure_application_integration_endpoint(
+    app_id: UUID,
+    data: EnterpriseApplicationIntegrationInput,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await _application_or_404(db, app_id)
+    assert_org_write_access(auth, row.organization_id)
+    integration = await integration_service.configure_integration(db, row, data)
+    return integration_service.integration_read(integration)
+
+
+@router.post(
+    "/applications/{app_id}/integration/sync",
+    response_model=EnterpriseApplicationSyncRead,
+)
+async def sync_application_integration_endpoint(
+    app_id: UUID,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await _application_or_404(db, app_id)
+    assert_org_write_access(auth, row.organization_id)
+    return await integration_service.sync_integration(db, row)
+
+
+@router.get(
+    "/applications/{app_id}/event-routes",
+    response_model=list[EnterpriseApplicationEventRouteRead],
+)
+async def list_application_event_routes_endpoint(
+    app_id: UUID,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await _application_or_404(db, app_id)
+    assert_org_access(auth, row.organization_id)
+    return await integration_service.list_routes(db, row.id)
+
+
+@router.put(
+    "/applications/{app_id}/event-routes",
+    response_model=list[EnterpriseApplicationEventRouteRead],
+)
+async def replace_application_event_routes_endpoint(
+    app_id: UUID,
+    data: EnterpriseApplicationEventRoutesReplace,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await _application_or_404(db, app_id)
+    assert_org_write_access(auth, row.organization_id)
+    return await integration_service.replace_routes(db, row, data.routes)
+
+
 @router.post("/applications/{app_id}/test", response_model=EnterpriseApplicationHealthRead)
 async def test_application_endpoint(
     app_id: UUID,
@@ -182,6 +266,7 @@ async def terminal_applications_endpoint(
             sort_order=row.sort_order,
             assistant_enabled=row.assistant_enabled,
             permissions=sorted(permissions),
+            module_keys=service.effective_module_keys(row, cu),
         )
         for row, permissions in rows
     ]
@@ -202,4 +287,26 @@ async def launch_terminal_application_endpoint(
         url=row.entry_url,
         display_mode=row.display_mode,
         permissions=sorted(permissions),
+        module_keys=service.effective_module_keys(row, cu),
     )
+
+
+@router.get("/terminal/cross-department-work-items", response_model=list[CrossDepartmentWorkItemRead])
+async def terminal_cross_department_work_items_endpoint(
+    cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await integration_service.list_work_items_for_user(db, cu)
+
+
+@router.patch(
+    "/terminal/cross-department-work-items/{item_id}",
+    response_model=CrossDepartmentWorkItemRead,
+)
+async def update_terminal_cross_department_work_item_endpoint(
+    item_id: UUID,
+    data: CrossDepartmentWorkItemUpdate,
+    cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await integration_service.update_work_item_status(db, cu, item_id, data.status)

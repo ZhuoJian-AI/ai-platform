@@ -12,8 +12,12 @@ from app.models.data_interface import DataInterface, DataSystem
 from app.models.department import Department
 from app.models.dlp_rule import DlpRule
 from app.models.enterprise_application import (
+    CrossDepartmentWorkItem,
     EnterpriseApplication,
+    EnterpriseApplicationEvent,
+    EnterpriseApplicationEventRoute,
     EnterpriseApplicationGrant,
+    EnterpriseApplicationIntegration,
     EnterpriseApplicationToolBinding,
 )
 from app.models.judge import JudgeTemplate
@@ -55,6 +59,10 @@ __all__ = [
     "ModelDeployment",
     "DlpRule",
     "EnterpriseApplication",
+    "EnterpriseApplicationIntegration",
+    "EnterpriseApplicationEvent",
+    "EnterpriseApplicationEventRoute",
+    "CrossDepartmentWorkItem",
     "EnterpriseApplicationGrant",
     "EnterpriseApplicationToolBinding",
     "RoutingPolicy",
