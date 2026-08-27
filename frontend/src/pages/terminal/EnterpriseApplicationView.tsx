@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Drawer, Empty, Input, Result, Space, Spin, Tag, Tooltip, Typography } from 'antd';
 import {
   AppstoreOutlined, ExportOutlined, FullscreenExitOutlined, FullscreenOutlined,
@@ -6,6 +6,49 @@ import {
 } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
 import { ApiError, terminal, type TerminalEnterpriseApplication } from '../../api/client';
+
+const BRIDGE_MAX_BYTES = 16_384;
+const BRIDGE_KEYS = new Set([
+  'application_slug', 'route', 'module_key', 'module_name', 'entity_type',
+  'entity_id', 'filters', 'selection', 'data_version',
+]);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isSafeBridgeValue(value: unknown, depth = 0): boolean {
+  if (depth > 5) return false;
+  if (value === null || typeof value === 'boolean' || typeof value === 'number') return true;
+  if (typeof value === 'string') return value.length <= 4_000;
+  if (Array.isArray(value)) return value.length <= 200 && value.every((item) => isSafeBridgeValue(item, depth + 1));
+  if (!isPlainObject(value) || Object.keys(value).length > 200) return false;
+  return Object.entries(value).every(([key, item]) => key.length <= 128 && isSafeBridgeValue(item, depth + 1));
+}
+
+export function parseBridgeContext(value: unknown, applicationSlug: string): Record<string, unknown> | null {
+  if (!isPlainObject(value) || value.type !== 'zhuojian:context' || value.version !== 1) return null;
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > BRIDGE_MAX_BYTES) return null;
+  } catch { return null; }
+  if (value.application_slug !== applicationSlug) return null;
+  const context: Record<string, unknown> = { bridge_version: 1 };
+  for (const key of BRIDGE_KEYS) {
+    const item = value[key];
+    if (item === undefined || item === null) continue;
+    if (['filters', 'selection'].includes(key)) {
+      if (!isPlainObject(item) || !isSafeBridgeValue(item)) return null;
+      context[key] = item;
+    } else if (typeof item === 'string' && item.length <= 1000) {
+      context[key] = item;
+    } else {
+      return null;
+    }
+  }
+  return context;
+}
 
 export default function EnterpriseApplicationView({
   application,
@@ -25,6 +68,8 @@ export default function EnterpriseApplicationView({
   const [frameKey, setFrameKey] = useState(0);
   const [frameLoaded, setFrameLoaded] = useState(false);
   const [frameSlow, setFrameSlow] = useState(false);
+  const [bridgeContext, setBridgeContext] = useState<Record<string, unknown>>({});
+  const frameRef = useRef<HTMLIFrameElement>(null);
   const { data: launch, isLoading, error, refetch } = useQuery({
     queryKey: ['terminal-application-launch', application.id],
     queryFn: () => terminal.launchApplication(application.id),
@@ -32,10 +77,27 @@ export default function EnterpriseApplicationView({
   });
 
   useEffect(() => {
-    setFrameLoaded(false); setFrameSlow(false);
+    setFrameLoaded(false); setFrameSlow(false); setBridgeContext({});
     const timer = window.setTimeout(() => setFrameSlow(true), 8000);
     return () => window.clearTimeout(timer);
   }, [application.id, frameKey]);
+
+  useEffect(() => {
+    if (!launch?.url || launch.display_mode !== 'embedded') return;
+    let allowedOrigin: string;
+    try { allowedOrigin = new URL(launch.url).origin; } catch { return; }
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== frameRef.current?.contentWindow || event.origin !== allowedOrigin) return;
+      if (isPlainObject(event.data) && event.data.type === 'zhuojian:ready' && event.data.version === 1) {
+        frameRef.current?.contentWindow?.postMessage({ type: 'zhuojian:host-ready', version: 1 }, allowedOrigin);
+        return;
+      }
+      const parsed = parseBridgeContext(event.data, application.slug);
+      if (parsed) setBridgeContext(parsed);
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [application.slug, launch?.display_mode, launch?.url, frameKey]);
 
   const submit = () => {
     const value = prompt.trim();
@@ -46,6 +108,7 @@ export default function EnterpriseApplicationView({
       application_name: application.name,
       page_url: launch?.url,
       source: 'business_assistant',
+      ...bridgeContext,
     });
     setPrompt(''); setAssistantOpen(false);
   };
@@ -86,7 +149,22 @@ export default function EnterpriseApplicationView({
       {launch.display_mode === 'embedded' ? (
         <div className="enterprise-app-view__frame-wrap">
           {!frameLoaded && <div className="enterprise-app-view__loading"><Spin tip={frameSlow ? '应用响应较慢，可尝试“备用打开”' : '正在加载业务应用…'} /></div>}
-          <iframe key={frameKey} src={launch.url} title={application.name} onLoad={() => setFrameLoaded(true)} className="enterprise-app-view__frame" />
+          <iframe
+            ref={frameRef}
+            key={frameKey}
+            src={launch.url}
+            title={application.name}
+            onLoad={() => {
+              setFrameLoaded(true);
+              setBridgeContext({});
+              try {
+                frameRef.current?.contentWindow?.postMessage(
+                  { type: 'zhuojian:host-ready', version: 1 }, new URL(launch.url).origin,
+                );
+              } catch { /* invalid launch URL is handled by the existing fallback */ }
+            }}
+            className="enterprise-app-view__frame"
+          />
           {frameSlow && !frameLoaded && <Alert showIcon type="warning" message="该项目可能禁止 iframe 嵌入" description="可使用右上角“备用打开”。若希望内嵌，需要独立项目允许 AI Platform 域名的 frame-ancestors。" style={{ position: 'absolute', left: 30, right: 30, bottom: 30, zIndex: 2 }} />}
         </div>
       ) : (
@@ -94,7 +172,12 @@ export default function EnterpriseApplicationView({
       )}
 
       <Drawer title={<Space><RobotOutlined style={{ color: '#6366f1' }} />{application.name} · 业务小助手</Space>} open={assistantOpen} onClose={() => setAssistantOpen(false)} width={400}>
-        <Alert showIcon type="info" message="助手会携带当前应用上下文" description="只会注册你在该应用中获准的查询、新增、更新、删除工具。" style={{ marginBottom: 18 }} />
+        <Alert
+          showIcon type="info"
+          message={typeof bridgeContext.module_name === 'string' ? `已连接当前模块：${bridgeContext.module_name}` : '助手会携带当前应用上下文'}
+          description={typeof bridgeContext.entity_id === 'string' ? `当前业务对象：${bridgeContext.entity_id}` : '只会注册你在该应用中获准的查询、新增、更新、删除工具。旧版应用会自动使用应用首页上下文。'}
+          style={{ marginBottom: 18 }}
+        />
         <Typography.Paragraph type="secondary">你可以问：</Typography.Paragraph>
         <Space direction="vertical" style={{ width: '100%', marginBottom: 16 }}>
           {['汇总当前页面异常并给出处理建议', '查询今天待处理的业务记录', '根据当前业务数据生成一份 Excel'].map((item) => <Button key={item} block style={{ textAlign: 'left' }} onClick={() => setPrompt(item)}>{item}</Button>)}
