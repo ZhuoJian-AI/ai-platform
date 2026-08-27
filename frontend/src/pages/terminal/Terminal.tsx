@@ -16,7 +16,7 @@ import {
   RightOutlined, DownOutlined,
   LoadingOutlined, CloseOutlined, DeleteOutlined,
   SearchOutlined, UploadOutlined, EditOutlined, DownloadOutlined,
-  PictureOutlined, EyeOutlined,
+  PictureOutlined, EyeOutlined, MenuUnfoldOutlined, HistoryOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -39,6 +39,7 @@ import EnterpriseApplicationView from './EnterpriseApplicationView';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from '../../branding/BrandLogoSlot';
 import { BRAND_TITLES, useBrandTitle } from '../../branding/brand';
+import './TerminalApplicationShell.css';
 
 /** WorkBuddy 配色（参考 HTML 的 tailwind theme）。 */
 const WB = {
@@ -312,6 +313,8 @@ export default function Terminal() {
   // 左侧功能菜单视图：平台核心能力 + 按授权动态加载的企业应用。
   const [view, setView] = useState<'assistant' | 'workspaces' | 'agents' | 'knowledge' | 'skills' | 'application'>('assistant');
   const [selectedApplicationId, setSelectedApplicationId] = useState<string | null>(null);
+  const [applicationNavOpen, setApplicationNavOpen] = useState(false);
+  const [applicationImmersive, setApplicationImmersive] = useState(false);
 
   // 跟随输入（选中任务后的对话）
   const [followUp, setFollowUp] = useState('');
@@ -338,6 +341,19 @@ export default function Terminal() {
     queryKey: ['terminal-applications'], queryFn: () => terminal.applications(),
   });
   const selectedApplication = terminalApplications.find((item) => item.id === selectedApplicationId) ?? null;
+  const applicationShellActive = view === 'application' && selectedApplication !== null;
+
+  useEffect(() => {
+    setApplicationNavOpen(false);
+    setApplicationImmersive(false);
+  }, [selectedApplicationId]);
+
+  useEffect(() => {
+    if (view !== 'application') {
+      setApplicationNavOpen(false);
+      setApplicationImmersive(false);
+    }
+  }, [view]);
   // 智能体 chip 文案：选中显示名称，未选=通用智能体。
   const agentLabel = selectedAgentId
     ? (agentsList.find((a) => a.id === selectedAgentId)?.name ?? '已选')
@@ -961,7 +977,43 @@ export default function Terminal() {
       <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#f5f5f5', fontFamily: WB_FONT }}>
         {/* 主内容区 */}
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-          {/* 左侧栏 */}
+          {/* 企业应用使用极窄导航轨；平台其他页面继续使用完整侧栏。 */}
+          {applicationShellActive && !applicationImmersive ? (
+            <aside className="terminal-app-rail" aria-label="平台快捷导航">
+              <Tooltip title="展开平台导航" placement="right">
+                <button type="button" className="terminal-app-rail__button terminal-app-rail__button--primary" aria-label="展开平台导航" onClick={() => setApplicationNavOpen(true)}>
+                  <MenuUnfoldOutlined />
+                </button>
+              </Tooltip>
+              <Tooltip title="企业应用" placement="right">
+                <button type="button" className="terminal-app-rail__button terminal-app-rail__button--active" aria-label="企业应用" onClick={() => setApplicationNavOpen(true)}>
+                  <AppstoreOutlined />
+                </button>
+              </Tooltip>
+              <div className="terminal-app-rail__divider" />
+              <Tooltip title="工作空间" placement="right">
+                <button type="button" className="terminal-app-rail__button" aria-label="工作空间" onClick={() => setView('workspaces')}><FolderOpenOutlined /></button>
+              </Tooltip>
+              <Tooltip title="智能体" placement="right">
+                <button type="button" className="terminal-app-rail__button" aria-label="智能体" onClick={() => setView('agents')}><RobotOutlined /></button>
+              </Tooltip>
+              <Tooltip title="知识库" placement="right">
+                <button type="button" className="terminal-app-rail__button" aria-label="知识库" onClick={() => setView('knowledge')}><BookOutlined /></button>
+              </Tooltip>
+              <Tooltip title="技能" placement="right">
+                <button type="button" className="terminal-app-rail__button" aria-label="技能" onClick={() => setView('skills')}><ThunderboltOutlined /></button>
+              </Tooltip>
+              <Tooltip title="任务与平台导航" placement="right">
+                <button type="button" className="terminal-app-rail__button" aria-label="任务与平台导航" onClick={() => setApplicationNavOpen(true)}><HistoryOutlined /></button>
+              </Tooltip>
+              <div className="terminal-app-rail__spacer" />
+              <Tooltip title={userName} placement="right">
+                <button type="button" className="terminal-app-rail__button" aria-label="用户菜单" onClick={() => setApplicationNavOpen(true)}>
+                  <Avatar size={28} style={{ background: 'linear-gradient(135deg, #34d399 0%, #14b8a6 100%)' }}>{userInitial}</Avatar>
+                </button>
+              </Tooltip>
+            </aside>
+          ) : !applicationShellActive ? (
           <aside style={{ width: 224, background: WB.sidebar, borderRight: `1px solid ${WB.border}`, display: 'flex', flexDirection: 'column', flex: '0 0 auto' }}>
             <div style={{ padding: 12 }}>
               <Button type="primary" icon={<PlusOutlined />} block onClick={newTask}>新建任务</Button>
@@ -1104,6 +1156,7 @@ export default function Terminal() {
               </Popover>
             </div>
           </aside>
+          ) : null}
 
           {/* 右侧主区 */}
           <main style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#fff', minWidth: 0 }}>
@@ -1130,14 +1183,20 @@ export default function Terminal() {
             ) : view === 'skills' ? (
               <SkillManagerView />
             ) : view === 'application' && selectedApplication ? (
-              <EnterpriseApplicationView application={selectedApplication} onAskAI={(prompt, context) => {
-                setView('assistant');
-                setSelectedId(null);
-                setComposerOpen(true);
-                setInput(prompt);
-                setConfig((current) => ({ ...current, application_id: selectedApplication.id }));
-                setPageContext(context);
-              }} />
+              <EnterpriseApplicationView
+                application={selectedApplication}
+                immersive={applicationImmersive}
+                onOpenNavigation={() => setApplicationNavOpen(true)}
+                onToggleImmersive={() => setApplicationImmersive((value) => !value)}
+                onAskAI={(prompt, context) => {
+                  setView('assistant');
+                  setSelectedId(null);
+                  setComposerOpen(true);
+                  setInput(prompt);
+                  setConfig((current) => ({ ...current, application_id: selectedApplication.id }));
+                  setPageContext(context);
+                }}
+              />
             ) : composerOpen ? (
               <HomeView
                 input={input} setInput={setInput}
@@ -1181,6 +1240,93 @@ export default function Terminal() {
               />
             )}
           </main>
+
+          <Drawer
+            placement="left"
+            width={280}
+            open={applicationShellActive && applicationNavOpen}
+            onClose={() => setApplicationNavOpen(false)}
+            closable={false}
+            rootClassName="terminal-app-nav-drawer"
+            styles={{ body: { padding: 0 }, mask: { background: 'rgba(15, 23, 42, .08)' } }}
+          >
+            <div className="terminal-app-nav-drawer__panel">
+              <div className="terminal-app-nav-drawer__header">
+                <Typography.Text strong><AppstoreOutlined style={{ marginRight: 8, color: WB.primary }} />平台导航</Typography.Text>
+                <Button type="text" aria-label="关闭平台导航" icon={<CloseOutlined />} onClick={() => setApplicationNavOpen(false)} />
+              </div>
+
+              <div style={{ padding: 12 }}>
+                <Button type="primary" icon={<PlusOutlined />} block onClick={() => { setApplicationNavOpen(false); newTask(); }}>新建任务</Button>
+              </div>
+
+              <nav style={{ padding: '0 10px' }}>
+                {terminalApplications.length > 0 && (
+                  <div style={{ padding: '6px 10px 4px', fontSize: 11, color: '#9ca3af', fontWeight: 600, letterSpacing: .4 }}>企业应用</div>
+                )}
+                {terminalApplications.map((application) => (
+                  <div
+                    key={application.id}
+                    onClick={() => {
+                      setSelectedApplicationId(application.id);
+                      setView('application');
+                      setApplicationNavOpen(false);
+                    }}
+                    style={navItemStyle(selectedApplicationId === application.id)}
+                  >
+                    {application.icon_url
+                      ? <img src={application.icon_url} alt="" style={{ width: 17, height: 17, borderRadius: 5, objectFit: 'cover' }} />
+                      : <AppstoreOutlined style={{ fontSize: 16 }} />}
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{application.name}</span>
+                    {application.assistant_enabled && <Tag color="purple" bordered={false} style={{ margin: '0 0 0 auto', fontSize: 9, lineHeight: '17px' }}>AI</Tag>}
+                  </div>
+                ))}
+                {terminalApplications.length > 0 && <div style={{ height: 1, background: '#e5e7eb', margin: '8px 10px' }} />}
+                <div onClick={() => { setApplicationNavOpen(false); setView('workspaces'); }} style={navItemStyle(false)}><FolderOpenOutlined style={{ fontSize: 16 }} /><span>工作空间</span></div>
+                <div onClick={() => { setApplicationNavOpen(false); setView('agents'); }} style={navItemStyle(false)}><RobotOutlined style={{ fontSize: 16 }} /><span>智能体</span></div>
+                <div onClick={() => { setApplicationNavOpen(false); setView('knowledge'); }} style={navItemStyle(false)}><BookOutlined style={{ fontSize: 16 }} /><span>知识库</span></div>
+                <div onClick={() => { setApplicationNavOpen(false); setView('skills'); }} style={navItemStyle(false)}><ThunderboltOutlined style={{ fontSize: 16 }} /><span>技能</span></div>
+              </nav>
+
+              <div style={{ padding: '12px 16px 8px' }}>
+                <div style={{ fontSize: 12, color: '#6b7280', fontWeight: 500, marginBottom: 8 }}>任务 ({tasks?.length ?? 0})</div>
+                <Input allowClear size="small" prefix={<SearchOutlined />} placeholder="搜索任务" value={taskSearch} onChange={(event) => setTaskSearch(event.target.value)} style={{ fontSize: 12 }} />
+              </div>
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 10px 10px' }} className="wb-scroll-hide">
+                {taskGroups.length === 0 && <div style={{ padding: '8px 10px', color: '#9ca3af', fontSize: 12 }}>{taskSearch ? '没有匹配任务' : '暂无任务'}</div>}
+                {taskGroups.map(([group, items]) => (
+                  <div key={group} style={{ marginBottom: 8 }}>
+                    <div style={{ padding: '7px 10px 3px', color: '#9ca3af', fontSize: 10, fontWeight: 600 }}>{group}</div>
+                    {items.map((task) => {
+                      const active = selectedId === task.id && !composerOpen;
+                      return (
+                        <div
+                          key={task.id}
+                          onClick={() => { selectTask(task.id); setView('assistant'); setApplicationNavOpen(false); }}
+                          style={{ ...navItemStyle(active), fontSize: 12 }}
+                        >
+                          <FileTextOutlined style={{ color: active ? WB.primary : '#cbd5e1' }} />
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title || '(未命名)'}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ padding: 12, borderTop: `1px solid ${WB.border}`, background: '#fff' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                  <Avatar size={30} style={{ background: 'linear-gradient(135deg, #34d399 0%, #14b8a6 100%)' }}>{userInitial}</Avatar>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ color: '#374151', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{userName}</div>
+                    <div style={{ color: '#9ca3af', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{user?.organization_name || user?.organization_slug || '企业用户'}</div>
+                  </div>
+                  <Tooltip title="导出 Skills"><Button type="text" aria-label="导出 Skills" icon={<DownloadOutlined />} onClick={exportSkillsPack} /></Tooltip>
+                  <Tooltip title="退出登录"><Button type="text" danger aria-label="退出登录" icon={<LogoutOutlined />} onClick={logout} /></Tooltip>
+                </div>
+              </div>
+            </div>
+          </Drawer>
         </div>
 
         {/* 右侧抽屉：资源·文件·记忆·轨迹（默认收起，按需展开） */}
