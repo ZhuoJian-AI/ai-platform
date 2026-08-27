@@ -197,6 +197,7 @@ from app.services.workspace_preview_service import (
     build_original_preview,
 )
 from app.tools.skill_manifest import parse_skill_manifest
+from app.utils.workspace_presentation import clean_display_name, presentation_dict
 
 router = APIRouter()
 
@@ -289,7 +290,7 @@ async def _resolve_task_attachments(
             "file_id": fid,
             "workspace_id": str(f.workspace_id),
             "path": f.path,
-            "name": str(meta.get("name") or f.path.rsplit("/", 1)[-1]),
+            "name": clean_display_name(f.path, meta),
         }
         if getattr(f, "current_version_id", None):
             snapshot["version_id"] = str(f.current_version_id)
@@ -392,6 +393,8 @@ async def list_all_ws_files_endpoint(
                 "workspace_id": str(ws.id),
                 "workspace_name": ws.name,
                 "path": f.path,
+                "original_filename": clean_display_name(f.path, f.metadata_ or {}),
+                "presentation": presentation_dict(f.path, f.metadata_ or {}, created_at=f.created_at),
                 "scope_type": ws.scope_type,
                 "is_binary": bool((f.metadata_ or {}).get("binary")),
             })
@@ -554,10 +557,13 @@ async def create_task_endpoint(
 
 @router.get("/terminal/tasks", response_model=list[TaskRead])
 async def list_tasks_endpoint(
+    q: str | None = Query(default=None, max_length=200),
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
-    tasks = await task_service.list_tasks(db, cu.id)
-    return tasks
+    if q and q.strip():
+        rows = await task_service.search_tasks(db, cu.id, q)
+        return [TaskRead.model_validate(task).model_copy(update={"match_excerpt": excerpt}) for task, excerpt in rows]
+    return await task_service.list_tasks(db, cu.id)
 
 
 @router.get("/terminal/tasks/{task_id}", response_model=TaskReadWithMessages)
@@ -633,9 +639,15 @@ async def run_task_endpoint(
         cfg["application_id"] = str(provided["application_id"]) if provided["application_id"] else None
     cfg["page_context"] = dict(data.page_context or {})
     if cfg.get("application_id"):
-        _, application_permissions = await enterprise_application_service.assert_application_permission(
+        application, application_permissions = await enterprise_application_service.assert_application_permission(
             db, cfg["application_id"], cu, "view",
         )
+        page_application_id = cfg["page_context"].get("application_id")
+        if page_application_id and str(page_application_id) != str(application.id):
+            raise HTTPException(status_code=400, detail="页面上下文与当前应用不匹配")
+        page_application_slug = cfg["page_context"].get("application_slug")
+        if page_application_slug and page_application_slug != application.slug:
+            raise HTTPException(status_code=400, detail="页面上下文与当前应用不匹配")
         cfg["application_permissions"] = sorted(application_permissions)
     if not cfg.get("workspace_id"):
         defaults = await _user_defaults(db, cu)
@@ -1645,7 +1657,24 @@ async def list_skills_endpoint(
         scope_type, scope_id
     ) not in await skill_scope_service.managed_scopes(db, cu):
         raise HTTPException(status_code=404, detail="Scope not accessible")
-    return await list_skill_folders(db, cu.organization_id, scope_type, scope_id)
+    folders = await list_skill_folders(db, cu.organization_id, scope_type, scope_id)
+    version_ids = [folder.active_version_id for folder in folders if folder.active_version_id]
+    versions = {
+        version.id: version
+        for version in (await db.execute(select(SkillVersion).where(SkillVersion.id.in_(version_ids)))).scalars().all()
+    } if version_ids else {}
+    result: list[dict] = []
+    for folder in folders:
+        version = versions.get(folder.active_version_id)
+        manifest = version.manifest if version is not None and isinstance(version.manifest, dict) else {}
+        item = SkillFolderRead.model_validate(folder).model_dump()
+        item.update({
+            "description": str(manifest.get("description") or "").strip() or None,
+            "active_version_no": version.version_no if version is not None else None,
+            "active_install_status": version.install_status if version is not None else None,
+        })
+        result.append(item)
+    return result
 
 
 @router.post("/terminal/skills", response_model=SkillFolderRead, status_code=201)

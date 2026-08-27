@@ -68,7 +68,54 @@ class TaskRunRequest(BaseModel):
 
         if len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")) > 16_384:
             raise ValueError("page_context exceeds 16KB")
+        cls._validate_context_value(value, depth=0)
+        if "bridge_version" in value:
+            if value.get("bridge_version") != 1:
+                raise ValueError("unsupported iframe bridge version")
+            bridge_strings = {
+                "application_slug",
+                "route",
+                "module_key",
+                "module_name",
+                "entity_type",
+                "entity_id",
+                "data_version",
+            }
+            for key in bridge_strings:
+                item = value.get(key)
+                if item is not None and (not isinstance(item, str) or len(item) > 1_000):
+                    raise ValueError(f"invalid iframe bridge field: {key}")
+            for key in ("filters", "selection"):
+                item = value.get(key)
+                if item is not None and not isinstance(item, dict):
+                    raise ValueError(f"invalid iframe bridge field: {key}")
         return value
+
+    @classmethod
+    def _validate_context_value(cls, value, *, depth: int) -> None:
+        if depth > 5:
+            raise ValueError("page_context nesting is too deep")
+        if value is None or isinstance(value, bool | int | float):
+            return
+        if isinstance(value, str):
+            if len(value) > 4_000:
+                raise ValueError("page_context string is too long")
+            return
+        if isinstance(value, list):
+            if len(value) > 200:
+                raise ValueError("page_context list is too large")
+            for item in value:
+                cls._validate_context_value(item, depth=depth + 1)
+            return
+        if isinstance(value, dict):
+            if len(value) > 200:
+                raise ValueError("page_context object is too large")
+            for key, item in value.items():
+                if not isinstance(key, str) or len(key) > 128:
+                    raise ValueError("page_context contains an invalid key")
+                cls._validate_context_value(item, depth=depth + 1)
+            return
+        raise ValueError("page_context must contain JSON-compatible values")
 
 
 class ExecutionVerification(BaseModel):
@@ -109,6 +156,7 @@ class TaskRead(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    match_excerpt: str | None = None
 
     model_config = {"from_attributes": True}
 

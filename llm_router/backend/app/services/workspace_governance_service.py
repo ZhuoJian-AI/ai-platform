@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.admin_auth import CurrentAdmin
 from app.auth.user_auth import CurrentUser
 from app.config import settings
+from app.models.admin import Admin
+from app.models.user import User
 from app.models.workspace import (
     Workspace,
     WorkspaceAuditEvent,
@@ -28,6 +30,7 @@ from app.models.workspace import (
 from app.schemas.workspace import WorkspaceFileCreate, WorkspaceUploadInitiate
 from app.services import storage_gateway_service, workspace_permission_service, workspace_service
 from app.services.storage_lifecycle_service import restore
+from app.utils.workspace_presentation import presentation_dict
 
 
 async def audit(
@@ -41,6 +44,11 @@ async def audit(
     version_id: str | UUID | None = None,
     metadata: dict | None = None,
 ) -> None:
+    audit_metadata = dict(metadata or {})
+    if file is not None:
+        presentation = presentation_dict(file.path, file.metadata_ or {}, created_at=file.created_at)
+        audit_metadata.setdefault("display_name", presentation["display_name"])
+        audit_metadata.setdefault("path", file.path)
     db.add(WorkspaceAuditEvent(
         organization_id=ws.organization_id,
         workspace_id=ws.id,
@@ -49,7 +57,7 @@ async def audit(
         actor_user_id=user_id,
         actor_admin_id=admin_id,
         action=action,
-        metadata_=metadata or {},
+        metadata_=audit_metadata,
     ))
     await db.flush()
 
@@ -294,9 +302,25 @@ async def list_trash(db: AsyncSession, ws: Workspace) -> list[WorkspaceFile]:
 async def list_audit_events(
     db: AsyncSession, ws: Workspace, *, limit: int = 200,
 ) -> list[WorkspaceAuditEvent]:
-    return list((await db.execute(select(WorkspaceAuditEvent).where(
+    events = list((await db.execute(select(WorkspaceAuditEvent).where(
         WorkspaceAuditEvent.workspace_id == ws.id,
     ).order_by(WorkspaceAuditEvent.created_at.desc()).limit(limit))).scalars().all())
+    user_ids = {event.actor_user_id for event in events if event.actor_user_id}
+    admin_ids = {event.actor_admin_id for event in events if event.actor_admin_id is not None}
+    users = {
+        str(user.id): user
+        for user in (await db.execute(select(User).where(User.id.in_(user_ids)))).scalars().all()
+    } if user_ids else {}
+    admins = {
+        admin.id: admin
+        for admin in (await db.execute(select(Admin).where(Admin.id.in_(admin_ids)))).scalars().all()
+    } if admin_ids else {}
+    for event in events:
+        user = users.get(str(event.actor_user_id)) if event.actor_user_id else None
+        admin = admins.get(event.actor_admin_id) if event.actor_admin_id is not None else None
+        actor = user or admin
+        event.actor_display_name = (actor.display_name or actor.username) if actor else "系统"
+    return events
 
 
 async def restore_from_trash(db: AsyncSession, ws: Workspace, file_id: UUID, cu: CurrentUser) -> WorkspaceFile:

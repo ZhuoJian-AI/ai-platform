@@ -34,6 +34,8 @@ from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.ontology import OntologyFile
 from app.models.organization import Organization
 from app.models.skill import SkillExecution, SkillFolder, SkillVersion
+from app.models.task import Task
+from app.models.workspace import WorkspaceFile
 from app.schemas.rag import RagRetrieveRequest
 from app.schemas.workspace import WorkspaceFileCreate
 from app.services import (
@@ -54,11 +56,26 @@ from app.services.skill_store_service import SKILL_MANIFEST_PATH
 from app.services.skill_store_service import get_file_by_path as get_skill_file_by_path
 from app.tools.executor import execute_endpoint
 from app.tools.skill_manifest import parse_skill_manifest
+from app.utils.workspace_presentation import artifacts_from_traces, enrich_metadata, presentation_dict
 
 logger = structlog.get_logger()
 
 MAX_STEPS = 8
 RUNNER_INLINE_FILE_BYTES = 10 * 1024 * 1024
+
+
+async def _task_source_fields(db: Any, state: AgentState) -> dict[str, str | None]:
+    task_id = str(state.get("task_id") or "").strip()
+    if not task_id:
+        return {"source_task_id": None, "source_task_title": None}
+    try:
+        task = await db.get(Task, UUID(task_id))
+    except ValueError:
+        task = None
+    return {
+        "source_task_id": task_id,
+        "source_task_title": task.title if task is not None else None,
+    }
 
 GENERAL_SYSTEM_PROMPT = (
     "你是组织智能助手。默认用 Markdown 直接回答；只有用户明确要求生成、编辑、转换或导出文件时，"
@@ -68,6 +85,7 @@ GENERAL_SYSTEM_PROMPT = (
     "用户明确调用 Skill 或某个 Skill 明显匹配专业流程时优先遵循该 Skill，平台文件工具作为通用能力。只有系统实际提供了"
     "[知识库检索结果]时才能使用RAG内容，通用智能体不会自动加载知识库。"
     "请基于上述上下文完成用户任务，必要时分步调用工具，最终给出清晰的结果。"
+    "文件交付时只写用户可读文件名；不要在正文中输出 file_id、UUID、OSS Key 或工作空间内部存储路径。"
 )
 
 # ── 执行模式（exec_mode）prompt 注入 ────────────────────────────────────
@@ -393,6 +411,7 @@ async def _execute_platform_file_tool(
             execution_id=f"{state.get('task_id') or 'playground'}-{uuid4().hex[:8]}",
         )
         output_items: list[dict] = []
+        task_source = await _task_source_fields(db, state)
         if result.get("outputs") and ws is None:
             return json.dumps({"status": "error", "error": "下载文件前请先绑定工作空间"}, ensure_ascii=False)
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -431,12 +450,17 @@ async def _execute_platform_file_tool(
             }
             if state.get("task_id"):
                 output_meta["task_id"] = str(state["task_id"])
-            saved.metadata_ = output_meta
+            saved.metadata_ = enrich_metadata(
+                saved.path,
+                output_meta,
+                source_kind="platform_tool",
+                **task_source,
+            )
+            await workspace_service.sync_current_version(db, saved)
             await db.flush()
             output_items.append({
                 "file_id": str(saved.id),
-                "name": original,
-                "path": saved.path,
+                "display_name": original,
                 "parse_status": saved.parse_status,
             })
         return json.dumps({
@@ -521,11 +545,13 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 saved = await workspace_service.ingest_uploaded_file(
                     db, ws, path=path, filename=filename, content_type="image/png", raw=raw,
                 )
-                saved.metadata_ = {
+                task_source = await _task_source_fields(db, state)
+                saved.metadata_ = enrich_metadata(saved.path, {
                     **(saved.metadata_ or {}), "generated_by": "image_generation_tool",
                     "provider_id": result.provider_id, "model": result.model_served,
                     "width": width, "height": height, "task_id": str(task_part),
-                }
+                }, source_kind="platform_tool", **task_source)
+                await workspace_service.sync_current_version(db, saved)
                 db.add(AuditLog(
                     request_id=f"image-generation-{uuid4().hex}",
                     organization_id=str(state["org_id"]), department_id=state.get("department_id"),
@@ -541,7 +567,7 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 await db.flush()
                 return json.dumps({
                     "status": "success", "tool": name,
-                    "outputs": [{"file_id": str(saved.id), "name": filename, "path": saved.path,
+                    "outputs": [{"file_id": str(saved.id), "display_name": filename,
                                  "mime_type": "image/png", "width": width, "height": height,
                                  "parse_status": saved.parse_status}],
                     "revised_prompt": result.revised_prompt,
@@ -1516,6 +1542,7 @@ async def _execute_code_skill(
         )
         output_ids: list[str] = []
         output_items: list[dict] = []
+        task_source = await _task_source_fields(db, state)
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         task_part = state.get("task_id") or "playground"
         for item in result.get("outputs") or []:
@@ -1542,9 +1569,19 @@ async def _execute_code_skill(
                     db, ws, path=path, filename=original, content_type=mime, raw=raw,
                     created_by_user_id=user.id,
                 )
+            saved.metadata_ = enrich_metadata(
+                saved.path,
+                saved.metadata_ or {},
+                source_kind="skill",
+                **task_source,
+                skill_id=str(folder.id),
+                skill_display_name=folder.name,
+                skill_version=str(version.version_no),
+            )
+            await workspace_service.sync_current_version(db, saved)
             output_ids.append(str(saved.id))
             output_items.append({
-                "file_id": str(saved.id), "name": original, "path": saved.path,
+                "file_id": str(saved.id), "display_name": original,
                 "parse_status": saved.parse_status,
             })
         execution.status = "success"
@@ -1568,6 +1605,7 @@ def _skill_record(folder: SkillFolder, version: SkillVersion | None, action: str
         "scope_type": folder.scope_type,
         "scope_id": str(folder.scope_id) if folder.scope_id else None,
         "version_id": str(version.id) if version is not None else None,
+        "version_no": version.version_no if version is not None else None,
         "action": action,
     }
 
@@ -2087,12 +2125,49 @@ async def save_memory(state: AgentState) -> dict:
             return {}
         # 仅落 assistant 消息：user 消息已在 _run_graph_bg 起始落库并提交
         # （让 run 期间 GET /tasks 能带回提示词、重连回放时前面有用户消息）。
+        traces = state.get("traces", [])
+        executed_skills = state.get("executed_skills", [])
+        task = await db.get(Task, UUID(task_id))
+        artifacts = artifacts_from_traces(
+            traces,
+            task_id=str(task_id),
+            task_title=task.title if task is not None else None,
+            executed_skills=executed_skills,
+        )
+        for artifact in artifacts:
+            try:
+                workspace_file = await db.get(WorkspaceFile, UUID(str(artifact.get("file_id"))))
+            except (TypeError, ValueError):
+                workspace_file = None
+            if workspace_file is None:
+                continue
+            presentation = presentation_dict(
+                workspace_file.path,
+                workspace_file.metadata_ or {},
+                created_at=workspace_file.created_at,
+            )
+            artifact.update({
+                "display_name": presentation["display_name"],
+                "workspace_path": workspace_file.path,
+                "mime_type": (workspace_file.metadata_ or {}).get("mime") or artifact.get("mime_type"),
+                "size": workspace_file.size,
+                "parse_status": workspace_file.parse_status,
+                "source": {
+                    "kind": presentation["source_kind"],
+                    "task_id": presentation["source_task_id"],
+                    "task_title": presentation["source_task_title"],
+                    "skill_id": presentation["skill_id"],
+                    "skill_display_name": presentation["skill_display_name"],
+                    "skill_version": presentation["skill_version"],
+                },
+            })
         db.add(TaskMessage(task_id=UUID(task_id), role="assistant",
                            content=state.get("assistant_final", ""),
                            metadata_={
-                               "traces": state.get("traces", []),
+                               "traces": traces,
                                "loaded_skills": state.get("loaded_skills", []),
-                               "executed_skills": state.get("executed_skills", []),
+                               "executed_skills": executed_skills,
+                               "artifacts": artifacts,
                            }))
         await db.flush()
         # **立即提交**：让 assistant 回复（及本轮工具写入的工作空间文件）当场持久化，

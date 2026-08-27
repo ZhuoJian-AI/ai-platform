@@ -36,7 +36,7 @@ SHEET_CONVERT_EXTS = {"xls", "xlsb", "xlt", "xltx", "xltm", "ods"}
 SLIDE_CONVERT_EXTS = {"ppt", "pptm", "pps", "ppsx", "ppsm", "pot", "potx", "potm", "odp"}
 
 SUPPORTED_EXTENSIONS = {
-    "txt", "text", "log", "md", "markdown", "csv", "tsv", "htm", "html", "pdf",
+    "txt", "text", "log", "md", "markdown", "json", "csv", "tsv", "htm", "html", "pdf",
     "docx", "xlsx", "xlsm", "pptx",
     *WORD_CONVERT_EXTS, *SHEET_CONVERT_EXTS, *SLIDE_CONVERT_EXTS,
 }
@@ -94,7 +94,7 @@ def extract_text(filename: str, content_type: str | None, raw: bytes) -> tuple[s
         elif ext in SLIDE_CONVERT_EXTS:
             raw = _convert_with_libreoffice(filename, raw, "pptx")
             kind = "pptx"
-        if kind in ("txt", "md", "csv"):
+        if kind in ("txt", "md", "json", "csv"):
             return _decode(raw), kind
         if kind == "html":
             return _parse_html(raw), kind
@@ -120,6 +120,7 @@ def _resolve_kind(ext: str, ct: str) -> str | None:
     table = {
         "txt": "txt", "text": "txt", "log": "txt",
         "md": "md", "markdown": "md",
+        "json": "json",
         "csv": "csv", "tsv": "csv",
         "htm": "html", "html": "html",
         "pdf": "pdf",
@@ -137,7 +138,7 @@ def _resolve_kind(ext: str, ct: str) -> str | None:
         return table[ext]
     # Content-Type 兜底
     ct_map = {
-        "text/plain": "txt", "text/markdown": "md", "text/csv": "csv",
+        "text/plain": "txt", "text/markdown": "md", "application/json": "json", "text/csv": "csv",
         "text/html": "html", "application/pdf": "pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",

@@ -27,6 +27,7 @@ from app.schemas.workspace import (
 )
 from app.services import doc_parser, storage_gateway_service
 from app.services.storage_lifecycle_service import mark_deleted, mark_workspace_deleted, restore
+from app.utils.workspace_presentation import clean_display_name, enrich_metadata, presentation_dict
 
 MAX_WORKSPACE_FILE_BYTES = settings.workspace_max_file_bytes
 MAX_LLM_FILE_CHARS = 100_000
@@ -134,7 +135,7 @@ async def upsert_file(
 ) -> WorkspaceFile:
     path = _normalize_path(data.path)
     content = _sanitize_content(data.content)
-    meta = dict(data.metadata or {})
+    meta = enrich_metadata(path, dict(data.metadata or {}), created_at=datetime.now(UTC))
     # 二进制文件：前端以 base64 编码写入 content，并以 metadata.binary 标记。
     # size / content_hash 按解码后的原始字节计算，content 列存 base64 文本（PG TEXT 不允许 NUL）。
     if meta.get("binary") and raw_size is not None:
@@ -249,6 +250,7 @@ async def sync_current_version(db: AsyncSession, f: WorkspaceFile) -> None:
     version.parse_status = f.parse_status
     version.parse_kind = f.parse_kind
     version.parse_error = f.parse_error
+    version.metadata_ = dict(f.metadata_ or {})
     await db.flush()
 
 
@@ -265,6 +267,7 @@ async def list_files(db: AsyncSession, ws_id: UUID) -> list[WorkspaceFile]:
             WorkspaceFile.workspace_id,
             WorkspaceFile.path,
             WorkspaceFile.metadata_,
+            WorkspaceFile.created_at,
         )).where(
             WorkspaceFile.workspace_id == ws_id, WorkspaceFile.deleted_at.is_(None)
         ).order_by(WorkspaceFile.path)
@@ -274,7 +277,7 @@ async def list_files(db: AsyncSession, ws_id: UUID) -> list[WorkspaceFile]:
 
 def _file_list_item(f: WorkspaceFile) -> WorkspaceFileListItem:
     meta = f.metadata_ or {}
-    original_filename = str(meta.get("name") or PurePosixPath(f.path).name)
+    original_filename = clean_display_name(f.path, meta)
     mime_type = str(meta.get("mime") or mimetypes.guess_type(original_filename)[0] or "") or None
     return WorkspaceFileListItem(
         id=f.id,
@@ -290,6 +293,7 @@ def _file_list_item(f: WorkspaceFile) -> WorkspaceFileListItem:
         parse_error=f.parse_error,
         created_at=f.created_at,
         updated_at=f.updated_at,
+        presentation=presentation_dict(f.path, meta, created_at=f.created_at),
     )
 
 
@@ -566,7 +570,7 @@ def paginate_file_content(
     base = {
         "file_id": str(f.id),
         "path": f.path,
-        "original_filename": str((f.metadata_ or {}).get("name") or PurePosixPath(f.path).name),
+        "original_filename": clean_display_name(f.path, f.metadata_ or {}),
     }
     if error is not None:
         return {**base, "status": "unavailable", "error": error}

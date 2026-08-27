@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas._base import MetaReadModel, OrmModel
 
@@ -59,6 +59,19 @@ class WorkspaceFileUpdate(BaseModel):
     metadata: dict | None = None
 
 
+class WorkspaceFilePresentation(BaseModel):
+    """Stable user-facing metadata; storage identifiers remain unchanged."""
+
+    display_name: str
+    source_kind: str = "upload"
+    source_task_id: str | None = None
+    source_task_title: str | None = None
+    skill_id: str | None = None
+    skill_display_name: str | None = None
+    skill_version: str | None = None
+    created_at: str | None = None
+
+
 class WorkspaceFileRead(MetaReadModel):
     id: UUID
     workspace_id: UUID
@@ -73,6 +86,17 @@ class WorkspaceFileRead(MetaReadModel):
     created_at: datetime
     updated_at: datetime
     current_version_id: UUID | None = None
+    presentation: WorkspaceFilePresentation | None = None
+
+    @model_validator(mode="after")
+    def derive_presentation(self):
+        if self.presentation is None:
+            from app.utils.workspace_presentation import presentation_dict
+
+            self.presentation = WorkspaceFilePresentation(**presentation_dict(
+                self.path, self.metadata, created_at=self.created_at,
+            ))
+        return self
 
 
 class WorkspaceFileListItem(BaseModel):
@@ -95,6 +119,7 @@ class WorkspaceFileListItem(BaseModel):
     parse_error: str | None = None
     created_at: datetime
     updated_at: datetime
+    presentation: WorkspaceFilePresentation
 
 
 class WorkspaceFilePage(BaseModel):
@@ -189,5 +214,6 @@ class WorkspaceAuditEventRead(MetaReadModel):
     workspace_file_id: UUID | None = None
     version_id: UUID | None = None
     action: str
+    actor_display_name: str | None = None
     metadata: dict = Field(default_factory=dict)
     created_at: datetime

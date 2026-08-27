@@ -143,6 +143,18 @@ def test_extract_pdf_text_by_page() -> None:
     assert "Production report 42" in text
 
 
+@pytest.mark.parametrize("content_type", ["application/json", "application/octet-stream"])
+def test_extract_json_by_mime_or_extension(content_type: str) -> None:
+    text, kind = doc_parser.extract_text(
+        "跨部门事件.json",
+        content_type,
+        b'{"event":"production.completed","style_id":"203A023"}',
+    )
+
+    assert kind == "json"
+    assert '"production.completed"' in text
+
+
 def test_old_office_uses_isolated_libreoffice_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     converted = _docx_bytes()
     observed: dict[str, object] = {}

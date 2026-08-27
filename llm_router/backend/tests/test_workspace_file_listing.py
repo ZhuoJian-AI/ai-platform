@@ -58,6 +58,8 @@ async def test_admin_file_list_is_paged_and_excludes_payloads(
     item = body["items"][0]
     assert item["path"] == "a.txt"
     assert item["original_filename"] == "a.txt"
+    assert item["presentation"]["display_name"] == "a.txt"
+    assert item["presentation"]["source_kind"] == "upload"
     assert "content" not in item
     assert "extracted_text" not in item
     assert "不得出现在列表" not in response.text
@@ -140,6 +142,17 @@ async def test_terminal_global_file_summary_can_read_projected_metadata(
         "workspace_id": str(ws.id),
         "workspace_name": ws.name,
         "path": file.path,
+        "original_filename": "二进制报告.pdf",
+        "presentation": {
+            "display_name": "二进制报告.pdf",
+            "source_kind": "upload",
+            "source_task_id": None,
+            "source_task_title": None,
+            "skill_id": None,
+            "skill_display_name": None,
+            "skill_version": None,
+            "created_at": file.created_at.isoformat(),
+        },
         "scope_type": "organization",
         "is_binary": True,
     }]

@@ -32,7 +32,7 @@ _LEADING_ATTACHMENT_RE = re.compile(
 )
 
 
-def make_task_title(message: str, *, max_length: int = 60) -> str:
+def make_task_title(message: str, *, max_length: int = 36) -> str:
     """Build a readable task title without leaking invocation syntax into the sidebar."""
     value = message or ""
     previous = None
@@ -45,7 +45,8 @@ def make_task_title(message: str, *, max_length: int = 60) -> str:
     if not value:
         return "新任务"
     sentence = re.split(r"[\n。！？!?]", value, maxsplit=1)[0].strip()
-    return (sentence or value)[:max_length]
+    title = sentence or value
+    return title if len(title) <= max_length else f"{title[:max_length - 1]}…"
 
 
 async def create_task(
@@ -76,6 +77,44 @@ async def list_tasks(db: AsyncSession, user_id: str) -> list[Task]:
         .order_by(Task.updated_at.desc())
     )
     return list((await db.execute(stmt)).scalars().all())
+
+
+def _match_excerpt(content: str, query: str, *, radius: int = 32) -> str | None:
+    normalized = re.sub(r"\s+", " ", content or "").strip()
+    index = normalized.casefold().find(query.casefold())
+    if index < 0:
+        return None
+    start = max(0, index - radius)
+    end = min(len(normalized), index + len(query) + radius)
+    excerpt = normalized[start:end]
+    return f"{'…' if start else ''}{excerpt}{'…' if end < len(normalized) else ''}"
+
+
+async def search_tasks(db: AsyncSession, user_id: str, query: str) -> list[tuple[Task, str | None]]:
+    """Search titles, initial prompts and persisted messages with a useful excerpt."""
+    needle = re.sub(r"\s+", " ", query or "").strip()
+    if not needle:
+        return [(task, None) for task in await list_tasks(db, user_id)]
+    stmt = (
+        select(Task)
+        .options(selectinload(Task.messages))
+        .where(Task.user_id == user_id, Task.deleted_at.is_(None))
+        .order_by(Task.updated_at.desc())
+    )
+    matches: list[tuple[Task, str | None]] = []
+    for task in (await db.execute(stmt)).scalars().unique().all():
+        if _match_excerpt(task.title, needle) is not None:
+            matches.append((task, None))
+            continue
+        excerpt = _match_excerpt(task.message, needle)
+        if excerpt is None:
+            for message in task.messages:
+                excerpt = _match_excerpt(message.content, needle)
+                if excerpt is not None:
+                    break
+        if excerpt is not None:
+            matches.append((task, excerpt))
+    return matches
 
 
 async def get_last_used_model_alias(db: AsyncSession, user_id: str) -> str | None:

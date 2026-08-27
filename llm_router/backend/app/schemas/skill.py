@@ -78,6 +78,9 @@ class SkillFolderRead(OrmModel):
     active_version_id: UUID | None = None
     is_active: bool = True
     is_installed: bool = False
+    description: str | None = None
+    active_version_no: int | None = None
+    active_install_status: str | None = None
     created_at: datetime
     updated_at: datetime
 
