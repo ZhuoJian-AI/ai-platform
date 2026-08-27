@@ -8,10 +8,12 @@ LABEL org.opencontainers.image.revision=${SOURCE_COMMIT} \
       org.opencontainers.image.source=${SOURCE_REPOSITORY}
 
 WORKDIR /app
+USER root
 COPY app.py .
 COPY builtin_tools.py .
 COPY --chmod=755 entrypoint.sh /usr/local/bin/skill-runner-entrypoint
 RUN sed -i 's/\r$//' /usr/local/bin/skill-runner-entrypoint
+USER 10001:10001
 
 EXPOSE 8020
 ENTRYPOINT ["/usr/local/bin/skill-runner-entrypoint"]
