@@ -1,15 +1,24 @@
 import { useEffect, useState } from 'react';
 import { Alert, Button, Drawer, Empty, Input, Result, Space, Spin, Tag, Tooltip, Typography } from 'antd';
-import { ExportOutlined, ReloadOutlined, RobotOutlined, SendOutlined } from '@ant-design/icons';
+import {
+  AppstoreOutlined, ExportOutlined, FullscreenExitOutlined, FullscreenOutlined,
+  ReloadOutlined, RobotOutlined, SendOutlined,
+} from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
 import { ApiError, terminal, type TerminalEnterpriseApplication } from '../../api/client';
 
 export default function EnterpriseApplicationView({
   application,
   onAskAI,
+  immersive,
+  onOpenNavigation,
+  onToggleImmersive,
 }: {
   application: TerminalEnterpriseApplication;
   onAskAI: (prompt: string, pageContext: Record<string, unknown>) => void;
+  immersive: boolean;
+  onOpenNavigation: () => void;
+  onToggleImmersive: () => void;
 }) {
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
@@ -49,23 +58,35 @@ export default function EnterpriseApplicationView({
   if (!launch) return <Empty description="应用入口不可用" />;
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: '#f6f7fb' }}>
-      <div style={{ height: 54, flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: 10, padding: '0 16px', background: '#fff', borderBottom: '1px solid #e5e7eb' }}>
+    <div className="enterprise-app-view">
+      <div className="enterprise-app-view__header">
+        <Tooltip title="打开平台导航">
+          <Button aria-label="打开平台导航" icon={<AppstoreOutlined />} onClick={onOpenNavigation} />
+        </Tooltip>
         <div style={{ width: 30, height: 30, borderRadius: 9, background: '#eef2ff', color: '#6366f1', display: 'grid', placeItems: 'center', overflow: 'hidden' }}>
           {application.icon_url ? <img src={application.icon_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : application.name.slice(0, 1)}
         </div>
-        <div style={{ minWidth: 0 }}><Typography.Text strong>{application.name}</Typography.Text><div style={{ fontSize: 11, color: '#9ca3af' }}>{application.description || '企业业务应用'}</div></div>
-        <Tag color="blue" style={{ marginLeft: 4 }}>{launch.display_mode === 'embedded' ? '平台内嵌' : '独立应用'}</Tag>
+        <div className="enterprise-app-view__identity"><Typography.Text strong>{application.name}</Typography.Text><div>{application.description || '企业业务应用'}</div></div>
+        <Tag color="blue" style={{ marginLeft: 4 }}>{launch.display_mode === 'embedded' ? (immersive ? '完全沉浸' : '沉浸内嵌') : '独立应用'}</Tag>
         <div style={{ flex: 1 }} />
         {launch.display_mode === 'embedded' && <Tooltip title="重新加载模块"><Button icon={<ReloadOutlined />} onClick={() => setFrameKey((value) => value + 1)} /></Tooltip>}
-        <Button icon={<ExportOutlined />} onClick={() => window.open(launch.url, '_blank', 'noopener,noreferrer')}>备用打开</Button>
-        {application.assistant_enabled && <Button type="primary" icon={<RobotOutlined />} onClick={() => setAssistantOpen(true)}>业务小助手</Button>}
+        {launch.display_mode === 'embedded' && (
+          <Tooltip title={immersive ? '显示平台导航轨' : '隐藏平台导航轨'}>
+            <Button
+              aria-label={immersive ? '退出完全沉浸' : '进入完全沉浸'}
+              icon={immersive ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
+              onClick={onToggleImmersive}
+            ><span className="enterprise-app-view__action-label">{immersive ? '退出沉浸' : '完全沉浸'}</span></Button>
+          </Tooltip>
+        )}
+        <Button icon={<ExportOutlined />} onClick={() => window.open(launch.url, '_blank', 'noopener,noreferrer')}><span className="enterprise-app-view__action-label">备用打开</span></Button>
+        {application.assistant_enabled && <Button type="primary" icon={<RobotOutlined />} onClick={() => setAssistantOpen(true)}><span className="enterprise-app-view__action-label">业务小助手</span></Button>}
       </div>
 
       {launch.display_mode === 'embedded' ? (
-        <div style={{ flex: 1, minHeight: 0, position: 'relative', padding: 10 }}>
-          {!frameLoaded && <div style={{ position: 'absolute', inset: 10, zIndex: 1, display: 'grid', placeItems: 'center', background: '#fff' }}><Spin tip={frameSlow ? '应用响应较慢，可尝试“备用打开”' : '正在加载业务应用…'} /></div>}
-          <iframe key={frameKey} src={launch.url} title={application.name} onLoad={() => setFrameLoaded(true)} style={{ width: '100%', height: '100%', border: '1px solid #e5e7eb', borderRadius: 12, background: '#fff', boxShadow: '0 8px 30px rgba(15,23,42,.06)' }} />
+        <div className="enterprise-app-view__frame-wrap">
+          {!frameLoaded && <div className="enterprise-app-view__loading"><Spin tip={frameSlow ? '应用响应较慢，可尝试“备用打开”' : '正在加载业务应用…'} /></div>}
+          <iframe key={frameKey} src={launch.url} title={application.name} onLoad={() => setFrameLoaded(true)} className="enterprise-app-view__frame" />
           {frameSlow && !frameLoaded && <Alert showIcon type="warning" message="该项目可能禁止 iframe 嵌入" description="可使用右上角“备用打开”。若希望内嵌，需要独立项目允许 AI Platform 域名的 frame-ancestors。" style={{ position: 'absolute', left: 30, right: 30, bottom: 30, zIndex: 2 }} />}
         </div>
       ) : (
