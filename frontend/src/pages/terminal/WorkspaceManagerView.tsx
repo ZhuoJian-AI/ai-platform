@@ -10,12 +10,14 @@ import {
   HistoryOutlined, RestOutlined, ShareAltOutlined, SendOutlined, AuditOutlined, MoreOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import {
   terminal, WORKSPACE_MAX_FILE_BYTES, type Workspace, type WorkspaceFileListItem, type WorkspaceFolder, type TerminalResources,
 } from '../../api/client';
 import { ApiError } from '../../api/client';
 import BrowserDrawer, { classifyFile, classifyUrl, type Source } from './BrowserDrawer';
 import ConfirmModal from '../../components/finder/ConfirmModal';
+import { auditSummary, auditTitle, workspaceDisplayName, workspaceSourceLabel, workspaceVisiblePath } from '../../utils/workspacePresentation';
 // extOf 已由 classifyFile 内部使用，此处不再直接引用
 
 /** WorkBuddy 配色（与 Terminal.tsx 保持一致）。 */
@@ -94,6 +96,7 @@ const PARSE_LABEL: Record<string, string> = {
  *  全部字体沿用终端 WB_FONT，字号与终端一致（标题 14 / 主文本 13 / 辅助 12 / 微 11）。 */
 export default function WorkspaceManagerView({ resources }: { resources: TerminalResources | undefined }) {
   const qc = useQueryClient();
+  const [urlParams, setUrlParams] = useSearchParams();
   const workspaces = resources?.workspaces ?? [];
   const { treeData, wsById } = useMemo(() => buildTree(workspaces), [workspaces]);
 
@@ -102,15 +105,16 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
     ?? workspaces.find((w) => w.scope_type === 'user')?.id
     ?? workspaces[0]?.id
     ?? null;
-  const [selectedWsId, setSelectedWsId] = useState<string | null>(null);
+  const [selectedWsId, setSelectedWsId] = useState<string | null>(() => urlParams.get('workspace'));
   useEffect(() => {
-    if (selectedWsId === null && defaultWsId) setSelectedWsId(defaultWsId);
-  }, [defaultWsId, selectedWsId]);
+    if ((!selectedWsId || !wsById.has(selectedWsId)) && defaultWsId) setSelectedWsId(defaultWsId);
+  }, [defaultWsId, selectedWsId, wsById]);
   const selectedWs = selectedWsId ? wsById.get(selectedWsId) ?? null : null;
   const canCreate = selectedWs?.capabilities?.create ?? false;
   const canManage = selectedWs?.capabilities?.manage ?? false;
 
-  const [cwd, setCwd] = useState<string[]>([]); // 当前目录段数组，根为 []
+  const [cwd, setCwd] = useState<string[]>(() => (urlParams.get('path') || '').split('/').filter(Boolean));
+  const previousWsRef = useRef<string | null>(selectedWsId);
   const [folderModalOpen, setFolderModalOpen] = useState(false);
   const [folderName, setFolderName] = useState('');
   const [hovered, setHovered] = useState<string | null>(null);
@@ -149,9 +153,21 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
     enabled: !!wsId,
   });
 
-  // 切换工作空间时回到根目录
-  useEffect(() => { setCwd([]); setSearch(''); setSelectedKeys(new Set()); }, [wsId]);
+  // 用户主动切换工作空间时回到根目录；首次深链接保留 path。
+  useEffect(() => {
+    if (previousWsRef.current && previousWsRef.current !== wsId) setCwd([]);
+    previousWsRef.current = wsId;
+    setSearch(''); setSelectedKeys(new Set());
+  }, [wsId]);
   useEffect(() => { setSelectedKeys(new Set()); }, [cwd, search]);
+  useEffect(() => {
+    if (!wsId) return;
+    const next = new URLSearchParams(urlParams);
+    next.set('view', 'workspace');
+    next.set('workspace', wsId);
+    if (cwd.length) next.set('path', cwd.join('/')); else next.delete('path');
+    if (next.toString() !== urlParams.toString()) setUrlParams(next, { replace: true });
+  }, [cwd, setUrlParams, urlParams, wsId]);
 
   // 无搜索时展示当前层直系子项；搜索时覆盖整个工作空间并保留完整路径。
   const { folderItems, fileItems } = useMemo(() => {
@@ -174,12 +190,18 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
     const folderItems = [...allFolderPaths.entries()].flatMap(([path, record]) => {
       const parent = path.split('/').slice(0, -1).join('/');
       if (query ? !path.toLocaleLowerCase().includes(query) : parent !== cwdPath) return [];
-      return [{ name: fileName(path), path, record }];
+      const technicalSegment = path.split('/').pop() || path;
+      const related = (files ?? []).find((file) => file.path.startsWith(`${path}/`));
+      const name = /^[0-9a-f-]{36}$/i.test(technicalSegment)
+        ? (related?.presentation.source_task_title || '任务产物')
+        : technicalSegment;
+      return [{ name, path, record }];
     });
     const fileItems = (files ?? []).flatMap((file) => {
       const parent = file.path.split('/').slice(0, -1).join('/');
-      if (query ? !file.path.toLocaleLowerCase().includes(query) : parent !== cwdPath) return [];
-      return [{ file, name: fileName(file.path), path: file.path }];
+      const displayName = workspaceDisplayName(file);
+      if (query ? !`${file.path} ${displayName}`.toLocaleLowerCase().includes(query) : parent !== cwdPath) return [];
+      return [{ file, name: displayName, path: file.path }];
     });
     const compare = (a: { name: string; path: string; record?: WorkspaceFolder | null; file?: WorkspaceFileListItem }, b: typeof a) => {
       if (sortBy === 'time') return new Date(b.file?.updated_at ?? b.record?.updated_at ?? 0).getTime() - new Date(a.file?.updated_at ?? a.record?.updated_at ?? 0).getTime();
@@ -635,9 +657,9 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                           {selecting && <Checkbox checked={selected} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelected(key)} style={viewMode === 'grid' ? { position: 'absolute', top: 5, left: 6 } : undefined} />}
                           <div style={viewMode === 'grid' ? { position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', width: 92, cursor: 'pointer' } : { display: 'contents' }}>
                             <FolderOutlined style={{ fontSize: viewMode === 'grid' ? 42 : 22, color: WB.macFolder }} />
-                            <div style={viewMode === 'grid' ? iconNameStyle : listNameStyle} title={it.path}>{it.name}</div>
-                            {viewMode === 'grid' && !!search.trim() && <div style={{ ...iconNameStyle, fontSize: 9, color: '#9ca3af', marginTop: 2 }} title={it.path}>{it.path}</div>}
-                            {viewMode === 'list' && <><span style={listMetaStyle}>文件夹</span><span style={listMetaStyle}>{it.record?.updated_at ? new Date(it.record.updated_at).toLocaleString() : '路径推导'}</span><span style={listPathStyle}>{it.path}</span></>}
+                            <div style={viewMode === 'grid' ? iconNameStyle : listNameStyle} title={it.name}>{it.name}</div>
+                            {viewMode === 'grid' && !!search.trim() && <div style={{ ...iconNameStyle, fontSize: 9, color: '#9ca3af', marginTop: 2 }} title={it.name}>{it.name}</div>}
+                            {viewMode === 'list' && <><span style={listMetaStyle}>文件夹</span><span style={listMetaStyle}>{it.record?.updated_at ? new Date(it.record.updated_at).toLocaleString() : '路径推导'}</span><span style={listPathStyle}>{it.name}</span></>}
                             {!selecting && canManage && (
                               <Dropdown
                                 trigger={['click']}
@@ -693,12 +715,12 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                           {selecting && <Checkbox checked={selected} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelected(key)} style={viewMode === 'grid' ? { position: 'absolute', top: 5, left: 6 } : undefined} />}
                           <div style={viewMode === 'grid' ? { position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', width: 92 } : { display: 'contents' }}>
                             <FileTextOutlined style={{ fontSize: viewMode === 'grid' ? 42 : 22, color: WB.macFile }} />
-                            <div style={viewMode === 'grid' ? iconNameStyle : listNameStyle} title={it.file.path}>{fileName(it.file.path)}</div>
-                            {viewMode === 'grid' && !!search.trim() && <div style={{ ...iconNameStyle, fontSize: 9, color: '#9ca3af', marginTop: 2 }} title={it.file.path}>{it.file.path}</div>}
+                            <div style={viewMode === 'grid' ? iconNameStyle : listNameStyle} title={it.name}>{it.name}</div>
+                            {viewMode === 'grid' && !!search.trim() && <div style={{ ...iconNameStyle, fontSize: 9, color: '#9ca3af', marginTop: 2 }} title={workspaceVisiblePath(it.file)}>{workspaceVisiblePath(it.file)}</div>}
                             {viewMode === 'grid' ? (
                               <span style={{ fontSize: 10, color: '#aeaeb2', marginTop: 1 }}>{formatBytes(it.file.size)}</span>
                             ) : (
-                              <><span style={listMetaStyle}>{fileType(it.file.path)} · {formatBytes(it.file.size)}</span><span style={listMetaStyle}>{new Date(it.file.updated_at).toLocaleString()}</span><span style={listMetaStyle}>{PARSE_LABEL[it.file.parse_status] ?? it.file.parse_status}</span><span style={listPathStyle}>{it.file.path}</span></>
+                              <><span style={listMetaStyle}>{fileType(it.file.path)} · {formatBytes(it.file.size)}</span><span style={listMetaStyle}>{new Date(it.file.updated_at).toLocaleString()}</span><span style={listMetaStyle}>{PARSE_LABEL[it.file.parse_status] ?? it.file.parse_status}</span><span style={listPathStyle}>{workspaceVisiblePath(it.file)}</span></>
                             )}
                             {!selecting && (
                               <Dropdown
@@ -786,12 +808,12 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
       <Modal title="回收站（保留 30 天）" open={trashOpen} footer={null} onCancel={() => setTrashOpen(false)} width={720}>
         <List loading={trashLoading} dataSource={trash} locale={{ emptyText: '回收站为空' }} renderItem={(file) => (
           <List.Item actions={[<a key="restore" onClick={() => restoreTrash.mutate(file.id)}>恢复</a>]}>
-            <List.Item.Meta title={fileName(file.path)} description={`${file.path} · ${formatBytes(file.size)}`} />
+            <List.Item.Meta title={workspaceDisplayName(file)} description={[workspaceSourceLabel(file), formatBytes(file.size)].filter(Boolean).join(' · ')} />
           </List.Item>
         )} />
       </Modal>
 
-      <Modal title={`版本历史${versionFile ? ` · ${fileName(versionFile.path)}` : ''}`} open={!!versionFile} footer={null} onCancel={() => setVersionFile(null)} width={720}>
+      <Modal title={`版本历史${versionFile ? ` · ${workspaceDisplayName(versionFile)}` : ''}`} open={!!versionFile} footer={null} onCancel={() => setVersionFile(null)} width={720}>
         <List loading={versionsLoading} dataSource={versions} locale={{ emptyText: '暂无版本' }} renderItem={(version, index) => (
           <List.Item actions={index === 0 ? [] : [<a key="restore" onClick={() => restoreVersion.mutate(version.id)}>恢复此版本</a>]}>
             <List.Item.Meta title={`版本 ${version.version_no}${index === 0 ? '（当前）' : ''}`} description={`${formatBytes(version.size)} · ${new Date(version.created_at).toLocaleString()} · ${PARSE_LABEL[version.parse_status] ?? version.parse_status}`} />
@@ -806,7 +828,12 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
 
       <Modal title="工作空间审计" open={auditOpen} footer={null} onCancel={() => setAuditOpen(false)} width={760}>
         <List loading={auditLoading} dataSource={auditEvents} locale={{ emptyText: '暂无审计事件' }} renderItem={(event) => (
-          <List.Item><List.Item.Meta title={event.action} description={`${new Date(event.created_at).toLocaleString()} · ${JSON.stringify(event.metadata)}`} /></List.Item>
+          <List.Item>
+            <List.Item.Meta
+              title={auditTitle(event)}
+              description={auditSummary(event)}
+            />
+          </List.Item>
         )} />
       </Modal>
     </div>

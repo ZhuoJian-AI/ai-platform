@@ -1,5 +1,5 @@
 import {
-  useCallback, useEffect, useRef, useState, forwardRef, useImperativeHandle, useMemo,
+  useCallback, useDeferredValue, useEffect, useRef, useState, forwardRef, useImperativeHandle, useMemo,
   type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent,
   type Dispatch, type FormEvent, type KeyboardEvent, type ReactNode, type SetStateAction,
 } from 'react';
@@ -21,6 +21,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   terminal, type TaskConfig, type TerminalTask, type TerminalTaskMessage,
   type TerminalResources, type TerminalMemoryItem, type TerminalModels, type TerminalAgent, type WorkspaceFileListItem,
@@ -40,6 +41,7 @@ import ConfirmModal from '../../components/finder/ConfirmModal';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from '../../branding/BrandLogoSlot';
 import { BRAND_TITLES, useBrandTitle } from '../../branding/brand';
 import './TerminalApplicationShell.css';
+import { redactArtifactIdentifiers, workspaceDisplayName } from '../../utils/workspacePresentation';
 
 /** WorkBuddy 配色（参考 HTML 的 tailwind theme）。 */
 const WB = {
@@ -62,6 +64,15 @@ const DEFAULT_CONFIG: TaskConfig = {
   exec_mode: 'craft',
 };
 
+type TerminalView = 'assistant' | 'workspaces' | 'agents' | 'knowledge' | 'skills' | 'application';
+
+function viewFromQuery(search: string): TerminalView {
+  const value = new URLSearchParams(search).get('view');
+  if (value === 'workspace') return 'workspaces';
+  if (value === 'agents' || value === 'knowledge' || value === 'skills' || value === 'application') return value;
+  return 'assistant';
+}
+
 // ── 执行过程时间线 block 模型 ──────────────────────────────────────────
 type TraceCategory = 'rag' | 'ontology' | 'memory' | 'data_interface' | 'skill' | 'file';
 type Block =
@@ -82,6 +93,7 @@ interface ChatMsg {
   attachments?: MessageAttachment[];
   invokedSkills?: InvokedSkill[];
   executionVerification?: TerminalTaskMessage['execution_verification'];
+  artifacts?: ArtifactOutput[];
 }
 
 type RuntimeUiStatus = {
@@ -123,6 +135,7 @@ interface ArtifactOutput {
   width?: number;
   height?: number;
   parseStatus?: string;
+  sourceLabel?: string;
 }
 
 type ComposerAttachmentStatus = 'uploading' | 'validating' | 'parsing' | 'ready' | 'failed';
@@ -199,6 +212,29 @@ function messageInvokedSkills(metadata: Record<string, unknown> | undefined): In
   });
 }
 
+function messageArtifacts(metadata: Record<string, unknown> | undefined): ArtifactOutput[] {
+  const raw = metadata?.artifacts;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const value = item as Record<string, unknown>;
+    const source = value.source && typeof value.source === 'object' ? value.source as Record<string, unknown> : {};
+    const fileId = typeof value.file_id === 'string' ? value.file_id : '';
+    const path = typeof value.workspace_path === 'string' ? value.workspace_path : '';
+    if (!fileId && !path) return [];
+    const skillName = typeof source.skill_display_name === 'string' ? source.skill_display_name : '';
+    return [{
+      fileId,
+      path,
+      name: typeof value.display_name === 'string' ? value.display_name : '生成文件',
+      mimeType: typeof value.mime_type === 'string' ? value.mime_type : '',
+      size: typeof value.size === 'number' ? value.size : undefined,
+      parseStatus: typeof value.parse_status === 'string' ? value.parse_status : undefined,
+      sourceLabel: source.kind === 'skill' ? (skillName ? `技能 · ${skillName}` : '技能生成') : '平台工具生成',
+    }];
+  });
+}
+
 /** 把后端持久化的 traces 数组还原为执行过程 blocks（历史回放用）。
  *  skill → tool_call block（复用 ToolCard 展示）；其余四类 → trace block（TraceChip 展示）。
  *  仅还原资源调用痕迹；终答正文由调用方末尾补一条 text block（见上方回放 map）。 */
@@ -244,7 +280,10 @@ function restoreChat(messages: TerminalTaskMessage[]): ChatMsg[] {
       const traces = (m.metadata?.traces as Record<string, unknown>[] | undefined) ?? [];
       const blocks = traces.length ? tracesToBlocks(traces) : undefined;
       if (blocks && m.content) blocks.push({ kind: 'text', content: m.content });
-      return { role: 'assistant' as const, content: m.content, blocks, executionVerification: m.execution_verification };
+      return {
+        role: 'assistant' as const, content: m.content, blocks,
+        executionVerification: m.execution_verification, artifacts: messageArtifacts(m.metadata),
+      };
     });
 }
 
@@ -274,8 +313,12 @@ export default function Terminal() {
 
   const { user, logout } = useUserAuth();
   const qc = useQueryClient();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { slug, taskId } = useParams<{ slug?: string; taskId?: string }>();
+  const terminalBasePath = slug ? `/${slug}/terminal` : '/terminal';
 
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => taskId || null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   // 删除确认弹窗：界面正中模态框（统一用共享 ConfirmModal）。
   const [delConfirm, setDelConfirm] = useState<{ id: string; title: string } | null>(null);
@@ -299,7 +342,7 @@ export default function Terminal() {
   const reconnRef = useRef<string | null>(null);
 
   // 新建任务作曲器
-  const [composerOpen, setComposerOpen] = useState(true);
+  const [composerOpen, setComposerOpen] = useState(() => !taskId);
   const [input, setInput] = useState('');
   const [inputSkills, setInputSkills] = useState<InvokedSkill[]>([]);
   const [inputAttachments, setInputAttachments] = useState<ComposerAttachment[]>([]);
@@ -311,8 +354,8 @@ export default function Terminal() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
   // 左侧功能菜单视图：平台核心能力 + 按授权动态加载的企业应用。
-  const [view, setView] = useState<'assistant' | 'workspaces' | 'agents' | 'knowledge' | 'skills' | 'application'>('assistant');
-  const [selectedApplicationId, setSelectedApplicationId] = useState<string | null>(null);
+  const [view, setView] = useState<TerminalView>(() => viewFromQuery(location.search));
+  const [selectedApplicationId, setSelectedApplicationId] = useState<string | null>(() => new URLSearchParams(location.search).get('app'));
   const [applicationNavOpen, setApplicationNavOpen] = useState(false);
   const [applicationImmersive, setApplicationImmersive] = useState(false);
 
@@ -354,21 +397,20 @@ export default function Terminal() {
       setApplicationImmersive(false);
     }
   }, [view]);
-  // 智能体 chip 文案：选中显示名称，未选=通用智能体。
+  // 智能体 chip 文案：业务应用助手优先显示实际应用名，不再退化成“通用”。
+  const composerApplication = terminalApplications.find((item) => item.id === config.application_id);
   const agentLabel = selectedAgentId
     ? (agentsList.find((a) => a.id === selectedAgentId)?.name ?? '已选')
-    : '通用';
+    : (composerApplication ? `${composerApplication.name}助手` : '通用');
   const { data: memoryList } = useQuery<TerminalMemoryItem[]>({
     queryKey: ['terminal-memory'], queryFn: () => terminal.memory(),
   });
+  const deferredTaskSearch = useDeferredValue(taskSearch.trim());
   const { data: tasks } = useQuery<TerminalTask[]>({
-    queryKey: ['terminal-tasks'], queryFn: () => terminal.listTasks(),
+    queryKey: ['terminal-tasks', deferredTaskSearch], queryFn: () => terminal.listTasks(deferredTaskSearch),
   });
   const taskGroups = useMemo(() => {
-    const query = taskSearch.trim().toLocaleLowerCase();
-    const filtered = (tasks ?? []).filter((task) => !query
-      || task.title.toLocaleLowerCase().includes(query)
-      || task.message.toLocaleLowerCase().includes(query));
+    const filtered = tasks ?? [];
     const startToday = new Date();
     startToday.setHours(0, 0, 0, 0);
     const startYesterday = new Date(startToday); startYesterday.setDate(startYesterday.getDate() - 1);
@@ -380,12 +422,45 @@ export default function Terminal() {
       buckets[label].push(task);
     }
     return Object.entries(buckets).filter(([, items]) => items.length);
-  }, [tasks, taskSearch]);
+  }, [tasks]);
   const { data: selectedTask } = useQuery<TerminalTaskWithMessages>({
     queryKey: ['terminal-task', selectedId],
     queryFn: () => terminal.getTask(selectedId!),
     enabled: !!selectedId,
   });
+
+  useEffect(() => {
+    const routeId = taskId || null;
+    setSelectedId(routeId);
+    if (routeId) {
+      setComposerOpen(false);
+      setView('assistant');
+    } else if (location.pathname === terminalBasePath) {
+      setComposerOpen(true);
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (view === 'assistant') params.delete('view');
+    else params.set('view', view === 'workspaces' ? 'workspace' : view);
+    if (view === 'application' && selectedApplicationId) params.set('app', selectedApplicationId);
+    else params.delete('app');
+    if (view !== 'workspaces') {
+      params.delete('workspace');
+      params.delete('path');
+      params.delete('scope');
+    }
+    const desiredPath = view === 'assistant' && selectedId && !composerOpen
+      ? `${terminalBasePath}/tasks/${selectedId}`
+      : terminalBasePath;
+    const query = params.toString();
+    const desired = `${desiredPath}${query ? `?${query}` : ''}`;
+    const current = `${location.pathname}${location.search}`;
+    const routeTaskId = taskId || null;
+    if (routeTaskId !== selectedId && (location.pathname === terminalBasePath || location.pathname.startsWith(`${terminalBasePath}/tasks/`))) return;
+    if (desired !== current) navigate(desired, { replace: true });
+  }, [composerOpen, location.pathname, location.search, navigate, selectedApplicationId, selectedId, taskId, terminalBasePath, view]);
 
   useEffect(() => {
     if (!selectedTask) return;
@@ -741,7 +816,8 @@ export default function Terminal() {
       } catch { /* 抓取失败交给 useQuery 兜底，不影响切换 */ }
     }
     setSelectedId(id);
-  }, [selectedId, abortActiveStream, qc]);
+    navigate(id ? `${terminalBasePath}/tasks/${id}` : terminalBasePath);
+  }, [selectedId, abortActiveStream, navigate, qc, terminalBasePath]);
 
   const stopStream = () => {
     abortRef.current?.abort();
@@ -786,6 +862,7 @@ export default function Terminal() {
       skipRestoreRef.current = true;
       setComposerOpen(false);
       setSelectedId(task.id);
+      navigate(`${terminalBasePath}/tasks/${task.id}`);
       setInput('');
       const invokedSkills = [...inputSkills];
       setInputSkills([]);
@@ -823,6 +900,7 @@ export default function Terminal() {
     abortActiveStream();
     skipRestoreRef.current = false;
     setSelectedId(null);
+    navigate(terminalBasePath);
     setChat([]);
     setTraceLog([]);
     setComposerOpen(true);
@@ -904,8 +982,8 @@ export default function Terminal() {
   const fileLinks = (wsFiles ?? []).map((f) => ({
     id: f.id,
     path: f.path,
-    name: f.path.split('/').pop() || f.path,
-    originalName: f.original_filename,
+    name: workspaceDisplayName(f),
+    originalName: workspaceDisplayName(f),
     size: f.size,
     mimeType: f.mime_type,
     parseStatus: f.parse_status,
@@ -918,7 +996,7 @@ export default function Terminal() {
   });
   const fileRefMap = useMemo(() => {
     const m = new Map<string, string>();
-    (allWsFiles ?? []).forEach((f) => m.set(f.id, f.path));
+    (allWsFiles ?? []).forEach((f) => m.set(f.id, workspaceDisplayName(f)));
     return m;
   }, [allWsFiles]);
   const userName = user?.display_name || user?.username || '用户';
@@ -1105,8 +1183,13 @@ export default function Terminal() {
                             style={{ fontSize: 12, padding: '0 6px', height: 24 }}
                           />
                         ) : (
-                          <Tooltip title={t.title || '(未命名)'} placement="right">
-                            <span style={{ flex: 1, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title || '(未命名)'}</span>
+                          <Tooltip title={t.match_excerpt || t.title || '(未命名)'} placement="right">
+                            <span style={{ flex: 1, minWidth: 0 }}>
+                              <span style={{ display: 'block', lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title || '(未命名)'}</span>
+                              {!!t.match_excerpt && taskSearch && (
+                                <span style={{ display: 'block', marginTop: 2, color: '#9ca3af', fontSize: 10, lineHeight: 1.35, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.match_excerpt}</span>
+                              )}
+                            </span>
                           </Tooltip>
                         )}
                         {!editing && (
@@ -1306,7 +1389,10 @@ export default function Terminal() {
                           style={{ ...navItemStyle(active), fontSize: 12 }}
                         >
                           <FileTextOutlined style={{ color: active ? WB.primary : '#cbd5e1' }} />
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title || '(未命名)'}</span>
+                          <span style={{ minWidth: 0, overflow: 'hidden' }}>
+                            <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title || '(未命名)'}</span>
+                            {!!task.match_excerpt && taskSearch && <span style={{ display: 'block', color: '#9ca3af', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.match_excerpt}</span>}
+                          </span>
                         </div>
                       );
                     })}
@@ -1703,7 +1789,7 @@ function TaskInputBox(props: {
     ? skills.filter((s) => s.name.toLowerCase().includes(qstr) || s.slug.toLowerCase().includes(qstr))
     : skills;
   const filteredFiles = qstr
-    ? files.filter((f) => f.path.toLowerCase().includes(qstr) || f.workspace_name.toLowerCase().includes(qstr))
+    ? files.filter((f) => workspaceDisplayName(f).toLowerCase().includes(qstr) || f.workspace_name.toLowerCase().includes(qstr))
     : files;
 
   const closePicker = useCallback((picked: boolean) => {
@@ -1998,7 +2084,7 @@ function TaskInputBox(props: {
             >
               <div style={{ fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <FileTextOutlined style={{ color: WB.primary }} />
-                {f.path}{f.is_binary && <Tag color="default" style={{ marginLeft: 6, fontSize: 10 }}>二进制</Tag>}
+                {workspaceDisplayName(f)}{f.is_binary && <Tag color="default" style={{ marginLeft: 6, fontSize: 10 }}>二进制</Tag>}
               </div>
               <div style={{ fontSize: 11, color: '#9ca3af' }}>{f.workspace_name}</div>
             </div>
@@ -2504,6 +2590,7 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
         <div style={{ background: WB.botMsg, border: `1px solid ${WB.border}`, borderRadius: '16px 16px 16px 4px', boxShadow: '0 1px 2px rgba(0,0,0,0.04)', padding: 16 }}>
           <ExecutionStatus verification={verification} streaming={streaming} />
           <div className="wb-md"><Md onLink={onLink} files={fileLinks}>{msg.content || '(无内容)'}</Md></div>
+          <ArtifactGallery artifacts={msg.artifacts ?? []} fileLinks={fileLinks} streaming={streaming} onLink={onLink} />
         </div>
       </div>
     );
@@ -2511,7 +2598,7 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
 
   const lastBlock = blocks![blocks!.length - 1];
   const thinking = streaming && (lastBlock.kind === 'phase' || (lastBlock.kind === 'tool_call' && lastBlock.running));
-  const artifacts = extractArtifacts(blocks);
+  const artifacts = msg.artifacts?.length ? msg.artifacts : extractArtifacts(blocks);
   const artifactPaths = new Set(artifacts.map((artifact) => artifact.path).filter(Boolean));
   const legacyChanges = extractFileChanges(blocks).filter((file) => !artifactPaths.has(file.path));
 
@@ -2593,11 +2680,13 @@ function extractArtifacts(blocks?: Block[]): ArtifactOutput[] {
         : (typeof output.fileId === 'string' ? output.fileId : '');
       const path = typeof output.path === 'string' ? output.path : '';
       if (!fileId && !path) continue;
-      const name = typeof output.name === 'string' && output.name
-        ? output.name
-        : (typeof output.filename === 'string' && output.filename
-            ? output.filename
-            : (path.split('/').pop() || '生成文件'));
+      const name = typeof output.display_name === 'string' && output.display_name
+        ? output.display_name
+        : (typeof output.name === 'string' && output.name
+            ? output.name
+            : (typeof output.filename === 'string' && output.filename
+                ? output.filename
+                : (path.split('/').pop() || '生成文件')));
       ordered.push({
         fileId,
         path,
@@ -2835,7 +2924,7 @@ function InlineArtifactCard({
       <div style={{ minWidth: 0, flex: 1 }}>
         <div title={name} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#1f2937', fontSize: 13, fontWeight: 550 }}>{name}</div>
         <div style={{ color: '#9ca3af', fontSize: 10, marginTop: 4 }}>
-          {[extension ? extension.toUpperCase() : '文件', formatArtifactSize(size), artifact.parseStatus === 'ready' || resolved?.parseStatus === 'ready' ? 'AI 已解析' : ''].filter(Boolean).join(' · ')}
+          {[extension ? extension.toUpperCase() : '文件', formatArtifactSize(size), artifact.parseStatus === 'ready' || resolved?.parseStatus === 'ready' ? 'AI 已解析' : '', artifact.sourceLabel || ''].filter(Boolean).join(' · ')}
         </div>
       </div>
       <Button size="small" icon={<EyeOutlined />} onClick={openPreview}>预览</Button>
@@ -2913,7 +3002,7 @@ function ChangesBox({ files, onLink }: { files: { path: string; generated: boole
               <a
                 onClick={(e) => { e.preventDefault(); onLink(f.path); }}
                 style={{ color: WB.primary, cursor: 'pointer', wordBreak: 'break-all' }}
-              >{f.path}</a>
+              >{f.path.replace(/^(?:技能输出|平台工具输出)\/[0-9a-f-]{36}\//i, '').replace(/^\d{8}-\d{6}-[0-9a-f]{8}-/i, '')}</a>
             </div>
           ))}
         </div>
@@ -3046,9 +3135,14 @@ function TraceChip({ b }: { b: Extract<Block, { kind: 'trace' }> }) {
 
 // ── Markdown 渲染 ────────────────────────────────────────────────────────
 
-function Md({ children, onLink, files }: { children: string; onLink: (href: string) => void; files: { path: string; name: string }[] }) {
+function Md({ children, onLink, files }: { children: string; onLink: (href: string) => void; files: ChatFileLink[] }) {
   // 先把正文里裸出现的「工作空间文件名」自动包成 markdown 链接，再交给 ReactMarkdown 渲染
-  const src = linkifyFiles(children, files);
+  const redacted = redactArtifactIdentifiers(children, files.map((file) => ({
+    id: file.id,
+    path: file.path,
+    original_filename: file.originalName,
+  })));
+  const src = linkifyFiles(redacted, files);
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
@@ -3172,7 +3266,7 @@ function FilePanel({ workspaceId }: { workspaceId: string | null }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <Typography.Text type="secondary">工作空间文件（点击预览，智能体可读写）</Typography.Text>
       <Tree
-        treeData={files.map((f) => ({ key: f.path, title: f.path, icon: <FileTextOutlined /> }))}
+        treeData={files.map((f) => ({ key: f.path, title: workspaceDisplayName(f), icon: <FileTextOutlined /> }))}
         height={200}
         onSelect={(keys) => {
           const p = keys[0] as string | undefined;

@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { Drawer, Tooltip, Spin, Empty, Typography, Button, message, Segmented, Tag } from 'antd';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { Drawer, Tooltip, Spin, Empty, Typography, Button, Input, Select, message, Segmented, Tag } from 'antd';
 import {
   ArrowLeftOutlined, ArrowRightOutlined, ReloadOutlined, SelectOutlined,
   FileTextOutlined, GlobalOutlined, FileWordOutlined, FilePdfOutlined,
   FileImageOutlined, DownloadOutlined, ShareAltOutlined,
-  ExportOutlined, FullscreenOutlined, FullscreenExitOutlined,
+  ExportOutlined, FullscreenOutlined, FullscreenExitOutlined, SearchOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -148,6 +148,86 @@ function MdNav({ content, onLink }: { content: string; onLink: (href: string) =>
     >
       {content}
     </ReactMarkdown>
+  );
+}
+
+function displayNameFromPath(path: string): string {
+  return (path.split('/').pop() || path)
+    .replace(/^\d{8}-\d{6}-[0-9a-f]{8}-/i, '')
+    .replace(/^\d{8}T\d{6}Z-[0-9a-f]{8}-/i, '');
+}
+
+interface ParsedSection {
+  id: string;
+  title: string;
+  content: string;
+}
+
+function parsedSections(content: string): ParsedSection[] {
+  const lines = content.split('\n');
+  const sections: ParsedSection[] = [];
+  let title = '文档开头';
+  let buffer: string[] = [];
+  const flush = () => {
+    if (!buffer.length) return;
+    sections.push({ id: `parsed-section-${sections.length}`, title, content: buffer.join('\n') });
+    buffer = [];
+  };
+  for (const line of lines) {
+    const heading = line.match(/^#{1,4}\s+(.+)$/) ?? line.match(/^(?:工作表|Sheet)\s*[:：]\s*(.+)$/i);
+    if (heading) {
+      flush();
+      title = heading[1].trim() || `第 ${sections.length + 1} 节`;
+    }
+    buffer.push(line);
+  }
+  flush();
+  return sections.length ? sections : [{ id: 'parsed-section-0', title: '全文', content }];
+}
+
+function ParsedContentViewer({ content, onLink }: { content: string; onLink: (href: string) => void }) {
+  const [query, setQuery] = useState('');
+  const sections = useMemo(() => parsedSections(content), [content]);
+  const large = content.length > 120_000;
+  const visible = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return needle
+      ? sections.filter((section) => `${section.title}\n${section.content}`.toLocaleLowerCase().includes(needle))
+      : sections;
+  }, [query, sections]);
+  const jump = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  return (
+    <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ display: 'flex', gap: 8, padding: '10px 16px', borderBottom: `1px solid ${WB.border}`, background: '#fff' }}>
+        <Input allowClear prefix={<SearchOutlined />} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索解析内容" />
+        <Select
+          style={{ width: 210 }}
+          placeholder="跳转到章节或工作表"
+          options={sections.map((section) => ({ value: section.id, label: section.title }))}
+          onChange={jump}
+        />
+      </div>
+      <div className="wb-md" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 24px' }}>
+        <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
+          这是提供给 AI 检索和分析的结构化文本，不代表原文件排版。{large ? ' 大文件已按章节延迟渲染，可逐节展开。' : ''}
+        </Typography.Text>
+        {!visible.length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有找到匹配内容" />}
+        {visible.map((section, index) => (
+          <details
+            id={section.id}
+            key={section.id}
+            open={!large || !!query || index === 0}
+            style={{ contentVisibility: 'auto', containIntrinsicSize: '160px', marginBottom: 10, borderBottom: `1px solid ${WB.border}` }}
+          >
+            <summary style={{ position: 'sticky', top: 0, padding: '8px 0', background: '#fff', color: '#374151', fontWeight: 600, cursor: 'pointer', zIndex: 1 }}>
+              {section.title}
+            </summary>
+            <MdNav content={section.content} onLink={onLink} />
+          </details>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -372,7 +452,7 @@ export default function BrowserDrawer({
       // data: URL 直接作为下载锚点；http URL 退化为新标签打开（跨域限制）
       const a = document.createElement('a');
       a.href = current.src;
-      a.download = current.path?.split('/').pop() || 'image';
+      a.download = current.path ? displayNameFromPath(current.path) : 'image';
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -386,7 +466,7 @@ export default function BrowserDrawer({
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = current.path.split('/').pop() || current.path;
+      a.download = displayNameFromPath(current.path);
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
       return;
@@ -400,7 +480,7 @@ export default function BrowserDrawer({
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = current.path.split('/').pop() || current.path;
+      a.download = displayNameFromPath(current.path);
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
       return;
@@ -410,7 +490,7 @@ export default function BrowserDrawer({
         const blob = loadOriginalFile
           ? await loadOriginalFile(current.fileId)
           : new Blob([b64ToUint8(current.kind === 'parsed' ? current.originalContent : current.content)], { type: current.mime });
-        saveBlob(blob, current.path.split('/').pop() || current.path);
+        saveBlob(blob, displayNameFromPath(current.path));
       } catch (error) {
         message.error((error as Error)?.message || '原文件下载失败');
       }
@@ -443,7 +523,10 @@ export default function BrowserDrawer({
     </Tooltip>
   );
 
-  const addr = current?.href ?? '';
+  const rawAddr = current?.href ?? '';
+  const addr = current?.kind === 'web' || current?.kind === 'pdf' || current?.kind === 'docx'
+    ? rawAddr
+    : (rawAddr ? displayNameFromPath(rawAddr) : '');
   const addrIcon =
     current?.kind === 'web' ? <GlobalOutlined /> :
     current?.kind === 'pdf' ? <FilePdfOutlined /> :
@@ -560,19 +643,14 @@ export default function BrowserDrawer({
               {binaryView === 'original' && (
                 <OriginalFilePreview
                   blob={originalPreviewBlob}
-                  filename={current.path.split('/').pop() || current.path}
+                  filename={displayNameFromPath(current.path)}
                   loading={originalPreviewLoading}
                   error={originalPreviewError}
                   onDownload={download}
                 />
               )}
               {binaryView === 'ai' && current.kind === 'parsed' && (
-                <div className="wb-md" style={{ height: '100%', overflowY: 'auto', padding: '20px 24px' }}>
-                  <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
-                    这是提供给 AI 检索和分析的结构化文本，不代表原文件排版。
-                  </Typography.Text>
-                  <MdNav content={current.content} onLink={navigate} />
-                </div>
+                <ParsedContentViewer content={current.content} onLink={navigate} />
               )}
               {binaryView === 'ai' && current.kind === 'binary' && (
                 <div style={previewCenter}>

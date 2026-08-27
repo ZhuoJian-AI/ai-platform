@@ -306,10 +306,13 @@ export default function SkillManagerView() {
                           <FolderOutlined style={{ fontSize: 16, color: WB.macFolder }} />
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                              <Typography.Text ellipsis style={{ fontSize: 13, color: '#1d1d1f', fontWeight: 500 }}>{s.name}</Typography.Text>
+                              <Typography.Text ellipsis style={{ fontSize: 13, color: '#1d1d1f', fontWeight: 600 }}>{s.name}</Typography.Text>
+                              <Tag color={s.is_active ? 'green' : 'default'} bordered={false} style={{ margin: 0 }}>{s.is_active ? '已启用' : '已停用'}</Tag>
+                              {s.active_version_no && <Tag bordered={false} style={{ margin: 0 }}>v{s.active_version_no}</Tag>}
                               {owner && <span style={minePillStyle}>可管理</span>}
                             </div>
-                            <Typography.Text type="secondary" ellipsis style={{ fontSize: 11, display: 'block' }}>{s.slug}</Typography.Text>
+                            <Typography.Text type="secondary" ellipsis style={{ fontSize: 11, display: 'block' }}>{s.description || '暂无技能简介'}</Typography.Text>
+                            <Typography.Text type="secondary" ellipsis style={{ fontSize: 10, display: 'block', marginTop: 2 }}>标识：{s.slug}</Typography.Text>
                           </div>
                           <div style={{ display: 'flex', gap: 2, flex: '0 0 auto' }} onClick={(e) => e.stopPropagation()}>
                             <IconAction
@@ -319,7 +322,7 @@ export default function SkillManagerView() {
                             <button
                               style={toolBtnStyle} disabled={!owner || toggleSkill.isPending}
                               onClick={() => toggleSkill.mutate({ id: s.id, is_active: !s.is_active })}
-                            >{s.is_active ? '停用' : '启用'}</button>
+                            >{s.is_active ? '停用技能' : '启用技能'}</button>
                             <IconAction
                               title={owner ? '删除' : '仅可删除自己创建的'} danger disabled={!owner}
                               icon={<DeleteOutlined />} onClick={() => setConfirm({ kind: 'skill', id: s.id, title: s.name })}

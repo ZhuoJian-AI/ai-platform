@@ -606,6 +606,13 @@ export interface WorkspaceFile {
   extracted_text: string | null; parse_status: 'unparsed' | 'queued' | 'processing' | 'ready' | 'unsupported' | 'failed';
   parse_kind: string | null; parse_error: string | null;
   created_at: string; updated_at: string;
+  presentation?: WorkspaceFilePresentation;
+}
+
+export interface WorkspaceFilePresentation {
+  display_name: string; source_kind: string; source_task_id: string | null;
+  source_task_title: string | null; skill_id: string | null;
+  skill_display_name: string | null; skill_version: string | null; created_at: string | null;
 }
 
 export interface WorkspaceFileListItem {
@@ -614,6 +621,7 @@ export interface WorkspaceFileListItem {
   parse_status: 'unparsed' | 'queued' | 'processing' | 'ready' | 'unsupported' | 'failed';
   parse_kind: string | null; parse_error: string | null;
   created_at: string; updated_at: string;
+  presentation: WorkspaceFilePresentation;
 }
 
 export interface WorkspaceFilePage {
@@ -1029,6 +1037,9 @@ export interface SkillFolder {
   active_version_id: string | null;
   is_active: boolean;
   is_installed: boolean;
+  description: string | null;
+  active_version_no: number | null;
+  active_install_status: string | null;
   created_at: string; updated_at: string;
 }
 
@@ -1075,7 +1086,8 @@ export interface SkillFolderSummary {
 /** /terminal/workspace-files 返回的工作空间文件轻量摘要（跨全部可访问工作空间，供 @ 引用下拉）。 */
 export interface WorkspaceFileSummary {
   id: string; workspace_id: string; workspace_name: string;
-  path: string; scope_type: string; is_binary: boolean;
+  path: string; original_filename: string; presentation: WorkspaceFilePresentation;
+  scope_type: string; is_binary: boolean;
 }
 
 const SKILL_ARCHIVE_MAX_BYTES = 100 * 1024 * 1024;
@@ -1345,7 +1357,8 @@ export interface TerminalModels {
 
 export interface WorkspaceAuditEvent {
   id: number; workspace_id: string; workspace_file_id: string | null;
-  version_id: string | null; action: string; metadata: Record<string, unknown>; created_at: string;
+  version_id: string | null; action: string; actor_display_name: string | null;
+  metadata: Record<string, unknown>; created_at: string;
 }
 
 const WORKSPACE_PROXY_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -1584,6 +1597,7 @@ export interface TerminalTask {
   status: string;
   created_at: string;
   updated_at: string;
+  match_excerpt?: string | null;
 }
 
 export interface TerminalTaskMessage {
@@ -1712,7 +1726,7 @@ export const terminal = {
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   },
-  listTasks: () => userRequest<TerminalTask[]>('/api/v1/terminal/tasks'),
+  listTasks: (q?: string) => userRequest<TerminalTask[]>(`/api/v1/terminal/tasks${q?.trim() ? `?q=${encodeURIComponent(q.trim())}` : ''}`),
   createTask: (data: { title?: string; message: string; config: TaskConfig }) =>
     userRequest<TerminalTask>('/api/v1/terminal/tasks', { method: 'POST', body: JSON.stringify(data) }),
   getTask: (id: string) => userRequest<TerminalTaskWithMessages>(`/api/v1/terminal/tasks/${id}`),

@@ -29,6 +29,7 @@ import {
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import { WB, WB_FONT, FS } from '../../components/finder/theme';
 import OriginalFilePreview from '../../components/files/OriginalFilePreview';
+import { auditSummary, auditTitle, workspaceDisplayName, workspaceVisiblePath } from '../../utils/workspacePresentation';
 
 const SCOPE_LABEL: Record<string, string> = {
   organization: '组织级',
@@ -175,7 +176,7 @@ export default function Workspaces() {
     const fileItems = (files ?? []).flatMap((file) => {
       const parent = file.path.split('/').slice(0, -1).join('/');
       if (query ? !file.path.toLocaleLowerCase().includes(query) : parent !== cwdPath) return [];
-      return [{ file, name: basename(file.path), path: file.path }];
+      return [{ file, name: workspaceDisplayName(file), path: file.path }];
     });
     const compare = (a: { name: string; path: string; record?: WorkspaceFolder | null; file?: WorkspaceFileListItem }, b: typeof a) => {
       if (sortBy === 'time') return new Date(b.file?.updated_at ?? b.record?.updated_at ?? 0).getTime() - new Date(a.file?.updated_at ?? a.record?.updated_at ?? 0).getTime();
@@ -192,6 +193,14 @@ export default function Workspaces() {
     ...folderItems.map((item) => `d:${item.path}`),
     ...fileItems.map((item) => `f:${item.file.id}`),
   ], [folderItems, fileItems]);
+
+  const visibleFolderPath = (path: string) => {
+    const related = (files ?? []).find((file) => file.path.startsWith(`${path}/`));
+    if (related?.presentation.source_task_title && /(?:^|\/)[0-9a-f-]{36}(?:\/|$)/i.test(path)) {
+      return path.replace(/[0-9a-f-]{36}/i, related.presentation.source_task_title);
+    }
+    return path.replace(/[0-9a-f-]{36}/gi, '任务产物');
+  };
 
   const toggleSelected = (key: string) => setSelectedKeys((current) => {
     const next = new Set(current);
@@ -651,9 +660,9 @@ export default function Workspaces() {
                           {selecting && <Checkbox checked={selected} onClick={(event) => event.stopPropagation()} onChange={() => toggleSelected(key)} style={viewMode === 'grid' ? { position: 'absolute', top: 5, left: 6 } : undefined} />}
                           <div style={viewMode === 'grid' ? iconInnerStyle : { display: 'contents' }}>
                             <FolderOutlined style={{ fontSize: viewMode === 'grid' ? 42 : 22, color: WB.macFolder }} />
-                            <div style={viewMode === 'grid' ? iconNameStyle : listNameStyle} title={it.path}>{it.name}</div>
-                            {viewMode === 'grid' && !!search.trim() && <div style={searchPathStyle} title={it.path}>{it.path}</div>}
-                            {viewMode === 'list' && <><span style={listMetaStyle}>文件夹</span><span style={listMetaStyle}>{it.record?.updated_at ? new Date(it.record.updated_at).toLocaleString() : '路径推导'}</span><span style={listPathStyle}>{it.path}</span></>}
+                            <div style={viewMode === 'grid' ? iconNameStyle : listNameStyle} title={visibleFolderPath(it.path)}>{visibleFolderPath(it.name)}</div>
+                            {viewMode === 'grid' && !!search.trim() && <div style={searchPathStyle} title={visibleFolderPath(it.path)}>{visibleFolderPath(it.path)}</div>}
+                            {viewMode === 'list' && <><span style={listMetaStyle}>文件夹</span><span style={listMetaStyle}>{it.record?.updated_at ? new Date(it.record.updated_at).toLocaleString() : '路径推导'}</span><span style={listPathStyle}>{visibleFolderPath(it.path)}</span></>}
                             {!selecting && (
                               <Dropdown
                                 trigger={['click']} placement="bottomRight"
@@ -701,10 +710,10 @@ export default function Workspaces() {
                           <div style={viewMode === 'grid' ? iconInnerStyle : { display: 'contents' }}>
                             <FileTextOutlined style={{ fontSize: viewMode === 'grid' ? 42 : 22, color: WB.macFile }} />
                             <div style={viewMode === 'grid' ? iconNameStyle : listNameStyle} title={it.path}>{it.name}</div>
-                            {viewMode === 'grid' && !!search.trim() && <div style={searchPathStyle} title={it.path}>{it.path}</div>}
+                            {viewMode === 'grid' && !!search.trim() && <div style={searchPathStyle} title={workspaceVisiblePath(it.file)}>{workspaceVisiblePath(it.file)}</div>}
                             {viewMode === 'grid'
                               ? <span style={{ fontSize: 10, color: WB.textMicro, marginTop: 1 }}>{formatBytes(it.file.size)}</span>
-                              : <><span style={listMetaStyle}>{fileType(it.path)} · {formatBytes(it.file.size)}</span><span style={listMetaStyle}>{new Date(it.file.updated_at).toLocaleString()}</span><span style={listMetaStyle}>{PARSE_LABEL[it.file.parse_status] ?? it.file.parse_status}</span><span style={listPathStyle}>{it.path}</span></>}
+                              : <><span style={listMetaStyle}>{fileType(it.path)} · {formatBytes(it.file.size)}</span><span style={listMetaStyle}>{new Date(it.file.updated_at).toLocaleString()}</span><span style={listMetaStyle}>{PARSE_LABEL[it.file.parse_status] ?? it.file.parse_status}</span><span style={listPathStyle}>{workspaceVisiblePath(it.file)}</span></>}
                             {!selecting && (
                               <Dropdown
                                 trigger={['click']} placement="bottomRight"
@@ -751,7 +760,7 @@ export default function Workspaces() {
         width={720}
         rootStyle={{ fontFamily: WB_FONT }}
         styles={{ header: { borderBottom: `1px solid ${WB.border}` }, body: { padding: 0, display: 'flex', flexDirection: 'column' } }}
-        title={activeFile ? basename(activeFile.path) : '文件查看'}
+        title={activeFile ? workspaceDisplayName(activeFile) : '文件查看'}
         extra={activeFile && (
           <ToolButton
             icon={<DownloadOutlined style={{ fontSize: 13 }} />}
@@ -775,7 +784,7 @@ export default function Workspaces() {
                     color: active ? WB.primary : WB.text,
                   }}
                 >
-                  <FileTextOutlined style={{ fontSize: 11 }} />{basename(f.path)}
+                  <FileTextOutlined style={{ fontSize: 11 }} />{workspaceDisplayName(f)}
                   <CloseOutlined
                     onClick={(e) => { e.stopPropagation(); closeFile(f.id); }}
                     style={{ fontSize: 10, color: WB.textAux }}
@@ -826,14 +835,14 @@ export default function Workspaces() {
           loading={trashLoading} dataSource={trash} locale={{ emptyText: '回收站为空' }}
           renderItem={(file) => (
             <List.Item actions={[<a key="restore" onClick={() => restoreTrash.mutate(file.id)}>恢复</a>]}>
-              <List.Item.Meta title={basename(file.path)} description={`${file.path} · ${formatBytes(file.size)}`} />
+              <List.Item.Meta title={workspaceDisplayName(file)} description={`${workspaceVisiblePath(file)} · ${formatBytes(file.size)}`} />
             </List.Item>
           )}
         />
       </Modal>
 
       <Modal
-        title={`版本历史${versionFile ? ` · ${basename(versionFile.path)}` : ''}`}
+        title={`版本历史${versionFile ? ` · ${workspaceDisplayName(versionFile)}` : ''}`}
         open={!!versionFile} footer={null} onCancel={() => setVersionFile(null)} width={720}
       >
         <List
@@ -854,7 +863,7 @@ export default function Workspaces() {
           loading={auditLoading} dataSource={auditEvents} locale={{ emptyText: '暂无审计事件' }}
           renderItem={(event) => (
             <List.Item>
-              <List.Item.Meta title={event.action} description={`${new Date(event.created_at).toLocaleString()} · ${JSON.stringify(event.metadata)}`} />
+              <List.Item.Meta title={auditTitle(event)} description={<div><div>{auditSummary(event)}</div><details style={{ marginTop: 6, fontSize: 11 }}><summary style={{ cursor: 'pointer' }}>技术详情</summary><pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{JSON.stringify({ action: event.action, metadata: event.metadata }, null, 2)}</pre></details></div>} />
             </List.Item>
           )}
         />
@@ -915,7 +924,7 @@ function FileViewer({ file, onDownload, onReparse, reparsing }: {
           {view === 'original' && (
             <OriginalFilePreview
               blob={previewBlob}
-              filename={basename(file.path)}
+              filename={workspaceDisplayName(file)}
               loading={previewLoading}
               error={previewError}
               onDownload={onDownload}

@@ -336,7 +336,13 @@ export default function App() {
         <Route path="/:slug/terminal" element={
           <UserAuthProvider><UserRequireAuth><Terminal /></UserRequireAuth></UserAuthProvider>
         } />
+        <Route path="/:slug/terminal/tasks/:taskId" element={
+          <UserAuthProvider><UserRequireAuth><Terminal /></UserRequireAuth></UserAuthProvider>
+        } />
         <Route path="/terminal" element={
+          <UserAuthProvider><UserRequireAuth><Terminal /></UserRequireAuth></UserAuthProvider>
+        } />
+        <Route path="/terminal/tasks/:taskId" element={
           <UserAuthProvider><UserRequireAuth><Terminal /></UserRequireAuth></UserAuthProvider>
         } />
         <Route path="/*" element={
