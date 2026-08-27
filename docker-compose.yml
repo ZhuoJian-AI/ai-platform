@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: ai_infra
       POSTGRES_DB: ai_infra
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres:/docker-entrypoint-initdb.d
@@ -19,12 +19,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - data_plane
 
   redis:
     image: redis:7-alpine
     container_name: ai_infra_redis
     ports:
-      - "6381:6379"
+      - "127.0.0.1:6381:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -32,6 +34,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - data_plane
 
   # 业务系统 Mock 网关（MES / CRM / …）——为平台演示提供可调用的数据接口。
   # 启动：docker compose up -d mock；本机访问 http://localhost:8010
@@ -54,6 +58,20 @@ services:
     container_name: ai_infra_skill_runner
     environment:
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:-skill-runner-local-dev-token}
+      # Defense in depth for Compose platforms that inject project variables
+      # into every service.  User code must never inherit platform credentials.
+      DATABASE_URL: ""
+      REDIS_URL: ""
+      POSTGRES_DB: ""
+      POSTGRES_USER: ""
+      POSTGRES_PASSWORD: ""
+      REDIS_PASSWORD: ""
+      SECRET_KEY: ""
+      MASTER_ENCRYPTION_KEY: ""
+      CRM_API_KEY: ""
+      MES_API_KEY: ""
+      DSH_RUNTIME_TOKEN: ""
+      EXTENSION_BUILDER_TOKEN: ""
       SKILL_CACHE_ROOT: /cache
       STORAGE_GATEWAY_URL: ${STORAGE_GATEWAY_URL:-}
       STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:-}
@@ -85,6 +103,8 @@ services:
       timeout: 5s
       retries: 12
     restart: unless-stopped
+    networks:
+      - default
     deploy:
       resources:
         limits: { cpus: "1.50", memory: 3G, pids: 512 }
@@ -142,3 +162,9 @@ volumes:
   redisdata:
   skillcache:
   extensioncache:
+
+networks:
+  # Only trusted data services and the backend/workers may join this bridge.
+  # The ordinary application network remains available to executable Skills.
+  data_plane:
+    internal: true

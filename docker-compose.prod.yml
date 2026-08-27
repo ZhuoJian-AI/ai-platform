@@ -79,6 +79,9 @@ services:
       retries: 12
       start_period: 30s
     restart: unless-stopped
+    networks:
+      - default
+      - data_plane
 
   workspace-parser:
     build: ./llm_router/backend
@@ -105,6 +108,9 @@ services:
     tmpfs:
       - /tmp:size=1073741824,mode=1777
     restart: unless-stopped
+    networks:
+      - default
+      - data_plane
 
   storage-lifecycle:
     build: ./llm_router/backend
@@ -132,6 +138,9 @@ services:
       skill-runner:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      - default
+      - data_plane
     deploy:
       resources:
         limits: { cpus: "0.25", memory: 384M }

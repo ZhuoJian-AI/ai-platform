@@ -59,6 +59,23 @@ BUILTIN_PYTHON_PACKAGES = (
 )
 BUILTIN_NODE_PACKAGES = ("exceljs",)
 
+# The Runner executes user-controlled Python, Node, Bash, and dependency
+# installation hooks.  These platform credentials must never exist in its
+# process namespace: a child can inspect /proc even when its direct environment
+# is rebuilt from an allowlist.
+FORBIDDEN_PLATFORM_SECRET_KEYS = (
+    "DATABASE_URL",
+    "REDIS_URL",
+    "POSTGRES_PASSWORD",
+    "REDIS_PASSWORD",
+    "SECRET_KEY",
+    "MASTER_ENCRYPTION_KEY",
+    "CRM_API_KEY",
+    "MES_API_KEY",
+    "DSH_RUNTIME_TOKEN",
+    "EXTENSION_BUILDER_TOKEN",
+)
+
 app = FastAPI(title="AI Platform Skill Runner")
 _CACHE_LOCK = asyncio.Lock()
 _ACTIVE_PACKAGE_HASHES: set[str] = set()
@@ -200,6 +217,15 @@ class BuiltinExecuteRequest(BaseModel):
 def _auth(token: str | None) -> None:
     if not token or token != RUNNER_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid runner token")
+
+
+def _assert_platform_secrets_absent() -> None:
+    leaked = sorted(key for key in FORBIDDEN_PLATFORM_SECRET_KEYS if os.getenv(key))
+    if leaked:
+        raise HTTPException(
+            status_code=503,
+            detail="Skill Runner contains forbidden platform secrets: " + ", ".join(leaked),
+        )
 
 
 def _decode_archive(encoded: str) -> bytes:
@@ -738,6 +764,7 @@ def _script(package: Path, requested: str | None, legacy_entrypoint: str | None)
 
 @app.get("/health")
 async def health() -> dict:
+    _assert_platform_secrets_absent()
     cache = await _cleanup_cache()
     return {
         "status": "ok", **_runtime_info(),
@@ -756,6 +783,7 @@ async def health() -> dict:
 @app.post("/install")
 async def install(req: InstallRequest, x_skill_runner_token: str | None = Header(None)) -> dict:
     _auth(x_skill_runner_token)
+    _assert_platform_secrets_absent()
     path, metadata = await _ensure_installed(req)
     return {"status": "ready", "package_hash": req.package_hash, "path": str(path), **metadata}
 
@@ -850,6 +878,7 @@ async def execute_builtin_tool(
     x_skill_runner_token: str | None = Header(None),
 ) -> dict:
     _auth(x_skill_runner_token)
+    _assert_platform_secrets_absent()
     if req.tool_kind in {"spreadsheet", "document", "presentation"}:
         async with OFFICE_CAPACITY.slot(), EXECUTION_CAPACITY.slot():
             return await _execute_builtin_tool(req)
@@ -933,5 +962,6 @@ async def _execute(req: ExecuteRequest) -> dict:
 @app.post("/execute")
 async def execute(req: ExecuteRequest, x_skill_runner_token: str | None = Header(None)) -> dict:
     _auth(x_skill_runner_token)
+    _assert_platform_secrets_absent()
     async with EXECUTION_CAPACITY.slot():
         return await _execute(req)

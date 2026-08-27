@@ -191,15 +191,14 @@ Path(os.environ["SKILL_OUTPUT_DIR"], "environment.json").write_text(
 )
 """
     package_hash, archive = _package("scripts/environment.py", script)
-    result = await runner.execute(
+    result = await runner._execute(
         runner.ExecuteRequest(
             package_hash=package_hash,
             archive_base64=archive,
             runtime="agent_skill",
             script_path="scripts/environment.py",
             execution_id=11,
-        ),
-        runner.RUNNER_TOKEN,
+        )
     )
     output = next(item for item in result["outputs"] if item["name"] == "environment.json")
     assert json.loads(base64.b64decode(output["content_base64"])) == {
@@ -207,6 +206,20 @@ Path(os.environ["SKILL_OUTPUT_DIR"], "environment.json").write_text(
         "REDIS_URL": None,
         "MODEL_API_KEY": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_runner_refuses_work_when_platform_secrets_are_present(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://must-not-leak")
+    monkeypatch.setenv("MASTER_ENCRYPTION_KEY", "must-not-leak")
+
+    with pytest.raises(runner.HTTPException) as exc:
+        await runner.health()
+
+    assert exc.value.status_code == 503
+    assert "DATABASE_URL" in exc.value.detail
+    assert "MASTER_ENCRYPTION_KEY" in exc.value.detail
+    assert "must-not-leak" not in exc.value.detail
 
 
 @pytest.mark.asyncio

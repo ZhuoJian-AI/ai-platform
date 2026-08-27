@@ -25,6 +25,8 @@ services:
     init: true
     stop_grace_period: 30s
     logging: *default-logging
+    networks:
+      - data_plane
     deploy:
       resources:
         limits: { cpus: "0.75", memory: 2G }
@@ -48,6 +50,8 @@ services:
     restart: unless-stopped
     init: true
     logging: *default-logging
+    networks:
+      - data_plane
     deploy:
       resources:
         limits: { cpus: "0.25", memory: 512M }
@@ -76,6 +80,20 @@ services:
     image: 127.0.0.1:5000/zhuojian/ai-platform-skill-runner-app@sha256:efa9f98f6326579399c16b087370409dbe1407ad75e1ec29a4659d4ccfb26711
     environment:
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
+      # Coolify exposes application variables to every service.  Override all
+      # platform credentials that executable user code must never observe.
+      DATABASE_URL: ""
+      REDIS_URL: ""
+      POSTGRES_DB: ""
+      POSTGRES_USER: ""
+      POSTGRES_PASSWORD: ""
+      REDIS_PASSWORD: ""
+      SECRET_KEY: ""
+      MASTER_ENCRYPTION_KEY: ""
+      CRM_API_KEY: ""
+      MES_API_KEY: ""
+      DSH_RUNTIME_TOKEN: ""
+      EXTENSION_BUILDER_TOKEN: ""
       SKILL_CACHE_ROOT: /cache
       STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
       STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
@@ -242,6 +260,9 @@ services:
     restart: unless-stopped
     init: true
     logging: *default-logging
+    networks:
+      - default
+      - data_plane
     deploy:
       resources:
         limits: { cpus: "1.50", memory: 2560M }
@@ -273,6 +294,9 @@ services:
     init: true
     stop_grace_period: 30s
     logging: *default-logging
+    networks:
+      - default
+      - data_plane
     deploy:
       resources:
         limits: { cpus: "0.75", memory: 1536M }
@@ -304,6 +328,9 @@ services:
     restart: unless-stopped
     init: true
     logging: *default-logging
+    networks:
+      - default
+      - data_plane
     deploy:
       resources:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
@@ -324,6 +351,8 @@ services:
     restart: unless-stopped
     init: true
     logging: *default-logging
+    networks:
+      - default
     deploy:
       resources:
         limits: { cpus: "0.20", memory: 256M }
@@ -333,3 +362,9 @@ volumes:
   redis_data:
   skill_cache:
   extension_cache:
+
+networks:
+  # PostgreSQL and Redis are invisible to executable Skills.  Backend and the
+  # trusted workers bridge this internal network to the application network.
+  data_plane:
+    internal: true
