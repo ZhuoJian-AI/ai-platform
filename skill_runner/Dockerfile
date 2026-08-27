@@ -55,6 +55,7 @@ RUN mkdir -p /opt/skill-node \
 COPY app.py .
 COPY builtin_tools.py .
 COPY --chmod=755 entrypoint.sh /usr/local/bin/skill-runner-entrypoint
+RUN sed -i 's/\r$//' /usr/local/bin/skill-runner-entrypoint
 
 # User supplied scripts never run as root. Named volumes mounted at /cache
 # inherit this directory ownership on first creation.

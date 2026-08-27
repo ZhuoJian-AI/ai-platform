@@ -11,6 +11,7 @@ WORKDIR /app
 COPY app.py .
 COPY builtin_tools.py .
 COPY --chmod=755 entrypoint.sh /usr/local/bin/skill-runner-entrypoint
+RUN sed -i 's/\r$//' /usr/local/bin/skill-runner-entrypoint
 
 EXPOSE 8020
 ENTRYPOINT ["/usr/local/bin/skill-runner-entrypoint"]
