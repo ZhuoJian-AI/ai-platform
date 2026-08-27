@@ -77,7 +77,7 @@ services:
         limits: { cpus: "0.20", memory: 256M }
 
   skill-runner:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-skill-runner-app@sha256:efa9f98f6326579399c16b087370409dbe1407ad75e1ec29a4659d4ccfb26711
+    image: 127.0.0.1:5000/zhuojian/ai-platform-skill-runner-app@sha256:89a48140043f89434c981a516ea78aba44cbc51a09e60d311375b451772eec1c
     environment:
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
       # Coolify exposes application variables to every service.  Override all
