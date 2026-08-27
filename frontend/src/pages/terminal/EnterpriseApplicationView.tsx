@@ -89,11 +89,19 @@ export default function EnterpriseApplicationView({
     const onMessage = (event: MessageEvent) => {
       if (event.source !== frameRef.current?.contentWindow || event.origin !== allowedOrigin) return;
       if (isPlainObject(event.data) && event.data.type === 'zhuojian:ready' && event.data.version === 1) {
-        frameRef.current?.contentWindow?.postMessage({ type: 'zhuojian:host-ready', version: 1 }, allowedOrigin);
+        frameRef.current?.contentWindow?.postMessage({
+          type: 'zhuojian:host-ready', version: 1,
+          allowed_module_keys: launch.module_keys ?? [],
+        }, allowedOrigin);
         return;
       }
       const parsed = parseBridgeContext(event.data, application.slug);
-      if (parsed) setBridgeContext(parsed);
+      if (parsed) {
+        const moduleKey = typeof parsed.module_key === 'string' ? parsed.module_key : null;
+        const allowedModules = launch.module_keys ?? [];
+        if (moduleKey && allowedModules.length > 0 && !allowedModules.includes(moduleKey)) return;
+        setBridgeContext(parsed);
+      }
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
@@ -108,6 +116,7 @@ export default function EnterpriseApplicationView({
       application_name: application.name,
       page_url: launch?.url,
       source: 'business_assistant',
+      allowed_module_keys: launch?.module_keys ?? [],
       ...bridgeContext,
     });
     setPrompt(''); setAssistantOpen(false);
@@ -159,7 +168,11 @@ export default function EnterpriseApplicationView({
               setBridgeContext({});
               try {
                 frameRef.current?.contentWindow?.postMessage(
-                  { type: 'zhuojian:host-ready', version: 1 }, new URL(launch.url).origin,
+                  {
+                    type: 'zhuojian:host-ready', version: 1,
+                    allowed_module_keys: launch.module_keys ?? [],
+                  },
+                  new URL(launch.url).origin,
                 );
               } catch { /* invalid launch URL is handled by the existing fallback */ }
             }}

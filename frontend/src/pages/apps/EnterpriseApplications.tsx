@@ -114,6 +114,12 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
       ];
     },
   });
+  const { data: selectedIntegration } = useQuery({
+    queryKey: ['enterprise-application-integration', selectedAppId],
+    queryFn: () => selectedAppId ? enterpriseApplications.integration(selectedAppId) : Promise.reject(),
+    enabled: !!selectedAppId && section === 'permissions',
+    retry: false,
+  });
   const selectedApp = apps.find((item) => item.id === selectedAppId) ?? apps[0];
 
   useEffect(() => {
@@ -160,6 +166,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
           scope_type: EnterpriseApplicationScope;
           scope_id: string | null;
           permissions: EnterpriseApplicationPermission[];
+          module_keys?: string[];
         }> = currentGrants.flatMap((grant) => {
           const scope = grantScopeValue(grant.scope_type, grant.scope_id, orgId);
           const permissions: EnterpriseApplicationPermission[] = grant.permissions.filter(
@@ -170,6 +177,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
             scope_type: grant.scope_type,
             scope_id: grant.scope_id,
             permissions,
+            module_keys: grant.module_keys,
           }] : [];
         });
         const existingScopes = new Set(currentGrants.map((grant) => (
@@ -242,7 +250,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   };
 
   const saveGrant = useMutation({
-    mutationFn: (values: { scope: string; permissions: EnterpriseApplicationPermission[] }) => {
+    mutationFn: (values: { scope: string; permissions: EnterpriseApplicationPermission[]; module_keys?: string[] }) => {
       if (!selectedApp) throw new Error('请先选择应用');
       const node = nodeMap.get(values.scope);
       if (!node) throw new Error('请选择授权范围');
@@ -250,9 +258,11 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
         scope_type: node.type as EnterpriseApplicationScope,
         scope_id: node.type === 'organization' ? null : node.id,
         permissions: values.permissions,
+        module_keys: values.module_keys ?? [],
       };
       const next = selectedApp.grants.map((item) => ({
         scope_type: item.scope_type, scope_id: item.scope_id, permissions: item.permissions,
+        module_keys: item.module_keys,
       }));
       if (grantIndex === null) next.push(grant); else next[grantIndex] = grant;
       return enterpriseApplications.replaceGrants(selectedApp.id, next);
@@ -265,6 +275,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
     if (!selectedApp) return;
     const next = selectedApp.grants.filter((_, i) => i !== index).map((item) => ({
       scope_type: item.scope_type, scope_id: item.scope_id, permissions: item.permissions,
+      module_keys: item.module_keys,
     }));
     enterpriseApplications.replaceGrants(selectedApp.id, next).then(() => {
       invalidate(); message.success('授权已移除');
@@ -346,7 +357,8 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
       <Table dataSource={selectedApp.grants} rowKey="id" pagination={false} columns={[
         { title: '授权范围', render: (_: unknown, row) => <Space><Tag>{row.scope_type}</Tag>{scopeLabel(row.scope_type, row.scope_id)}</Space> },
         { title: '权限', dataIndex: 'permissions', render: (values: string[]) => <Space wrap>{values.map((value) => <Tag key={value} color={value === 'view' ? 'blue' : value.includes('delete') ? 'red' : 'purple'}>{PERMISSIONS.find((item) => item.value === value)?.label ?? value}</Tag>)}</Space> },
-        { title: '操作', width: 150, render: (_: unknown, row, index) => <Space><Button size="small" onClick={() => { setGrantIndex(index); grantForm.setFieldsValue({ scope: `${row.scope_type === 'organization' ? 'org' : row.scope_type === 'department' ? 'dept' : row.scope_type}:${row.scope_id ?? orgId}`, permissions: row.permissions }); setGrantModalOpen(true); }}>编辑</Button><Button size="small" danger onClick={() => removeGrant(index)}>移除</Button></Space> },
+        { title: '可见子模块', dataIndex: 'module_keys', render: (values: string[]) => values?.length ? <Space wrap>{values.map((value) => <Tag key={value}>{value}</Tag>)}</Space> : <Tag color="blue">全部子模块</Tag> },
+        { title: '操作', width: 150, render: (_: unknown, row, index) => <Space><Button size="small" onClick={() => { setGrantIndex(index); grantForm.setFieldsValue({ scope: `${row.scope_type === 'organization' ? 'org' : row.scope_type === 'department' ? 'dept' : row.scope_type}:${row.scope_id ?? orgId}`, permissions: row.permissions, module_keys: row.module_keys ?? [] }); setGrantModalOpen(true); }}>编辑</Button><Button size="small" danger onClick={() => removeGrant(index)}>移除</Button></Space> },
       ]} />
     </>
   ) : <Empty description="请先创建企业应用" />;
@@ -438,6 +450,12 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
         <Form form={grantForm} layout="vertical" onFinish={(values) => saveGrant.mutate(values)}>
           <Form.Item name="scope" label="授权对象" rules={[{ required: true }]}><TreeSelect treeData={orgTree} treeDefaultExpandAll showSearch treeNodeFilterProp="title" loading={treeLoading} placeholder="选择全企业、部门、团队或用户" /></Form.Item>
           <Form.Item name="permissions" label="权限" rules={[{ required: true }]}><Checkbox.Group options={PERMISSIONS} /></Form.Item>
+          <Form.Item name="module_keys" label="可见子模块" extra="不选择表示可访问整个应用；选择后，该授权对象只能进入这些子模块，业务小助手也执行同一限制。">
+            <Checkbox.Group options={(selectedIntegration?.modules ?? []).map((item) => ({
+              value: item.key || item.moduleKey || '', label: item.name || item.moduleName || item.key || item.moduleKey,
+            })).filter((item) => item.value)} />
+          </Form.Item>
+          {!selectedIntegration?.modules.length && <Alert showIcon type="warning" message="尚未发现子模块" description="请先在应用详情的“系统联通”中保存连接并同步；当前留空即保持整个应用可见。" />}
         </Form>
       </Modal>
 

@@ -1472,6 +1472,7 @@ export interface EnterpriseApplicationGrant {
   id: string; application_id: string; organization_id: string;
   scope_type: EnterpriseApplicationScope; scope_id: string | null;
   permissions: EnterpriseApplicationPermission[];
+  module_keys: string[];
   created_at: string; updated_at: string;
 }
 
@@ -1502,11 +1503,37 @@ export interface TerminalEnterpriseApplication {
   icon_url: string | null; display_mode: 'embedded' | 'external';
   sort_order: number; assistant_enabled: boolean;
   permissions: EnterpriseApplicationPermission[];
+  module_keys: string[];
 }
 
 export interface EnterpriseApplicationLaunch {
   application_id: string; url: string; display_mode: 'embedded' | 'external';
   permissions: EnterpriseApplicationPermission[];
+  module_keys: string[];
+}
+
+export interface EnterpriseApplicationIntegration {
+  application_id: string; manifest_url: string; events_url: string | null;
+  protocol_version: number; manifest: Record<string, unknown>;
+  modules: Array<{ key?: string; moduleKey?: string; name?: string; moduleName?: string }>;
+  cursor_sequence: number; sync_enabled: boolean;
+  sync_status: 'unconfigured' | 'ready' | 'syncing' | 'healthy' | 'error';
+  token_configured: boolean; last_manifest_sync_at: string | null;
+  last_event_sync_at: string | null; last_error: string | null;
+}
+
+export interface EnterpriseApplicationEventRoute {
+  id: string; application_id: string; name: string; event_type: string;
+  module_key: string | null; target_scope_type: EnterpriseApplicationScope;
+  target_scope_id: string | null; target_module_key: string | null;
+  is_active: boolean; created_at: string; updated_at: string;
+}
+
+export interface CrossDepartmentWorkItem {
+  id: string; source_application_id: string; source_event_id: string;
+  title: string; status: 'open' | 'done'; target_scope_type: string;
+  target_scope_id: string | null; target_module_key: string | null;
+  source_context: Record<string, unknown>; created_at: string; updated_at: string;
 }
 
 export interface EnterpriseApplicationCapability {
@@ -1562,6 +1589,7 @@ export const enterpriseApplications = {
   replaceGrants: (id: string, grants: Array<{
     scope_type: EnterpriseApplicationScope; scope_id: string | null;
     permissions: EnterpriseApplicationPermission[];
+    module_keys?: string[];
   }>) => request<EnterpriseApplication>(`/api/v1/applications/${id}/grants`, {
     method: 'PUT', body: JSON.stringify({ grants }),
   }),
@@ -1574,6 +1602,21 @@ export const enterpriseApplications = {
   test: (id: string) => request<{ status: 'healthy' | 'unhealthy'; status_code: number | null; detail: string | null }>(
     `/api/v1/applications/${id}/test`, { method: 'POST' },
   ),
+  integration: (id: string) => request<EnterpriseApplicationIntegration>(`/api/v1/applications/${id}/integration`),
+  configureIntegration: (id: string, data: {
+    manifest_url: string; auth_token?: string; clear_auth_token?: boolean; sync_enabled: boolean;
+  }) => request<EnterpriseApplicationIntegration>(`/api/v1/applications/${id}/integration`, {
+    method: 'PUT', body: JSON.stringify(data),
+  }),
+  syncIntegration: (id: string) => request<{
+    status: 'healthy' | 'error'; manifest_updated: boolean; received_events: number;
+    created_work_items: number; cursor_sequence: number; detail: string | null;
+  }>(`/api/v1/applications/${id}/integration/sync`, { method: 'POST' }),
+  eventRoutes: (id: string) => request<EnterpriseApplicationEventRoute[]>(`/api/v1/applications/${id}/event-routes`),
+  replaceEventRoutes: (id: string, routes: Array<Omit<EnterpriseApplicationEventRoute, 'id' | 'application_id' | 'created_at' | 'updated_at'>>) =>
+    request<EnterpriseApplicationEventRoute[]>(`/api/v1/applications/${id}/event-routes`, {
+      method: 'PUT', body: JSON.stringify({ routes }),
+    }),
 };
 
 export interface TerminalAgent {
@@ -1657,6 +1700,13 @@ export const terminal = {
   launchApplication: (id: string) => userRequest<EnterpriseApplicationLaunch>(
     `/api/v1/terminal/applications/${id}/launch`, { method: 'POST' },
   ),
+  crossDepartmentWorkItems: () => userRequest<CrossDepartmentWorkItem[]>(
+    '/api/v1/terminal/cross-department-work-items',
+  ),
+  updateCrossDepartmentWorkItem: (id: string, status: 'open' | 'done') =>
+    userRequest<CrossDepartmentWorkItem>(`/api/v1/terminal/cross-department-work-items/${id}`, {
+      method: 'PATCH', body: JSON.stringify({ status }),
+    }),
   // ── 终端智能体管理（用户级）：列表展示权限范围内可见、改删仅限自己创建的 ──
   listAgents: (scope?: { scope_type: string; scope_id?: string | null }) => {
     const url = scope
