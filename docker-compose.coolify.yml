@@ -187,7 +187,7 @@ services:
         limits: { cpus: "1.00", memory: 1G, pids: 256 }
 
   backend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5eaef7ec8792775a18ec2f099abb270162315a8fbf0015b8dfba006275dc59fd
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0546833dbea23af57a9d15317586d3eb25045788bb1590da27c3f5512d65a4a6
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -277,7 +277,7 @@ services:
         limits: { cpus: "1.50", memory: 2560M }
 
   workspace-parser:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5eaef7ec8792775a18ec2f099abb270162315a8fbf0015b8dfba006275dc59fd
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0546833dbea23af57a9d15317586d3eb25045788bb1590da27c3f5512d65a4a6
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -315,7 +315,7 @@ services:
         limits: { cpus: "0.75", memory: 1536M }
 
   storage-lifecycle:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5eaef7ec8792775a18ec2f099abb270162315a8fbf0015b8dfba006275dc59fd
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0546833dbea23af57a9d15317586d3eb25045788bb1590da27c3f5512d65a4a6
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -353,7 +353,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   frontend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:20607e5fa284d3c4fecbaec20d3207fab626806abbbb419977d28501e9254ff0
+    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:167ddb4034a5e8c100438ab0b70944f8abb7f18feed4afc6494bd7cf7ab029cf
     labels:
       # Coolify also attaches its public application network. Pin Traefik to
       # that network so it never selects the private Compose default network.
