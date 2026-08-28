@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useRef } from 'react';
 import { Button, Typography, message } from 'antd';
 import { CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import FileViewer from '@file-viewer/react';
@@ -18,11 +18,14 @@ export interface OfficeFilePreviewProps {
 /** Lazily loaded so normal pages and native PDF/image previews stay lightweight. */
 export default function OfficeFilePreview({ file, filename, extension, onDownload }: OfficeFilePreviewProps) {
   const isSpreadsheet = SPREADSHEET_EXTENSIONS.has(extension);
-  const [hasSpreadsheetSelection, setHasSpreadsheetSelection] = useState(false);
+  // Selection is owned by the canvas renderer. Keeping this flag in a ref is
+  // deliberate: a React state update here recreates FileViewer and discards
+  // the range the user just selected.
+  const hasSpreadsheetSelectionRef = useRef(false);
   const spreadsheetStageRef = useRef<HTMLElement | null>(null);
 
   const copySpreadsheetSelection = () => {
-    if (!hasSpreadsheetSelection) {
+    if (!hasSpreadsheetSelectionRef.current) {
       message.info('请先在表格中拖动框选要复制的单元格');
       return;
     }
@@ -77,7 +80,7 @@ export default function OfficeFilePreview({ file, filename, extension, onDownloa
           ));
           if (stage instanceof HTMLElement) {
             spreadsheetStageRef.current = stage;
-            setHasSpreadsheetSelection(true);
+            hasSpreadsheetSelectionRef.current = true;
           }
         }}
         style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}
