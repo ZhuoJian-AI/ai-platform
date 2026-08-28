@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "postinstall": "patch-package",
     "test:presentation": "node scripts/test-workspace-presentation.mjs",
     "test:e2e:attachments": "node scripts/e2e-chat-attachments.mjs",
     "preview": "vite preview",
@@ -32,6 +33,7 @@
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
+    "patch-package": "^8.0.0",
     "typescript": "~5.7.2",
     "vite": "^6.2.0"
   }

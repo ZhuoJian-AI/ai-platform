@@ -86,7 +86,12 @@ export default function OriginalFilePreview({
   if (OFFICE_EXTENSIONS.has(extension)) {
     return (
       <Suspense fallback={<LoadingState label="正在加载 Office 查看器…" />}>
-        <OfficeFilePreview file={originalFile} filename={filename} extension={extension} />
+        <OfficeFilePreview
+          file={originalFile}
+          filename={filename}
+          extension={extension}
+          onDownload={onDownload}
+        />
       </Suspense>
     );
   }

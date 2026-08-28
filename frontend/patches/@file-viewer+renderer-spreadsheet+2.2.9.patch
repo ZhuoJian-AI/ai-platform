@@ -1,0 +1,144 @@
+diff --git a/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js b/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
+index 283ae3e..13feecf 100644
+--- a/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
++++ b/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
+@@ -472,7 +472,71 @@ const serializeSpreadsheetCopyData = (data) => {
+         return row.map(serializeSpreadsheetCopyCell).join('\t');
+     }).join('\n');
+ };
+-const copyTextWithTextareaFallback = (documentRef, text) => {
++const escapeSpreadsheetClipboardHtml = (value) => `${value !== null && value !== void 0 ? value : ''}`
++    .replace(/&/g, '&amp;')
++    .replace(/</g, '&lt;')
++    .replace(/>/g, '&gt;')
++    .replace(/"/g, '&quot;')
++    .replace(/'/g, '&#39;');
++const spreadsheetClipboardBorder = (border) => border
++    ? `${Math.max(Number(border.width) || 1, 1)}px ${border.style || 'solid'} ${border.color || '#dfe3e8'}`
++    : '';
++const spreadsheetClipboardCellCss = (style) => {
++    const declarations = [
++        'padding:2px 6px',
++        'white-space:pre-wrap',
++        'vertical-align:middle',
++    ];
++    if (!style) {
++        declarations.push('border:1px solid #dfe3e8');
++        return declarations.join(';');
++    }
++    if (style.backgroundColor)
++        declarations.push(`background-color:${style.backgroundColor}`);
++    if (style.color)
++        declarations.push(`color:${style.color}`);
++    if (style.font)
++        declarations.push(`font:${style.font}`);
++    if (style.horizontalAlign)
++        declarations.push(`text-align:${style.horizontalAlign}`);
++    if (style.verticalAlign)
++        declarations.push(`vertical-align:${style.verticalAlign}`);
++    if (style.wrapText)
++        declarations.push('white-space:pre-wrap');
++    const borders = [
++        ['top', style.borderTop],
++        ['right', style.borderRight],
++        ['bottom', style.borderBottom],
++        ['left', style.borderLeft],
++    ];
++    let hasBorder = false;
++    borders.forEach(([side, border]) => {
++        const value = spreadsheetClipboardBorder(border);
++        if (value) {
++            hasBorder = true;
++            declarations.push(`border-${side}:${value}`);
++        }
++    });
++    if (!hasBorder)
++        declarations.push('border:1px solid #dfe3e8');
++    return declarations.join(';');
++};
++const serializeSpreadsheetCopyHtml = (params, virtualState) => {
++    const rows = Array.isArray(params.data) ? params.data : [[params.data]];
++    const startRow = Number(params.yArr[0]) || 0;
++    const startCol = Number(params.xArr[0]) || 0;
++    const body = rows.map((rowValue, rowOffset) => {
++        const cells = Array.isArray(rowValue) ? rowValue : [rowValue];
++        return `<tr>${cells.map((value, colOffset) => {
++            const style = virtualState.cellCache.get(displayCellKey(startRow + rowOffset, startCol + colOffset));
++            const css = escapeSpreadsheetClipboardHtml(spreadsheetClipboardCellCss(style));
++            const content = escapeSpreadsheetClipboardHtml(value).replace(/\r?\n/g, '<br>') || '&nbsp;';
++            return `<td style="${css}">${content}</td>`;
++        }).join('')}</tr>`;
++    }).join('');
++    return `<html><head><meta charset="utf-8"></head><body><table style="border-collapse:collapse;font-family:Aptos,'Segoe UI','Microsoft YaHei',sans-serif">${body}</table></body></html>`;
++};
++const copyTextWithTextareaFallback = (documentRef, text, html) => {
+     var _a;
+     const body = documentRef.body;
+     if (!body || typeof documentRef.execCommand !== 'function') {
+@@ -499,19 +563,42 @@ const copyTextWithTextareaFallback = (documentRef, text) => {
+     textarea.select();
+     textarea.setSelectionRange(0, textarea.value.length);
+     let copied = false;
++    const onCopy = (event) => {
++        if (!event.clipboardData)
++            return;
++        event.preventDefault();
++        event.clipboardData.setData('text/plain', text);
++        if (html)
++            event.clipboardData.setData('text/html', html);
++    };
++    documentRef.addEventListener('copy', onCopy, { once: true });
+     try {
+         copied = documentRef.execCommand('copy');
+     }
+     finally {
++        documentRef.removeEventListener('copy', onCopy);
+         textarea.remove();
+         (_a = activeElement === null || activeElement === void 0 ? void 0 : activeElement.focus) === null || _a === void 0 ? void 0 : _a.call(activeElement, { preventScroll: true });
+     }
+     return copied;
+ };
+-const writeSpreadsheetClipboard = async (documentRef, text) => {
++const writeSpreadsheetClipboard = async (documentRef, text, html) => {
+     var _a;
+     const targetWindow = documentRef.defaultView;
+     const clipboard = (_a = targetWindow === null || targetWindow === void 0 ? void 0 : targetWindow.navigator) === null || _a === void 0 ? void 0 : _a.clipboard;
++    const ClipboardItemCtor = targetWindow === null || targetWindow === void 0 ? void 0 : targetWindow.ClipboardItem;
++    if ((targetWindow === null || targetWindow === void 0 ? void 0 : targetWindow.isSecureContext) && html && typeof (clipboard === null || clipboard === void 0 ? void 0 : clipboard.write) === 'function' && ClipboardItemCtor) {
++        try {
++            await clipboard.write([new ClipboardItemCtor({
++                    'text/plain': new Blob([text], { type: 'text/plain;charset=utf-8' }),
++                    'text/html': new Blob([html], { type: 'text/html;charset=utf-8' }),
++                })]);
++            return true;
++        }
++        catch {
++            return copyTextWithTextareaFallback(documentRef, text, html);
++        }
++    }
+     const useAsyncClipboard = !!(targetWindow === null || targetWindow === void 0 ? void 0 : targetWindow.isSecureContext) && typeof (clipboard === null || clipboard === void 0 ? void 0 : clipboard.writeText) === 'function';
+     if (useAsyncClipboard) {
+         try {
+@@ -519,10 +606,10 @@ const writeSpreadsheetClipboard = async (documentRef, text) => {
+             return true;
+         }
+         catch {
+-            return copyTextWithTextareaFallback(documentRef, text);
++            return copyTextWithTextareaFallback(documentRef, text, html);
+         }
+     }
+-    return copyTextWithTextareaFallback(documentRef, text);
++    return copyTextWithTextareaFallback(documentRef, text, html);
+ };
+ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+     var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
+@@ -972,7 +1059,8 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+     };
+     const copySpreadsheetSelection = (params) => {
+         const text = serializeSpreadsheetCopyData(params.data);
+-        void writeSpreadsheetClipboard(documentRef, text).then((copied) => {
++        const html = serializeSpreadsheetCopyHtml(params, virtualState);
++        void writeSpreadsheetClipboard(documentRef, text, html).then((copied) => {
+             if (copied) {
+                 markCopiedSelection(params);
+                 return;
