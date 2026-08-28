@@ -18,7 +18,7 @@ services:
     command:
       - postgres
       - -c
-      - listen_addresses=127.0.0.1,10.0.10.10
+      - listen_addresses=127.0.0.1,${DATA_PLANE_PREFIX:-10.0.10}.10
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -31,7 +31,7 @@ services:
     logging: *default-logging
     networks:
       data_plane:
-        ipv4_address: 10.0.10.10
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.10
     deploy:
       resources:
         limits: { cpus: "0.75", memory: 2G }
@@ -43,7 +43,7 @@ services:
     command:
       - /bin/sh
       - -c
-      - exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}" --bind 127.0.0.1 10.0.10.11 --protected-mode yes
+      - exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}" --bind 127.0.0.1 ${DATA_PLANE_PREFIX:-10.0.10}.11 --protected-mode yes
     volumes:
       - redis_data:/data
     healthcheck:
@@ -57,7 +57,7 @@ services:
     logging: *default-logging
     networks:
       data_plane:
-        ipv4_address: 10.0.10.11
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.11
     deploy:
       resources:
         limits: { cpus: "0.25", memory: 512M }
@@ -238,8 +238,8 @@ services:
     expose:
       - "8000"
     extra_hosts:
-      - "postgres:10.0.10.10"
-      - "redis:10.0.10.11"
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.10}.11"
     command:
       - /bin/sh
       - -c
@@ -271,7 +271,7 @@ services:
     networks:
       default:
       data_plane:
-        ipv4_address: 10.0.10.20
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.20
     deploy:
       resources:
         limits: { cpus: "1.50", memory: 2560M }
@@ -295,8 +295,8 @@ services:
       WORKSPACE_TRASH_RETENTION_DAYS: "${WORKSPACE_TRASH_RETENTION_DAYS:-30}"
     command: ["python", "-m", "app.workers.workspace_parser"]
     extra_hosts:
-      - "postgres:10.0.10.10"
-      - "redis:10.0.10.11"
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.10}.11"
     depends_on:
       backend:
         condition: service_healthy
@@ -309,7 +309,7 @@ services:
     networks:
       default:
       data_plane:
-        ipv4_address: 10.0.10.21
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.21
     deploy:
       resources:
         limits: { cpus: "0.75", memory: 1536M }
@@ -334,8 +334,8 @@ services:
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
     command: ["python", "-m", "app.workers.storage_lifecycle"]
     extra_hosts:
-      - "postgres:10.0.10.10"
-      - "redis:10.0.10.11"
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.10}.11"
     depends_on:
       backend:
         condition: service_healthy
@@ -347,7 +347,7 @@ services:
     networks:
       default:
       data_plane:
-        ipv4_address: 10.0.10.22
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.22
     deploy:
       resources:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
@@ -391,4 +391,4 @@ networks:
     internal: true
     ipam:
       config:
-        - subnet: 10.0.10.0/24
+        - subnet: ${DATA_PLANE_PREFIX:-10.0.10}.0/24
