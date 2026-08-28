@@ -1,0 +1,68 @@
+.subsystem-onboarding .ant-modal-content {
+  border-top: 4px solid #1f5f4a;
+}
+
+.subsystem-onboarding .ant-steps {
+  margin: 12px 0 26px;
+}
+
+.subsystem-onboarding__stage {
+  display: grid;
+  gap: 16px;
+  min-height: 380px;
+  align-content: start;
+}
+
+.subsystem-onboarding__intro {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 20px;
+  border: 1px solid #d8e2dc;
+  background: #f6faf7;
+}
+
+.subsystem-onboarding__intro h4 {
+  margin: 0 0 4px !important;
+}
+
+.subsystem-onboarding__mark {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: #fff;
+  font-size: 22px;
+  background: #1f5f4a;
+}
+
+.subsystem-onboarding__module-grid,
+.subsystem-onboarding__departments {
+  display: grid;
+  gap: 12px;
+}
+
+.subsystem-onboarding__mapping {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding-top: 12px;
+  border-top: 1px solid #edf0ee;
+}
+
+.subsystem-onboarding__actions {
+  margin-top: 12px;
+}
+
+@media (max-width: 720px) {
+  .subsystem-onboarding__mapping {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .subsystem-onboarding__mapping .ant-select {
+    width: 100% !important;
+  }
+}

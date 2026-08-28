@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Drawer, Empty, Input, Result, Space, Spin, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Badge, Button, Card, Drawer, Empty, Input, Result, Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import {
   AppstoreOutlined, ExportOutlined, FullscreenExitOutlined, FullscreenOutlined,
   ReloadOutlined, RobotOutlined, SendOutlined,
 } from '@ant-design/icons';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, terminal, type TerminalEnterpriseApplication } from '../../api/client';
 
 const BRIDGE_MAX_BYTES = 16_384;
@@ -50,6 +50,18 @@ export function parseBridgeContext(value: unknown, applicationSlug: string): Rec
   return context;
 }
 
+function safeContextPageUrl(launchUrl: string | undefined, route: unknown): string | undefined {
+  if (!launchUrl) return undefined;
+  try {
+    const origin = new URL(launchUrl).origin;
+    return typeof route === 'string' && route.startsWith('/') && !route.startsWith('//')
+      ? new URL(route, origin).toString()
+      : `${origin}/`;
+  } catch {
+    return undefined;
+  }
+}
+
 export default function EnterpriseApplicationView({
   application,
   onAskAI,
@@ -63,18 +75,61 @@ export default function EnterpriseApplicationView({
   onOpenNavigation: () => void;
   onToggleImmersive: () => void;
 }) {
+  const queryClient = useQueryClient();
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [frameKey, setFrameKey] = useState(0);
   const [frameLoaded, setFrameLoaded] = useState(false);
   const [frameSlow, setFrameSlow] = useState(false);
   const [bridgeContext, setBridgeContext] = useState<Record<string, unknown>>({});
+  const [selectedModule, setSelectedModule] = useState<string>();
   const frameRef = useRef<HTMLIFrameElement>(null);
   const { data: launch, isLoading, error, refetch } = useQuery({
-    queryKey: ['terminal-application-launch', application.id],
-    queryFn: () => terminal.launchApplication(application.id),
+    queryKey: ['terminal-application-launch', application.id, selectedModule],
+    queryFn: () => terminal.launchApplication(application.id, selectedModule),
     retry: false,
   });
+  const confirmationsQuery = useQuery({
+    queryKey: ['application-action-confirmations'],
+    queryFn: () => terminal.applicationActionConfirmations(),
+    refetchInterval: 5_000,
+  });
+  const pendingConfirmations = (confirmationsQuery.data ?? []).filter((item) => (
+    item.application_id === application.id && item.status === 'pending'
+  ));
+  const resolveConfirmation = useMutation({
+    mutationFn: ({ id, decision }: { id: string; decision: 'approve' | 'reject' }) =>
+      terminal.resolveApplicationAction(id, decision),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['application-action-confirmations'] });
+      if (result.status === 'completed') message.success('操作已执行');
+      else if (result.status === 'rejected') message.info('操作已拒绝');
+      else message.warning(result.error || `操作状态：${result.status}`);
+    },
+    onError: (mutationError) => message.error(
+      mutationError instanceof ApiError ? mutationError.message : '确认处理失败',
+    ),
+  });
+
+  const refreshFrame = async () => {
+    const refreshed = await refetch();
+    if (refreshed.isSuccess) setFrameKey((value) => value + 1);
+  };
+
+  const openFreshLaunch = async () => {
+    const popup = window.open('about:blank', '_blank');
+    if (popup) popup.opener = null;
+    const refreshed = await refetch();
+    if (refreshed.isSuccess && refreshed.data?.url && popup) popup.location.replace(refreshed.data.url);
+    else {
+      popup?.close();
+      if (!popup) message.warning('浏览器阻止了新窗口，请允许弹窗后重试');
+    }
+  };
+
+  useEffect(() => {
+    setSelectedModule(undefined);
+  }, [application.id]);
 
   useEffect(() => {
     setFrameLoaded(false); setFrameSlow(false); setBridgeContext({});
@@ -114,7 +169,7 @@ export default function EnterpriseApplicationView({
       application_id: application.id,
       application_slug: application.slug,
       application_name: application.name,
-      page_url: launch?.url,
+      page_url: safeContextPageUrl(launch?.url, bridgeContext.route),
       source: 'business_assistant',
       allowed_module_keys: launch?.module_keys ?? [],
       ...bridgeContext,
@@ -140,8 +195,16 @@ export default function EnterpriseApplicationView({
         </div>
         <div className="enterprise-app-view__identity"><Typography.Text strong>{application.name}</Typography.Text><div>{application.description || '企业业务应用'}</div></div>
         <Tag color="blue" style={{ marginLeft: 4 }}>{launch.display_mode === 'embedded' ? (immersive ? '完全沉浸' : '沉浸内嵌') : '独立应用'}</Tag>
+        {(launch.modules ?? []).length > 1 && <Select
+          size="small"
+          value={launch.module_key ?? undefined}
+          style={{ minWidth: 140 }}
+          options={(launch.modules ?? []).map((item) => ({ value: item.module_key, label: item.name }))}
+          onChange={setSelectedModule}
+          aria-label="选择子模块"
+        />}
         <div style={{ flex: 1 }} />
-        {launch.display_mode === 'embedded' && <Tooltip title="重新加载模块"><Button icon={<ReloadOutlined />} onClick={() => setFrameKey((value) => value + 1)} /></Tooltip>}
+        {launch.display_mode === 'embedded' && <Tooltip title="重新加载模块"><Button icon={<ReloadOutlined />} onClick={() => void refreshFrame()} /></Tooltip>}
         {launch.display_mode === 'embedded' && (
           <Tooltip title={immersive ? '显示平台导航轨' : '隐藏平台导航轨'}>
             <Button
@@ -151,8 +214,8 @@ export default function EnterpriseApplicationView({
             ><span className="enterprise-app-view__action-label">{immersive ? '退出沉浸' : '完全沉浸'}</span></Button>
           </Tooltip>
         )}
-        <Button icon={<ExportOutlined />} onClick={() => window.open(launch.url, '_blank', 'noopener,noreferrer')}><span className="enterprise-app-view__action-label">备用打开</span></Button>
-        {application.assistant_enabled && <Button type="primary" icon={<RobotOutlined />} onClick={() => setAssistantOpen(true)}><span className="enterprise-app-view__action-label">业务小助手</span></Button>}
+        <Button icon={<ExportOutlined />} onClick={() => void openFreshLaunch()}><span className="enterprise-app-view__action-label">备用打开</span></Button>
+        {application.assistant_enabled && <Badge count={pendingConfirmations.length} size="small"><Button type="primary" icon={<RobotOutlined />} onClick={() => setAssistantOpen(true)}><span className="enterprise-app-view__action-label">业务小助手</span></Button></Badge>}
       </div>
 
       {launch.display_mode === 'embedded' ? (
@@ -163,6 +226,8 @@ export default function EnterpriseApplicationView({
             key={frameKey}
             src={launch.url}
             title={application.name}
+            sandbox="allow-downloads allow-forms allow-popups allow-same-origin allow-scripts"
+            referrerPolicy="strict-origin"
             onLoad={() => {
               setFrameLoaded(true);
               setBridgeContext({});
@@ -181,7 +246,7 @@ export default function EnterpriseApplicationView({
           {frameSlow && !frameLoaded && <Alert showIcon type="warning" message="该项目可能禁止 iframe 嵌入" description="可使用右上角“备用打开”。若希望内嵌，需要独立项目允许 AI Platform 域名的 frame-ancestors。" style={{ position: 'absolute', left: 30, right: 30, bottom: 30, zIndex: 2 }} />}
         </div>
       ) : (
-        <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}><Result icon={<ExportOutlined style={{ color: '#6366f1' }} />} title={`${application.name} 配置为独立打开`} subTitle="应用仍由原项目独立部署和迭代；AI Platform 负责权限、导航和业务助手。" extra={<Button type="primary" onClick={() => window.open(launch.url, '_blank', 'noopener,noreferrer')}>打开应用</Button>} /></div>
+        <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}><Result icon={<ExportOutlined style={{ color: '#6366f1' }} />} title={`${application.name} 配置为独立打开`} subTitle="应用仍由原项目独立部署和迭代；AI Platform 负责权限、导航和业务助手。" extra={<Button type="primary" onClick={() => void openFreshLaunch()}>打开应用</Button>} /></div>
       )}
 
       <Drawer title={<Space><RobotOutlined style={{ color: '#6366f1' }} />{application.name} · 业务小助手</Space>} open={assistantOpen} onClose={() => setAssistantOpen(false)} width={400}>
@@ -191,6 +256,20 @@ export default function EnterpriseApplicationView({
           description={typeof bridgeContext.entity_id === 'string' ? `当前业务对象：${bridgeContext.entity_id}` : '只会注册你在该应用中获准的查询、新增、更新、删除工具。旧版应用会自动使用应用首页上下文。'}
           style={{ marginBottom: 18 }}
         />
+        {pendingConfirmations.length > 0 && <div style={{ marginBottom: 18 }}>
+          <Typography.Title level={5}>等待你确认的操作</Typography.Title>
+          <Space direction="vertical" style={{ width: '100%' }}>
+            {pendingConfirmations.map((item) => <Card key={item.id} size="small" title={item.action.name} extra={<Tag color="red">高风险</Tag>}>
+              <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>{item.action.description || `${item.action.operation} · ${item.module_key}`}</Typography.Paragraph>
+              {Object.keys(item.params).length > 0 && <Typography.Paragraph code copyable style={{ marginBottom: 8 }}>{JSON.stringify(item.params, null, 2)}</Typography.Paragraph>}
+              <Typography.Text type="secondary">请求编号：{item.request_id}</Typography.Text>
+              <div style={{ marginTop: 12 }}><Space>
+                <Button danger loading={resolveConfirmation.isPending} onClick={() => resolveConfirmation.mutate({ id: item.id, decision: 'reject' })}>拒绝</Button>
+                <Button type="primary" loading={resolveConfirmation.isPending} onClick={() => resolveConfirmation.mutate({ id: item.id, decision: 'approve' })}>确认执行</Button>
+              </Space></div>
+            </Card>)}
+          </Space>
+        </div>}
         <Typography.Paragraph type="secondary">你可以问：</Typography.Paragraph>
         <Space direction="vertical" style={{ width: '100%', marginBottom: 16 }}>
           {['汇总当前页面异常并给出处理建议', '查询今天待处理的业务记录', '根据当前业务数据生成一份 Excel'].map((item) => <Button key={item} block style={{ textAlign: 'left' }} onClick={() => setPrompt(item)}>{item}</Button>)}

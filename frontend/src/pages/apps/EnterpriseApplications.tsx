@@ -12,7 +12,8 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ApiError, connectors, dataInterfaces, enterpriseApplications, skillStore,
   type EnterpriseApplication,
-  type EnterpriseApplicationInput, type EnterpriseApplicationOperation,
+  type EnterpriseApplicationInput, type EnterpriseApplicationModuleAccess,
+  type EnterpriseApplicationOperation,
   type EnterpriseApplicationPermission, type EnterpriseApplicationScope,
   type EnterpriseApplicationTarget,
 } from '../../api/client';
@@ -20,6 +21,7 @@ import OrgSelect from '../../components/OrgSelect';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import { FinderShell, TitleBar } from '../../components/finder/primitives';
 import { useOrgTree } from '../../hooks/useOrgTree';
+import EnterpriseApplicationOnboardingWizard from './EnterpriseApplicationOnboardingWizard';
 
 export type EnterpriseApplicationsSection = 'applications' | 'navigation' | 'permissions' | 'assistant';
 
@@ -73,6 +75,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   const [orgId, setOrgId] = useState<string>();
   const [editing, setEditing] = useState<EnterpriseApplication | null>(null);
   const [appModalOpen, setAppModalOpen] = useState(false);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<EnterpriseApplication | null>(null);
   const [selectedAppId, setSelectedAppId] = useState<string>();
   const [grantModalOpen, setGrantModalOpen] = useState(false);
@@ -167,6 +170,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
           scope_id: string | null;
           permissions: EnterpriseApplicationPermission[];
           module_keys?: string[];
+          module_access?: Record<string, EnterpriseApplicationModuleAccess>;
         }> = currentGrants.flatMap((grant) => {
           const scope = grantScopeValue(grant.scope_type, grant.scope_id, orgId);
           const permissions: EnterpriseApplicationPermission[] = grant.permissions.filter(
@@ -178,6 +182,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
             scope_id: grant.scope_id,
             permissions,
             module_keys: grant.module_keys,
+            module_access: grant.module_access,
           }] : [];
         });
         const existingScopes = new Set(currentGrants.map((grant) => (
@@ -254,15 +259,24 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
       if (!selectedApp) throw new Error('请先选择应用');
       const node = nodeMap.get(values.scope);
       if (!node) throw new Error('请选择授权范围');
+      const moduleKeys = values.module_keys ?? [];
+      const existingModuleAccess = grantIndex === null
+        ? {}
+        : (selectedApp.grants[grantIndex]?.module_access ?? {});
       const grant = {
         scope_type: node.type as EnterpriseApplicationScope,
         scope_id: node.type === 'organization' ? null : node.id,
         permissions: values.permissions,
-        module_keys: values.module_keys ?? [],
+        module_keys: moduleKeys,
+        module_access: Object.fromEntries(moduleKeys.map((moduleKey) => [moduleKey, {
+          role: existingModuleAccess[moduleKey]?.role ?? 'member',
+          permissions: values.permissions,
+        }])),
       };
       const next = selectedApp.grants.map((item) => ({
         scope_type: item.scope_type, scope_id: item.scope_id, permissions: item.permissions,
         module_keys: item.module_keys,
+        module_access: item.module_access,
       }));
       if (grantIndex === null) next.push(grant); else next[grantIndex] = grant;
       return enterpriseApplications.replaceGrants(selectedApp.id, next);
@@ -276,6 +290,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
     const next = selectedApp.grants.filter((_, i) => i !== index).map((item) => ({
       scope_type: item.scope_type, scope_id: item.scope_id, permissions: item.permissions,
       module_keys: item.module_keys,
+      module_access: item.module_access,
     }));
     enterpriseApplications.replaceGrants(selectedApp.id, next).then(() => {
       invalidate(); message.success('授权已移除');
@@ -392,7 +407,10 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
 
   return (
     <FinderShell>
-      <TitleBar icon={titles[section][1]} title={titles[section][0]} titleExtra={<OrgSelect value={orgId} onChange={setOrgId} />} extra={section === 'applications' ? <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={!orgId}>登记应用</Button> : undefined} />
+      <TitleBar icon={titles[section][1]} title={titles[section][0]} titleExtra={<OrgSelect value={orgId} onChange={setOrgId} />} extra={section === 'applications' ? <Space>
+        <Button icon={<LinkOutlined />} onClick={() => setOnboardingOpen(true)} disabled={!orgId}>接入模块系统</Button>
+        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={!orgId}>手动登记</Button>
+      </Space> : undefined} />
       <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
         {section === 'applications' && renderApplications()}
         {section === 'navigation' && renderNavigation()}
@@ -452,7 +470,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
           <Form.Item name="permissions" label="权限" rules={[{ required: true }]}><Checkbox.Group options={PERMISSIONS} /></Form.Item>
           <Form.Item name="module_keys" label="可见子模块" extra="不选择表示可访问整个应用；选择后，该授权对象只能进入这些子模块，业务小助手也执行同一限制。">
             <Checkbox.Group options={(selectedIntegration?.modules ?? []).map((item) => ({
-              value: item.key || item.moduleKey || '', label: item.name || item.moduleName || item.key || item.moduleKey,
+              value: item.moduleKey, label: item.name || item.moduleKey,
             })).filter((item) => item.value)} />
           </Form.Item>
           {!selectedIntegration?.modules.length && <Alert showIcon type="warning" message="尚未发现子模块" description="请先在应用详情的“系统联通”中保存连接并同步；当前留空即保持整个应用可见。" />}
@@ -460,6 +478,16 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
       </Modal>
 
       <ConfirmModal open={!!deleteTarget} title="删除企业应用" desc={`确认删除“${deleteTarget?.name ?? ''}”？应用授权和工具绑定也会停用。`} okText="删除" okDanger loading={deleteApp.isPending} onCancel={() => setDeleteTarget(null)} onOk={() => { if (deleteTarget) deleteApp.mutate(deleteTarget.id); }} />
+      {orgId && <EnterpriseApplicationOnboardingWizard
+        open={onboardingOpen}
+        orgId={orgId}
+        nodeMap={nodeMap}
+        onClose={() => setOnboardingOpen(false)}
+        onComplete={(applicationId) => {
+          setSelectedAppId(applicationId);
+          invalidate();
+        }}
+      />}
     </FinderShell>
   );
 }

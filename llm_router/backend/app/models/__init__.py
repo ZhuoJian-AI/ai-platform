@@ -14,6 +14,8 @@ from app.models.dlp_rule import DlpRule
 from app.models.enterprise_application import (
     CrossDepartmentWorkItem,
     EnterpriseApplication,
+    EnterpriseApplicationAction,
+    EnterpriseApplicationActionRequest,
     EnterpriseApplicationEvent,
     EnterpriseApplicationEventRoute,
     EnterpriseApplicationGrant,
@@ -59,6 +61,8 @@ __all__ = [
     "ModelDeployment",
     "DlpRule",
     "EnterpriseApplication",
+    "EnterpriseApplicationAction",
+    "EnterpriseApplicationActionRequest",
     "EnterpriseApplicationIntegration",
     "EnterpriseApplicationEvent",
     "EnterpriseApplicationEventRoute",

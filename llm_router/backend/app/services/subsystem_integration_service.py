@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime
 from urllib.parse import urljoin, urlsplit
 from uuid import UUID
@@ -18,9 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.user_auth import CurrentUser
 from app.config import settings
 from app.database import async_session_factory
+from app.models.department import Department
 from app.models.enterprise_application import (
     CrossDepartmentWorkItem,
     EnterpriseApplication,
+    EnterpriseApplicationAction,
     EnterpriseApplicationEvent,
     EnterpriseApplicationEventRoute,
     EnterpriseApplicationIntegration,
@@ -31,28 +34,21 @@ from app.schemas.enterprise_application import (
 )
 from app.services import scope_service, skill_scope_service
 from app.utils.crypto import decrypt_provider_api_key, encrypt_provider_api_key
+from app.utils.public_url import assert_public_http_url, same_origin
 
 logger = structlog.get_logger()
 
-
-def _same_origin(entry_url: str, candidate: str) -> bool:
-    entry = urlsplit(entry_url)
-    target = urlsplit(candidate)
-    return (
-        target.scheme in {"http", "https"}
-        and target.username is None
-        and target.password is None
-        and (entry.scheme, entry.hostname, entry.port) == (target.scheme, target.hostname, target.port)
-    )
+STABLE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
 def _validate_manifest_url(application: EnterpriseApplication, value: str) -> str:
     url = str(value)
-    if not _same_origin(application.entry_url, url):
+    if not same_origin(application.entry_url, url):
         raise HTTPException(status_code=422, detail="Manifest URL must use the application entry URL origin")
-    parsed = urlsplit(url)
-    if settings.app_env != "development" and parsed.scheme != "https":
-        raise HTTPException(status_code=422, detail="Production subsystem integration requires HTTPS")
+    try:
+        assert_public_http_url(url, require_https=settings.app_env != "development")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return url
 
 
@@ -63,31 +59,213 @@ def _headers(row: EnterpriseApplicationIntegration) -> dict[str, str]:
     return headers
 
 
-def _validate_manifest(application: EnterpriseApplication, payload: object, manifest_url: str) -> tuple[dict, str]:
+def _validate_manifest_payload(
+    payload: object,
+    *,
+    entry_url: str,
+    manifest_url: str,
+    expected_slug: str | None,
+) -> tuple[dict, str, int]:
     if not isinstance(payload, dict) or payload.get("protocol") != "zhuojian-subsystem":
         raise ValueError("Manifest protocol must be 'zhuojian-subsystem'")
-    if payload.get("version") != 1:
-        raise ValueError("Only subsystem protocol version 1 is supported")
-    if payload.get("applicationSlug") != application.slug:
+    version = payload.get("version")
+    if version not in {1, 2}:
+        raise ValueError("Subsystem protocol version must be 1 or 2")
+    application_slug = str(payload.get("applicationSlug") or "").strip()
+    if not application_slug:
+        raise ValueError("Manifest applicationSlug is required")
+    if expected_slug is not None and application_slug != expected_slug:
         raise ValueError("Manifest applicationSlug does not match the registered application")
     modules = payload.get("modules")
     if not isinstance(modules, list) or len(modules) > 500:
         raise ValueError("Manifest modules must be a list with at most 500 entries")
     module_keys: set[str] = set()
+    action_keys: set[str] = set()
+    normalized_modules: list[dict] = []
+    if version == 2:
+        if not modules:
+            raise ValueError("Manifest modules must not be empty for protocol v2")
+        enterprise = payload.get("enterprise")
+        if (
+            not isinstance(enterprise, dict)
+            or not str(enterprise.get("key") or "").strip()
+            or not str(enterprise.get("name") or "").strip()
+        ):
+            raise ValueError("Manifest enterprise.key and enterprise.name are required")
+        auth = payload.get("auth")
+        if not isinstance(auth, dict):
+            raise ValueError("Manifest auth is required for protocol v2")
+        if auth.get("ssoPath") != "/api/integration/sso":
+            raise ValueError("Manifest auth.ssoPath must be '/api/integration/sso'")
+        if auth.get("algorithm") != "HS256":
+            raise ValueError("Manifest auth.algorithm must be 'HS256'")
     for module in modules:
         if not isinstance(module, dict):
             raise ValueError("Manifest module entries must be objects")
         key = str(module.get("key") or module.get("moduleKey") or "").strip()
-        if not key or len(key) > 120 or key in module_keys:
+        if not key or len(key) > 120 or not STABLE_KEY_RE.fullmatch(key) or key in module_keys:
             raise ValueError("Manifest module keys must be unique and 1-120 characters")
         module_keys.add(key)
-    event_feed = payload.get("eventFeed")
-    if not isinstance(event_feed, dict) or not event_feed.get("path"):
-        raise ValueError("Manifest eventFeed.path is required")
-    events_url = urljoin(manifest_url, str(event_feed["path"]))
-    if not _same_origin(application.entry_url, events_url):
+        route = str(module.get("route") or "/").strip()
+        parsed_route = urlsplit(route)
+        if not route.startswith("/") or route.startswith("//") or parsed_route.scheme or parsed_route.netloc:
+            raise ValueError(f"Module '{key}' route must be a site-relative path")
+        departments = module.get("departments") if isinstance(module.get("departments"), list) else []
+        if version == 2:
+            if any(not isinstance(item, dict) for item in departments):
+                raise ValueError(f"Module '{key}' departments must contain objects")
+            department_keys = [
+                str(item.get("key") or "").strip()
+                for item in departments
+                if isinstance(item, dict)
+            ]
+            if not department_keys or any(not item for item in department_keys):
+                raise ValueError(f"Module '{key}' must declare departments with stable keys")
+            if any(len(item) > 120 or not STABLE_KEY_RE.fullmatch(item) for item in department_keys):
+                raise ValueError(f"Module '{key}' department keys must use lowercase stable identifiers")
+            if len(set(department_keys)) != len(department_keys):
+                raise ValueError(f"Module '{key}' department keys must be unique")
+            for department in departments:
+                if not str(department.get("name") or "").strip() or not str(
+                    department.get("role") or ""
+                ).strip():
+                    raise ValueError(f"Module '{key}' departments must declare name and role")
+            owners = [item for item in departments if isinstance(item, dict) and item.get("role") == "owner"]
+            if len(owners) != 1:
+                raise ValueError(f"Module '{key}' must declare exactly one owner department")
+        normalized_actions: list[dict] = []
+        actions = module.get("actions") if isinstance(module.get("actions"), list) else []
+        if version == 2 and not isinstance(module.get("actions"), list):
+            raise ValueError(f"Module '{key}' actions must be a list")
+        for action in actions:
+            if not isinstance(action, dict):
+                raise ValueError(f"Module '{key}' contains a non-object action")
+            action_key = str(action.get("actionKey") or action.get("key") or "").strip()
+            operation = str(action.get("operation") or "").strip()
+            if version == 2:
+                required_fields = {
+                    "actionKey",
+                    "name",
+                    "operation",
+                    "aiEnabled",
+                    "requiresConfirmation",
+                    "inputSchema",
+                    "resultSchema",
+                }
+                if not required_fields.issubset(action):
+                    raise ValueError(f"Action '{action_key or '<empty>'}' is missing protocol v2 fields")
+                if not isinstance(action["aiEnabled"], bool) or not isinstance(
+                    action["requiresConfirmation"], bool
+                ):
+                    raise ValueError(f"Action '{action_key}' AI and confirmation flags must be booleans")
+                if not isinstance(action["inputSchema"], dict) or not isinstance(
+                    action["resultSchema"], dict
+                ):
+                    raise ValueError(f"Action '{action_key}' input and result schemas must be objects")
+            if (
+                not action_key
+                or len(action_key) > 160
+                or not STABLE_KEY_RE.fullmatch(action_key)
+                or action_key in action_keys
+            ):
+                raise ValueError("Manifest action keys must be unique and 1-160 characters")
+            if operation not in {"query", "create", "update", "delete", "export"}:
+                raise ValueError(f"Action '{action_key}' has an unsupported operation")
+            action_keys.add(action_key)
+            normalized_actions.append({
+                **action,
+                "actionKey": action_key,
+                "name": str(action.get("name") or action_key)[:255],
+                "operation": operation,
+                "aiEnabled": bool(action.get("aiEnabled", False)),
+                "requiresConfirmation": bool(action.get("requiresConfirmation", False)),
+                "inputSchema": action.get("inputSchema") if isinstance(action.get("inputSchema"), dict) else {},
+                "resultSchema": action.get("resultSchema") if isinstance(action.get("resultSchema"), dict) else {},
+            })
+        normalized_modules.append({
+            **module,
+            "moduleKey": key,
+            "name": str(module.get("name") or module.get("moduleName") or key)[:255],
+            "route": route,
+            "departments": departments,
+            "actions": normalized_actions,
+        })
+    if version == 1:
+        event_feed = payload.get("eventFeed")
+        if not isinstance(event_feed, dict) or not event_feed.get("path"):
+            raise ValueError("Manifest eventFeed.path is required")
+        events_url = urljoin(manifest_url, str(event_feed["path"]))
+    else:
+        if not payload.get("eventsUrl"):
+            raise ValueError("Manifest eventsUrl is required for protocol v2")
+        events_url = urljoin(manifest_url, str(payload["eventsUrl"]))
+    if not same_origin(entry_url, events_url):
         raise ValueError("Event feed must use the registered application origin")
-    return payload, events_url
+    normalized = {**payload, "version": version, "applicationSlug": application_slug, "modules": normalized_modules}
+    return normalized, events_url, version
+
+
+def _validate_manifest(application: EnterpriseApplication, payload: object, manifest_url: str) -> tuple[dict, str, int]:
+    return _validate_manifest_payload(
+        payload,
+        entry_url=application.entry_url,
+        manifest_url=manifest_url,
+        expected_slug=application.slug,
+    )
+
+
+async def _match_departments(db: AsyncSession, organization_id: UUID | str, manifest: dict) -> None:
+    departments = list((await db.execute(
+        select(Department).where(Department.organization_id == UUID(str(organization_id)))
+    )).scalars().all())
+    by_slug = {item.slug: item for item in departments}
+    for module in manifest.get("modules") or []:
+        for department in module.get("departments") or []:
+            if not isinstance(department, dict):
+                continue
+            match = by_slug.get(str(department.get("key") or ""))
+            department["platformDepartmentId"] = str(match.id) if match else None
+            department["matchStatus"] = "matched" if match else "unresolved"
+
+
+async def _sync_actions(
+    db: AsyncSession, application: EnterpriseApplication, manifest: dict
+) -> None:
+    existing = list((await db.execute(
+        select(EnterpriseApplicationAction).where(EnterpriseApplicationAction.application_id == application.id)
+    )).scalars().all())
+    by_key = {item.action_key: item for item in existing}
+    seen: set[str] = set()
+    for module in manifest.get("modules") or []:
+        module_key = module["moduleKey"]
+        for action in module.get("actions") or []:
+            key = action["actionKey"]
+            seen.add(key)
+            values = {
+                "module_key": module_key,
+                "name": action["name"],
+                "description": str(action.get("description") or "")[:4000] or None,
+                "operation": action["operation"],
+                "ai_enabled": action["aiEnabled"],
+                "requires_confirmation": action["requiresConfirmation"],
+                "input_schema": action["inputSchema"],
+                "result_schema": action["resultSchema"],
+                "is_active": True,
+            }
+            row = by_key.get(key)
+            if row is None:
+                db.add(EnterpriseApplicationAction(
+                    application_id=application.id,
+                    organization_id=application.organization_id,
+                    action_key=key,
+                    **values,
+                ))
+            else:
+                for field, value in values.items():
+                    setattr(row, field, value)
+    for row in existing:
+        if row.action_key not in seen:
+            row.is_active = False
 
 
 async def get_integration(db: AsyncSession, application_id: UUID | str) -> EnterpriseApplicationIntegration | None:
@@ -127,6 +305,56 @@ async def configure_integration(
         row.auth_token_encrypted = encrypt_provider_api_key(data.auth_token)
     await db.flush()
     return row
+
+
+async def discover_subsystem(
+    db: AsyncSession, organization_id: UUID | str, base_url: str, auth_token: str | None = None
+) -> dict:
+    """Probe the fixed v2 endpoints without creating platform records."""
+    entry_url = str(base_url).rstrip("/") + "/"
+    try:
+        assert_public_http_url(entry_url, require_https=settings.app_env != "development")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    health_url = urljoin(entry_url, "/health")
+    manifest_url = urljoin(entry_url, "/api/integration/manifest")
+    headers = {"accept": "application/json", "user-agent": "ZhuoJian-Subsystem-Discovery/2.0"}
+    if auth_token:
+        headers["authorization"] = f"Bearer {auth_token}"
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(15.0, connect=5.0), follow_redirects=False
+        ) as client:
+            health_response = await client.get(health_url, headers=headers)
+            if 300 <= health_response.status_code < 400:
+                raise ValueError("Health endpoint must not redirect")
+            health_response.raise_for_status()
+            manifest_response = await client.get(manifest_url, headers=headers)
+            if 300 <= manifest_response.status_code < 400:
+                raise ValueError("Manifest endpoint must not redirect")
+            manifest_response.raise_for_status()
+            if len(manifest_response.content) > 512 * 1024:
+                raise ValueError("Manifest exceeds 512KB")
+            manifest, _, version = _validate_manifest_payload(
+                manifest_response.json(),
+                entry_url=entry_url,
+                manifest_url=manifest_url,
+                expected_slug=None,
+            )
+            await _match_departments(db, organization_id, manifest)
+    except (httpx.HTTPError, ValueError, ValidationError) as exc:
+        raise HTTPException(status_code=422, detail=f"Subsystem discovery failed: {exc}") from exc
+    return {
+        "entry_url": entry_url,
+        "manifest_url": manifest_url,
+        "health_url": health_url,
+        "health_status": "healthy",
+        "protocol_version": version,
+        "suggested_name": str(manifest.get("applicationName") or manifest["applicationSlug"])[:255],
+        "suggested_slug": manifest["applicationSlug"],
+        "manifest": manifest,
+        "modules": manifest.get("modules") or [],
+    }
 
 
 def integration_read(row: EnterpriseApplicationIntegration) -> dict:
@@ -320,10 +548,14 @@ async def sync_integration(
             manifest_response.raise_for_status()
             if len(manifest_response.content) > 512 * 1024:
                 raise ValueError("Manifest exceeds 512KB")
-            manifest, events_url = _validate_manifest(application, manifest_response.json(), row.manifest_url)
+            manifest, events_url, version = _validate_manifest(
+                application, manifest_response.json(), row.manifest_url
+            )
+            await _match_departments(db, application.organization_id, manifest)
+            await _sync_actions(db, application, manifest)
             row.manifest = manifest
             row.events_url = events_url
-            row.protocol_version = 1
+            row.protocol_version = version
             row.last_manifest_sync_at = datetime.now(UTC)
 
             while received < batch_limit:

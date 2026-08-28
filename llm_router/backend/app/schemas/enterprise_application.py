@@ -14,6 +14,16 @@ ApplicationTarget = Literal["tool_endpoint", "data_interface", "skill_folder"]
 ApplicationOperation = Literal["query", "create", "update", "delete", "export"]
 
 
+class EnterpriseApplicationModuleAccess(BaseModel):
+    role: str = Field("member", min_length=1, max_length=80)
+    permissions: list[ApplicationPermission] = Field(default_factory=list)
+
+    @field_validator("permissions")
+    @classmethod
+    def unique_permissions(cls, value: list[ApplicationPermission]) -> list[ApplicationPermission]:
+        return list(dict.fromkeys(value))
+
+
 class EnterpriseApplicationCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     slug: str = Field(..., max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -46,6 +56,7 @@ class EnterpriseApplicationGrantInput(BaseModel):
     scope_id: UUID | None = None
     permissions: list[ApplicationPermission] = Field(default_factory=list)
     module_keys: list[str] = Field(default_factory=list, max_length=200)
+    module_access: dict[str, EnterpriseApplicationModuleAccess] = Field(default_factory=dict)
 
     @field_validator("permissions")
     @classmethod
@@ -59,6 +70,21 @@ class EnterpriseApplicationGrantInput(BaseModel):
         if any(len(item) > 120 for item in cleaned):
             raise ValueError("module key must be 120 characters or fewer")
         return list(dict.fromkeys(cleaned))
+
+    @field_validator("module_access")
+    @classmethod
+    def valid_module_access(
+        cls, value: dict[str, EnterpriseApplicationModuleAccess]
+    ) -> dict[str, EnterpriseApplicationModuleAccess]:
+        if len(value) > 200:
+            raise ValueError("module access must contain at most 200 modules")
+        cleaned: dict[str, EnterpriseApplicationModuleAccess] = {}
+        for key, access in value.items():
+            module_key = key.strip()
+            if not module_key or len(module_key) > 120:
+                raise ValueError("module key must be 1-120 characters")
+            cleaned[module_key] = access
+        return cleaned
 
 
 class EnterpriseApplicationGrantsReplace(BaseModel):
@@ -84,6 +110,7 @@ class EnterpriseApplicationGrantRead(OrmModel):
     scope_id: str | None
     permissions: list[str]
     module_keys: list[str]
+    module_access: dict[str, EnterpriseApplicationModuleAccess] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
@@ -134,12 +161,19 @@ class TerminalEnterpriseApplicationRead(BaseModel):
     module_keys: list[str] = Field(default_factory=list)
 
 
+class EnterpriseApplicationLaunchModuleRead(BaseModel):
+    module_key: str
+    name: str
+
+
 class EnterpriseApplicationLaunchRead(BaseModel):
     application_id: UUID
     url: str
     display_mode: str
     permissions: list[str]
     module_keys: list[str] = Field(default_factory=list)
+    module_key: str | None = None
+    modules: list[EnterpriseApplicationLaunchModuleRead] = Field(default_factory=list)
 
 
 class EnterpriseApplicationIntegrationInput(BaseModel):
@@ -163,6 +197,72 @@ class EnterpriseApplicationIntegrationRead(BaseModel):
     last_manifest_sync_at: datetime | None
     last_event_sync_at: datetime | None
     last_error: str | None
+
+
+class EnterpriseApplicationActionRead(OrmModel):
+    id: UUID
+    application_id: UUID
+    module_key: str
+    action_key: str
+    name: str
+    description: str | None
+    operation: ApplicationOperation
+    ai_enabled: bool
+    requires_confirmation: bool
+    input_schema: dict = Field(default_factory=dict)
+    result_schema: dict = Field(default_factory=dict)
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class EnterpriseApplicationDiscoveryInput(BaseModel):
+    base_url: AnyHttpUrl
+    auth_token: str | None = Field(None, min_length=16, max_length=4096)
+
+
+class EnterpriseApplicationDiscoveryRead(BaseModel):
+    entry_url: str
+    manifest_url: str
+    health_url: str
+    health_status: Literal["healthy", "unhealthy"]
+    protocol_version: int
+    suggested_name: str
+    suggested_slug: str
+    manifest: dict
+    modules: list[dict] = Field(default_factory=list)
+
+
+class EnterpriseApplicationActionInvoke(BaseModel):
+    module_key: str = Field(..., min_length=1, max_length=120)
+    params: dict = Field(default_factory=dict)
+    request_id: str | None = Field(None, min_length=1, max_length=200)
+
+
+class EnterpriseApplicationActionResultRead(BaseModel):
+    request_id: str
+    status: Literal["pending", "executing", "completed", "rejected", "expired", "failed"]
+    confirmation_id: UUID | None = None
+    result: dict = Field(default_factory=dict)
+    error: str | None = None
+    provenance: dict = Field(default_factory=dict)
+
+
+class EnterpriseApplicationActionRequestRead(OrmModel):
+    id: UUID
+    application_id: UUID
+    action_id: UUID
+    request_id: str
+    module_key: str
+    status: str
+    params: dict = Field(default_factory=dict)
+    expires_at: datetime
+    resolved_at: datetime | None
+    result: dict = Field(default_factory=dict)
+    error: str | None
+    action: EnterpriseApplicationActionRead
+    created_at: datetime
+    updated_at: datetime
 
 
 class EnterpriseApplicationSyncRead(BaseModel):

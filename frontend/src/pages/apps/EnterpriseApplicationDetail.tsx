@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
-  Alert, Button, Card, Descriptions, Empty, Form, Input, Modal, Select, Space,
+  Alert, Button, Card, Descriptions, Empty, Form, Input, Modal, Popconfirm, Select, Space,
   Switch, Table, Tabs, Tag, TreeSelect, Typography, message,
 } from 'antd';
 import {
@@ -13,6 +13,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ApiError, enterpriseApplications,
   type EnterpriseApplicationCapability,
+  type EnterpriseApplicationAction,
   type EnterpriseApplicationInput,
   type EnterpriseApplicationOperation,
   type EnterpriseApplicationPermission,
@@ -92,6 +93,11 @@ export default function EnterpriseApplicationDetail() {
     queryFn: () => enterpriseApplications.eventRoutes(appId),
     enabled: !!appId,
   });
+  const actionsQuery = useQuery({
+    queryKey: ['enterprise-application-actions', appId],
+    queryFn: () => enterpriseApplications.actions(appId),
+    enabled: !!appId,
+  });
   const app = appQuery.data;
   const overview = overviewQuery.data;
 
@@ -137,10 +143,23 @@ export default function EnterpriseApplicationDetail() {
     },
     onError: (error) => message.error(errorText(error, '连接配置保存失败')),
   });
+  const revokeIntegration = useMutation({
+    mutationFn: () => enterpriseApplications.configureIntegration(appId, {
+      manifest_url: integrationQuery.data!.manifest_url,
+      clear_auth_token: true,
+      sync_enabled: false,
+    }),
+    onSuccess: (result) => {
+      qc.setQueryData(['enterprise-application-integration', appId], result);
+      message.success('连接密钥已撤销，新的登录和 AI 操作已停止');
+    },
+    onError: (error) => message.error(errorText(error, '撤销连接密钥失败')),
+  });
   const syncIntegration = useMutation({
     mutationFn: () => enterpriseApplications.syncIntegration(appId),
     onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ['enterprise-application-integration', appId] });
+      qc.invalidateQueries({ queryKey: ['enterprise-application-actions', appId] });
       if (result.status === 'healthy') {
         message.success(`同步完成：新增 ${result.received_events} 个事件，生成 ${result.created_work_items} 个跨部门待办`);
       } else message.error(result.detail || '子系统同步失败');
@@ -263,6 +282,14 @@ export default function EnterpriseApplicationDetail() {
                 {PERMISSION_LABEL[permission]}
               </Tag>
             ))}</Space>
+          ),
+        },
+        {
+          title: '子模块权限', dataIndex: 'module_access',
+          render: (access: Record<string, { role: string; permissions: EnterpriseApplicationPermission[] }>) => (
+            Object.keys(access ?? {}).length ? <Space wrap>{Object.entries(access).map(([moduleKey, value]) => (
+              <Tag key={moduleKey} color="cyan">{moduleKey} · {value.role}</Tag>
+            ))}</Space> : <Tag>沿用应用级权限</Tag>
           ),
         },
         {
@@ -393,6 +420,16 @@ export default function EnterpriseApplicationDetail() {
               <Space size={24} align="start">
                 <Form.Item name="sync_enabled" valuePropName="checked"><Switch checkedChildren="自动同步" unCheckedChildren="暂停同步" /></Form.Item>
                 <Button type="primary" htmlType="submit" loading={configureIntegration.isPending}>保存连接</Button>
+                {integrationQuery.data?.token_configured && <Popconfirm
+                  title="撤销模块连接密钥？"
+                  description="撤销后新的 iframe 登录、AI 操作和自动同步都会停止。"
+                  okText="确认撤销"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => revokeIntegration.mutate()}
+                >
+                  <Button danger loading={revokeIntegration.isPending}>撤销密钥</Button>
+                </Popconfirm>}
               </Space>
             </Form>
             {integrationQuery.data && <Descriptions bordered size="small" column={2}>
@@ -405,9 +442,26 @@ export default function EnterpriseApplicationDetail() {
           </Card>
           <Card title="已发现的业务子模块">
             <Space wrap>{integrationQuery.data?.modules.length ? integrationQuery.data.modules.map((item) => {
-              const key = item.key || item.moduleKey || 'unknown';
-              return <Tag key={key} color="blue">{item.name || item.moduleName || key} · {key}</Tag>;
+              const key = item.moduleKey || 'unknown';
+              return <Tag key={key} color="blue">{item.name || key} · {key}</Tag>;
             }) : <Typography.Text type="secondary">首次同步成功后自动显示；之后子系统新增模块也会自动更新。</Typography.Text>}</Space>
+          </Card>
+          <Card title={<Space><ApiOutlined />页面与 AI 共用操作</Space>}>
+            <Alert showIcon type="info" message="这些操作由模块 Manifest 自动同步" description="AI 和模块页面调用相同业务命令；标记为高风险的操作会先等待当前用户确认。" style={{ marginBottom: 14 }} />
+            <Table<EnterpriseApplicationAction>
+              rowKey="id"
+              pagination={false}
+              dataSource={actionsQuery.data ?? []}
+              locale={{ emptyText: '当前系统还没有声明 v2 操作' }}
+              columns={[
+                { title: '操作', render: (_, row) => <div><Typography.Text strong>{row.name}</Typography.Text><div><Typography.Text type="secondary">{row.action_key}</Typography.Text></div></div> },
+                { title: '子模块', dataIndex: 'module_key' },
+                { title: '类型', dataIndex: 'operation', width: 100, render: (value: EnterpriseApplicationOperation) => <Tag color={OPERATION_META[value].color}>{OPERATION_META[value].label}</Tag> },
+                { title: 'AI', dataIndex: 'ai_enabled', width: 90, render: (value: boolean) => <Tag color={value ? 'purple' : 'default'}>{value ? '可调用' : '页面专用'}</Tag> },
+                { title: '确认', dataIndex: 'requires_confirmation', width: 100, render: (value: boolean) => <Tag color={value ? 'red' : 'green'}>{value ? '用户确认' : '直接执行'}</Tag> },
+                { title: '状态', dataIndex: 'is_active', width: 90, render: (value: boolean) => <Tag color={value ? 'green' : 'default'}>{value ? '启用' : '已停用'}</Tag> },
+              ]}
+            />
           </Card>
           <Card title="跨部门分发规则" extra={<Button icon={<PlusOutlined />} onClick={() => setRouteOpen(true)} disabled={!integrationQuery.data?.modules.length}>新增规则</Button>}>
             <Alert showIcon type="success" message="规则只传递业务变化，不复制对方数据库" description="例如：生产部“款号资料中心”变化后，为设计部生成待办；设计部进入自己的系统继续处理。" style={{ marginBottom: 14 }} />
@@ -466,7 +520,7 @@ export default function EnterpriseApplicationDetail() {
         <Form form={routeForm} layout="vertical" onFinish={(values) => saveRoute.mutate(values)}>
           <Form.Item name="name" label="规则名称" rules={[{ required: true }]}><Input placeholder="例如：款号资料更新后通知设计部" /></Form.Item>
           <Form.Item name="module_key" label="来源子模块" extra="选择“全部模块”时，这个系统的任何业务更新都会通知接收方。">
-            <Select allowClear placeholder="全部模块" options={(integrationQuery.data?.modules ?? []).map((item) => ({ value: item.key || item.moduleKey, label: item.name || item.moduleName || item.key || item.moduleKey }))} />
+            <Select allowClear placeholder="全部模块" options={(integrationQuery.data?.modules ?? []).map((item) => ({ value: item.moduleKey, label: item.name || item.moduleKey }))} />
           </Form.Item>
           <Form.Item name="target_scope" label="接收部门、团队或人员" rules={[{ required: true }]}><TreeSelect treeData={treeData} treeDefaultExpandAll showSearch treeNodeFilterProp="title" placeholder="例如：设计部" /></Form.Item>
           <Form.Item name="target_module_key" label="目标模块标识（可选）" extra="目标部门有独立系统时填写其模块 key；暂未接入时留空，先进入平台跨部门待办。"><Input placeholder="例如：style_design" /></Form.Item>

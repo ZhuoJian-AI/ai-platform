@@ -55,6 +55,10 @@ class EnterpriseApplication(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin
         uselist=False,
     )
     event_routes = relationship("EnterpriseApplicationEventRoute", back_populates="application", lazy="selectin")
+    actions = relationship("EnterpriseApplicationAction", back_populates="application", lazy="selectin")
+    action_requests = relationship(
+        "EnterpriseApplicationActionRequest", back_populates="application", lazy="selectin"
+    )
 
 
 class EnterpriseApplicationGrant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
@@ -93,6 +97,8 @@ class EnterpriseApplicationGrant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDelete
     permissions: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     # Empty means every module, preserving the behaviour of grants created before 0043.
     module_keys: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # Protocol v2: per-submodule role + permissions. Empty preserves v1 behaviour.
+    module_access: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     application = relationship("EnterpriseApplication", back_populates="grants")
 
@@ -166,6 +172,81 @@ class EnterpriseApplicationIntegration(UUIDPrimaryKeyMixin, TimestampMixin, Base
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     application = relationship("EnterpriseApplication", back_populates="integration")
+
+
+class EnterpriseApplicationAction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Manifest-discovered command shared by page buttons and AI assistants."""
+
+    __tablename__ = "enterprise_application_actions"
+    __table_args__ = (
+        UniqueConstraint("application_id", "action_key", name="uq_enterprise_application_action_key"),
+        CheckConstraint(
+            "operation IN ('query','create','update','delete','export')",
+            name="ck_enterprise_application_action_operation",
+        ),
+    )
+
+    application_id: Mapped[str] = mapped_column(
+        ForeignKey("enterprise_applications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    module_key: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    action_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    operation: Mapped[str] = mapped_column(String(20), nullable=False)
+    ai_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    requires_confirmation: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    input_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    result_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    application = relationship("EnterpriseApplication", back_populates="actions")
+    requests = relationship("EnterpriseApplicationActionRequest", back_populates="action", lazy="selectin")
+
+
+class EnterpriseApplicationActionRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Replay-safe execution and optional human-confirmation record for one action."""
+
+    __tablename__ = "enterprise_application_action_requests"
+    __table_args__ = (
+        UniqueConstraint(
+            "application_id",
+            "user_id",
+            "request_id",
+            name="uq_enterprise_application_action_request",
+        ),
+        CheckConstraint(
+            "status IN ('pending','executing','completed','rejected','expired','failed')",
+            name="ck_enterprise_application_action_request_status",
+        ),
+    )
+
+    application_id: Mapped[str] = mapped_column(
+        ForeignKey("enterprise_applications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    action_id: Mapped[str] = mapped_column(
+        ForeignKey("enterprise_application_actions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    request_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    module_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    params_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    result: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    application = relationship("EnterpriseApplication", back_populates="action_requests")
+    action = relationship("EnterpriseApplicationAction", back_populates="requests")
 
 
 class EnterpriseApplicationEvent(UUIDPrimaryKeyMixin, TimestampMixin, Base):

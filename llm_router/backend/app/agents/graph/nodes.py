@@ -47,6 +47,7 @@ from app.services import (
     skill_runner_client,
     skill_scope_service,
     storage_gateway_service,
+    subsystem_action_service,
     workspace_permission_service,
     workspace_service,
 )
@@ -1258,7 +1259,13 @@ async def _configure_visual_turn(
     return provider, model, system_prompt
 
 async def _build_tools(
-    db, skill_ids: list[str], workspace_id: str | None, user=None, *, exec_mode: str = "craft",
+    db,
+    skill_ids: list[str],
+    workspace_id: str | None,
+    user=None,
+    *,
+    exec_mode: str = "craft",
+    application_id: str | None = None,
 ) -> tuple[list[dict], dict[str, dict]]:
     """加载技能文件夹 → 读取 skill.md manifest → OpenAI tools 列表 + name→(folder, endpoint) 映射。
 
@@ -1269,6 +1276,24 @@ async def _build_tools(
     """
     tools: list[dict] = []
     registry: dict[str, dict] = {}
+    if application_id and user is not None:
+        application = await enterprise_application_service.get_application(db, application_id)
+        if application is not None and str(application.organization_id) == str(user.organization_id):
+            for action in await subsystem_action_service.list_actions_for_user(db, application, user):
+                tool_name = subsystem_action_service.action_tool_name(application, action)
+                parameters = dict(action.input_schema or {"type": "object", "properties": {}})
+                parameters.setdefault("type", "object")
+                parameters.setdefault("properties", {})
+                tools.append({"type": "function", "function": {
+                    "name": tool_name,
+                    "description": action.description or action.name,
+                    "parameters": parameters,
+                }})
+                registry[tool_name] = {
+                    "kind": "enterprise_action",
+                    "application": application,
+                    "action": action,
+                }
     agent_skills: dict[str, dict] = {}
     agent_skill_slugs: dict[str, list[str]] = {}
     for sid in skill_ids:
@@ -1812,6 +1837,30 @@ async def _execute_tool_call(
         except (json.JSONDecodeError, AttributeError):
             ok = False
         return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
+    if entry.get("kind") == "enterprise_action":
+        user = deps.get("user")
+        if user is None:
+            msg = "Enterprise subsystem actions require a terminal user"
+            return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
+        application = entry["application"]
+        action = entry["action"]
+        try:
+            result = await subsystem_action_service.invoke_action(
+                db,
+                application.id,
+                action.action_key,
+                action.module_key,
+                params,
+                user,
+                request_id=f"{state.get('task_id') or 'agent'}:{tool_call_id}"[:200],
+            )
+            content = json.dumps(result, ensure_ascii=False, default=str)
+            ok = result.get("status") in {"pending", "completed"}
+            return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("enterprise_action_failed", action=action.action_key, error=str(exc))
+            msg = f"enterprise action error: {exc}"
+            return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
     folder: SkillFolder = entry["folder"]
     ep: ToolEndpoint = entry["endpoint"]
     user = deps.get("user")
@@ -2063,7 +2112,11 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
         tools, registry = [], {}
     else:
         tools, registry = await _build_tools(
-            db, state.get("skill_ids") or [], state.get("workspace_id"), user,
+            db,
+            state.get("skill_ids") or [],
+            state.get("workspace_id"),
+            user,
+            application_id=state.get("application_id"),
         )
         rag_ids = list(state.get("rag_collection_ids") or [])
         if state.get("rag_collection_id") and str(state["rag_collection_id"]) not in rag_ids:

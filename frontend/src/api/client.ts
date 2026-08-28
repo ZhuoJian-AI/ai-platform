@@ -1468,11 +1468,17 @@ export type EnterpriseApplicationScope = 'organization' | 'department' | 'team' 
 export type EnterpriseApplicationTarget = 'tool_endpoint' | 'data_interface' | 'skill_folder';
 export type EnterpriseApplicationOperation = 'query' | 'create' | 'update' | 'delete' | 'export';
 
+export interface EnterpriseApplicationModuleAccess {
+  role: string;
+  permissions: EnterpriseApplicationPermission[];
+}
+
 export interface EnterpriseApplicationGrant {
   id: string; application_id: string; organization_id: string;
   scope_type: EnterpriseApplicationScope; scope_id: string | null;
   permissions: EnterpriseApplicationPermission[];
   module_keys: string[];
+  module_access: Record<string, EnterpriseApplicationModuleAccess>;
   created_at: string; updated_at: string;
 }
 
@@ -1510,16 +1516,67 @@ export interface EnterpriseApplicationLaunch {
   application_id: string; url: string; display_mode: 'embedded' | 'external';
   permissions: EnterpriseApplicationPermission[];
   module_keys: string[];
+  module_key: string | null;
+  modules: Array<{ module_key: string; name: string }>;
+}
+
+export interface EnterpriseApplicationManifestDepartment {
+  key: string; name: string; role: string;
+  platformDepartmentId?: string | null; matchStatus?: 'matched' | 'unresolved';
+}
+
+export interface EnterpriseApplicationManifestAction {
+  actionKey: string; name: string; description?: string;
+  operation: EnterpriseApplicationOperation; aiEnabled: boolean;
+  requiresConfirmation: boolean; inputSchema: Record<string, unknown>;
+  resultSchema: Record<string, unknown>;
+}
+
+export interface EnterpriseApplicationManifestModule {
+  moduleKey: string; name: string; route: string;
+  departments: EnterpriseApplicationManifestDepartment[];
+  actions: EnterpriseApplicationManifestAction[];
 }
 
 export interface EnterpriseApplicationIntegration {
   application_id: string; manifest_url: string; events_url: string | null;
   protocol_version: number; manifest: Record<string, unknown>;
-  modules: Array<{ key?: string; moduleKey?: string; name?: string; moduleName?: string }>;
+  modules: EnterpriseApplicationManifestModule[];
   cursor_sequence: number; sync_enabled: boolean;
   sync_status: 'unconfigured' | 'ready' | 'syncing' | 'healthy' | 'error';
   token_configured: boolean; last_manifest_sync_at: string | null;
   last_event_sync_at: string | null; last_error: string | null;
+}
+
+export interface EnterpriseApplicationDiscovery {
+  entry_url: string; manifest_url: string; health_url: string;
+  health_status: 'healthy' | 'unhealthy'; protocol_version: number;
+  suggested_name: string; suggested_slug: string;
+  manifest: Record<string, unknown>; modules: EnterpriseApplicationManifestModule[];
+}
+
+export interface EnterpriseApplicationAction {
+  id: string; application_id: string; module_key: string; action_key: string;
+  name: string; description: string | null; operation: EnterpriseApplicationOperation;
+  ai_enabled: boolean; requires_confirmation: boolean;
+  input_schema: Record<string, unknown>; result_schema: Record<string, unknown>;
+  is_active: boolean; created_at: string; updated_at: string;
+}
+
+export interface EnterpriseApplicationActionResult {
+  request_id: string;
+  status: 'pending' | 'executing' | 'completed' | 'rejected' | 'expired' | 'failed';
+  confirmation_id: string | null; result: Record<string, unknown>; error: string | null;
+  provenance: Record<string, unknown>;
+}
+
+export interface EnterpriseApplicationActionRequest {
+  id: string; application_id: string; action_id: string; request_id: string;
+  module_key: string; status: EnterpriseApplicationActionResult['status'];
+  params: Record<string, unknown>;
+  expires_at: string; resolved_at: string | null; result: Record<string, unknown>;
+  error: string | null; action: EnterpriseApplicationAction;
+  created_at: string; updated_at: string;
 }
 
 export interface EnterpriseApplicationEventRoute {
@@ -1581,6 +1638,10 @@ export const enterpriseApplications = {
     request<EnterpriseApplication>(`/api/v1/organizations/${orgId}/applications`, {
       method: 'POST', body: JSON.stringify(data),
     }),
+  discover: (orgId: string, data: { base_url: string; auth_token?: string }) =>
+    request<EnterpriseApplicationDiscovery>(`/api/v1/organizations/${orgId}/applications/discover`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
   update: (id: string, data: Partial<EnterpriseApplicationInput>) =>
     request<EnterpriseApplication>(`/api/v1/applications/${id}`, {
       method: 'PATCH', body: JSON.stringify(data),
@@ -1590,6 +1651,7 @@ export const enterpriseApplications = {
     scope_type: EnterpriseApplicationScope; scope_id: string | null;
     permissions: EnterpriseApplicationPermission[];
     module_keys?: string[];
+    module_access?: Record<string, EnterpriseApplicationModuleAccess>;
   }>) => request<EnterpriseApplication>(`/api/v1/applications/${id}/grants`, {
     method: 'PUT', body: JSON.stringify({ grants }),
   }),
@@ -1612,6 +1674,7 @@ export const enterpriseApplications = {
     status: 'healthy' | 'error'; manifest_updated: boolean; received_events: number;
     created_work_items: number; cursor_sequence: number; detail: string | null;
   }>(`/api/v1/applications/${id}/integration/sync`, { method: 'POST' }),
+  actions: (id: string) => request<EnterpriseApplicationAction[]>(`/api/v1/applications/${id}/actions`),
   eventRoutes: (id: string) => request<EnterpriseApplicationEventRoute[]>(`/api/v1/applications/${id}/event-routes`),
   replaceEventRoutes: (id: string, routes: Array<Omit<EnterpriseApplicationEventRoute, 'id' | 'application_id' | 'created_at' | 'updated_at'>>) =>
     request<EnterpriseApplicationEventRoute[]>(`/api/v1/applications/${id}/event-routes`, {
@@ -1697,9 +1760,24 @@ export const terminal = {
   models: () => userRequest<TerminalModels>('/api/v1/terminal/models'),
   agents: () => userRequest<{ agents: TerminalAgent[] }>('/api/v1/terminal/agents'),
   applications: () => userRequest<TerminalEnterpriseApplication[]>('/api/v1/terminal/applications'),
-  launchApplication: (id: string) => userRequest<EnterpriseApplicationLaunch>(
-    `/api/v1/terminal/applications/${id}/launch`, { method: 'POST' },
+  launchApplication: (id: string, moduleKey?: string) => userRequest<EnterpriseApplicationLaunch>(
+    `/api/v1/terminal/applications/${id}/launch${moduleKey ? `?module_key=${encodeURIComponent(moduleKey)}` : ''}`,
+    { method: 'POST' },
   ),
+  invokeApplicationAction: (
+    id: string, actionKey: string, data: { module_key: string; params: Record<string, unknown>; request_id?: string },
+  ) => userRequest<EnterpriseApplicationActionResult>(
+    `/api/v1/terminal/applications/${id}/actions/${encodeURIComponent(actionKey)}`,
+    { method: 'POST', body: JSON.stringify(data) },
+  ),
+  applicationActionConfirmations: () => userRequest<EnterpriseApplicationActionRequest[]>(
+    '/api/v1/terminal/application-action-confirmations',
+  ),
+  resolveApplicationAction: (id: string, decision: 'approve' | 'reject') =>
+    userRequest<EnterpriseApplicationActionResult>(
+      `/api/v1/terminal/application-action-confirmations/${id}/${decision}`,
+      { method: 'POST' },
+    ),
   crossDepartmentWorkItems: () => userRequest<CrossDepartmentWorkItem[]>(
     '/api/v1/terminal/cross-department-work-items',
   ),

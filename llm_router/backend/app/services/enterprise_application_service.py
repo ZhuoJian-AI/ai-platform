@@ -125,7 +125,7 @@ async def replace_grants(
     row: EnterpriseApplication,
     grants: list[EnterpriseApplicationGrantInput],
 ) -> EnterpriseApplication:
-    normalized: dict[tuple[str, str | None], tuple[list[str], list[str]]] = {}
+    normalized: dict[tuple[str, str | None], tuple[list[str], list[str], dict]] = {}
     for item in grants:
         sid = await skill_scope_service.validate_scope_target(
             db,
@@ -134,8 +134,16 @@ async def replace_grants(
             item.scope_id,
         )
         permissions = [value for value in item.permissions if value in PERMISSIONS]
-        if permissions:
-            normalized[(item.scope_type, sid)] = (permissions, item.module_keys)
+        module_access = {
+            key: access.model_dump(mode="json")
+            for key, access in item.module_access.items()
+        }
+        if permissions or module_access:
+            normalized[(item.scope_type, sid)] = (
+                permissions,
+                item.module_keys,
+                module_access,
+            )
 
     all_grants = list(
         (
@@ -154,9 +162,9 @@ async def replace_grants(
         if key not in normalized:
             grant.deleted_at = now
         else:
-            grant.permissions, grant.module_keys = normalized[key]
+            grant.permissions, grant.module_keys, grant.module_access = normalized[key]
             grant.deleted_at = None
-    for (scope_type, scope_id), (permissions, module_keys) in normalized.items():
+    for (scope_type, scope_id), (permissions, module_keys, module_access) in normalized.items():
         if (scope_type, scope_id) not in current:
             db.add(
                 EnterpriseApplicationGrant(
@@ -166,6 +174,7 @@ async def replace_grants(
                     scope_id=scope_id,
                     permissions=permissions,
                     module_keys=module_keys,
+                    module_access=module_access,
                 )
             )
     await db.flush()
@@ -433,6 +442,12 @@ def effective_permissions(row: EnterpriseApplication, user: CurrentUser) -> set[
     for grant in row.grants:
         if grant.deleted_at is None and (grant.scope_type, grant.scope_id or None) in scopes:
             permissions.update(value for value in (grant.permissions or []) if value in PERMISSIONS)
+            if any(
+                "view" in (access.get("permissions") or [])
+                for access in (grant.module_access or {}).values()
+                if isinstance(access, dict)
+            ):
+                permissions.add("view")
     return permissions
 
 
@@ -443,9 +458,52 @@ def effective_module_keys(row: EnterpriseApplication, user: CurrentUser) -> list
         grant for grant in row.grants
         if grant.deleted_at is None and (grant.scope_type, grant.scope_id or None) in scopes
     ]
-    if not matching or any(not (grant.module_keys or []) for grant in matching):
+    if not matching:
         return []
-    return sorted({key for grant in matching for key in (grant.module_keys or [])})
+    if any(not (grant.module_keys or []) and not (grant.module_access or {}) for grant in matching):
+        return []
+    return sorted({
+        key
+        for grant in matching
+        for key in [*(grant.module_keys or []), *(grant.module_access or {}).keys()]
+    })
+
+
+def effective_module_permissions(
+    row: EnterpriseApplication, user: CurrentUser, module_key: str
+) -> set[str]:
+    """Resolve v2 per-module permissions while preserving v1 grants."""
+    if not row.is_active or row.deleted_at is not None:
+        return set()
+    scopes = set(scope_service.effective_scope_set(user))
+    permissions: set[str] = set()
+    for grant in row.grants:
+        if grant.deleted_at is not None or (grant.scope_type, grant.scope_id or None) not in scopes:
+            continue
+        access = (grant.module_access or {}).get(module_key)
+        if isinstance(access, dict):
+            permissions.update(value for value in (access.get("permissions") or []) if value in PERMISSIONS)
+            continue
+        keys = grant.module_keys or []
+        if not keys or module_key in keys:
+            permissions.update(value for value in (grant.permissions or []) if value in PERMISSIONS)
+    return permissions
+
+
+async def assert_module_permission(
+    db: AsyncSession,
+    app_id: UUID | str,
+    user: CurrentUser,
+    module_key: str,
+    permission: str = "view",
+) -> tuple[EnterpriseApplication, set[str]]:
+    row = await get_application(db, app_id)
+    if row is None or str(row.organization_id) != str(user.organization_id):
+        raise HTTPException(status_code=404, detail="Application not found")
+    permissions = effective_module_permissions(row, user, module_key)
+    if permission not in permissions:
+        raise HTTPException(status_code=403, detail=f"Module permission '{permission}' required")
+    return row, permissions
 
 
 async def list_applications_for_user(
