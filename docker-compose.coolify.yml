@@ -357,7 +357,7 @@ services:
     labels:
       # Coolify also attaches its public application network. Pin Traefik to
       # that network so it never selects the private Compose default network.
-      traefik.docker.network: "jwbpxybciypgdidyzu2ebrlr"
+      traefik.docker.network: "${TRAEFIK_DOCKER_NETWORK:-jwbpxybciypgdidyzu2ebrlr}"
     expose:
       - "80"
     depends_on:
