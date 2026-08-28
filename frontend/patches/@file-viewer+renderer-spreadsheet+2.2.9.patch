@@ -1,5 +1,5 @@
 diff --git a/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js b/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
-index 283ae3e..ac64dd7 100644
+index 283ae3e..0c307d2 100644
 --- a/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
 +++ b/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
 @@ -472,7 +472,71 @@ const serializeSpreadsheetCopyData = (data) => {
@@ -142,7 +142,7 @@ index 283ae3e..ac64dd7 100644
              if (copied) {
                  markCopiedSelection(params);
                  return;
-@@ -982,6 +1070,26 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+@@ -982,6 +1070,40 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
              console.error('Spreadsheet copy failed:', error);
          });
      };
@@ -150,9 +150,23 @@ index 283ae3e..ac64dd7 100644
 +        if (!table) {
 +            return;
 +        }
-+        const selected = table.ctx.getSelectedData();
++        let selected = table.ctx.getSelectedData();
 +        if (!selected || selected.xArr[0] < 0 || selected.yArr[0] < 0) {
-+            return;
++            const focusCell = table.ctx.focusCell;
++            const hoverCell = table.ctx.hoverCell || focusCell;
++            if (!focusCell || !hoverCell) {
++                return;
++            }
++            table.ctx.selector.xArr = [
++                Math.min(focusCell.colIndex, hoverCell.colIndex),
++                Math.max(focusCell.colIndex, hoverCell.colIndex),
++            ];
++            table.ctx.selector.yArr = [
++                Math.min(focusCell.rowIndex, hoverCell.rowIndex),
++                Math.max(focusCell.rowIndex, hoverCell.rowIndex),
++            ];
++            table.ctx.emit('draw');
++            selected = table.ctx.getSelectedData();
 +        }
 +        copySpreadsheetSelection({
 +            data: selected.value,
@@ -169,7 +183,7 @@ index 283ae3e..ac64dd7 100644
      const buildTableView = () => ({
          config: createTableConfig({
              hostHeight: getHostHeight(),
-@@ -1051,6 +1159,15 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+@@ -1051,6 +1173,15 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
                  zoomScale: zoom,
              }),
          });
@@ -185,7 +199,7 @@ index 283ae3e..ac64dd7 100644
          table.on('onScrollX', scheduleViewportLoad);
          table.on('onScrollY', scheduleViewportLoad);
          table.on('resize', scheduleViewportLoad);
-@@ -1624,6 +1741,8 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+@@ -1624,6 +1755,8 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
              clearScheduledLayoutRefresh();
              resizeObserver === null || resizeObserver === void 0 ? void 0 : resizeObserver.disconnect();
              resizeObserver = null;
