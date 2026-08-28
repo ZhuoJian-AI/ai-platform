@@ -33,6 +33,8 @@ from app.services import enterprise_application_service as service
 from app.services import subsystem_action_service as action_service
 from app.services import subsystem_integration_service as integration_service
 
+INTEGRATION_SECRET = "test-integration-token-at-least-32-bytes"
+
 
 async def _organization_tree(db_session):
     org = Organization(name="Tenant Applications", slug=f"apps-{uuid4().hex[:8]}")
@@ -241,10 +243,10 @@ async def test_subsystem_sync_is_replay_safe_and_routes_work_items(db_session, m
         application,
         EnterpriseApplicationIntegrationInput(
             manifest_url="https://garment.example.test/api/integration/manifest",
-            auth_token="test-integration-token",
+            auth_token=INTEGRATION_SECRET,
         ),
     )
-    assert integration.auth_token_encrypted != "test-integration-token"
+    assert integration.auth_token_encrypted != INTEGRATION_SECRET
     await integration_service.replace_routes(
         db_session,
         application,
@@ -279,7 +281,7 @@ async def test_subsystem_sync_is_replay_safe_and_routes_work_items(db_session, m
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["authorization"] == "Bearer test-integration-token"
+        assert request.headers["authorization"] == f"Bearer {INTEGRATION_SECRET}"
         if request.url.path.endswith("/manifest"):
             return httpx.Response(200, json=manifest)
         after = int(request.url.params.get("after", "0"))
@@ -331,7 +333,7 @@ async def test_protocol_v2_sync_discovers_actions_and_matches_departments_withou
         application,
         EnterpriseApplicationIntegrationInput(
             manifest_url="https://sample.example.test/api/integration/manifest",
-            auth_token="test-integration-token",
+            auth_token=INTEGRATION_SECRET,
         ),
     )
     manifest = {
@@ -401,7 +403,7 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
         application,
         EnterpriseApplicationIntegrationInput(
             manifest_url="https://action.example.test/api/integration/manifest",
-            auth_token="test-integration-token",
+            auth_token=INTEGRATION_SECRET,
         ),
     )
     integration.protocol_version = 2
@@ -439,7 +441,7 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
         nonlocal calls
         calls += 1
         token = request.headers["authorization"].split(" ", 1)[1]
-        claims = jwt.decode(token, "test-integration-token", algorithms=["HS256"], audience=application.slug)
+        claims = jwt.decode(token, INTEGRATION_SECRET, algorithms=["HS256"], audience=application.slug)
         assert claims["typ"] == "zhuojian-action"
         assert claims["moduleKey"] == "sample_review"
         assert claims["actionKey"] == action.action_key

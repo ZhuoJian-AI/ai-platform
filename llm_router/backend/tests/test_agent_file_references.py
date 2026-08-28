@@ -166,7 +166,15 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
         ),
     )
     await db_session.flush()
-    async def fake_build_tools(_db, _skill_ids, _workspace_id, _user=None):
+    async def fake_build_tools(
+        _db,
+        _skill_ids,
+        _workspace_id,
+        _user=None,
+        *,
+        exec_mode="craft",
+        application_id=None,
+    ):
         return nodes._builtin_tool_defs(), {}
 
     async def fake_visual(_state, _db, _user, _messages, prompt):
@@ -222,7 +230,15 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
         WorkspaceFileCreate(path="根目录/其他文件.docx", content="绝对不得注入"),
     )
     await db_session.flush()
-    async def fake_build_tools(_db, _skill_ids, _workspace_id, _user=None):
+    async def fake_build_tools(
+        _db,
+        _skill_ids,
+        _workspace_id,
+        _user=None,
+        *,
+        exec_mode="craft",
+        application_id=None,
+    ):
         return nodes._builtin_tool_defs(), {}
 
     async def fake_visual(_state, _db, _user, _messages, prompt):
