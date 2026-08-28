@@ -26,13 +26,10 @@ export default function OfficeFilePreview({ file, filename, extension, onDownloa
       message.info('请先在表格中拖动框选要复制的单元格');
       return;
     }
-    // e-virt-table owns the selection model inside FileViewer's ShadowRoot and
-    // listens on window. Dispatching the same keyboard command keeps the button
-    // and Ctrl+C on one tested copy path without exposing renderer internals.
-    spreadsheetStageRef.current?.dispatchEvent(new KeyboardEvent('keydown', {
-      key: 'c',
-      code: 'KeyC',
-      ctrlKey: true,
+    // Keep the command inside FileViewer's ShadowRoot. Keyboard events are
+    // retargeted when they cross that boundary, so e-virt-table rejects a
+    // synthetic Ctrl+C issued by the outer toolbar.
+    spreadsheetStageRef.current?.dispatchEvent(new CustomEvent('zhuojian:copy-spreadsheet-selection', {
       bubbles: true,
     }));
     message.success('已复制选区，可直接粘贴到 Excel 或 WPS');

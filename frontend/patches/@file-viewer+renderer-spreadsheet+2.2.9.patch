@@ -1,5 +1,5 @@
 diff --git a/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js b/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
-index 283ae3e..13feecf 100644
+index 283ae3e..79a9999 100644
 --- a/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
 +++ b/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
 @@ -472,7 +472,71 @@ const serializeSpreadsheetCopyData = (data) => {
@@ -142,3 +142,34 @@ index 283ae3e..13feecf 100644
              if (copied) {
                  markCopiedSelection(params);
                  return;
+@@ -982,6 +1070,22 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+             console.error('Spreadsheet copy failed:', error);
+         });
+     };
++    const copySpreadsheetSelectionFromToolbar = () => {
++        if (!table) {
++            return;
++        }
++        const selected = table.ctx.getSelectedData();
++        if (!selected || selected.xArr[0] < 0 || selected.yArr[0] < 0) {
++            return;
++        }
++        copySpreadsheetSelection({
++            data: selected.value,
++            xArr: selected.xArr,
++            yArr: selected.yArr,
++            focusCell: table.ctx.focusCell,
++        });
++    };
++    tableHost.addEventListener('zhuojian:copy-spreadsheet-selection', copySpreadsheetSelectionFromToolbar);
+     const buildTableView = () => ({
+         config: createTableConfig({
+             hostHeight: getHostHeight(),
+@@ -1624,6 +1728,7 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+             clearScheduledLayoutRefresh();
+             resizeObserver === null || resizeObserver === void 0 ? void 0 : resizeObserver.disconnect();
+             resizeObserver = null;
++            tableHost.removeEventListener('zhuojian:copy-spreadsheet-selection', copySpreadsheetSelectionFromToolbar);
+             unregisterFileViewerZoomProvider(root);
+             controller.destroy();
+             table === null || table === void 0 ? void 0 : table.destroy();
