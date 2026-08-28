@@ -14,7 +14,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import RedirectResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,6 +58,7 @@ from app.services.workspace_preview_service import (
 from app.services.workspace_service import (
     WorkspaceFileUploadError,
     build_workspace_tree,
+    bulk_soft_delete_items,
     create_folder,
     create_workspace,
     get_file,
@@ -69,7 +70,6 @@ from app.services.workspace_service import (
     list_workspaces,
     load_file_bytes,
     reparse_file,
-    bulk_soft_delete_items,
     soft_delete_file,
     soft_delete_folder,
     soft_delete_folder_path,
@@ -345,19 +345,30 @@ async def download_file_endpoint(
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
+    metadata = f.metadata_ or {}
+    filename = str(metadata.get("name") or f.path.rsplit("/", 1)[-1])
+    media_type = str(metadata.get("mime") or "application/octet-stream")
     if storage_gateway_service.is_object_ref(f.content_ref):
         try:
             signed = await storage_gateway_service.get_signed_download(str(f.content_ref))
         except storage_gateway_service.StorageGatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return RedirectResponse(str(signed["url"]), status_code=307)
+        return StreamingResponse(
+            storage_gateway_service.stream_signed_download(
+                str(signed["url"]),
+                headers={str(k): str(v) for k, v in (signed.get("headers") or {}).items()},
+                max_bytes=settings.workspace_max_file_bytes,
+            ),
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
     try:
         raw = await load_file_bytes(f)
     except WorkspaceFileUploadError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    metadata = f.metadata_ or {}
-    filename = str(metadata.get("name") or f.path.rsplit("/", 1)[-1])
-    media_type = str(metadata.get("mime") or "application/octet-stream")
     return Response(content=raw, media_type=media_type, headers={
         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
         "X-Content-Type-Options": "nosniff",

@@ -91,6 +91,47 @@ async def test_upload_and_download_use_scoped_signed_urls(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stream_signed_download_proxies_internal_object_in_chunks(monkeypatch):
+    _configure(monkeypatch)
+
+    class FakeStreamResponse:
+        headers = {"content-length": "8"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self, _chunk_size):
+            yield b"original"
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, method, url, **kwargs):
+            assert method == "GET"
+            assert "oss-cn-hongkong-internal" in url
+            assert kwargs["headers"] == {"x-test": "download"}
+            return FakeStreamResponse()
+
+    monkeypatch.setattr(storage.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    chunks = [chunk async for chunk in storage.stream_signed_download(
+        "https://bucket.oss-cn-hongkong-internal.aliyuncs.com/report.xlsx?sig=2",
+        headers={"x-test": "download"},
+        max_bytes=100,
+    )]
+    assert chunks == [b"original"]
+
+
+@pytest.mark.asyncio
 async def test_workspace_loads_external_bytes_and_verifies_hash(monkeypatch):
     raw = b"external file"
     file = SimpleNamespace(

@@ -951,19 +951,30 @@ async def download_ws_file_endpoint(
     if ws is None:
         raise HTTPException(status_code=404, detail="File not found")
     await workspace_permission_service.assert_can_read(db, ws, cu)
+    metadata = f.metadata_ or {}
+    filename = str(metadata.get("name") or f.path.rsplit("/", 1)[-1])
+    media_type = str(metadata.get("mime") or "application/octet-stream")
     if storage_gateway_service.is_object_ref(f.content_ref):
         try:
             signed = await storage_gateway_service.get_signed_download(str(f.content_ref))
         except storage_gateway_service.StorageGatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return RedirectResponse(str(signed["url"]), status_code=307)
+        return StreamingResponse(
+            storage_gateway_service.stream_signed_download(
+                str(signed["url"]),
+                headers={str(k): str(v) for k, v in (signed.get("headers") or {}).items()},
+                max_bytes=settings.workspace_max_file_bytes,
+            ),
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
     try:
         raw = await workspace_service.load_file_bytes(f)
     except workspace_service.WorkspaceFileUploadError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    metadata = f.metadata_ or {}
-    filename = str(metadata.get("name") or f.path.rsplit("/", 1)[-1])
-    media_type = str(metadata.get("mime") or "application/octet-stream")
     return Response(content=raw, media_type=media_type, headers={
         "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
         "X-Content-Type-Options": "nosniff",

@@ -221,6 +221,36 @@ async def get_signed_download(content_ref: str) -> dict:
         raise StorageGatewayError("OSS download signing failed") from exc
 
 
+async def stream_signed_download(
+    url: str, *, headers: dict[str, str] | None = None, max_bytes: int,
+):
+    """Proxy a signed OSS response without exposing its internal URL to browsers.
+
+    Browser ``fetch`` cannot follow a redirect to the same-region internal OSS
+    hostname.  Keeping that URL server-side also avoids CORS-dependent download
+    behaviour while still streaming large workspace files in bounded chunks.
+    """
+    written = 0
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(settings.storage_gateway_timeout_seconds, read=300), trust_env=False,
+        ) as client:
+            async with client.stream("GET", url, headers=headers or {}) as response:
+                response.raise_for_status()
+                declared = int(response.headers.get("content-length", "0") or 0)
+                if declared > max_bytes:
+                    raise StorageGatewayError("OSS object exceeds workspace limit")
+                async for chunk in response.aiter_bytes(1024 * 1024):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise StorageGatewayError("OSS object exceeds workspace limit")
+                    yield chunk
+    except StorageGatewayError:
+        raise
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("OSS streaming download failed") from exc
+
+
 async def download_bytes(content_ref: str) -> bytes:
     object_key = object_key_from_ref(content_ref)
     timeout = settings.storage_gateway_timeout_seconds
