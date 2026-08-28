@@ -6,7 +6,7 @@ FROM ${AI_PLATFORM_FRONTEND_DEPS_BASE} AS builder
 
 WORKDIR /app
 COPY . .
-RUN npm run build
+RUN npx patch-package && npm run build
 
 FROM ${AI_PLATFORM_NGINX_BASE}
 ARG SOURCE_COMMIT
