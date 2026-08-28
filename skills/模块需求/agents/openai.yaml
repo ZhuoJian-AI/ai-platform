@@ -1,4 +1,0 @@
-interface:
-  display_name: "模块需求"
-  short_description: "帮你把一个说不清的想法，问成开发能直接开工的需求"
-  default_prompt: "我想做个东西，但还没完全想清楚。按「模块需求」带我一步步理清楚，最后出一份需求文档。"
