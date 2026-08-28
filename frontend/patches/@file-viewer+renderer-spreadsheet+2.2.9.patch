@@ -1,5 +1,5 @@
 diff --git a/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js b/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
-index 283ae3e..79a9999 100644
+index 283ae3e..ac64dd7 100644
 --- a/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
 +++ b/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
 @@ -472,7 +472,71 @@ const serializeSpreadsheetCopyData = (data) => {
@@ -142,7 +142,7 @@ index 283ae3e..79a9999 100644
              if (copied) {
                  markCopiedSelection(params);
                  return;
-@@ -982,6 +1070,22 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+@@ -982,6 +1070,26 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
              console.error('Spreadsheet copy failed:', error);
          });
      };
@@ -162,13 +162,34 @@ index 283ae3e..79a9999 100644
 +        });
 +    };
 +    tableHost.addEventListener('zhuojian:copy-spreadsheet-selection', copySpreadsheetSelectionFromToolbar);
++    const keepSpreadsheetMousedownInsideShadowRoot = (event) => {
++        event.stopPropagation();
++    };
++    tableHost.addEventListener('mousedown', keepSpreadsheetMousedownInsideShadowRoot);
      const buildTableView = () => ({
          config: createTableConfig({
              hostHeight: getHostHeight(),
-@@ -1624,6 +1728,7 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+@@ -1051,6 +1159,15 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+                 zoomScale: zoom,
+             }),
+         });
++        const originalIsTarget = table.ctx.isTarget.bind(table.ctx);
++        table.ctx.isTarget = (event) => {
++            var _a;
++            const eventPath = typeof (event === null || event === void 0 ? void 0 : event.composedPath) === 'function' ? event.composedPath() : [];
++            const NodeCtor = (_a = documentRef.defaultView) === null || _a === void 0 ? void 0 : _a.Node;
++            const targetsTable = eventPath.some((targetNode) => targetNode === table.ctx.containerElement ||
++                (!!NodeCtor && targetNode instanceof NodeCtor && table.ctx.containerElement.contains(targetNode)));
++            return targetsTable || originalIsTarget(event);
++        };
+         table.on('onScrollX', scheduleViewportLoad);
+         table.on('onScrollY', scheduleViewportLoad);
+         table.on('resize', scheduleViewportLoad);
+@@ -1624,6 +1741,8 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
              clearScheduledLayoutRefresh();
              resizeObserver === null || resizeObserver === void 0 ? void 0 : resizeObserver.disconnect();
              resizeObserver = null;
++            tableHost.removeEventListener('mousedown', keepSpreadsheetMousedownInsideShadowRoot);
 +            tableHost.removeEventListener('zhuojian:copy-spreadsheet-selection', copySpreadsheetSelectionFromToolbar);
              unregisterFileViewerZoomProvider(root);
              controller.destroy();
