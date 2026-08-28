@@ -1,5 +1,5 @@
 diff --git a/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js b/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
-index 283ae3e..0c307d2 100644
+index 283ae3e..35e4db1 100644
 --- a/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
 +++ b/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
 @@ -472,7 +472,71 @@ const serializeSpreadsheetCopyData = (data) => {
@@ -142,7 +142,7 @@ index 283ae3e..0c307d2 100644
              if (copied) {
                  markCopiedSelection(params);
                  return;
-@@ -982,6 +1070,40 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+@@ -982,6 +1070,122 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
              console.error('Spreadsheet copy failed:', error);
          });
      };
@@ -180,10 +180,92 @@ index 283ae3e..0c307d2 100644
 +        event.stopPropagation();
 +    };
 +    tableHost.addEventListener('mousedown', keepSpreadsheetMousedownInsideShadowRoot);
++    let toolbarSelectionAnchor;
++    let toolbarSelectionCurrent;
++    let toolbarSelectionDragging = false;
++    let toolbarSelectionStage;
++    const getToolbarSelectionCell = (event) => {
++        if (!table) {
++            return undefined;
++        }
++        const { offsetX, offsetY } = table.ctx.getOffset(event);
++        for (const row of table.ctx.body.renderRows) {
++            const cells = row.fixedCells.concat(row.noFixedCells);
++            const cell = cells.find((candidate) => candidate.isInsideVisible(offsetX, offsetY));
++            if (cell) {
++                return cell;
++            }
++        }
++        return undefined;
++    };
++    const syncToolbarSelection = () => {
++        if (!table || !toolbarSelectionAnchor || !toolbarSelectionCurrent) {
++            return;
++        }
++        table.ctx.selector.xArr = [
++            Math.min(toolbarSelectionAnchor.colIndex, toolbarSelectionCurrent.colIndex),
++            Math.max(toolbarSelectionAnchor.colIndex, toolbarSelectionCurrent.colIndex),
++        ];
++        table.ctx.selector.yArr = [
++            Math.min(toolbarSelectionAnchor.rowIndex, toolbarSelectionCurrent.rowIndex),
++            Math.max(toolbarSelectionAnchor.rowIndex, toolbarSelectionCurrent.rowIndex),
++        ];
++        table.ctx.emit('draw');
++    };
++    const handleToolbarSelectionStart = (event) => {
++        if (event.button !== 0) {
++            return;
++        }
++        const cell = getToolbarSelectionCell(event);
++        if (!cell) {
++            return;
++        }
++        toolbarSelectionAnchor = cell;
++        toolbarSelectionCurrent = cell;
++        toolbarSelectionDragging = true;
++        syncToolbarSelection();
++    };
++    const handleToolbarSelectionMove = (event) => {
++        if (!toolbarSelectionDragging) {
++            return;
++        }
++        const cell = getToolbarSelectionCell(event);
++        if (!cell) {
++            return;
++        }
++        toolbarSelectionCurrent = cell;
++        syncToolbarSelection();
++    };
++    const handleToolbarSelectionEnd = (event) => {
++        if (!toolbarSelectionDragging || event.button !== 0) {
++            return;
++        }
++        const cell = getToolbarSelectionCell(event);
++        if (cell) {
++            toolbarSelectionCurrent = cell;
++            syncToolbarSelection();
++        }
++        toolbarSelectionDragging = false;
++    };
++    const bindToolbarSelectionStage = (stageElement) => {
++        toolbarSelectionStage = stageElement;
++        stageElement.addEventListener('mousedown', handleToolbarSelectionStart);
++        stageElement.addEventListener('mousemove', handleToolbarSelectionMove);
++        stageElement.addEventListener('mouseup', handleToolbarSelectionEnd);
++    };
++    const unbindToolbarSelectionStage = () => {
++        if (!toolbarSelectionStage) {
++            return;
++        }
++        toolbarSelectionStage.removeEventListener('mousedown', handleToolbarSelectionStart);
++        toolbarSelectionStage.removeEventListener('mousemove', handleToolbarSelectionMove);
++        toolbarSelectionStage.removeEventListener('mouseup', handleToolbarSelectionEnd);
++        toolbarSelectionStage = undefined;
++    };
      const buildTableView = () => ({
          config: createTableConfig({
              hostHeight: getHostHeight(),
-@@ -1051,6 +1173,15 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+@@ -1051,6 +1255,16 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
                  zoomScale: zoom,
              }),
          });
@@ -196,13 +278,15 @@ index 283ae3e..0c307d2 100644
 +                (!!NodeCtor && targetNode instanceof NodeCtor && table.ctx.containerElement.contains(targetNode)));
 +            return targetsTable || originalIsTarget(event);
 +        };
++        bindToolbarSelectionStage(table.ctx.stageElement);
          table.on('onScrollX', scheduleViewportLoad);
          table.on('onScrollY', scheduleViewportLoad);
          table.on('resize', scheduleViewportLoad);
-@@ -1624,6 +1755,8 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+@@ -1624,6 +1838,9 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
              clearScheduledLayoutRefresh();
              resizeObserver === null || resizeObserver === void 0 ? void 0 : resizeObserver.disconnect();
              resizeObserver = null;
++            unbindToolbarSelectionStage();
 +            tableHost.removeEventListener('mousedown', keepSpreadsheetMousedownInsideShadowRoot);
 +            tableHost.removeEventListener('zhuojian:copy-spreadsheet-selection', copySpreadsheetSelectionFromToolbar);
              unregisterFileViewerZoomProvider(root);
