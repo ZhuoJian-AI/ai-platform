@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import os
 import socket
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -140,6 +141,11 @@ def _assert_public_image_url(url: str) -> None:
             raise RuntimeError("image generation URL points to a private or reserved address")
 
 
+_THINKING_DISABLED_MODELS = frozenset(
+    m.strip() for m in os.getenv("CHAT_THINKING_DISABLED_MODELS", "").split(",") if m.strip()
+)
+
+
 def _build_chat_body(
     provider: LlmProvider,
     model: str,
@@ -177,6 +183,11 @@ def _build_chat_body(
         "model": model,
         "messages": ([{"role": "system", "content": system_prompt}] if system_prompt else []) + messages,
     }
+    # 推理模型的思考期是纯等待（DeepSeek v4 系先想数秒再吐字）。对延迟敏感的
+    # 部署可按模型显式关掉：CHAT_THINKING_DISABLED_MODELS=deepseek-v4-flash,...
+    # 默认为空，不改变任何现有行为。仅 OpenAI 风格通道生效。
+    if model in _THINKING_DISABLED_MODELS:
+        body["thinking"] = {"type": "disabled"}
     if temperature is not None:
         body["temperature"] = temperature
     if max_tokens is not None:
