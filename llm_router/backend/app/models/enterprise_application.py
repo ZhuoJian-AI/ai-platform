@@ -123,7 +123,7 @@ class EnterpriseApplicationToolBinding(UUIDPrimaryKeyMixin, TimestampMixin, Soft
             name="ck_enterprise_application_tool_binding_target_type",
         ),
         CheckConstraint(
-            "operation IN ('query','create','update','delete','export')",
+            "operation IN ('query','create','update','delete','export','approve')",
             name="ck_enterprise_application_tool_binding_operation",
         ),
     )
@@ -186,7 +186,7 @@ class EnterpriseApplicationAction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("application_id", "action_key", name="uq_enterprise_application_action_key"),
         CheckConstraint(
-            "operation IN ('query','create','update','delete','export')",
+            "operation IN ('query','create','update','delete','export','approve')",
             name="ck_enterprise_application_action_operation",
         ),
     )

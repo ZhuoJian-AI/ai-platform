@@ -516,7 +516,7 @@ async def test_cross_application_event_delivery_is_signed_and_idempotent(db_sess
         org.id,
         EnterpriseApplicationCreate(
             name="Sample Review", slug="sample-review-source",
-            entry_url="https://source.example.com/",
+            entry_url="https://source.example/",
         ),
     )
     target = await service.create_application(
@@ -524,14 +524,14 @@ async def test_cross_application_event_delivery_is_signed_and_idempotent(db_sess
         org.id,
         EnterpriseApplicationCreate(
             name="Production Handoff", slug="production-handoff-target",
-            entry_url="https://target.example.com/",
+            entry_url="https://target.example/",
         ),
     )
     source_integration = await integration_service.configure_integration(
         db_session,
         source,
         EnterpriseApplicationIntegrationInput(
-            manifest_url="https://source.example.com/api/integration/manifest",
+            manifest_url="https://source.example/api/integration/manifest",
             auth_token=INTEGRATION_SECRET,
         ),
     )
@@ -539,7 +539,7 @@ async def test_cross_application_event_delivery_is_signed_and_idempotent(db_sess
         db_session,
         target,
         EnterpriseApplicationIntegrationInput(
-            manifest_url="https://target.example.com/api/integration/manifest",
+            manifest_url="https://target.example/api/integration/manifest",
             auth_token=INTEGRATION_SECRET,
         ),
     )
@@ -580,7 +580,7 @@ async def test_cross_application_event_delivery_is_signed_and_idempotent(db_sess
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        assert request.url == "https://target.example.com/api/integration/event-deliveries"
+        assert request.url == "https://target.example/api/integration/event-deliveries"
         claims = jwt.decode(
             request.headers["authorization"].split(" ", 1)[1],
             INTEGRATION_SECRET,

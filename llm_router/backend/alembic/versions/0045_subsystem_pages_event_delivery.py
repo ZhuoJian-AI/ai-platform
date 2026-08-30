@@ -17,6 +17,26 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.drop_constraint(
+        "ck_enterprise_application_tool_binding_operation",
+        "enterprise_application_tool_bindings",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "ck_enterprise_application_tool_binding_operation",
+        "enterprise_application_tool_bindings",
+        "operation IN ('query','create','update','delete','export','approve')",
+    )
+    op.drop_constraint(
+        "ck_enterprise_application_action_operation",
+        "enterprise_application_actions",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "ck_enterprise_application_action_operation",
+        "enterprise_application_actions",
+        "operation IN ('query','create','update','delete','export','approve')",
+    )
     op.add_column(
         "enterprise_application_event_routes",
         sa.Column("target_application_id", postgresql.UUID(as_uuid=True), nullable=True),
@@ -81,3 +101,23 @@ def downgrade() -> None:
         type_="foreignkey",
     )
     op.drop_column("enterprise_application_event_routes", "target_application_id")
+    op.drop_constraint(
+        "ck_enterprise_application_action_operation",
+        "enterprise_application_actions",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "ck_enterprise_application_action_operation",
+        "enterprise_application_actions",
+        "operation IN ('query','create','update','delete','export')",
+    )
+    op.drop_constraint(
+        "ck_enterprise_application_tool_binding_operation",
+        "enterprise_application_tool_bindings",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "ck_enterprise_application_tool_binding_operation",
+        "enterprise_application_tool_bindings",
+        "operation IN ('query','create','update','delete','export')",
+    )
