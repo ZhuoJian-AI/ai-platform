@@ -1,6 +1,6 @@
 """Page-scoped authorization and cross-subsystem event deliveries.
 
-Revision ID: 0045_subsystem_pages_event_delivery
+Revision ID: 0045_subsystem_pages_events
 Revises: 0044_subsystem_protocol_v2
 Create Date: 2026-08-30
 """
@@ -10,7 +10,7 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision = "0045_subsystem_pages_event_delivery"
+revision = "0045_subsystem_pages_events"
 down_revision = "0044_subsystem_protocol_v2"
 branch_labels = None
 depends_on = None
