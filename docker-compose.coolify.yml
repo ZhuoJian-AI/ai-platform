@@ -18,7 +18,7 @@ services:
     command:
       - postgres
       - -c
-      - listen_addresses=127.0.0.1,10.0.10.10
+      - listen_addresses=127.0.0.1,${DATA_PLANE_PREFIX:-10.0.10}.10
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -31,7 +31,7 @@ services:
     logging: *default-logging
     networks:
       data_plane:
-        ipv4_address: 10.0.10.10
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.10
     deploy:
       resources:
         limits: { cpus: "0.75", memory: 2G }
@@ -43,7 +43,7 @@ services:
     command:
       - /bin/sh
       - -c
-      - exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}" --bind 127.0.0.1 10.0.10.11 --protected-mode yes
+      - exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}" --bind 127.0.0.1 ${DATA_PLANE_PREFIX:-10.0.10}.11 --protected-mode yes
     volumes:
       - redis_data:/data
     healthcheck:
@@ -57,7 +57,7 @@ services:
     logging: *default-logging
     networks:
       data_plane:
-        ipv4_address: 10.0.10.11
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.11
     deploy:
       resources:
         limits: { cpus: "0.25", memory: 512M }
@@ -187,7 +187,7 @@ services:
         limits: { cpus: "1.00", memory: 1G, pids: 256 }
 
   backend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:3a1ddd742750d7fc71f35a4a15ad1f07df5aaba58c20726b7c279fd0c4f96a66
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:727cd2f0ba5b7a826c994dcc77f5109b6c8e66418cd49f67c3d0366ff84d91b4
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -224,6 +224,7 @@ services:
       IMAGE_GENERATION_ORG_ALLOWLIST: "${IMAGE_GENERATION_ORG_ALLOWLIST:-aifabei}"
       MODEL_GATEWAY_ENABLED: "${MODEL_GATEWAY_ENABLED:-true}"
       MODEL_GATEWAY_ORG_ALLOWLIST: "${MODEL_GATEWAY_ORG_ALLOWLIST:-aifabei}"
+      CHAT_THINKING_DISABLED_MODELS: "${CHAT_THINKING_DISABLED_MODELS:-}"
       WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-true}"
       STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
       STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
@@ -238,8 +239,8 @@ services:
     expose:
       - "8000"
     extra_hosts:
-      - "postgres:10.0.10.10"
-      - "redis:10.0.10.11"
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.10}.11"
     command:
       - /bin/sh
       - -c
@@ -271,13 +272,13 @@ services:
     networks:
       default:
       data_plane:
-        ipv4_address: 10.0.10.20
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.20
     deploy:
       resources:
         limits: { cpus: "1.50", memory: 2560M }
 
   workspace-parser:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:3a1ddd742750d7fc71f35a4a15ad1f07df5aaba58c20726b7c279fd0c4f96a66
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:727cd2f0ba5b7a826c994dcc77f5109b6c8e66418cd49f67c3d0366ff84d91b4
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -295,8 +296,8 @@ services:
       WORKSPACE_TRASH_RETENTION_DAYS: "${WORKSPACE_TRASH_RETENTION_DAYS:-30}"
     command: ["python", "-m", "app.workers.workspace_parser"]
     extra_hosts:
-      - "postgres:10.0.10.10"
-      - "redis:10.0.10.11"
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.10}.11"
     depends_on:
       backend:
         condition: service_healthy
@@ -309,13 +310,13 @@ services:
     networks:
       default:
       data_plane:
-        ipv4_address: 10.0.10.21
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.21
     deploy:
       resources:
         limits: { cpus: "0.75", memory: 1536M }
 
   storage-lifecycle:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:3a1ddd742750d7fc71f35a4a15ad1f07df5aaba58c20726b7c279fd0c4f96a66
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:727cd2f0ba5b7a826c994dcc77f5109b6c8e66418cd49f67c3d0366ff84d91b4
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -334,8 +335,8 @@ services:
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
     command: ["python", "-m", "app.workers.storage_lifecycle"]
     extra_hosts:
-      - "postgres:10.0.10.10"
-      - "redis:10.0.10.11"
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.10}.11"
     depends_on:
       backend:
         condition: service_healthy
@@ -347,7 +348,7 @@ services:
     networks:
       default:
       data_plane:
-        ipv4_address: 10.0.10.22
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.22
     deploy:
       resources:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
@@ -357,7 +358,7 @@ services:
     labels:
       # Coolify also attaches its public application network. Pin Traefik to
       # that network so it never selects the private Compose default network.
-      traefik.docker.network: "jwbpxybciypgdidyzu2ebrlr"
+      traefik.docker.network: "${TRAEFIK_DOCKER_NETWORK:-jwbpxybciypgdidyzu2ebrlr}"
     expose:
       - "80"
     depends_on:
@@ -391,4 +392,4 @@ networks:
     internal: true
     ipam:
       config:
-        - subnet: 10.0.10.0/24
+        - subnet: ${DATA_PLANE_PREFIX:-10.0.10}.0/24
