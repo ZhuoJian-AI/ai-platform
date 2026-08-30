@@ -16,6 +16,7 @@ from app.models.enterprise_application import (
     EnterpriseApplicationAction,
     EnterpriseApplicationActionRequest,
     EnterpriseApplicationEvent,
+    EnterpriseApplicationEventDelivery,
 )
 from app.models.organization import Organization
 from app.models.skill import SkillFile, SkillFolder
@@ -305,6 +306,7 @@ async def test_subsystem_sync_is_replay_safe_and_routes_work_items(db_session, m
         "manifest_updated": True,
         "received_events": 1,
         "created_work_items": 1,
+        "delivered_events": 0,
         "cursor_sequence": 1,
         "detail": None,
     }
@@ -407,13 +409,23 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
         ),
     )
     integration.protocol_version = 2
+    integration.manifest = {
+        "contractRevision": "2.1",
+        "modules": [{
+            "moduleKey": "sample_review",
+            "pages": [{
+                "pageKey": "sample_review.detail",
+                "actionKeys": ["sample_review.approve"],
+            }],
+        }],
+    }
     action = EnterpriseApplicationAction(
         application_id=application.id,
         organization_id=org.id,
         module_key="sample_review",
         action_key="sample_review.approve",
         name="通过评审",
-        operation="update",
+        operation="approve",
         ai_enabled=True,
         requires_confirmation=True,
         input_schema={"type": "object", "required": ["styleId"]},
@@ -425,15 +437,25 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
         EnterpriseApplicationGrantInput(
             scope_type="department",
             scope_id=department.id,
-            permissions=["view", "ai_update"],
+            permissions=["view", "ai_approve"],
             module_keys=["sample_review"],
             module_access={
-                "sample_review": {"role": "owner", "permissions": ["view", "ai_update"]},
+                "sample_review": {
+                    "role": "owner",
+                    "permissions": ["view", "ai_approve"],
+                    "action_keys": ["sample_review.approve"],
+                    "page_access": {
+                        "sample_review.detail": {
+                            "permissions": ["view", "ai_approve"],
+                            "action_keys": ["sample_review.approve"],
+                        },
+                    },
+                },
             },
         ),
     ])
     assert service.effective_module_permissions(application, current, "sample_review") == {
-        "view", "ai_update",
+        "view", "ai_approve",
     }
     calls = 0
 
@@ -444,8 +466,16 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
         claims = jwt.decode(token, INTEGRATION_SECRET, algorithms=["HS256"], audience=application.slug)
         assert claims["typ"] == "zhuojian-action"
         assert claims["moduleKey"] == "sample_review"
+        assert claims["pageKey"] == "sample_review.detail"
         assert claims["actionKey"] == action.action_key
-        assert json.loads(request.content)["requestId"] == "action-request-1"
+        assert claims["confirmationId"]
+        assert claims["confirmedBy"] == current.id
+        assert claims["confirmedAt"]
+        assert claims["paramsHash"]
+        body = json.loads(request.content)
+        assert body["requestId"] == "action-request-1"
+        assert body["operation"] == "approve"
+        assert body["expectedVersion"] == 1
         return httpx.Response(200, json={"status": "approved", "entityVersion": "2"})
 
     original_client = httpx.AsyncClient
@@ -462,6 +492,9 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
         {"styleId": "203A023"},
         current,
         request_id="action-request-1",
+        page_key="sample_review.detail",
+        operation="approve",
+        expected_version=1,
     )
     assert pending["status"] == "pending"
     request_row = (await db_session.execute(select(EnterpriseApplicationActionRequest))).scalar_one()
@@ -473,6 +506,112 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
     assert completed["result"]["entityVersion"] == "2"
     assert calls == 1
     assert request_row.params_encrypted is None
+
+
+@pytest.mark.asyncio
+async def test_cross_application_event_delivery_is_signed_and_idempotent(db_session, monkeypatch):
+    org, _, department, _, _ = await _organization_tree(db_session)
+    source = await service.create_application(
+        db_session,
+        org.id,
+        EnterpriseApplicationCreate(
+            name="Sample Review", slug="sample-review-source",
+            entry_url="https://source.example.com/",
+        ),
+    )
+    target = await service.create_application(
+        db_session,
+        org.id,
+        EnterpriseApplicationCreate(
+            name="Production Handoff", slug="production-handoff-target",
+            entry_url="https://target.example.com/",
+        ),
+    )
+    source_integration = await integration_service.configure_integration(
+        db_session,
+        source,
+        EnterpriseApplicationIntegrationInput(
+            manifest_url="https://source.example.com/api/integration/manifest",
+            auth_token=INTEGRATION_SECRET,
+        ),
+    )
+    target_integration = await integration_service.configure_integration(
+        db_session,
+        target,
+        EnterpriseApplicationIntegrationInput(
+            manifest_url="https://target.example.com/api/integration/manifest",
+            auth_token=INTEGRATION_SECRET,
+        ),
+    )
+    target_integration.protocol_version = 2
+    target_integration.manifest = {
+        "contractRevision": "2.1",
+        "enterprise": {"key": "aifabei", "name": "爱法贝"},
+        "eventDeliveriesUrl": "/api/integration/event-deliveries",
+    }
+    await integration_service.replace_routes(
+        db_session,
+        source,
+        [EnterpriseApplicationEventRouteInput(
+            name="样品评审通过后生成生产交接草稿",
+            event_type="design.sample_review.approved.v1",
+            module_key="sample_review",
+            target_scope_type="department",
+            target_scope_id=department.id,
+            target_application_id=target.id,
+            target_module_key="production_handoff",
+        )],
+    )
+    stored, work_items = await integration_service._store_event(db_session, source_integration, {
+        "sequence": 1,
+        "eventId": "sample-review-approved-1",
+        "eventType": "design.sample_review.approved.v1",
+        "moduleKey": "sample_review",
+        "entityType": "sample_review",
+        "entityId": "SR-001",
+        "action": "approved",
+        "occurredAt": "2026-08-30T12:00:00+08:00",
+        "payload": {"sampleNumber": "S-001"},
+    })
+    assert stored is True and work_items == 1
+
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert request.url == "https://target.example.com/api/integration/event-deliveries"
+        claims = jwt.decode(
+            request.headers["authorization"].split(" ", 1)[1],
+            INTEGRATION_SECRET,
+            algorithms=["HS256"],
+            audience=target.slug,
+        )
+        body = json.loads(request.content)
+        assert claims["typ"] == "zhuojian-event"
+        assert claims["deliveryId"] == body["deliveryId"]
+        assert claims["eventId"] == body["event"]["eventId"]
+        assert claims["targetModuleKey"] == "production_handoff"
+        return httpx.Response(200, json={"status": "accepted", "draftId": "PH-001"})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        integration_service.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: original_client(transport=httpx.MockTransport(handler)),
+    )
+    assert await integration_service.deliver_pending_events(
+        db_session, organization_id=org.id,
+    ) == 1
+    assert await integration_service.deliver_pending_events(
+        db_session, organization_id=org.id,
+    ) == 0
+    delivery = (
+        await db_session.execute(select(EnterpriseApplicationEventDelivery))
+    ).scalar_one()
+    assert delivery.status == "delivered"
+    assert delivery.response["draftId"] == "PH-001"
+    assert calls == 1
 
 
 def test_public_url_validation_rejects_private_and_metadata_addresses():
