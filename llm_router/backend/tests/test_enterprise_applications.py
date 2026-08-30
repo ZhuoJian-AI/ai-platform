@@ -37,6 +37,69 @@ from app.services import subsystem_integration_service as integration_service
 INTEGRATION_SECRET = "test-integration-token-at-least-32-bytes"
 
 
+def test_protocol_v22_validates_department_page_and_action_limits():
+    manifest = {
+        "protocol": "zhuojian-subsystem",
+        "version": 2,
+        "contractRevision": "2.2",
+        "enterprise": {"key": "aifabei", "name": "爱法贝"},
+        "applicationSlug": "sample-review",
+        "applicationName": "样品评审",
+        "eventsUrl": "/api/integration/events",
+        "eventDeliveriesUrl": "/api/integration/event-deliveries",
+        "auth": {"ssoPath": "/api/integration/sso", "algorithm": "HS256"},
+        "modules": [{
+            "moduleKey": "sample_review",
+            "name": "样品评审",
+            "route": "/sample-review",
+            "departments": [{
+                "key": "quality",
+                "name": "质量部",
+                "role": "owner",
+                "pageKeys": ["sample_review.list"],
+                "actionKeys": ["sample_review.query"],
+            }],
+            "pages": [{
+                "pageKey": "sample_review.list",
+                "name": "评审列表",
+                "routePattern": "/sample-review",
+                "queryActionKey": "sample_review.query",
+                "actionKeys": ["sample_review.query"],
+                "contextSchema": {"type": "object"},
+            }],
+            "actions": [{
+                "actionKey": "sample_review.query",
+                "name": "查询评审",
+                "operation": "query",
+                "aiEnabled": True,
+                "requiresConfirmation": False,
+                "inputSchema": {"type": "object"},
+                "resultSchema": {"type": "object"},
+            }],
+        }],
+    }
+    normalized, events_url, version = integration_service._validate_manifest_payload(
+        manifest,
+        entry_url="https://sample.example.test/",
+        manifest_url="https://sample.example.test/api/integration/manifest",
+        expected_slug="sample-review",
+    )
+    department = normalized["modules"][0]["departments"][0]
+    assert version == 2
+    assert events_url == "https://sample.example.test/api/integration/events"
+    assert department["pageKeys"] == ["sample_review.list"]
+    assert department["actionKeys"] == ["sample_review.query"]
+
+    manifest["modules"][0]["departments"][0]["actionKeys"] = ["sample_review.delete"]
+    with pytest.raises(ValueError, match="department actionKeys"):
+        integration_service._validate_manifest_payload(
+            manifest,
+            entry_url="https://sample.example.test/",
+            manifest_url="https://sample.example.test/api/integration/manifest",
+            expected_slug="sample-review",
+        )
+
+
 async def _organization_tree(db_session):
     org = Organization(name="Tenant Applications", slug=f"apps-{uuid4().hex[:8]}")
     other = Organization(name="Other Tenant", slug=f"other-{uuid4().hex[:8]}")

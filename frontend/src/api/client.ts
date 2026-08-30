@@ -1524,6 +1524,7 @@ export interface EnterpriseApplicationLaunch {
 
 export interface EnterpriseApplicationManifestDepartment {
   key: string; name: string; role: string;
+  actionKeys?: string[]; pageKeys?: string[];
   platformDepartmentId?: string | null; matchStatus?: 'matched' | 'unresolved';
 }
 

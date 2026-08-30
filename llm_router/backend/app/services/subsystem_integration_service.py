@@ -87,7 +87,7 @@ def _validate_manifest_payload(
     normalized_modules: list[dict] = []
     contract_revision = str(payload.get("contractRevision") or "2.0") if version == 2 else "1.0"
     if version == 2:
-        if contract_revision not in {"2.0", "2.1"}:
+        if contract_revision not in {"2.0", "2.1", "2.2"}:
             raise ValueError("Unsupported subsystem contractRevision")
         if not modules:
             raise ValueError("Manifest modules must not be empty for protocol v2")
@@ -190,8 +190,8 @@ def _validate_manifest_payload(
             })
         normalized_pages: list[dict] = []
         pages = module.get("pages") if isinstance(module.get("pages"), list) else []
-        if contract_revision == "2.1" and not pages:
-            raise ValueError(f"Module '{key}' must declare pages for contractRevision 2.1")
+        if contract_revision in {"2.1", "2.2"} and not pages:
+            raise ValueError(f"Module '{key}' must declare pages for contractRevision {contract_revision}")
         module_action_keys = {item["actionKey"] for item in normalized_actions}
         for page in pages:
             if not isinstance(page, dict):
@@ -234,12 +234,49 @@ def _validate_manifest_payload(
                 "actionKeys": list(dict.fromkeys(page_action_keys)),
                 "contextSchema": context_schema,
             })
+        normalized_departments: list[dict] | list[object] = list(departments)
+        if version == 2:
+            normalized_departments = []
+        for department in departments if version == 2 else []:
+            department_action_keys = department.get("actionKeys")
+            department_page_keys = department.get("pageKeys")
+            if contract_revision == "2.2" and (
+                not isinstance(department_action_keys, list)
+                or not isinstance(department_page_keys, list)
+            ):
+                raise ValueError(
+                    f"Module '{key}' departments must declare actionKeys and pageKeys for contractRevision 2.2"
+                )
+            if department_action_keys is None:
+                department_action_keys = []
+            if department_page_keys is None:
+                department_page_keys = []
+            if not isinstance(department_action_keys, list) or any(
+                not isinstance(item, str) or item not in module_action_keys
+                for item in department_action_keys
+            ):
+                raise ValueError(
+                    f"Module '{key}' department actionKeys must reference actions in the same module"
+                )
+            module_page_keys = {item["pageKey"] for item in normalized_pages}
+            if not isinstance(department_page_keys, list) or any(
+                not isinstance(item, str) or item not in module_page_keys
+                for item in department_page_keys
+            ):
+                raise ValueError(
+                    f"Module '{key}' department pageKeys must reference pages in the same module"
+                )
+            normalized_departments.append({
+                **department,
+                "actionKeys": list(dict.fromkeys(department_action_keys)),
+                "pageKeys": list(dict.fromkeys(department_page_keys)),
+            })
         normalized_modules.append({
             **module,
             "moduleKey": key,
             "name": str(module.get("name") or module.get("moduleName") or key)[:255],
             "route": route,
-            "departments": departments,
+            "departments": normalized_departments,
             "pages": normalized_pages,
             "actions": normalized_actions,
         })
@@ -252,7 +289,7 @@ def _validate_manifest_payload(
         if not payload.get("eventsUrl"):
             raise ValueError("Manifest eventsUrl is required for protocol v2")
         events_url = urljoin(manifest_url, str(payload["eventsUrl"]))
-        if contract_revision == "2.1":
+        if contract_revision in {"2.1", "2.2"}:
             deliveries_path = payload.get("eventDeliveriesUrl")
             if deliveries_path != "/api/integration/event-deliveries":
                 raise ValueError("Manifest eventDeliveriesUrl must be '/api/integration/event-deliveries'")

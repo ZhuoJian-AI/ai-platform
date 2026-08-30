@@ -120,18 +120,27 @@ export default function EnterpriseApplicationOnboardingWizard({
             module_access: {},
           };
           const module = discovery.modules.find((item) => item.moduleKey === row.moduleKey)!;
+          const legacyEnabledActionKeys = module.actions
+            .filter((action) => action.aiEnabled)
+            .map((action) => action.actionKey);
+          const enabledActionKeys = (row.department.actionKeys ?? legacyEnabledActionKeys)
+            .filter((key) => module.actions.some((action) => action.aiEnabled && action.actionKey === key));
+          const enabledPageKeys = new Set(
+            row.department.pageKeys ?? (module.pages ?? []).map((page) => page.pageKey),
+          );
           const permissions = new Set<EnterpriseApplicationPermission>(['view']);
-          module.actions.filter((action) => action.aiEnabled).forEach((action) => {
+          module.actions.filter((action) => enabledActionKeys.includes(action.actionKey)).forEach((action) => {
             permissions.add(OPERATION_PERMISSION[action.operation]);
           });
           permissions.forEach((permission) => group.permissions.add(permission));
           group.module_keys.add(row.moduleKey);
-          const enabledActionKeys = module.actions.filter((action) => action.aiEnabled).map((action) => action.actionKey);
           group.module_access[row.moduleKey] = {
             role: row.department.role,
             permissions: Array.from(permissions),
             action_keys: enabledActionKeys,
-            page_access: Object.fromEntries((module.pages ?? []).map((page) => {
+            page_access: Object.fromEntries((module.pages ?? []).filter(
+              (page) => enabledPageKeys.has(page.pageKey),
+            ).map((page) => {
               const pageActionKeys = page.actionKeys.filter((key) => enabledActionKeys.includes(key));
               const pagePermissions = new Set<EnterpriseApplicationPermission>(['view']);
               module.actions.filter((action) => pageActionKeys.includes(action.actionKey)).forEach((action) => {
@@ -216,7 +225,7 @@ export default function EnterpriseApplicationOnboardingWizard({
               {module.departments.map((department) => {
                 const rowKey = `${module.moduleKey}:${department.key}`;
                 return <div className="subsystem-onboarding__mapping" key={rowKey}>
-                  <div><Typography.Text strong>{department.name}</Typography.Text><Tag color={department.role === 'owner' ? 'gold' : 'default'}>{department.role}</Tag><div><Typography.Text type="secondary">声明标识：{department.key}</Typography.Text></div></div>
+                  <div><Typography.Text strong>{department.name}</Typography.Text><Tag color={department.role === 'owner' ? 'gold' : 'default'}>{department.role}</Tag><div><Typography.Text type="secondary">声明标识：{department.key} · 页面 {department.pageKeys?.length ?? module.pages.length} · 操作 {department.actionKeys?.length ?? module.actions.filter((action) => action.aiEnabled).length}</Typography.Text></div></div>
                   <Select
                     showSearch
                     optionFilterProp="label"
