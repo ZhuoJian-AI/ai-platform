@@ -87,7 +87,7 @@ def _validate_manifest_payload(
     normalized_modules: list[dict] = []
     contract_revision = str(payload.get("contractRevision") or "2.0") if version == 2 else "1.0"
     if version == 2:
-        if contract_revision not in {"2.0", "2.1", "2.2"}:
+        if contract_revision not in {"2.0", "2.1", "2.2", "2.3"}:
             raise ValueError("Unsupported subsystem contractRevision")
         if not modules:
             raise ValueError("Manifest modules must not be empty for protocol v2")
@@ -190,7 +190,7 @@ def _validate_manifest_payload(
             })
         normalized_pages: list[dict] = []
         pages = module.get("pages") if isinstance(module.get("pages"), list) else []
-        if contract_revision in {"2.1", "2.2"} and not pages:
+        if contract_revision in {"2.1", "2.2", "2.3"} and not pages:
             raise ValueError(f"Module '{key}' must declare pages for contractRevision {contract_revision}")
         module_action_keys = {item["actionKey"] for item in normalized_actions}
         for page in pages:
@@ -240,12 +240,13 @@ def _validate_manifest_payload(
         for department in departments if version == 2 else []:
             department_action_keys = department.get("actionKeys")
             department_page_keys = department.get("pageKeys")
-            if contract_revision == "2.2" and (
+            if contract_revision in {"2.2", "2.3"} and (
                 not isinstance(department_action_keys, list)
                 or not isinstance(department_page_keys, list)
             ):
                 raise ValueError(
-                    f"Module '{key}' departments must declare actionKeys and pageKeys for contractRevision 2.2"
+                    f"Module '{key}' departments must declare actionKeys and pageKeys "
+                    f"for contractRevision {contract_revision}"
                 )
             if department_action_keys is None:
                 department_action_keys = []
@@ -289,7 +290,7 @@ def _validate_manifest_payload(
         if not payload.get("eventsUrl"):
             raise ValueError("Manifest eventsUrl is required for protocol v2")
         events_url = urljoin(manifest_url, str(payload["eventsUrl"]))
-        if contract_revision in {"2.1", "2.2"}:
+        if contract_revision in {"2.1", "2.2", "2.3"}:
             deliveries_path = payload.get("eventDeliveriesUrl")
             if deliveries_path != "/api/integration/event-deliveries":
                 raise ValueError("Manifest eventDeliveriesUrl must be '/api/integration/event-deliveries'")

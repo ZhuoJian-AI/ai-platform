@@ -520,6 +520,36 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
     assert service.effective_module_permissions(application, current, "sample_review") == {
         "view", "ai_approve",
     }
+    module_claims = service.effective_module_claims(application, current, "sample_review")
+    assert module_claims == {
+        "permissions": ["ai_approve", "view"],
+        "action_keys": ["sample_review.approve"],
+        "page_access": {
+            "sample_review.detail": {
+                "permissions": ["ai_approve", "view"],
+                "action_keys": ["sample_review.approve"],
+            },
+        },
+    }
+    launch_claims = jwt.decode(
+        action_service.issue_launch_ticket(
+            integration,
+            application,
+            current,
+            "sample_review",
+            {"view", "ai_approve"},
+            module_claims,
+        ),
+        INTEGRATION_SECRET,
+        algorithms=["HS256"],
+        audience=application.slug,
+    )
+    assert launch_claims["pageKeys"] == ["sample_review.detail"]
+    assert launch_claims["actionKeys"] == ["sample_review.approve"]
+    assert launch_claims["pageAccess"]["sample_review.detail"] == {
+        "permissions": ["ai_approve", "view"],
+        "actionKeys": ["sample_review.approve"],
+    }
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:

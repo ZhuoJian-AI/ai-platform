@@ -352,14 +352,34 @@ async def launch_terminal_application_endpoint(
         )
         if module is None:
             raise HTTPException(status_code=404, detail="Subsystem module not found")
+        module_claims = service.effective_module_claims(row, cu, selected_module)
         redirect_path = str(module.get("route") or "/")
+        page_access = module_claims.get("page_access")
+        if isinstance(page_access, dict):
+            authorized_pages = [
+                page for page in (module.get("pages") or [])
+                if isinstance(page, dict) and page.get("pageKey") in page_access
+            ]
+            authorized_routes = [
+                str(page.get("routePattern")) for page in authorized_pages
+                if isinstance(page.get("routePattern"), str)
+            ]
+            if not authorized_routes:
+                raise HTTPException(status_code=403, detail="Module has no authorized launch page")
+            if redirect_path not in authorized_routes:
+                redirect_path = authorized_routes[0]
         auth = integration.manifest.get("auth") if isinstance(integration.manifest.get("auth"), dict) else {}
         sso_path = str(auth.get("ssoPath") or "/api/integration/sso")
         sso_url = urljoin(row.entry_url.rstrip("/") + "/", sso_path)
         if not same_origin(row.entry_url, sso_url):
             raise HTTPException(status_code=409, detail="SSO endpoint left the registered application origin")
         ticket = action_service.issue_launch_ticket(
-            integration, row, cu, selected_module, module_permissions
+            integration,
+            row,
+            cu,
+            selected_module,
+            module_permissions,
+            module_claims,
         )
         launch_url = f"{sso_url}?{urlencode({'ticket': ticket, 'redirect': redirect_path})}"
     return EnterpriseApplicationLaunchRead(

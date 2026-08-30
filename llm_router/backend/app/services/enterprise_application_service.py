@@ -491,6 +491,64 @@ def effective_module_permissions(
     return permissions
 
 
+def effective_module_claims(
+    row: EnterpriseApplication, user: CurrentUser, module_key: str
+) -> dict:
+    """Build the least-privilege page/action scope embedded in an SSO ticket.
+
+    Legacy grants without structured module access remain unrestricted for compatibility.
+    Structured grants are merged across all scopes that apply to the user.
+    """
+    scopes = set(scope_service.effective_scope_set(user))
+    action_keys: set[str] = set()
+    page_access: dict[str, dict[str, set[str]]] = {}
+    unrestricted_actions = False
+    unrestricted_pages = False
+    matched = False
+    for grant in row.grants:
+        if grant.deleted_at is not None or (grant.scope_type, grant.scope_id or None) not in scopes:
+            continue
+        access = (grant.module_access or {}).get(module_key)
+        if not isinstance(access, dict):
+            keys = grant.module_keys or []
+            if not keys or module_key in keys:
+                matched = True
+                unrestricted_actions = True
+                unrestricted_pages = True
+            continue
+        matched = True
+        actions = access.get("action_keys")
+        if isinstance(actions, list):
+            action_keys.update(str(item) for item in actions if isinstance(item, str))
+        else:
+            unrestricted_actions = True
+        pages = access.get("page_access")
+        if not isinstance(pages, dict) or not pages:
+            unrestricted_pages = True
+            continue
+        for page_key, page in pages.items():
+            if not isinstance(page_key, str) or not isinstance(page, dict):
+                continue
+            merged = page_access.setdefault(page_key, {"permissions": set(), "action_keys": set()})
+            merged["permissions"].update(
+                value for value in (page.get("permissions") or []) if value in PERMISSIONS
+            )
+            merged["action_keys"].update(
+                str(item) for item in (page.get("action_keys") or []) if isinstance(item, str)
+            )
+    return {
+        "permissions": sorted(effective_module_permissions(row, user, module_key)),
+        "action_keys": None if matched and unrestricted_actions else sorted(action_keys),
+        "page_access": None if matched and unrestricted_pages else {
+            key: {
+                "permissions": sorted(value["permissions"]),
+                "action_keys": sorted(value["action_keys"]),
+            }
+            for key, value in sorted(page_access.items())
+        },
+    }
+
+
 def effective_page_permissions(
     row: EnterpriseApplication, user: CurrentUser, module_key: str, page_key: str | None
 ) -> set[str]:

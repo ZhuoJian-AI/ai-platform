@@ -511,25 +511,42 @@ def issue_launch_ticket(
     user: CurrentUser,
     module_key: str,
     permissions: set[str],
+    module_claims: dict | None = None,
 ) -> str:
     if not integration.auth_token_encrypted or integration.protocol_version < 2:
         raise HTTPException(status_code=409, detail="Protocol v2 integration secret is not configured")
     now = datetime.now(UTC)
+    claims = {
+        "iss": "zhuojian-saas",
+        "aud": application.slug,
+        "typ": "zhuojian-sso",
+        "sub": user.id,
+        "organizationId": str(user.organization_id),
+        "departmentId": user.department_id,
+        "teamId": user.team_id,
+        "moduleKey": module_key,
+        "permissions": sorted(permissions),
+        "jti": uuid4().hex,
+        "iat": now,
+        "exp": now + timedelta(seconds=60),
+    }
+    if isinstance(module_claims, dict):
+        action_keys = module_claims.get("action_keys")
+        page_access = module_claims.get("page_access")
+        if isinstance(action_keys, list):
+            claims["actionKeys"] = action_keys
+        if isinstance(page_access, dict):
+            claims["pageAccess"] = {
+                page_key: {
+                    "permissions": page.get("permissions") or [],
+                    "actionKeys": page.get("action_keys") or [],
+                }
+                for page_key, page in page_access.items()
+                if isinstance(page_key, str) and isinstance(page, dict)
+            }
+            claims["pageKeys"] = sorted(claims["pageAccess"])
     return jwt.encode(
-        {
-            "iss": "zhuojian-saas",
-            "aud": application.slug,
-            "typ": "zhuojian-sso",
-            "sub": user.id,
-            "organizationId": str(user.organization_id),
-            "departmentId": user.department_id,
-            "teamId": user.team_id,
-            "moduleKey": module_key,
-            "permissions": sorted(permissions),
-            "jti": uuid4().hex,
-            "iat": now,
-            "exp": now + timedelta(seconds=60),
-        },
+        claims,
         decrypt_provider_api_key(integration.auth_token_encrypted),
         algorithm="HS256",
     )
