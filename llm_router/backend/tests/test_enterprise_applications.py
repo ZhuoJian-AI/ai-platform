@@ -589,6 +589,7 @@ async def test_cross_application_event_delivery_is_signed_and_idempotent(db_sess
         )
         body = json.loads(request.content)
         assert claims["typ"] == "zhuojian-event"
+        assert claims["organizationId"] == str(org.id)
         assert claims["deliveryId"] == body["deliveryId"]
         assert claims["eventId"] == body["event"]["eventId"]
         assert claims["targetModuleKey"] == "production_handoff"

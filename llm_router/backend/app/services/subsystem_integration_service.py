@@ -684,6 +684,7 @@ async def deliver_pending_events(
                 "iss": "zhuojian-saas",
                 "aud": target.slug,
                 "typ": "zhuojian-event",
+                "organizationId": str(delivery.organization_id),
                 "deliveryId": delivery.delivery_id,
                 "eventId": event.event_id,
                 "eventType": event.event_type,
