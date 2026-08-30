@@ -81,9 +81,15 @@ def upgrade() -> None:
         sa.UniqueConstraint("delivery_id", name="uq_enterprise_application_event_deliveries_delivery_id"),
         sa.UniqueConstraint("route_id", "source_event_id", name="uq_enterprise_event_delivery_route_event"),
     )
-    for column in ("organization_id", "route_id", "source_event_id", "target_application_id"):
+    index_names = {
+        "organization_id": "ix_ea_event_deliveries_org",
+        "route_id": "ix_ea_event_deliveries_route",
+        "source_event_id": "ix_ea_event_deliveries_event",
+        "target_application_id": "ix_ea_event_deliveries_target",
+    }
+    for column, index_name in index_names.items():
         op.create_index(
-            f"ix_enterprise_application_event_deliveries_{column}",
+            index_name,
             "enterprise_application_event_deliveries",
             [column],
         )
