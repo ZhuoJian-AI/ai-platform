@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 import jwt
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,8 +15,6 @@ from app.auth.security import hash_password, verify_password
 from app.config import settings
 from app.models.admin import Admin
 from app.schemas.admin import AdminCreate, AdminRead, LoginResponse
-from fastapi import HTTPException
-
 
 # 向后兼容的薄封装（历史调用方仍可用私有名）
 _hash_password = hash_password
@@ -99,7 +98,10 @@ async def create_admin(db: AsyncSession, data: AdminCreate, created_by_id: int |
 async def ensure_super_admin(db: AsyncSession) -> Admin:
     """确保至少存在一个 super_admin 账号；如不存在则自动创建默认账号。"""
     result = await db.execute(
-        select(Admin).where(Admin.role == "super_admin", Admin.is_active.is_(True))
+        select(Admin)
+        .where(Admin.role == "super_admin", Admin.is_active.is_(True))
+        .order_by(Admin.id)
+        .limit(1)
     )
     admin = result.scalar_one_or_none()
     if admin is not None:

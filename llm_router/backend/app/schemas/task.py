@@ -79,7 +79,6 @@ class TaskRunRequest(BaseModel):
                 "module_name",
                 "entity_type",
                 "entity_id",
-                "data_version",
             }
             for key in bridge_strings:
                 item = value.get(key)
@@ -89,6 +88,17 @@ class TaskRunRequest(BaseModel):
                 item = value.get(key)
                 if item is not None and not isinstance(item, dict):
                     raise ValueError(f"invalid iframe bridge field: {key}")
+            data_version = value.get("data_version")
+            if data_version is not None:
+                import math
+
+                if (
+                    not isinstance(data_version, str | int | float)
+                    or isinstance(data_version, bool)
+                    or (isinstance(data_version, str) and len(data_version) > 1_000)
+                    or (isinstance(data_version, float) and not math.isfinite(data_version))
+                ):
+                    raise ValueError("invalid iframe bridge field: data_version")
         return value
 
     @classmethod

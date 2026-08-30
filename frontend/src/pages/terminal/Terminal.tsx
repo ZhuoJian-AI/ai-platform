@@ -722,7 +722,17 @@ export default function Terminal() {
       );
       if (!resp.ok || !resp.body) {
         const err = await resp.json().catch(() => ({}));
-        throw new Error(err.detail || `HTTP ${resp.status}`);
+        const detail = err.detail;
+        const detailMessage = typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((item) => (
+              item && typeof item === 'object' && typeof item.msg === 'string'
+                ? item.msg
+                : JSON.stringify(item)
+            )).join('；')
+            : null;
+        throw new Error(detailMessage || `HTTP ${resp.status}`);
       }
       await consumeSSE(resp);
       qc.invalidateQueries({ queryKey: ['terminal-tasks'] });

@@ -138,12 +138,18 @@ def test_iframe_bridge_page_context_validation() -> None:
             "bridge_version": 1,
             "module_key": "factory_progress",
             "filters": {"season": "26秋"},
+            "selection": {"id": "FP-1"},
+            "data_version": 3,
         },
     )
     assert request.page_context["bridge_version"] == 1
+    assert request.page_context["data_version"] == 3
 
     with pytest.raises(ValidationError, match="unsupported iframe bridge version"):
         TaskRunRequest(message="bad", page_context={"bridge_version": 2})
 
     with pytest.raises(ValidationError, match="invalid iframe bridge field"):
         TaskRunRequest(message="bad", page_context={"bridge_version": 1, "filters": []})
+
+    with pytest.raises(ValidationError, match="invalid iframe bridge field: data_version"):
+        TaskRunRequest(message="bad", page_context={"bridge_version": 1, "data_version": float("nan")})
