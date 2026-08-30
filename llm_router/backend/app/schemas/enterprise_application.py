@@ -8,20 +8,62 @@ from pydantic import AnyHttpUrl, BaseModel, Field, field_validator
 
 from app.schemas._base import OrmModel
 
-ApplicationPermission = Literal["view", "ai_query", "ai_create", "ai_update", "ai_delete", "export"]
+ApplicationPermission = Literal[
+    "view", "ai_query", "ai_create", "ai_update", "ai_delete", "ai_approve", "export"
+]
 ApplicationScope = Literal["organization", "department", "team", "user"]
 ApplicationTarget = Literal["tool_endpoint", "data_interface", "skill_folder"]
-ApplicationOperation = Literal["query", "create", "update", "delete", "export"]
+ApplicationOperation = Literal["query", "create", "update", "delete", "export", "approve"]
 
 
-class EnterpriseApplicationModuleAccess(BaseModel):
-    role: str = Field("member", min_length=1, max_length=80)
+class EnterpriseApplicationPageAccess(BaseModel):
     permissions: list[ApplicationPermission] = Field(default_factory=list)
+    action_keys: list[str] = Field(default_factory=list, max_length=500)
 
     @field_validator("permissions")
     @classmethod
     def unique_permissions(cls, value: list[ApplicationPermission]) -> list[ApplicationPermission]:
         return list(dict.fromkeys(value))
+
+    @field_validator("action_keys")
+    @classmethod
+    def valid_action_keys(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in value if item.strip()]
+        if any(len(item) > 160 for item in cleaned):
+            raise ValueError("action key must be 160 characters or fewer")
+        return list(dict.fromkeys(cleaned))
+
+
+class EnterpriseApplicationModuleAccess(BaseModel):
+    role: str = Field("member", min_length=1, max_length=80)
+    permissions: list[ApplicationPermission] = Field(default_factory=list)
+    action_keys: list[str] = Field(default_factory=list, max_length=500)
+    page_access: dict[str, EnterpriseApplicationPageAccess] = Field(default_factory=dict)
+
+    @field_validator("permissions")
+    @classmethod
+    def unique_permissions(cls, value: list[ApplicationPermission]) -> list[ApplicationPermission]:
+        return list(dict.fromkeys(value))
+
+    @field_validator("action_keys")
+    @classmethod
+    def valid_action_keys(cls, value: list[str]) -> list[str]:
+        return EnterpriseApplicationPageAccess.valid_action_keys(value)
+
+    @field_validator("page_access")
+    @classmethod
+    def valid_page_access(
+        cls, value: dict[str, EnterpriseApplicationPageAccess]
+    ) -> dict[str, EnterpriseApplicationPageAccess]:
+        if len(value) > 500:
+            raise ValueError("page access must contain at most 500 pages")
+        cleaned: dict[str, EnterpriseApplicationPageAccess] = {}
+        for key, access in value.items():
+            page_key = key.strip()
+            if not page_key or len(page_key) > 160:
+                raise ValueError("page key must be 1-160 characters")
+            cleaned[page_key] = access
+        return cleaned
 
 
 class EnterpriseApplicationCreate(BaseModel):
@@ -235,6 +277,9 @@ class EnterpriseApplicationDiscoveryRead(BaseModel):
 
 class EnterpriseApplicationActionInvoke(BaseModel):
     module_key: str = Field(..., min_length=1, max_length=120)
+    page_key: str | None = Field(None, min_length=1, max_length=160)
+    operation: ApplicationOperation | None = None
+    expected_version: str | int | None = None
     params: dict = Field(default_factory=dict)
     request_id: str | None = Field(None, min_length=1, max_length=200)
 
@@ -254,6 +299,7 @@ class EnterpriseApplicationActionRequestRead(OrmModel):
     action_id: UUID
     request_id: str
     module_key: str
+    page_key: str | None = None
     status: str
     params: dict = Field(default_factory=dict)
     expires_at: datetime
@@ -270,6 +316,7 @@ class EnterpriseApplicationSyncRead(BaseModel):
     manifest_updated: bool = False
     received_events: int = 0
     created_work_items: int = 0
+    delivered_events: int = 0
     cursor_sequence: int = 0
     detail: str | None = None
 
@@ -280,6 +327,7 @@ class EnterpriseApplicationEventRouteInput(BaseModel):
     module_key: str | None = Field(None, max_length=120)
     target_scope_type: ApplicationScope
     target_scope_id: UUID | None = None
+    target_application_id: UUID | None = None
     target_module_key: str | None = Field(None, max_length=120)
     is_active: bool = True
 
@@ -296,6 +344,7 @@ class EnterpriseApplicationEventRouteRead(OrmModel):
     module_key: str | None
     target_scope_type: str
     target_scope_id: str | None
+    target_application_id: UUID | None
     target_module_key: str | None
     is_active: bool
     created_at: datetime

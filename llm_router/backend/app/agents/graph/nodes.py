@@ -1266,6 +1266,7 @@ async def _build_tools(
     *,
     exec_mode: str = "craft",
     application_id: str | None = None,
+    page_context: dict | None = None,
 ) -> tuple[list[dict], dict[str, dict]]:
     """加载技能文件夹 → 读取 skill.md manifest → OpenAI tools 列表 + name→(folder, endpoint) 映射。
 
@@ -1279,7 +1280,16 @@ async def _build_tools(
     if application_id and user is not None:
         application = await enterprise_application_service.get_application(db, application_id)
         if application is not None and str(application.organization_id) == str(user.organization_id):
-            for action in await subsystem_action_service.list_actions_for_user(db, application, user):
+            context = page_context if isinstance(page_context, dict) else {}
+            context_module_key = context.get("module_key") if isinstance(context.get("module_key"), str) else None
+            context_page_key = context.get("page_key") if isinstance(context.get("page_key"), str) else None
+            for action in await subsystem_action_service.list_actions_for_user(
+                db,
+                application,
+                user,
+                page_key=context_page_key,
+                module_key=context_module_key,
+            ):
                 tool_name = subsystem_action_service.action_tool_name(application, action)
                 parameters = dict(action.input_schema or {"type": "object", "properties": {}})
                 parameters.setdefault("type", "object")
@@ -1293,6 +1303,8 @@ async def _build_tools(
                     "kind": "enterprise_action",
                     "application": application,
                     "action": action,
+                    "page_key": context_page_key,
+                    "expected_version": context.get("data_version"),
                 }
     agent_skills: dict[str, dict] = {}
     agent_skill_slugs: dict[str, list[str]] = {}
@@ -1844,15 +1856,20 @@ async def _execute_tool_call(
             return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
         application = entry["application"]
         action = entry["action"]
+        action_params = dict(params)
+        expected_version = action_params.pop("expectedVersion", entry.get("expected_version"))
         try:
             result = await subsystem_action_service.invoke_action(
                 db,
                 application.id,
                 action.action_key,
                 action.module_key,
-                params,
+                action_params,
                 user,
                 request_id=f"{state.get('task_id') or 'agent'}:{tool_call_id}"[:200],
+                page_key=entry.get("page_key"),
+                operation=action.operation,
+                expected_version=expected_version,
             )
             content = json.dumps(result, ensure_ascii=False, default=str)
             ok = result.get("status") in {"pending", "completed"}
@@ -2117,6 +2134,7 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
             state.get("workspace_id"),
             user,
             application_id=state.get("application_id"),
+            page_context=state.get("page_context") or {},
         )
         rag_ids = list(state.get("rag_collection_ids") or [])
         if state.get("rag_collection_id") and str(state["rag_collection_id"]) not in rag_ids:

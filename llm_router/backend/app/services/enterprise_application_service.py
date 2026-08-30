@@ -28,12 +28,13 @@ from app.schemas.enterprise_application import (
 )
 from app.services import scope_service, skill_scope_service
 
-PERMISSIONS = {"view", "ai_query", "ai_create", "ai_update", "ai_delete", "export"}
+PERMISSIONS = {"view", "ai_query", "ai_create", "ai_update", "ai_delete", "ai_approve", "export"}
 OPERATION_PERMISSION = {
     "query": "ai_query",
     "create": "ai_create",
     "update": "ai_update",
     "delete": "ai_delete",
+    "approve": "ai_approve",
     "export": "export",
 }
 
@@ -488,6 +489,91 @@ def effective_module_permissions(
         if not keys or module_key in keys:
             permissions.update(value for value in (grant.permissions or []) if value in PERMISSIONS)
     return permissions
+
+
+def effective_page_permissions(
+    row: EnterpriseApplication, user: CurrentUser, module_key: str, page_key: str | None
+) -> set[str]:
+    """Resolve page permissions; v2.0 grants without page_access keep module behaviour."""
+    if not page_key:
+        return effective_module_permissions(row, user, module_key)
+    if not row.is_active or row.deleted_at is not None:
+        return set()
+    scopes = set(scope_service.effective_scope_set(user))
+    permissions: set[str] = set()
+    for grant in row.grants:
+        if grant.deleted_at is not None or (grant.scope_type, grant.scope_id or None) not in scopes:
+            continue
+        access = (grant.module_access or {}).get(module_key)
+        if isinstance(access, dict):
+            page_access = access.get("page_access")
+            if isinstance(page_access, dict) and page_access:
+                page = page_access.get(page_key)
+                if isinstance(page, dict):
+                    permissions.update(value for value in (page.get("permissions") or []) if value in PERMISSIONS)
+                continue
+            permissions.update(value for value in (access.get("permissions") or []) if value in PERMISSIONS)
+            continue
+        keys = grant.module_keys or []
+        if not keys or module_key in keys:
+            permissions.update(value for value in (grant.permissions or []) if value in PERMISSIONS)
+    return permissions
+
+
+def action_allowed_for_user(
+    row: EnterpriseApplication,
+    user: CurrentUser,
+    module_key: str,
+    page_key: str | None,
+    action_key: str,
+    required_permission: str,
+) -> bool:
+    """Require one matching grant to authorize the page, operation and action catalog entry."""
+    if not row.is_active or row.deleted_at is not None:
+        return False
+    scopes = set(scope_service.effective_scope_set(user))
+    for grant in row.grants:
+        if grant.deleted_at is not None or (grant.scope_type, grant.scope_id or None) not in scopes:
+            continue
+        access = (grant.module_access or {}).get(module_key)
+        if not isinstance(access, dict):
+            keys = grant.module_keys or []
+            permissions = set(grant.permissions or [])
+            if (not keys or module_key in keys) and {"view", required_permission} <= permissions:
+                return True
+            continue
+        permissions = set(access.get("permissions") or [])
+        module_actions = access.get("action_keys")
+        if isinstance(module_actions, list) and module_actions and action_key not in module_actions:
+            continue
+        page_access = access.get("page_access")
+        if page_key and isinstance(page_access, dict) and page_access:
+            page = page_access.get(page_key)
+            if not isinstance(page, dict):
+                continue
+            permissions = set(page.get("permissions") or [])
+            page_actions = page.get("action_keys")
+            if not isinstance(page_actions, list) or action_key not in page_actions:
+                continue
+        if {"view", required_permission} <= permissions:
+            return True
+    return False
+
+
+async def assert_page_permission(
+    db: AsyncSession,
+    app_id: UUID | str,
+    user: CurrentUser,
+    module_key: str,
+    page_key: str | None,
+    permission: str,
+) -> EnterpriseApplication:
+    row = await get_application(db, app_id)
+    if row is None or str(row.organization_id) != str(user.organization_id):
+        raise HTTPException(status_code=404, detail="Application not found")
+    if permission not in effective_page_permissions(row, user, module_key, page_key):
+        raise HTTPException(status_code=403, detail="Application page permission denied")
+    return row
 
 
 async def assert_module_permission(

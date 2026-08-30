@@ -9,7 +9,8 @@ import { ApiError, terminal, type TerminalEnterpriseApplication } from '../../ap
 
 const BRIDGE_MAX_BYTES = 16_384;
 const BRIDGE_KEYS = new Set([
-  'application_slug', 'route', 'module_key', 'module_name', 'entity_type',
+  'enterprise_key', 'application_slug', 'route', 'module_key', 'module_name',
+  'page_key', 'page_name', 'entity_type',
   'entity_id', 'filters', 'selection', 'data_version',
 ]);
 

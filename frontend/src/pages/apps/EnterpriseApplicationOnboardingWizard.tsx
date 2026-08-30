@@ -20,7 +20,8 @@ import type { OrgNodeInfo } from '../../hooks/useOrgTree';
 import './EnterpriseApplicationOnboardingWizard.css';
 
 const OPERATION_PERMISSION: Record<EnterpriseApplicationOperation, EnterpriseApplicationPermission> = {
-  query: 'ai_query', create: 'ai_create', update: 'ai_update', delete: 'ai_delete', export: 'export',
+  query: 'ai_query', create: 'ai_create', update: 'ai_update', delete: 'ai_delete',
+  approve: 'ai_approve', export: 'export',
 };
 
 function errorText(error: unknown, fallback: string) {
@@ -125,9 +126,19 @@ export default function EnterpriseApplicationOnboardingWizard({
           });
           permissions.forEach((permission) => group.permissions.add(permission));
           group.module_keys.add(row.moduleKey);
+          const enabledActionKeys = module.actions.filter((action) => action.aiEnabled).map((action) => action.actionKey);
           group.module_access[row.moduleKey] = {
             role: row.department.role,
             permissions: Array.from(permissions),
+            action_keys: enabledActionKeys,
+            page_access: Object.fromEntries((module.pages ?? []).map((page) => {
+              const pageActionKeys = page.actionKeys.filter((key) => enabledActionKeys.includes(key));
+              const pagePermissions = new Set<EnterpriseApplicationPermission>(['view']);
+              module.actions.filter((action) => pageActionKeys.includes(action.actionKey)).forEach((action) => {
+                pagePermissions.add(OPERATION_PERMISSION[action.operation]);
+              });
+              return [page.pageKey, { permissions: Array.from(pagePermissions), action_keys: pageActionKeys }];
+            })),
           };
           grouped.set(groupKey, group);
         });

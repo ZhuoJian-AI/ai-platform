@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urljoin, urlsplit
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
+import jwt
 import structlog
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -25,6 +26,7 @@ from app.models.enterprise_application import (
     EnterpriseApplication,
     EnterpriseApplicationAction,
     EnterpriseApplicationEvent,
+    EnterpriseApplicationEventDelivery,
     EnterpriseApplicationEventRoute,
     EnterpriseApplicationIntegration,
 )
@@ -81,8 +83,12 @@ def _validate_manifest_payload(
         raise ValueError("Manifest modules must be a list with at most 500 entries")
     module_keys: set[str] = set()
     action_keys: set[str] = set()
+    page_keys: set[str] = set()
     normalized_modules: list[dict] = []
+    contract_revision = str(payload.get("contractRevision") or "2.0") if version == 2 else "1.0"
     if version == 2:
+        if contract_revision not in {"2.0", "2.1"}:
+            raise ValueError("Unsupported subsystem contractRevision")
         if not modules:
             raise ValueError("Manifest modules must not be empty for protocol v2")
         enterprise = payload.get("enterprise")
@@ -169,7 +175,7 @@ def _validate_manifest_payload(
                 or action_key in action_keys
             ):
                 raise ValueError("Manifest action keys must be unique and 1-160 characters")
-            if operation not in {"query", "create", "update", "delete", "export"}:
+            if operation not in {"query", "create", "update", "delete", "export", "approve"}:
                 raise ValueError(f"Action '{action_key}' has an unsupported operation")
             action_keys.add(action_key)
             normalized_actions.append({
@@ -182,12 +188,59 @@ def _validate_manifest_payload(
                 "inputSchema": action.get("inputSchema") if isinstance(action.get("inputSchema"), dict) else {},
                 "resultSchema": action.get("resultSchema") if isinstance(action.get("resultSchema"), dict) else {},
             })
+        normalized_pages: list[dict] = []
+        pages = module.get("pages") if isinstance(module.get("pages"), list) else []
+        if contract_revision == "2.1" and not pages:
+            raise ValueError(f"Module '{key}' must declare pages for contractRevision 2.1")
+        module_action_keys = {item["actionKey"] for item in normalized_actions}
+        for page in pages:
+            if not isinstance(page, dict):
+                raise ValueError(f"Module '{key}' contains a non-object page")
+            page_key = str(page.get("pageKey") or "").strip()
+            if (
+                not page_key
+                or len(page_key) > 160
+                or not STABLE_KEY_RE.fullmatch(page_key)
+                or page_key in page_keys
+            ):
+                raise ValueError("Manifest page keys must be unique and 1-160 characters")
+            page_keys.add(page_key)
+            route_pattern = str(page.get("routePattern") or "").strip()
+            parsed_page_route = urlsplit(route_pattern)
+            if (
+                not route_pattern.startswith("/")
+                or route_pattern.startswith("//")
+                or parsed_page_route.scheme
+                or parsed_page_route.netloc
+            ):
+                raise ValueError(f"Page '{page_key}' routePattern must be a site-relative path")
+            page_action_keys = page.get("actionKeys")
+            if not isinstance(page_action_keys, list) or any(
+                not isinstance(item, str) or item not in module_action_keys for item in page_action_keys
+            ):
+                raise ValueError(f"Page '{page_key}' actionKeys must reference actions in module '{key}'")
+            query_action_key = page.get("queryActionKey")
+            if query_action_key is not None and query_action_key not in page_action_keys:
+                raise ValueError(f"Page '{page_key}' queryActionKey must be included in actionKeys")
+            context_schema = page.get("contextSchema")
+            if not isinstance(context_schema, dict):
+                raise ValueError(f"Page '{page_key}' contextSchema must be an object")
+            normalized_pages.append({
+                **page,
+                "pageKey": page_key,
+                "name": str(page.get("name") or page_key)[:255],
+                "routePattern": route_pattern,
+                "queryActionKey": query_action_key,
+                "actionKeys": list(dict.fromkeys(page_action_keys)),
+                "contextSchema": context_schema,
+            })
         normalized_modules.append({
             **module,
             "moduleKey": key,
             "name": str(module.get("name") or module.get("moduleName") or key)[:255],
             "route": route,
             "departments": departments,
+            "pages": normalized_pages,
             "actions": normalized_actions,
         })
     if version == 1:
@@ -199,9 +252,22 @@ def _validate_manifest_payload(
         if not payload.get("eventsUrl"):
             raise ValueError("Manifest eventsUrl is required for protocol v2")
         events_url = urljoin(manifest_url, str(payload["eventsUrl"]))
+        if contract_revision == "2.1":
+            deliveries_path = payload.get("eventDeliveriesUrl")
+            if deliveries_path != "/api/integration/event-deliveries":
+                raise ValueError("Manifest eventDeliveriesUrl must be '/api/integration/event-deliveries'")
+            deliveries_url = urljoin(manifest_url, deliveries_path)
+            if not same_origin(entry_url, deliveries_url):
+                raise ValueError("Event delivery endpoint must use the registered application origin")
     if not same_origin(entry_url, events_url):
         raise ValueError("Event feed must use the registered application origin")
-    normalized = {**payload, "version": version, "applicationSlug": application_slug, "modules": normalized_modules}
+    normalized = {
+        **payload,
+        "version": version,
+        "contractRevision": contract_revision,
+        "applicationSlug": application_slug,
+        "modules": normalized_modules,
+    }
     return normalized, events_url, version
 
 
@@ -376,6 +442,24 @@ def integration_read(row: EnterpriseApplicationIntegration) -> dict:
     }
 
 
+def manifest_page(
+    integration: EnterpriseApplicationIntegration,
+    module_key: str,
+    page_key: str,
+) -> dict | None:
+    manifest = integration.manifest if isinstance(integration.manifest, dict) else {}
+    modules = manifest.get("modules") if isinstance(manifest.get("modules"), list) else []
+    for module in modules:
+        if not isinstance(module, dict) or module.get("moduleKey") != module_key:
+            continue
+        pages = module.get("pages") if isinstance(module.get("pages"), list) else []
+        return next(
+            (page for page in pages if isinstance(page, dict) and page.get("pageKey") == page_key),
+            None,
+        )
+    return None
+
+
 async def replace_routes(
     db: AsyncSession,
     application: EnterpriseApplication,
@@ -400,6 +484,16 @@ async def replace_routes(
         scope_id = await skill_scope_service.validate_scope_target(
             db, application.organization_id, item.target_scope_type, item.target_scope_id
         )
+        target_application_id = None
+        if item.target_application_id:
+            target_application = await db.get(EnterpriseApplication, item.target_application_id)
+            if (
+                target_application is None
+                or target_application.deleted_at is not None
+                or str(target_application.organization_id) != str(application.organization_id)
+            ):
+                raise HTTPException(status_code=400, detail="Target application must belong to the same organization")
+            target_application_id = target_application.id
         row = EnterpriseApplicationEventRoute(
             application_id=application.id,
             organization_id=application.organization_id,
@@ -408,6 +502,7 @@ async def replace_routes(
             module_key=item.module_key,
             target_scope_type=item.target_scope_type,
             target_scope_id=scope_id,
+            target_application_id=target_application_id,
             target_module_key=item.target_module_key,
             is_active=item.is_active,
         )
@@ -476,8 +571,8 @@ async def _store_event(
         .on_conflict_do_nothing(index_elements=["application_id", "event_id"])
         .returning(EnterpriseApplicationEvent.id)
     )
-    inserted = result.scalar_one_or_none() is not None
-    if not inserted:
+    event_row_id = result.scalar_one_or_none()
+    if event_row_id is None:
         return False, 0
     routes = list(
         (
@@ -500,6 +595,22 @@ async def _store_event(
     created = 0
     entity_label = values["entity_id"] or values["entity_type"] or "业务记录"
     for route in routes:
+        if route.target_application_id:
+            delivery_id = str(uuid5(NAMESPACE_URL, f"{route.id}:{event_row_id}"))
+            await db.execute(
+                insert(EnterpriseApplicationEventDelivery)
+                .values(
+                    organization_id=integration.organization_id,
+                    route_id=route.id,
+                    source_event_id=event_row_id,
+                    target_application_id=route.target_application_id,
+                    delivery_id=delivery_id,
+                    status="pending",
+                    attempts=0,
+                    response={},
+                )
+                .on_conflict_do_nothing(index_elements=["route_id", "source_event_id"])
+            )
         work_result = await db.execute(
             insert(CrossDepartmentWorkItem)
             .values(
@@ -527,6 +638,95 @@ async def _store_event(
     return True, created
 
 
+async def deliver_pending_events(
+    db: AsyncSession,
+    *,
+    organization_id: UUID | str,
+    limit: int = 100,
+) -> int:
+    deliveries = list((await db.execute(
+        select(EnterpriseApplicationEventDelivery)
+        .where(
+            EnterpriseApplicationEventDelivery.organization_id == UUID(str(organization_id)),
+            EnterpriseApplicationEventDelivery.status.in_(["pending", "failed"]),
+            EnterpriseApplicationEventDelivery.attempts < 10,
+        )
+        .order_by(EnterpriseApplicationEventDelivery.created_at)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )).scalars().all())
+    delivered = 0
+    for delivery in deliveries:
+        delivery.status = "delivering"
+        delivery.attempts += 1
+        await db.flush()
+        event = await db.get(EnterpriseApplicationEvent, delivery.source_event_id)
+        route = await db.get(EnterpriseApplicationEventRoute, delivery.route_id)
+        target = await db.get(EnterpriseApplication, delivery.target_application_id)
+        integration = await get_integration(db, delivery.target_application_id)
+        if not event or not route or not target or not integration or not integration.auth_token_encrypted:
+            delivery.status = "failed"
+            delivery.last_error = "Target subsystem integration is unavailable"
+            continue
+        manifest = integration.manifest if isinstance(integration.manifest, dict) else {}
+        delivery_path = manifest.get("eventDeliveriesUrl")
+        if delivery_path != "/api/integration/event-deliveries":
+            delivery.status = "failed"
+            delivery.last_error = "Target subsystem does not declare eventDeliveriesUrl"
+            continue
+        url = urljoin(target.entry_url.rstrip("/") + "/", delivery_path.lstrip("/"))
+        try:
+            if not same_origin(target.entry_url, url):
+                raise ValueError("Event delivery endpoint left the target application origin")
+            assert_public_http_url(url, require_https=True)
+            now = datetime.now(UTC)
+            token = jwt.encode({
+                "iss": "zhuojian-saas",
+                "aud": target.slug,
+                "typ": "zhuojian-event",
+                "deliveryId": delivery.delivery_id,
+                "eventId": event.event_id,
+                "eventType": event.event_type,
+                "targetModuleKey": route.target_module_key,
+                "iat": now,
+                "exp": now + timedelta(seconds=60),
+            }, decrypt_provider_api_key(integration.auth_token_encrypted), algorithm="HS256")
+            source = await db.get(EnterpriseApplication, event.application_id)
+            body = {
+                "deliveryId": delivery.delivery_id,
+                "sourceApplicationSlug": source.slug if source else "unknown",
+                "event": {
+                    "eventId": event.event_id,
+                    "eventType": event.event_type,
+                    "enterpriseKey": str(manifest.get("enterprise", {}).get("key") or "aifabei"),
+                    "moduleKey": event.module_key,
+                    "entityType": event.entity_type,
+                    "entityId": event.entity_id,
+                    "occurredAt": event.occurred_at.isoformat() if event.occurred_at else event.created_at.isoformat(),
+                    "payload": event.payload or {},
+                },
+            }
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=8.0), follow_redirects=False) as client:
+                response = await client.post(url, json=body, headers={
+                    "authorization": f"Bearer {token}",
+                    "user-agent": "ZhuoJian-Subsystem-Event/2.1",
+                })
+            if 300 <= response.status_code < 400:
+                raise RuntimeError("Subsystem event delivery endpoint must not redirect")
+            response.raise_for_status()
+            result = response.json()
+            delivery.status = "delivered"
+            delivery.delivered_at = datetime.now(UTC)
+            delivery.response = result if isinstance(result, dict) else {"value": result}
+            delivery.last_error = None
+            delivered += 1
+        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+            delivery.status = "failed"
+            delivery.last_error = str(exc)[:1000]
+        await db.flush()
+    return delivered
+
+
 async def sync_integration(
     db: AsyncSession,
     application: EnterpriseApplication,
@@ -541,6 +741,7 @@ async def sync_integration(
     await db.flush()
     received = 0
     work_items = 0
+    delivered_events = 0
     try:
         timeout = httpx.Timeout(20.0, connect=8.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
@@ -586,6 +787,9 @@ async def sync_integration(
                 if not items or not feed.get("hasMore") or received >= batch_limit:
                     break
             row.last_event_sync_at = datetime.now(UTC)
+            delivered_events = await deliver_pending_events(
+                db, organization_id=application.organization_id
+            )
             row.sync_status = "healthy"
             row.last_error = None
             await db.flush()
@@ -594,6 +798,7 @@ async def sync_integration(
             "manifest_updated": True,
             "received_events": received,
             "created_work_items": work_items,
+            "delivered_events": delivered_events,
             "cursor_sequence": row.cursor_sequence,
             "detail": None,
         }
@@ -606,6 +811,7 @@ async def sync_integration(
             "manifest_updated": False,
             "received_events": received,
             "created_work_items": work_items,
+            "delivered_events": delivered_events,
             "cursor_sequence": row.cursor_sequence,
             "detail": row.last_error,
         }

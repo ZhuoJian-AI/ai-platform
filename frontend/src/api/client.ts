@@ -1463,14 +1463,16 @@ export interface TaskConfig {
 }
 
 export type EnterpriseApplicationPermission =
-  | 'view' | 'ai_query' | 'ai_create' | 'ai_update' | 'ai_delete' | 'export';
+  | 'view' | 'ai_query' | 'ai_create' | 'ai_update' | 'ai_delete' | 'ai_approve' | 'export';
 export type EnterpriseApplicationScope = 'organization' | 'department' | 'team' | 'user';
 export type EnterpriseApplicationTarget = 'tool_endpoint' | 'data_interface' | 'skill_folder';
-export type EnterpriseApplicationOperation = 'query' | 'create' | 'update' | 'delete' | 'export';
+export type EnterpriseApplicationOperation = 'query' | 'create' | 'update' | 'delete' | 'export' | 'approve';
 
 export interface EnterpriseApplicationModuleAccess {
   role: string;
   permissions: EnterpriseApplicationPermission[];
+  action_keys: string[];
+  page_access: Record<string, { permissions: EnterpriseApplicationPermission[]; action_keys: string[] }>;
 }
 
 export interface EnterpriseApplicationGrant {
@@ -1532,9 +1534,15 @@ export interface EnterpriseApplicationManifestAction {
   resultSchema: Record<string, unknown>;
 }
 
+export interface EnterpriseApplicationManifestPage {
+  pageKey: string; name: string; routePattern: string; queryActionKey?: string | null;
+  actionKeys: string[]; contextSchema: Record<string, unknown>;
+}
+
 export interface EnterpriseApplicationManifestModule {
   moduleKey: string; name: string; route: string;
   departments: EnterpriseApplicationManifestDepartment[];
+  pages: EnterpriseApplicationManifestPage[];
   actions: EnterpriseApplicationManifestAction[];
 }
 
@@ -1572,7 +1580,7 @@ export interface EnterpriseApplicationActionResult {
 
 export interface EnterpriseApplicationActionRequest {
   id: string; application_id: string; action_id: string; request_id: string;
-  module_key: string; status: EnterpriseApplicationActionResult['status'];
+  module_key: string; page_key: string | null; status: EnterpriseApplicationActionResult['status'];
   params: Record<string, unknown>;
   expires_at: string; resolved_at: string | null; result: Record<string, unknown>;
   error: string | null; action: EnterpriseApplicationAction;
@@ -1582,7 +1590,7 @@ export interface EnterpriseApplicationActionRequest {
 export interface EnterpriseApplicationEventRoute {
   id: string; application_id: string; name: string; event_type: string;
   module_key: string | null; target_scope_type: EnterpriseApplicationScope;
-  target_scope_id: string | null; target_module_key: string | null;
+  target_scope_id: string | null; target_application_id: string | null; target_module_key: string | null;
   is_active: boolean; created_at: string; updated_at: string;
 }
 
@@ -1672,7 +1680,7 @@ export const enterpriseApplications = {
   }),
   syncIntegration: (id: string) => request<{
     status: 'healthy' | 'error'; manifest_updated: boolean; received_events: number;
-    created_work_items: number; cursor_sequence: number; detail: string | null;
+    created_work_items: number; delivered_events: number; cursor_sequence: number; detail: string | null;
   }>(`/api/v1/applications/${id}/integration/sync`, { method: 'POST' }),
   actions: (id: string) => request<EnterpriseApplicationAction[]>(`/api/v1/applications/${id}/actions`),
   eventRoutes: (id: string) => request<EnterpriseApplicationEventRoute[]>(`/api/v1/applications/${id}/event-routes`),

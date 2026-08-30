@@ -113,6 +113,7 @@ from app.services import (
     skill_scope_service,
     skills_pack_service,
     storage_gateway_service,
+    subsystem_integration_service,
     task_service,
     workspace_governance_service,
     workspace_permission_service,
@@ -652,6 +653,19 @@ async def run_task_endpoint(
         page_module_key = cfg["page_context"].get("module_key")
         if page_module_key and allowed_module_keys and page_module_key not in allowed_module_keys:
             raise HTTPException(status_code=403, detail="当前账号无权访问该业务子模块")
+        page_key = cfg["page_context"].get("page_key")
+        if page_key:
+            if not page_module_key:
+                raise HTTPException(status_code=400, detail="页面上下文缺少 module_key")
+            integration = await subsystem_integration_service.get_integration(db, application.id)
+            if integration is None or subsystem_integration_service.manifest_page(
+                integration, str(page_module_key), str(page_key)
+            ) is None:
+                raise HTTPException(status_code=400, detail="页面上下文不在当前应用 Manifest 中")
+            if "view" not in enterprise_application_service.effective_page_permissions(
+                application, cu, str(page_module_key), str(page_key)
+            ):
+                raise HTTPException(status_code=403, detail="当前账号无权访问该业务页面")
         cfg["application_permissions"] = sorted(application_permissions)
         cfg["application_module_keys"] = allowed_module_keys
     if not cfg.get("workspace_id"):

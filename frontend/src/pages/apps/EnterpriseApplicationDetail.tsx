@@ -27,6 +27,7 @@ const OPERATION_META: Record<EnterpriseApplicationOperation, { label: string; co
   create: { label: '新增', color: '#059669' },
   update: { label: '更新', color: '#d97706' },
   delete: { label: '删除', color: '#dc2626' },
+  approve: { label: '审批', color: '#ea580c' },
   export: { label: '导出', color: '#7c3aed' },
 };
 
@@ -36,6 +37,7 @@ const PERMISSION_LABEL: Record<EnterpriseApplicationPermission, string> = {
   ai_create: 'AI 新增',
   ai_update: 'AI 更新',
   ai_delete: 'AI 删除',
+  ai_approve: 'AI 审批',
   export: '导出',
 };
 
@@ -100,6 +102,11 @@ export default function EnterpriseApplicationDetail() {
   });
   const app = appQuery.data;
   const overview = overviewQuery.data;
+  const organizationAppsQuery = useQuery({
+    queryKey: ['enterprise-applications', app?.organization_id],
+    queryFn: () => enterpriseApplications.list(app!.organization_id),
+    enabled: !!app?.organization_id,
+  });
 
   useEffect(() => {
     if (!app) return;
@@ -161,7 +168,7 @@ export default function EnterpriseApplicationDetail() {
       qc.invalidateQueries({ queryKey: ['enterprise-application-integration', appId] });
       qc.invalidateQueries({ queryKey: ['enterprise-application-actions', appId] });
       if (result.status === 'healthy') {
-        message.success(`同步完成：新增 ${result.received_events} 个事件，生成 ${result.created_work_items} 个跨部门待办`);
+        message.success(`同步完成：新增 ${result.received_events} 个事件，生成 ${result.created_work_items} 个跨部门待办，投递 ${result.delivered_events} 个目标系统事件`);
       } else message.error(result.detail || '子系统同步失败');
     },
     onError: (error) => message.error(errorText(error, '子系统同步失败')),
@@ -172,18 +179,20 @@ export default function EnterpriseApplicationDetail() {
     module_key: route.module_key,
     target_scope_type: route.target_scope_type,
     target_scope_id: route.target_scope_id,
+    target_application_id: route.target_application_id,
     target_module_key: route.target_module_key,
     is_active: route.is_active,
   });
   const saveRoute = useMutation({
-    mutationFn: (values: { name: string; module_key?: string; target_scope: string; target_module_key?: string }) => {
+    mutationFn: (values: { name: string; event_type: string; module_key?: string; target_scope: string; target_application_id?: string; target_module_key?: string }) => {
       const [prefix, id] = values.target_scope.split(':', 2);
       const scopeType = prefix === 'org' ? 'organization' : prefix === 'dept' ? 'department' : prefix as 'team' | 'user';
       return enterpriseApplications.replaceEventRoutes(appId, [
         ...(routesQuery.data ?? []).map(routePayload),
         {
-          name: values.name, event_type: '*', module_key: values.module_key || null,
+          name: values.name, event_type: values.event_type, module_key: values.module_key || null,
           target_scope_type: scopeType, target_scope_id: scopeType === 'organization' ? null : id,
+          target_application_id: values.target_application_id || null,
           target_module_key: values.target_module_key || null, is_active: true,
         },
       ]);
@@ -469,6 +478,7 @@ export default function EnterpriseApplicationDetail() {
               { title: '规则', dataIndex: 'name' },
               { title: '来源子模块', dataIndex: 'module_key', render: (value: string | null) => value || '全部模块' },
               { title: '接收范围', render: (_: unknown, row) => scopeLabel(row.target_scope_type, row.target_scope_id) },
+              { title: '目标系统', dataIndex: 'target_application_id', render: (value: string | null) => organizationAppsQuery.data?.find((item) => item.id === value)?.name || (value ? '已登记系统' : '仅平台待办') },
               { title: '进入目标模块', dataIndex: 'target_module_key', render: (value: string | null) => value || '跨部门待办' },
               { title: '操作', width: 90, render: (_: unknown, row) => <Button size="small" danger loading={removeRoute.isPending} onClick={() => removeRoute.mutate(row.id)}>移除</Button> },
             ]} />
@@ -522,7 +532,9 @@ export default function EnterpriseApplicationDetail() {
           <Form.Item name="module_key" label="来源子模块" extra="选择“全部模块”时，这个系统的任何业务更新都会通知接收方。">
             <Select allowClear placeholder="全部模块" options={(integrationQuery.data?.modules ?? []).map((item) => ({ value: item.moduleKey, label: item.name || item.moduleKey }))} />
           </Form.Item>
+          <Form.Item name="event_type" label="来源事件类型" rules={[{ required: true }]} extra="使用 Manifest 中带版本的稳定事件类型，例如 design.sample_review.approved.v1。"><Input placeholder="design.sample_review.approved.v1" /></Form.Item>
           <Form.Item name="target_scope" label="接收部门、团队或人员" rules={[{ required: true }]}><TreeSelect treeData={treeData} treeDefaultExpandAll showSearch treeNodeFilterProp="title" placeholder="例如：设计部" /></Form.Item>
+          <Form.Item name="target_application_id" label="目标模块系统（可选）" extra="选择后，平台会把事件签名投递到目标系统；留空则只生成平台待办。"><Select allowClear showSearch optionFilterProp="label" options={(organizationAppsQuery.data ?? []).filter((item) => item.id !== appId).map((item) => ({ value: item.id, label: item.name }))} /></Form.Item>
           <Form.Item name="target_module_key" label="目标模块标识（可选）" extra="目标部门有独立系统时填写其模块 key；暂未接入时留空，先进入平台跨部门待办。"><Input placeholder="例如：style_design" /></Form.Item>
         </Form>
       </Modal>

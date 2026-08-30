@@ -392,6 +392,9 @@ async def invoke_terminal_application_action_endpoint(
         data.params,
         cu,
         request_id=data.request_id,
+        page_key=data.page_key,
+        operation=data.operation,
+        expected_version=data.expected_version,
     )
 
 

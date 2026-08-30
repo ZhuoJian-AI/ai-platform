@@ -31,6 +31,7 @@ const PERMISSIONS: Array<{ value: EnterpriseApplicationPermission; label: string
   { value: 'ai_create', label: 'AI 新增' },
   { value: 'ai_update', label: 'AI 更新' },
   { value: 'ai_delete', label: 'AI 删除' },
+  { value: 'ai_approve', label: 'AI 审批' },
   { value: 'export', label: '导出' },
 ];
 
@@ -255,7 +256,10 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   };
 
   const saveGrant = useMutation({
-    mutationFn: (values: { scope: string; permissions: EnterpriseApplicationPermission[]; module_keys?: string[] }) => {
+    mutationFn: (values: {
+      scope: string; permissions: EnterpriseApplicationPermission[]; module_keys?: string[];
+      page_keys?: string[]; action_keys?: string[];
+    }) => {
       if (!selectedApp) throw new Error('请先选择应用');
       const node = nodeMap.get(values.scope);
       if (!node) throw new Error('请选择授权范围');
@@ -263,15 +267,30 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
       const existingModuleAccess = grantIndex === null
         ? {}
         : (selectedApp.grants[grantIndex]?.module_access ?? {});
+      const selectedPages = new Set(values.page_keys ?? []);
+      const selectedActions = new Set(values.action_keys ?? []);
       const grant = {
         scope_type: node.type as EnterpriseApplicationScope,
         scope_id: node.type === 'organization' ? null : node.id,
         permissions: values.permissions,
         module_keys: moduleKeys,
-        module_access: Object.fromEntries(moduleKeys.map((moduleKey) => [moduleKey, {
-          role: existingModuleAccess[moduleKey]?.role ?? 'member',
-          permissions: values.permissions,
-        }])),
+        module_access: Object.fromEntries(moduleKeys.map((moduleKey) => {
+          const module = selectedIntegration?.modules.find((item) => item.moduleKey === moduleKey);
+          const moduleActions = new Set((module?.actions ?? []).map((item) => item.actionKey));
+          const actionKeys = Array.from(selectedActions).filter((key) => moduleActions.has(key));
+          const pageAccess = Object.fromEntries((module?.pages ?? [])
+            .filter((page) => selectedPages.has(`${moduleKey}::${page.pageKey}`))
+            .map((page) => [page.pageKey, {
+              permissions: values.permissions,
+              action_keys: page.actionKeys.filter((key) => selectedActions.has(key)),
+            }]));
+          return [moduleKey, {
+            role: existingModuleAccess[moduleKey]?.role ?? 'member',
+            permissions: values.permissions,
+            action_keys: actionKeys,
+            page_access: pageAccess,
+          }];
+        })),
       };
       const next = selectedApp.grants.map((item) => ({
         scope_type: item.scope_type, scope_id: item.scope_id, permissions: item.permissions,
@@ -373,7 +392,18 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
         { title: '授权范围', render: (_: unknown, row) => <Space><Tag>{row.scope_type}</Tag>{scopeLabel(row.scope_type, row.scope_id)}</Space> },
         { title: '权限', dataIndex: 'permissions', render: (values: string[]) => <Space wrap>{values.map((value) => <Tag key={value} color={value === 'view' ? 'blue' : value.includes('delete') ? 'red' : 'purple'}>{PERMISSIONS.find((item) => item.value === value)?.label ?? value}</Tag>)}</Space> },
         { title: '可见子模块', dataIndex: 'module_keys', render: (values: string[]) => values?.length ? <Space wrap>{values.map((value) => <Tag key={value}>{value}</Tag>)}</Space> : <Tag color="blue">全部子模块</Tag> },
-        { title: '操作', width: 150, render: (_: unknown, row, index) => <Space><Button size="small" onClick={() => { setGrantIndex(index); grantForm.setFieldsValue({ scope: `${row.scope_type === 'organization' ? 'org' : row.scope_type === 'department' ? 'dept' : row.scope_type}:${row.scope_id ?? orgId}`, permissions: row.permissions, module_keys: row.module_keys ?? [] }); setGrantModalOpen(true); }}>编辑</Button><Button size="small" danger onClick={() => removeGrant(index)}>移除</Button></Space> },
+        { title: '操作', width: 150, render: (_: unknown, row, index) => <Space><Button size="small" onClick={() => {
+          setGrantIndex(index);
+          const moduleAccess = row.module_access ?? {};
+          grantForm.setFieldsValue({
+            scope: `${row.scope_type === 'organization' ? 'org' : row.scope_type === 'department' ? 'dept' : row.scope_type}:${row.scope_id ?? orgId}`,
+            permissions: row.permissions,
+            module_keys: row.module_keys ?? [],
+            page_keys: Object.entries(moduleAccess).flatMap(([moduleKey, access]) => Object.keys(access.page_access ?? {}).map((pageKey) => `${moduleKey}::${pageKey}`)),
+            action_keys: Array.from(new Set(Object.values(moduleAccess).flatMap((access) => access.action_keys ?? []))),
+          });
+          setGrantModalOpen(true);
+        }}>编辑</Button><Button size="small" danger onClick={() => removeGrant(index)}>移除</Button></Space> },
       ]} />
     </>
   ) : <Empty description="请先创建企业应用" />;
@@ -472,6 +502,16 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
             <Checkbox.Group options={(selectedIntegration?.modules ?? []).map((item) => ({
               value: item.moduleKey, label: item.name || item.moduleKey,
             })).filter((item) => item.value)} />
+          </Form.Item>
+          <Form.Item name="page_keys" label="可见页面" extra="原生模块按页面授权；未勾选的页面不会进入该对象的导航和 AI 上下文。">
+            <Checkbox.Group options={(selectedIntegration?.modules ?? []).flatMap((module) => (module.pages ?? []).map((page) => ({
+              value: `${module.moduleKey}::${page.pageKey}`, label: `${module.name} / ${page.name}`,
+            })))} />
+          </Form.Item>
+          <Form.Item name="action_keys" label="允许 AI 使用的操作" extra="这里只列 Manifest 已声明可供 AI 使用的操作；模块以后新增操作不会自动获得授权。">
+            <Checkbox.Group options={(selectedIntegration?.modules ?? []).flatMap((module) => module.actions.filter((action) => action.aiEnabled).map((action) => ({
+              value: action.actionKey, label: `${module.name} / ${action.name}${action.requiresConfirmation ? '（需确认）' : ''}`,
+            })))} />
           </Form.Item>
           {!selectedIntegration?.modules.length && <Alert showIcon type="warning" message="尚未发现子模块" description="请先在应用详情的“系统联通”中保存连接并同步；当前留空即保持整个应用可见。" />}
         </Form>

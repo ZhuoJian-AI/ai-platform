@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote, urljoin
@@ -30,6 +31,7 @@ OPERATION_PERMISSION = {
     "create": "ai_create",
     "update": "ai_update",
     "delete": "ai_delete",
+    "approve": "ai_approve",
     "export": "export",
 }
 CONFIRMATION_TTL = timedelta(minutes=5)
@@ -55,13 +57,25 @@ async def list_actions(
 
 
 async def list_actions_for_user(
-    db: AsyncSession, application: EnterpriseApplication, user: CurrentUser
+    db: AsyncSession,
+    application: EnterpriseApplication,
+    user: CurrentUser,
+    *,
+    page_key: str | None = None,
+    module_key: str | None = None,
 ) -> list[EnterpriseApplicationAction]:
+    integration = await _integration_or_409(db, application.id)
     result: list[EnterpriseApplicationAction] = []
     for action in await list_actions(db, application.id, active_only=True):
+        if module_key and action.module_key != module_key:
+            continue
+        page_actions = _manifest_page_action_keys(integration, action.module_key, page_key)
+        if page_actions is not None and action.action_key not in page_actions:
+            continue
         required = OPERATION_PERMISSION[action.operation]
-        permissions = enterprise_application_service.effective_module_permissions(application, user, action.module_key)
-        if action.ai_enabled and "view" in permissions and required in permissions:
+        if action.ai_enabled and enterprise_application_service.action_allowed_for_user(
+            application, user, action.module_key, page_key, action.action_key, required
+        ):
             result.append(action)
     return result
 
@@ -98,15 +112,57 @@ async def _integration_or_409(db: AsyncSession, application_id: UUID | str) -> E
     return row
 
 
+def _manifest_page_action_keys(
+    integration: EnterpriseApplicationIntegration, module_key: str, page_key: str | None
+) -> set[str] | None:
+    manifest = integration.manifest if isinstance(integration.manifest, dict) else {}
+    revision = str(manifest.get("contractRevision") or "2.0")
+    modules = manifest.get("modules") if isinstance(manifest.get("modules"), list) else []
+    module = next((item for item in modules if isinstance(item, dict) and item.get("moduleKey") == module_key), None)
+    if not isinstance(module, dict):
+        return None if revision == "2.0" else set()
+    if not page_key:
+        return None if revision == "2.0" else set()
+    pages = module.get("pages") if isinstance(module.get("pages"), list) else []
+    page = next((item for item in pages if isinstance(item, dict) and item.get("pageKey") == page_key), None)
+    if not isinstance(page, dict):
+        return set()
+    return {str(item) for item in (page.get("actionKeys") or []) if isinstance(item, str)}
+
+
+def _request_payload(params: dict, page_key: str | None, expected_version: str | int | None) -> str:
+    return json.dumps(
+        {"params": params, "pageKey": page_key, "expectedVersion": expected_version},
+        ensure_ascii=False,
+    )
+
+
+def _decode_request_payload(value: str) -> tuple[dict, str | None, str | int | None]:
+    decoded = json.loads(value)
+    if isinstance(decoded, dict) and isinstance(decoded.get("params"), dict):
+        page_key = decoded.get("pageKey") if isinstance(decoded.get("pageKey"), str) else None
+        return decoded["params"], page_key, decoded.get("expectedVersion")
+    return (decoded if isinstance(decoded, dict) else {}), None, None
+
+
+def _params_hash(params: dict) -> str:
+    canonical = json.dumps(params, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def _identity_claims(
     application: EnterpriseApplication,
     action: EnterpriseApplicationAction,
     user: CurrentUser,
     request_id: str,
     permissions: set[str],
+    page_key: str | None,
+    params: dict,
+    *,
+    confirmation_id: str | None = None,
 ) -> dict:
     now = datetime.now(UTC)
-    return {
+    claims = {
         "iss": "zhuojian-saas",
         "aud": application.slug,
         "typ": "zhuojian-action",
@@ -115,6 +171,7 @@ def _identity_claims(
         "departmentId": user.department_id,
         "teamId": user.team_id,
         "moduleKey": action.module_key,
+        "pageKey": page_key,
         "actionKey": action.action_key,
         "operation": action.operation,
         "permissions": sorted(permissions),
@@ -123,13 +180,28 @@ def _identity_claims(
         "iat": now,
         "exp": now + timedelta(seconds=60),
     }
+    if confirmation_id:
+        claims.update({
+            "confirmed": True,
+            "confirmationId": confirmation_id,
+            "confirmedBy": user.id,
+            "confirmedAt": now.isoformat(),
+            "paramsHash": _params_hash(params),
+        })
+    return claims
 
 
-def _provenance(application: EnterpriseApplication, action: EnterpriseApplicationAction, request_id: str) -> dict:
+def _provenance(
+    application: EnterpriseApplication,
+    action: EnterpriseApplicationAction,
+    request_id: str,
+    page_key: str | None = None,
+) -> dict:
     return {
         "applicationId": str(application.id),
         "applicationSlug": application.slug,
         "moduleKey": action.module_key,
+        "pageKey": page_key,
         "actionKey": action.action_key,
         "operation": action.operation,
         "requestId": request_id,
@@ -143,16 +215,41 @@ async def _execute_request(
     application: EnterpriseApplication,
     action: EnterpriseApplicationAction,
     user: CurrentUser,
+    *,
+    confirmed: bool = False,
 ) -> dict:
     integration = await _integration_or_409(db, application.id)
-    permissions = enterprise_application_service.effective_module_permissions(application, user, action.module_key)
+    params, page_key, expected_version = _decode_request_payload(
+        decrypt_provider_api_key(request_row.params_encrypted or "")
+    )
     required = OPERATION_PERMISSION[action.operation]
-    if "view" not in permissions or required not in permissions or not action.is_active or not action.ai_enabled:
+    permissions = enterprise_application_service.effective_page_permissions(
+        application, user, action.module_key, page_key
+    )
+    if (
+        not action.is_active
+        or not action.ai_enabled
+        or (
+            (page_actions := _manifest_page_action_keys(integration, action.module_key, page_key)) is not None
+            and action.action_key not in page_actions
+        )
+        or not enterprise_application_service.action_allowed_for_user(
+            application, user, action.module_key, page_key, action.action_key, required
+        )
+    ):
         raise HTTPException(status_code=403, detail="Action is no longer authorized")
-    params = json.loads(decrypt_provider_api_key(request_row.params_encrypted or ""))
     secret = decrypt_provider_api_key(integration.auth_token_encrypted or "")
     token = jwt.encode(
-        _identity_claims(application, action, user, request_row.request_id, permissions),
+        _identity_claims(
+            application,
+            action,
+            user,
+            request_row.request_id,
+            permissions,
+            page_key,
+            params,
+            confirmation_id=str(request_row.id) if confirmed and action.requires_confirmation else None,
+        ),
         secret,
         algorithm="HS256",
     )
@@ -179,6 +276,9 @@ async def _execute_request(
                 },
                 json={
                     "moduleKey": action.module_key,
+                    "pageKey": page_key,
+                    "operation": action.operation,
+                    "expectedVersion": expected_version,
                     "params": params,
                     "requestId": request_row.request_id,
                 },
@@ -200,13 +300,15 @@ async def _execute_request(
     request_row.params_encrypted = None
     request_row.resolved_at = datetime.now(UTC)
     await db.flush()
-    return action_result(request_row, application, action)
+    return action_result(request_row, application, action, page_key=page_key)
 
 
 def action_result(
     request_row: EnterpriseApplicationActionRequest,
     application: EnterpriseApplication,
     action: EnterpriseApplicationAction,
+    *,
+    page_key: str | None = None,
 ) -> dict:
     return {
         "request_id": request_row.request_id,
@@ -214,7 +316,7 @@ def action_result(
         "confirmation_id": request_row.id if action.requires_confirmation else None,
         "result": request_row.result or {},
         "error": request_row.error,
-        "provenance": _provenance(application, action, request_row.request_id),
+        "provenance": _provenance(application, action, request_row.request_id, page_key),
     }
 
 
@@ -227,6 +329,9 @@ async def invoke_action(
     user: CurrentUser,
     *,
     request_id: str | None = None,
+    page_key: str | None = None,
+    operation: str | None = None,
+    expected_version: str | int | None = None,
 ) -> dict:
     application = await enterprise_application_service.get_application(db, application_id)
     if application is None or str(application.organization_id) != str(user.organization_id):
@@ -243,12 +348,23 @@ async def invoke_action(
     ).scalar_one_or_none()
     if action is None:
         raise HTTPException(status_code=404, detail="Subsystem action not found")
+    if operation is not None and operation != action.operation:
+        raise HTTPException(status_code=409, detail="Action operation does not match the manifest")
     required = OPERATION_PERMISSION[action.operation]
-    await enterprise_application_service.assert_module_permission(db, application.id, user, module_key, required)
+    await enterprise_application_service.assert_page_permission(
+        db, application.id, user, module_key, page_key, required
+    )
     if not action.ai_enabled:
         raise HTTPException(status_code=403, detail="Action is not enabled for AI")
     _validate_params(action, params)
-    await _integration_or_409(db, application.id)
+    integration = await _integration_or_409(db, application.id)
+    page_actions = _manifest_page_action_keys(integration, module_key, page_key)
+    if page_actions is not None and action.action_key not in page_actions:
+        raise HTTPException(status_code=403, detail="Action is not available on the current page")
+    if not enterprise_application_service.action_allowed_for_user(
+        application, user, module_key, page_key, action.action_key, required
+    ):
+        raise HTTPException(status_code=403, detail="Action is not authorized for this user and page")
     rid = request_id or uuid4().hex
     existing = (
         await db.execute(
@@ -265,7 +381,13 @@ async def invoke_action(
                 status_code=409,
                 detail="requestId is already bound to a different user, module, or action",
             )
-        return action_result(existing, application, action)
+        if existing.params_encrypted:
+            _, existing_page_key, existing_version = _decode_request_payload(
+                decrypt_provider_api_key(existing.params_encrypted)
+            )
+            if existing_page_key != page_key or existing_version != expected_version:
+                raise HTTPException(status_code=409, detail="requestId is bound to another page or version")
+        return action_result(existing, application, action, page_key=page_key)
     now = datetime.now(UTC)
     request_row = EnterpriseApplicationActionRequest(
         application_id=application.id,
@@ -274,14 +396,14 @@ async def invoke_action(
         user_id=UUID(user.id),
         request_id=rid,
         module_key=module_key,
-        params_encrypted=encrypt_provider_api_key(json.dumps(params, ensure_ascii=False)),
+        params_encrypted=encrypt_provider_api_key(_request_payload(params, page_key, expected_version)),
         status="pending",
         expires_at=now + CONFIRMATION_TTL,
     )
     db.add(request_row)
     await db.flush()
     if action.requires_confirmation:
-        return action_result(request_row, application, action)
+        return action_result(request_row, application, action, page_key=page_key)
     return await _execute_request(db, request_row, application, action, user)
 
 
@@ -312,10 +434,12 @@ async def list_confirmation_requests(db: AsyncSession, user: CurrentUser) -> lis
     result: list[dict] = []
     for row in rows:
         params: dict = {}
+        page_key: str | None = None
         if row.status == "pending" and row.params_encrypted:
             try:
-                value = json.loads(decrypt_provider_api_key(row.params_encrypted))
-                params = value if isinstance(value, dict) else {}
+                params, page_key, _ = _decode_request_payload(
+                    decrypt_provider_api_key(row.params_encrypted)
+                )
             except (ValueError, TypeError):
                 params = {}
         result.append(
@@ -325,6 +449,7 @@ async def list_confirmation_requests(db: AsyncSession, user: CurrentUser) -> lis
                 "action_id": row.action_id,
                 "request_id": row.request_id,
                 "module_key": row.module_key,
+                "page_key": page_key,
                 "status": row.status,
                 "params": params,
                 "expires_at": row.expires_at,
@@ -354,22 +479,30 @@ async def resolve_confirmation(db: AsyncSession, confirmation_id: UUID, user: Cu
     if application is None or str(application.organization_id) != str(user.organization_id):
         raise HTTPException(status_code=404, detail="Application not found")
     action = request_row.action
+    page_key: str | None = None
+    if request_row.params_encrypted:
+        try:
+            _, page_key, _ = _decode_request_payload(
+                decrypt_provider_api_key(request_row.params_encrypted)
+            )
+        except (ValueError, TypeError):
+            page_key = None
     if request_row.status != "pending":
-        return action_result(request_row, application, action)
+        return action_result(request_row, application, action, page_key=page_key)
     now = datetime.now(UTC)
     if request_row.expires_at <= now:
         request_row.status = "expired"
         request_row.params_encrypted = None
         request_row.resolved_at = now
         await db.flush()
-        return action_result(request_row, application, action)
+        return action_result(request_row, application, action, page_key=page_key)
     if not approve:
         request_row.status = "rejected"
         request_row.params_encrypted = None
         request_row.resolved_at = now
         await db.flush()
-        return action_result(request_row, application, action)
-    return await _execute_request(db, request_row, application, action, user)
+        return action_result(request_row, application, action, page_key=page_key)
+    return await _execute_request(db, request_row, application, action, user, confirmed=True)
 
 
 def issue_launch_ticket(

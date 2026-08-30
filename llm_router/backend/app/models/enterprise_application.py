@@ -54,7 +54,12 @@ class EnterpriseApplication(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin
         lazy="selectin",
         uselist=False,
     )
-    event_routes = relationship("EnterpriseApplicationEventRoute", back_populates="application", lazy="selectin")
+    event_routes = relationship(
+        "EnterpriseApplicationEventRoute",
+        back_populates="application",
+        lazy="selectin",
+        foreign_keys="EnterpriseApplicationEventRoute.application_id",
+    )
     actions = relationship("EnterpriseApplicationAction", back_populates="application", lazy="selectin")
     action_requests = relationship(
         "EnterpriseApplicationActionRequest", back_populates="application", lazy="selectin"
@@ -297,10 +302,48 @@ class EnterpriseApplicationEventRoute(UUIDPrimaryKeyMixin, TimestampMixin, SoftD
     module_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
     target_scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
     target_scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    target_application_id: Mapped[str | None] = mapped_column(
+        ForeignKey("enterprise_applications.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     target_module_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
-    application = relationship("EnterpriseApplication", back_populates="event_routes")
+    application = relationship(
+        "EnterpriseApplication", back_populates="event_routes", foreign_keys=[application_id]
+    )
+    target_application = relationship("EnterpriseApplication", foreign_keys=[target_application_id])
+
+
+class EnterpriseApplicationEventDelivery(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Replay-safe outbound delivery from one subsystem event to another subsystem."""
+
+    __tablename__ = "enterprise_application_event_deliveries"
+    __table_args__ = (
+        UniqueConstraint("route_id", "source_event_id", name="uq_enterprise_event_delivery_route_event"),
+        CheckConstraint(
+            "status IN ('pending','delivering','delivered','failed')",
+            name="ck_enterprise_event_delivery_status",
+        ),
+    )
+
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    route_id: Mapped[str] = mapped_column(
+        ForeignKey("enterprise_application_event_routes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_event_id: Mapped[str] = mapped_column(
+        ForeignKey("enterprise_application_events.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_application_id: Mapped[str] = mapped_column(
+        ForeignKey("enterprise_applications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    delivery_id: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    response: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class CrossDepartmentWorkItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
