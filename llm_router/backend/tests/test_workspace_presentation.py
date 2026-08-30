@@ -153,3 +153,44 @@ def test_iframe_bridge_page_context_validation() -> None:
 
     with pytest.raises(ValidationError, match="invalid iframe bridge field: data_version"):
         TaskRunRequest(message="bad", page_context={"bridge_version": 1, "data_version": float("nan")})
+
+
+def test_business_page_context_survives_follow_up_and_clears_on_application_switch() -> None:
+    from app.api.terminal import _merge_application_run_context
+
+    application_id = uuid4()
+    other_application_id = uuid4()
+    initial = _merge_application_run_context(
+        {},
+        application_id_provided=True,
+        application_id=application_id,
+        page_context={
+            "application_id": str(application_id),
+            "module_key": "sample_review",
+            "page_key": "sample_review.list",
+        },
+    )
+    follow_up = _merge_application_run_context(
+        initial,
+        application_id_provided=True,
+        application_id=application_id,
+        page_context={},
+    )
+    assert follow_up["page_context"] == initial["page_context"]
+
+    switched = _merge_application_run_context(
+        follow_up,
+        application_id_provided=True,
+        application_id=other_application_id,
+        page_context={},
+    )
+    assert switched["page_context"] == {}
+
+    cleared = _merge_application_run_context(
+        follow_up,
+        application_id_provided=True,
+        application_id=None,
+        page_context={},
+    )
+    assert cleared["application_id"] is None
+    assert cleared["page_context"] == {}

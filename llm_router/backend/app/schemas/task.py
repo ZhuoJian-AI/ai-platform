@@ -57,7 +57,8 @@ class TaskRunRequest(BaseModel):
     #   显式传 UUID → 该次用此智能体（load_config 拼 persona + 继承 skill_ids/model_alias）
     #   显式传 null/空 → 强制通用智能体（不绑模板，纯 GENERAL_SYSTEM_PROMPT）
     template_agent_id: str | None = None
-    # 业务小助手可逐轮覆盖任务绑定应用；页面上下文只在本轮使用，不写回任务配置。
+    # 业务小助手可逐轮覆盖任务绑定应用；经过服务端重新鉴权的最后页面上下文会留在
+    # 任务配置中供同一应用的后续轮次使用，切换/清空应用时立即清除。
     application_id: UUID | None = None
     page_context: dict = Field(default_factory=dict)
 

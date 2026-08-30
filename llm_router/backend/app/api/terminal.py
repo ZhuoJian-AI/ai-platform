@@ -621,6 +621,35 @@ async def delete_task_message_endpoint(
     await db.commit()
 
 
+def _merge_application_run_context(
+    task_config: dict,
+    *,
+    application_id_provided: bool,
+    application_id: UUID | None,
+    page_context: dict,
+) -> dict:
+    """Keep the last verified business page context for follow-up turns.
+
+    An explicit application switch clears the previous page context. An empty
+    context for the same application means "continue this business task", not
+    "drop page authorization".
+    """
+    cfg = dict(task_config or {})
+    previous_application_id = str(cfg.get("application_id") or "")
+    if application_id_provided:
+        next_application_id = str(application_id) if application_id else ""
+        cfg["application_id"] = next_application_id or None
+        if next_application_id != previous_application_id:
+            cfg["page_context"] = {}
+    if page_context:
+        cfg["page_context"] = dict(page_context)
+    else:
+        cfg["page_context"] = dict(cfg.get("page_context") or {})
+    if not cfg.get("application_id"):
+        cfg["page_context"] = {}
+    return cfg
+
+
 @router.post("/terminal/tasks/{task_id}/run")
 async def run_task_endpoint(
     task_id: UUID,
@@ -634,11 +663,13 @@ async def run_task_endpoint(
     assert_user_write(cu)
     # 旧任务 config 可能缺 workspace_id，运行时按用户默认补齐。
     # 模型必须显式选择（创建时未选且无最近使用默认则空）——不选模型不允许执行。
-    cfg = dict(task.config or {})
     provided = data.model_dump(exclude_unset=True)
-    if "application_id" in provided:
-        cfg["application_id"] = str(provided["application_id"]) if provided["application_id"] else None
-    cfg["page_context"] = dict(data.page_context or {})
+    cfg = _merge_application_run_context(
+        dict(task.config or {}),
+        application_id_provided="application_id" in provided,
+        application_id=data.application_id,
+        page_context=data.page_context,
+    )
     if cfg.get("application_id"):
         application, application_permissions = await enterprise_application_service.assert_application_permission(
             db, cfg["application_id"], cu, "view",
@@ -668,6 +699,11 @@ async def run_task_endpoint(
                 raise HTTPException(status_code=403, detail="当前账号无权访问该业务页面")
         cfg["application_permissions"] = sorted(application_permissions)
         cfg["application_module_keys"] = allowed_module_keys
+    persisted_cfg = dict(task.config or {})
+    persisted_cfg["application_id"] = cfg.get("application_id")
+    persisted_cfg["page_context"] = dict(cfg.get("page_context") or {})
+    task.config = persisted_cfg
+    await db.flush()
     if not cfg.get("workspace_id"):
         defaults = await _user_defaults(db, cu)
         if defaults["workspace_id"]:
