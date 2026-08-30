@@ -495,6 +495,22 @@ def test_enterprise_mutation_tools_require_an_explicit_expected_version():
     }
 
 
+def test_enterprise_action_idempotency_is_scoped_to_the_current_run():
+    first = nodes._enterprise_action_request_id(
+        {"task_id": "task-1", "run_id": 101}, "tool-call-1"
+    )
+    replay = nodes._enterprise_action_request_id(
+        {"task_id": "task-1", "run_id": 101}, "tool-call-1"
+    )
+    next_turn = nodes._enterprise_action_request_id(
+        {"task_id": "task-1", "run_id": 102}, "tool-call-1"
+    )
+
+    assert first == replay
+    assert first != next_turn
+    assert first == "task-1:101:tool-call-1"
+
+
 @pytest.mark.asyncio
 async def test_web_tool_is_available_and_executable_without_workspace(db_session, monkeypatch):
     _, _, _, _, _, _, cu = await _hierarchy(db_session)
