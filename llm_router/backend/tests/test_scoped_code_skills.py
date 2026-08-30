@@ -476,6 +476,25 @@ def test_platform_tool_registry_keeps_legacy_docx_hidden():
     assert "generate_docx" in nodes.LEGACY_BUILTIN_TOOL_NAMES
 
 
+def test_enterprise_mutation_tools_require_an_explicit_expected_version():
+    original = {
+        "type": "object",
+        "properties": {"id": {"type": "string"}},
+        "required": ["id"],
+    }
+    parameters = nodes._enterprise_action_parameters(original, "delete")
+
+    assert parameters["required"] == ["id", "expectedVersion"]
+    assert parameters["properties"]["expectedVersion"]["anyOf"] == [
+        {"type": "integer"}, {"type": "string"},
+    ]
+    assert original == {
+        "type": "object",
+        "properties": {"id": {"type": "string"}},
+        "required": ["id"],
+    }
+
+
 @pytest.mark.asyncio
 async def test_web_tool_is_available_and_executable_without_workspace(db_session, monkeypatch):
     _, _, _, _, _, _, cu = await _hierarchy(db_session)

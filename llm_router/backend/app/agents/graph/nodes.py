@@ -13,6 +13,7 @@ owns step scheduling, observations and termination.
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import mimetypes
 import re
@@ -1258,6 +1259,27 @@ async def _configure_visual_turn(
     _emit({"type": "vision_preprocess", "status": "completed", "images": len(images), "mode": "fallback"})
     return provider, model, system_prompt
 
+def _enterprise_action_parameters(input_schema: dict | None, operation: str) -> dict:
+    parameters = copy.deepcopy(input_schema or {"type": "object", "properties": {}})
+    parameters.setdefault("type", "object")
+    parameters.setdefault("properties", {})
+    if operation in {"update", "delete"}:
+        parameters["properties"].setdefault(
+            "expectedVersion",
+            {
+                "anyOf": [{"type": "integer"}, {"type": "string"}],
+                "description": (
+                    "必须填写刚刚查询或页面上下文返回的当前 dataVersion；"
+                    "记录已被他人修改时会返回 409，需重新查询后再操作。"
+                ),
+            },
+        )
+        required = parameters.setdefault("required", [])
+        if "expectedVersion" not in required:
+            required.append("expectedVersion")
+    return parameters
+
+
 async def _build_tools(
     db,
     skill_ids: list[str],
@@ -1291,9 +1313,7 @@ async def _build_tools(
                 module_key=context_module_key,
             ):
                 tool_name = subsystem_action_service.action_tool_name(application, action)
-                parameters = dict(action.input_schema or {"type": "object", "properties": {}})
-                parameters.setdefault("type", "object")
-                parameters.setdefault("properties", {})
+                parameters = _enterprise_action_parameters(action.input_schema, action.operation)
                 tools.append({"type": "function", "function": {
                     "name": tool_name,
                     "description": action.description or action.name,
