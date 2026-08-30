@@ -22,6 +22,7 @@ from app.api.dsh_internal import router as dsh_internal_router
 from app.api.enterprise_applications import router as enterprise_application_router
 from app.api.llm_providers import router as provider_router
 from app.api.memory import router as memory_router
+from app.api.module_publisher import router as module_publisher_router
 from app.api.monitor import router as monitor_router
 from app.api.ontology import router as ontology_router
 from app.api.organizations import router as org_router
@@ -44,6 +45,7 @@ api_router.include_router(config_router, tags=["config"])
 api_router.include_router(platform_extension_router, tags=["platform-extensions"])
 api_router.include_router(storage_lifecycle_router, tags=["storage-lifecycle"])
 api_router.include_router(enterprise_application_router, tags=["enterprise-applications"])
+api_router.include_router(module_publisher_router, tags=["module-publisher"])
 # Docker-internal DSH callbacks use a dedicated service token, never user/admin JWTs.
 api_router.include_router(dsh_internal_router, tags=["internal-dsh"])
 

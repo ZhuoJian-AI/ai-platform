@@ -62,6 +62,15 @@ class Settings(BaseSettings):
     extension_catalog_sync_interval_seconds: int = 24 * 60 * 60
     extension_catalog_sync_poll_seconds: int = 60 * 60
     subsystem_sync_poll_seconds: int = 30
+    # GitHub App-backed enterprise module repository publisher. The private
+    # key is held only by the central backend; tenant ECS instances receive
+    # repository-scoped, short-lived installation tokens.
+    github_module_publisher_enabled: bool = False
+    github_module_publisher_owner: str = "ZhuoJian-AI"
+    github_module_publisher_app_id: str = ""
+    github_module_publisher_installation_id: str = ""
+    github_module_publisher_private_key_b64: str = ""
+    github_module_publisher_timeout_seconds: int = 20
     original_preview_enabled: bool = False
     # Native file preview is part of the staging-wide workspace experience;
     # keep the emergency deployment switch but no tenant allowlist.
@@ -96,6 +105,16 @@ class Settings(BaseSettings):
             self.workspace_object_storage_enabled
             and self.storage_gateway_url.strip()
             and self.storage_project_token.strip()
+        )
+
+    @property
+    def github_module_publisher_configured(self) -> bool:
+        return bool(
+            self.github_module_publisher_enabled
+            and self.github_module_publisher_owner.strip()
+            and self.github_module_publisher_app_id.strip()
+            and self.github_module_publisher_installation_id.strip()
+            and self.github_module_publisher_private_key_b64.strip()
         )
 
     def original_preview_enabled_for(self, organization_slug: str) -> bool:
