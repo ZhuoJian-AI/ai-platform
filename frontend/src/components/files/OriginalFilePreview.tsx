@@ -56,11 +56,7 @@ export default function OriginalFilePreview({
   // presentations, can leave the outer loading state waiting even though OSS
   // has already completed the response.  Header-authenticated legacy sources
   // still need the Blob fallback.
-  // Native PDF plug-ins are unreliable with expiring signed URLs: some Chrome
-  // builds fetch the URL successfully but still leave an empty iframe.  A
-  // same-page object URL avoids expiry, redirect and Content-Disposition
-  // differences while preserving the original PDF bytes.
-  const needsRemoteBlob = extension === 'pdf' || TEXT_EXTENSIONS.has(extension) || hasSourceHeaders;
+  const needsRemoteBlob = TEXT_EXTENSIONS.has(extension) || hasSourceHeaders;
   const effectiveBlob = blob || remoteBlob;
   const blobMime = effectiveBlob?.type || '';
   const effectiveMime = !blobMime || blobMime === 'application/octet-stream'
@@ -122,9 +118,25 @@ export default function OriginalFilePreview({
 
   if (loading || remoteLoading) return <LoadingState label="正在从对象存储读取原文件…" />;
 
-  const previewUrl = needsRemoteBlob ? objectUrl : (directUrl || objectUrl);
-  if ((extension === 'pdf' || effectiveMime === 'application/pdf') && previewUrl) {
-    return <iframe title={filename} src={previewUrl} style={frameStyle} />;
+  const previewUrl = directUrl || objectUrl;
+
+  // Use the bundled PDF.js renderer instead of Chrome's native PDF plug-in.
+  // Native iframe previews can remain completely white (and occasionally
+  // replace/close the automation target) even after OSS returns the PDF with
+  // HTTP 200.  The same offline renderer used for Office documents gives us a
+  // deterministic ready/error lifecycle and never leaves the app shell.
+  if ((extension === 'pdf' || effectiveMime === 'application/pdf') && (originalFile || directUrl)) {
+    return (
+      <Suspense fallback={<LoadingState label="正在加载 PDF 查看器…" />}>
+        <OfficeFilePreview
+          file={originalFile || undefined}
+          url={directUrl || undefined}
+          filename={filename}
+          extension="pdf"
+          onDownload={onDownload}
+        />
+      </Suspense>
+    );
   }
 
   if ((IMAGE_EXTENSIONS.has(extension) || effectiveMime.startsWith('image/')) && previewUrl) {
@@ -198,5 +210,3 @@ const centerStyle: CSSProperties = {
   width: '100%', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column',
   alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, background: '#fafafa',
 };
-
-const frameStyle: CSSProperties = { width: '100%', height: '100%', border: 'none', background: '#fff' };
