@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { Button, Empty, Spin, Typography } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
+import type { WorkspacePdfPreviewInfo } from '../../api/client';
 
 const OfficeFilePreview = lazy(() => import('./OfficeFilePreview'));
 const PdfFilePreview = lazy(() => import('./PdfFilePreview'));
@@ -34,6 +35,8 @@ export interface OriginalFilePreviewProps {
   loading?: boolean;
   error?: string | null;
   onDownload: () => void;
+  loadPdfInfo?: () => Promise<WorkspacePdfPreviewInfo>;
+  loadPdfPage?: (pageNumber: number) => Promise<Blob>;
 }
 
 /**
@@ -43,6 +46,7 @@ export interface OriginalFilePreviewProps {
  */
 export default function OriginalFilePreview({
   blob, sourceUrl, sourceHeaders = EMPTY_HEADERS, mimeType, filename, loading = false, error, onDownload,
+  loadPdfInfo, loadPdfPage,
 }: OriginalFilePreviewProps) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [remoteBlob, setRemoteBlob] = useState<Blob | null>(null);
@@ -132,6 +136,8 @@ export default function OriginalFilePreview({
           url={directUrl || undefined}
           filename={filename}
           onDownload={onDownload}
+          loadInfo={loadPdfInfo}
+          loadPage={loadPdfPage}
         />
       </Suspense>
     );

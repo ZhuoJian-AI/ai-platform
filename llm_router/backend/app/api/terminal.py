@@ -92,11 +92,11 @@ from app.schemas.workspace import (
     WorkspaceFileCreate,
     WorkspaceFilePage,
     WorkspaceFilePreviewRead,
-    WorkspaceOriginalPreviewSourceRead,
     WorkspaceFileRead,
     WorkspaceFileVersionRead,
     WorkspaceFolderCreate,
     WorkspaceFolderRead,
+    WorkspaceOriginalPreviewSourceRead,
     WorkspacePublishRequest,
     WorkspaceRead,
     WorkspaceShareCreate,
@@ -117,6 +117,7 @@ from app.services import (
     subsystem_integration_service,
     task_service,
     workspace_governance_service,
+    workspace_pdf_preview_service,
     workspace_permission_service,
     workspace_service,
 )
@@ -1031,6 +1032,49 @@ async def original_preview_source_ws_file_endpoint(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except storage_gateway_service.StorageGatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/terminal/files/{file_id}/pdf-preview/info")
+async def pdf_preview_info_ws_file_endpoint(
+    file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
+    try:
+        return await workspace_pdf_preview_service.get_pdf_info(f)
+    except workspace_pdf_preview_service.WorkspacePdfPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except storage_gateway_service.StorageGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/terminal/files/{file_id}/pdf-preview/pages/{page_number}")
+async def pdf_preview_page_ws_file_endpoint(
+    file_id: UUID, page_number: int, cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
+    try:
+        content, media_type = await workspace_pdf_preview_service.get_pdf_page(f, page_number)
+    except workspace_pdf_preview_service.WorkspacePdfPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except storage_gateway_service.StorageGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return Response(content=content, media_type=media_type, headers={
+        "Cache-Control": "private, max-age=3600",
+        "X-Content-Type-Options": "nosniff",
+    })
 
 
 @router.get("/terminal/files/{file_id}/download")

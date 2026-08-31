@@ -808,6 +808,8 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
         onReparse={reparseFile}
         loadOriginalPreview={terminal.getWsFileOriginalPreview}
         loadOriginalPreviewSource={terminal.getWsFileOriginalPreviewSource}
+        loadPdfPreviewInfo={terminal.getWsFilePdfPreviewInfo}
+        loadPdfPreviewPage={terminal.getWsFilePdfPreviewPage}
         loadOriginalFile={terminal.downloadWsFile}
       />
 

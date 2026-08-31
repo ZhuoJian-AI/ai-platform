@@ -971,6 +971,8 @@ function FileViewer({ file, onDownload, onReparse, reparsing }: {
               loading={previewLoading}
               error={previewError}
               onDownload={onDownload}
+              loadPdfInfo={() => workspaces.getFilePdfPreviewInfo(file.id)}
+              loadPdfPage={(pageNumber) => workspaces.getFilePdfPreviewPage(file.id, pageNumber)}
             />
           )}
           {view === 'ai' && hasAiContent && (

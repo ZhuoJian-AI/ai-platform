@@ -9,7 +9,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import OriginalFilePreview from '../../components/files/OriginalFilePreview';
-import type { WorkspaceOriginalPreviewSource } from '../../api/client';
+import type { WorkspaceOriginalPreviewSource, WorkspacePdfPreviewInfo } from '../../api/client';
 // mammoth 仅在打开 .docx 时按需动态加载（见下方 useEffect），不进主包。
 
 /** WorkBuddy 配色（与 Terminal.tsx 保持一致）。 */
@@ -245,13 +245,16 @@ export interface BrowserDrawerProps {
   loadOriginalPreview?: (fileId: string) => Promise<Blob>;
   /** 获取短时直连对象存储的预览源；历史文件会返回 blob 回退模式。 */
   loadOriginalPreviewSource?: (fileId: string) => Promise<WorkspaceOriginalPreviewSource>;
+  /** 获取 PDF 原页信息与逐页图像，避免大文件完整下载后才开始预览。 */
+  loadPdfPreviewInfo?: (fileId: string) => Promise<WorkspacePdfPreviewInfo>;
+  loadPdfPreviewPage?: (fileId: string, pageNumber: number) => Promise<Blob>;
   /** 鉴权下载未经转换的原始文件。 */
   loadOriginalFile?: (fileId: string) => Promise<Blob>;
 }
 
 export default function BrowserDrawer({
   open, initialHref, onClose, resolveHref, onReparse, loadOriginalPreview,
-  loadOriginalPreviewSource, loadOriginalFile,
+  loadOriginalPreviewSource, loadPdfPreviewInfo, loadPdfPreviewPage, loadOriginalFile,
 }: BrowserDrawerProps) {
   const [history, setHistory] = useState<Source[]>([]);
   const [index, setIndex] = useState(-1);
@@ -671,6 +674,8 @@ export default function BrowserDrawer({
                   loading={originalPreviewLoading}
                   error={originalPreviewError}
                   onDownload={download}
+                  loadPdfInfo={loadPdfPreviewInfo ? () => loadPdfPreviewInfo(current.fileId) : undefined}
+                  loadPdfPage={loadPdfPreviewPage ? (pageNumber) => loadPdfPreviewPage(current.fileId, pageNumber) : undefined}
                 />
               )}
               {binaryView === 'ai' && current.kind === 'parsed' && (

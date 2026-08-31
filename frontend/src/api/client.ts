@@ -646,6 +646,12 @@ export interface WorkspaceOriginalPreviewSource {
   mime_type: string;
 }
 
+export interface WorkspacePdfPreviewInfo {
+  page_count: number;
+  width: number;
+  height: number;
+}
+
 export interface WorkspaceUploadOptions {
   signal?: AbortSignal;
   onProgress?: (percent: number) => void;
@@ -749,6 +755,10 @@ export const workspaces = {
   getFilePreview: (id: string) => request<WorkspaceFilePreview>(`/api/v1/files/${id}/preview`),
   getFileOriginalPreviewSource: (id: string) =>
     request<WorkspaceOriginalPreviewSource>(`/api/v1/files/${id}/original-preview-source`),
+  getFilePdfPreviewInfo: (id: string) =>
+    request<WorkspacePdfPreviewInfo>(`/api/v1/files/${id}/pdf-preview/info`),
+  getFilePdfPreviewPage: (id: string, pageNumber: number) =>
+    requestBlob(`/api/v1/files/${id}/pdf-preview/pages/${pageNumber}`, 'ai_infra_token'),
   getFileOriginalPreview: (id: string) => requestBlob(`/api/v1/files/${id}/original-preview`, 'ai_infra_token'),
   downloadFile: (id: string) => requestBlob(`/api/v1/files/${id}/download`, 'ai_infra_token'),
   reparseFile: (id: string) => request<WorkspaceFile>(`/api/v1/files/${id}/reparse`, { method: 'POST' }),
@@ -1965,6 +1975,10 @@ export const terminal = {
   getWsFilePreview: (id: string) => userRequest<WorkspaceFilePreview>(`/api/v1/terminal/files/${id}/preview`),
   getWsFileOriginalPreviewSource: (id: string) =>
     userRequest<WorkspaceOriginalPreviewSource>(`/api/v1/terminal/files/${id}/original-preview-source`),
+  getWsFilePdfPreviewInfo: (id: string) =>
+    userRequest<WorkspacePdfPreviewInfo>(`/api/v1/terminal/files/${id}/pdf-preview/info`),
+  getWsFilePdfPreviewPage: (id: string, pageNumber: number) =>
+    requestBlob(`/api/v1/terminal/files/${id}/pdf-preview/pages/${pageNumber}`, USER_TOKEN_KEY),
   getWsFileOriginalPreview: (id: string, signal?: AbortSignal) => requestBlob(`/api/v1/terminal/files/${id}/original-preview`, USER_TOKEN_KEY, signal),
   downloadWsFile: (id: string, signal?: AbortSignal) => requestBlob(`/api/v1/terminal/files/${id}/download`, USER_TOKEN_KEY, signal),
   reparseWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}/reparse`, { method: 'POST' }),
