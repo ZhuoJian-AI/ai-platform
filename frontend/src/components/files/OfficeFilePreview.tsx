@@ -9,14 +9,15 @@ const SPREADSHEET_EXTENSIONS = new Set([
 ]);
 
 export interface OfficeFilePreviewProps {
-  file: File;
+  file?: File;
+  url?: string;
   filename: string;
   extension: string;
   onDownload: () => void;
 }
 
 /** Lazily loaded so normal pages and native PDF/image previews stay lightweight. */
-export default function OfficeFilePreview({ file, filename, extension, onDownload }: OfficeFilePreviewProps) {
+export default function OfficeFilePreview({ file, url, filename, extension, onDownload }: OfficeFilePreviewProps) {
   const isSpreadsheet = SPREADSHEET_EXTENSIONS.has(extension);
   // Selection is owned by the canvas renderer. Keeping this flag in a ref is
   // deliberate: a React state update here recreates FileViewer and discards
@@ -87,6 +88,7 @@ export default function OfficeFilePreview({ file, filename, extension, onDownloa
       >
         <FileViewer
           file={file}
+          url={url}
           filename={filename}
           type={extension}
           style={{ width: '100%', height: '100%' }}

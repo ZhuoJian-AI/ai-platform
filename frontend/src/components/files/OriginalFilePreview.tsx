@@ -51,9 +51,12 @@ export default function OriginalFilePreview({
   const [textError, setTextError] = useState<string | null>(null);
   const extension = extensionOf(filename);
   const hasSourceHeaders = Object.keys(sourceHeaders).length > 0;
-  const needsRemoteBlob = OFFICE_EXTENSIONS.has(extension)
-    || TEXT_EXTENSIONS.has(extension)
-    || hasSourceHeaders;
+  // Signed OSS URLs can be handed directly to the Office renderer.  Fetching
+  // them into React state first adds a full-file memory copy and, for larger
+  // presentations, can leave the outer loading state waiting even though OSS
+  // has already completed the response.  Header-authenticated legacy sources
+  // still need the Blob fallback.
+  const needsRemoteBlob = TEXT_EXTENSIONS.has(extension) || hasSourceHeaders;
   const effectiveBlob = blob || remoteBlob;
   const blobMime = effectiveBlob?.type || '';
   const effectiveMime = !blobMime || blobMime === 'application/octet-stream'
@@ -136,11 +139,12 @@ export default function OriginalFilePreview({
     return <div style={centerStyle}><audio controls src={previewUrl} style={{ width: 'min(560px, 90%)' }} /></div>;
   }
 
-  if (OFFICE_EXTENSIONS.has(extension) && originalFile) {
+  if (OFFICE_EXTENSIONS.has(extension) && (originalFile || directUrl)) {
     return (
       <Suspense fallback={<LoadingState label="正在加载 Office 查看器…" />}>
         <OfficeFilePreview
-          file={originalFile}
+          file={originalFile || undefined}
+          url={directUrl || undefined}
           filename={filename}
           extension={extension}
           onDownload={onDownload}
