@@ -72,7 +72,7 @@ function grantScopeValue(
 export default function EnterpriseApplications({ section }: { section: EnterpriseApplicationsSection }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [orgId, setOrgId] = useState<string>();
   const [editing, setEditing] = useState<EnterpriseApplication | null>(null);
   const [appModalOpen, setAppModalOpen] = useState(false);
@@ -86,6 +86,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   const [assistantForm] = Form.useForm();
   const [bindingForm] = Form.useForm();
   const bindingTargetType = Form.useWatch('target_type', bindingForm) as EnterpriseApplicationTarget | undefined;
+  const selectedGrantModuleKeys = (Form.useWatch('module_keys', grantForm) ?? []) as string[];
   const { treeData, nodeMap, isLoading: treeLoading } = useOrgTree();
 
   const { data: apps = [], isLoading } = useQuery({
@@ -126,17 +127,27 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   });
   const selectedApp = apps.find((item) => item.id === selectedAppId) ?? apps[0];
 
+  const requestedAppId = searchParams.get('app');
   useEffect(() => {
-    const requestedApp = searchParams.get('app');
-    if (requestedApp && apps.some((item) => item.id === requestedApp)) {
-      setSelectedAppId(requestedApp);
+    if (!apps.length) return;
+    if (requestedAppId && apps.some((item) => item.id === requestedAppId)) {
+      setSelectedAppId(requestedAppId);
       return;
     }
-    if (!selectedAppId && apps[0]) setSelectedAppId(apps[0].id);
-    if (selectedAppId && apps.length && !apps.some((item) => item.id === selectedAppId)) {
-      setSelectedAppId(apps[0]?.id);
-    }
-  }, [apps, selectedAppId, searchParams]);
+    setSelectedAppId((current) => (
+      current && apps.some((item) => item.id === current) ? current : apps[0]?.id
+    ));
+  }, [apps, requestedAppId]);
+
+  const selectApplication = (applicationId: string) => {
+    setSelectedAppId(applicationId);
+    setGrantModalOpen(false);
+    setGrantIndex(null);
+    grantForm.resetFields();
+    const next = new URLSearchParams(searchParams);
+    next.set('app', applicationId);
+    setSearchParams(next, { replace: true });
+  };
 
   const orgTree = useMemo(() => {
     if (!orgId) return [];
@@ -257,40 +268,48 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
 
   const saveGrant = useMutation({
     mutationFn: (values: {
-      scope: string; permissions: EnterpriseApplicationPermission[]; module_keys?: string[];
-      page_keys?: string[]; action_keys?: string[];
+      scope: string;
+      permissions?: EnterpriseApplicationPermission[];
+      module_keys?: string[];
+      module_permissions?: Record<string, EnterpriseApplicationPermission[]>;
+      module_roles?: Record<string, string>;
+      module_page_keys?: Record<string, string[]>;
+      module_action_keys?: Record<string, string[]>;
     }) => {
       if (!selectedApp) throw new Error('请先选择应用');
       const node = nodeMap.get(values.scope);
       if (!node) throw new Error('请选择授权范围');
       const moduleKeys = values.module_keys ?? [];
-      const existingModuleAccess = grantIndex === null
-        ? {}
-        : (selectedApp.grants[grantIndex]?.module_access ?? {});
-      const selectedPages = new Set(values.page_keys ?? []);
-      const selectedActions = new Set(values.action_keys ?? []);
+      const hasNativeModules = (selectedIntegration?.modules.length ?? 0) > 0;
+      const moduleAccess = hasNativeModules ? Object.fromEntries(moduleKeys.map((moduleKey) => {
+        const module = selectedIntegration?.modules.find((item) => item.moduleKey === moduleKey);
+        const modulePermissions = values.module_permissions?.[moduleKey] ?? [];
+        const selectedPages = new Set(values.module_page_keys?.[moduleKey] ?? []);
+        const selectedActions = new Set(values.module_action_keys?.[moduleKey] ?? []);
+        const moduleActions = new Set((module?.actions ?? []).map((item) => item.actionKey));
+        const actionKeys = Array.from(selectedActions).filter((key) => moduleActions.has(key));
+        const pageAccess = Object.fromEntries((module?.pages ?? [])
+          .filter((page) => selectedPages.has(page.pageKey))
+          .map((page) => [page.pageKey, {
+            permissions: modulePermissions,
+            action_keys: page.actionKeys.filter((key) => selectedActions.has(key)),
+          }]));
+        return [moduleKey, {
+          role: values.module_roles?.[moduleKey] || 'member',
+          permissions: modulePermissions,
+          action_keys: actionKeys,
+          page_access: pageAccess,
+        }];
+      })) : {};
+      const permissions = hasNativeModules
+        ? Array.from(new Set(Object.values(moduleAccess).flatMap((access) => access.permissions)))
+        : (values.permissions ?? []);
       const grant = {
         scope_type: node.type as EnterpriseApplicationScope,
         scope_id: node.type === 'organization' ? null : node.id,
-        permissions: values.permissions,
-        module_keys: moduleKeys,
-        module_access: Object.fromEntries(moduleKeys.map((moduleKey) => {
-          const module = selectedIntegration?.modules.find((item) => item.moduleKey === moduleKey);
-          const moduleActions = new Set((module?.actions ?? []).map((item) => item.actionKey));
-          const actionKeys = Array.from(selectedActions).filter((key) => moduleActions.has(key));
-          const pageAccess = Object.fromEntries((module?.pages ?? [])
-            .filter((page) => selectedPages.has(`${moduleKey}::${page.pageKey}`))
-            .map((page) => [page.pageKey, {
-              permissions: values.permissions,
-              action_keys: page.actionKeys.filter((key) => selectedActions.has(key)),
-            }]));
-          return [moduleKey, {
-            role: existingModuleAccess[moduleKey]?.role ?? 'member',
-            permissions: values.permissions,
-            action_keys: actionKeys,
-            page_access: pageAccess,
-          }];
-        })),
+        permissions,
+        module_keys: hasNativeModules ? moduleKeys : [],
+        module_access: moduleAccess,
       };
       const next = selectedApp.grants.map((item) => ({
         scope_type: item.scope_type, scope_id: item.scope_id, permissions: item.permissions,
@@ -386,21 +405,46 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
 
   const renderPermissions = () => selectedApp ? (
     <>
-      <Alert showIcon type="info" message="应用的基础可见范围可在“登记/编辑应用”中直接选择；这里用于进一步配置 AI 查询、新增、更新、删除和导出权限。" style={{ marginBottom: 12 }} />
-      <Space style={{ marginBottom: 12 }}><Select style={{ width: 260 }} value={selectedApp.id} options={appOptions} onChange={setSelectedAppId} /><Button type="primary" icon={<PlusOutlined />} onClick={() => { setGrantIndex(null); grantForm.resetFields(); setGrantModalOpen(true); }}>新增授权</Button></Space>
+      <Alert showIcon type="info" message="原生系统按子模块授权；每个子模块可以分别配置部门、页面和 AI 操作。旧系统没有 Manifest 时才按整个应用兼容授权。" style={{ marginBottom: 12 }} />
+      <Space style={{ marginBottom: 12 }}>
+        <Select style={{ width: 260 }} value={selectedApp.id} options={appOptions} onChange={selectApplication} />
+        {selectedIntegration?.modules.length ? <Tag color="blue">已发现 {selectedIntegration.modules.length} 个子模块</Tag> : <Tag>旧系统 / 尚未同步 Manifest</Tag>}
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => {
+          setGrantIndex(null);
+          grantForm.resetFields();
+          if (selectedIntegration?.modules.length === 1) {
+            grantForm.setFieldValue('module_keys', [selectedIntegration.modules[0].moduleKey]);
+          }
+          setGrantModalOpen(true);
+        }}>新增授权</Button>
+      </Space>
       <Table dataSource={selectedApp.grants} rowKey="id" pagination={false} columns={[
         { title: '授权范围', render: (_: unknown, row) => <Space><Tag>{row.scope_type}</Tag>{scopeLabel(row.scope_type, row.scope_id)}</Space> },
-        { title: '权限', dataIndex: 'permissions', render: (values: string[]) => <Space wrap>{values.map((value) => <Tag key={value} color={value === 'view' ? 'blue' : value.includes('delete') ? 'red' : 'purple'}>{PERMISSIONS.find((item) => item.value === value)?.label ?? value}</Tag>)}</Space> },
-        { title: '可见子模块', dataIndex: 'module_keys', render: (values: string[]) => values?.length ? <Space wrap>{values.map((value) => <Tag key={value}>{value}</Tag>)}</Space> : <Tag color="blue">全部子模块</Tag> },
+        { title: '子模块授权明细', render: (_: unknown, row) => {
+          const moduleEntries = Object.entries(row.module_access ?? {});
+          if (!moduleEntries.length) return <Space wrap><Tag color="gold">整个应用（兼容模式）</Tag>{row.permissions.map((value) => <Tag key={value} color={value === 'view' ? 'blue' : value.includes('delete') ? 'red' : 'purple'}>{PERMISSIONS.find((item) => item.value === value)?.label ?? value}</Tag>)}</Space>;
+          return <Space direction="vertical" size={6}>{moduleEntries.map(([moduleKey, access]) => {
+            const module = selectedIntegration?.modules.find((item) => item.moduleKey === moduleKey);
+            return <Space key={moduleKey} wrap>
+              <Tag color="cyan">{module?.name || moduleKey}</Tag>
+              <Tag>{access.role}</Tag>
+              {access.permissions.map((value) => <Tag key={value} color={value === 'view' ? 'blue' : value.includes('delete') ? 'red' : 'purple'}>{PERMISSIONS.find((item) => item.value === value)?.label ?? value}</Tag>)}
+              <Typography.Text type="secondary">{Object.keys(access.page_access ?? {}).length} 个页面 · {access.action_keys?.length ?? 0} 个 AI 操作</Typography.Text>
+            </Space>;
+          })}</Space>;
+        } },
         { title: '操作', width: 150, render: (_: unknown, row, index) => <Space><Button size="small" onClick={() => {
           setGrantIndex(index);
           const moduleAccess = row.module_access ?? {};
+          const moduleKeys = row.module_keys?.length ? row.module_keys : Object.keys(moduleAccess);
           grantForm.setFieldsValue({
             scope: `${row.scope_type === 'organization' ? 'org' : row.scope_type === 'department' ? 'dept' : row.scope_type}:${row.scope_id ?? orgId}`,
             permissions: row.permissions,
-            module_keys: row.module_keys ?? [],
-            page_keys: Object.entries(moduleAccess).flatMap(([moduleKey, access]) => Object.keys(access.page_access ?? {}).map((pageKey) => `${moduleKey}::${pageKey}`)),
-            action_keys: Array.from(new Set(Object.values(moduleAccess).flatMap((access) => access.action_keys ?? []))),
+            module_keys: moduleKeys,
+            module_permissions: Object.fromEntries(Object.entries(moduleAccess).map(([moduleKey, access]) => [moduleKey, access.permissions ?? []])),
+            module_roles: Object.fromEntries(Object.entries(moduleAccess).map(([moduleKey, access]) => [moduleKey, access.role ?? 'member'])),
+            module_page_keys: Object.fromEntries(Object.entries(moduleAccess).map(([moduleKey, access]) => [moduleKey, Object.keys(access.page_access ?? {})])),
+            module_action_keys: Object.fromEntries(Object.entries(moduleAccess).map(([moduleKey, access]) => [moduleKey, access.action_keys ?? []])),
           });
           setGrantModalOpen(true);
         }}>编辑</Button><Button size="small" danger onClick={() => removeGrant(index)}>移除</Button></Space> },
@@ -494,26 +538,41 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
         </Form>
       </Modal>
 
-      <Modal title={grantIndex === null ? '新增应用授权' : '编辑应用授权'} open={grantModalOpen} onCancel={() => setGrantModalOpen(false)} onOk={() => grantForm.submit()} confirmLoading={saveGrant.isPending} forceRender>
+      <Modal width={820} title={grantIndex === null ? '新增子模块授权' : '编辑子模块授权'} open={grantModalOpen} onCancel={() => setGrantModalOpen(false)} onOk={() => grantForm.submit()} confirmLoading={saveGrant.isPending} forceRender>
         <Form form={grantForm} layout="vertical" onFinish={(values) => saveGrant.mutate(values)}>
           <Form.Item name="scope" label="授权对象" rules={[{ required: true }]}><TreeSelect treeData={orgTree} treeDefaultExpandAll showSearch treeNodeFilterProp="title" loading={treeLoading} placeholder="选择全企业、部门、团队或用户" /></Form.Item>
-          <Form.Item name="permissions" label="权限" rules={[{ required: true }]}><Checkbox.Group options={PERMISSIONS} /></Form.Item>
-          <Form.Item name="module_keys" label="可见子模块" extra="不选择表示可访问整个应用；选择后，该授权对象只能进入这些子模块，业务小助手也执行同一限制。">
-            <Checkbox.Group options={(selectedIntegration?.modules ?? []).map((item) => ({
-              value: item.moduleKey, label: item.name || item.moduleKey,
-            })).filter((item) => item.value)} />
-          </Form.Item>
-          <Form.Item name="page_keys" label="可见页面" extra="原生模块按页面授权；未勾选的页面不会进入该对象的导航和 AI 上下文。">
-            <Checkbox.Group options={(selectedIntegration?.modules ?? []).flatMap((module) => (module.pages ?? []).map((page) => ({
-              value: `${module.moduleKey}::${page.pageKey}`, label: `${module.name} / ${page.name}`,
-            })))} />
-          </Form.Item>
-          <Form.Item name="action_keys" label="允许 AI 使用的操作" extra="这里只列 Manifest 已声明可供 AI 使用的操作；模块以后新增操作不会自动获得授权。">
-            <Checkbox.Group options={(selectedIntegration?.modules ?? []).flatMap((module) => module.actions.filter((action) => action.aiEnabled).map((action) => ({
-              value: action.actionKey, label: `${module.name} / ${action.name}${action.requiresConfirmation ? '（需确认）' : ''}`,
-            })))} />
-          </Form.Item>
-          {!selectedIntegration?.modules.length && <Alert showIcon type="warning" message="尚未发现子模块" description="请先在应用详情的“系统联通”中保存连接并同步；当前留空即保持整个应用可见。" />}
+          {selectedIntegration?.modules.length ? <>
+            <Form.Item name="module_keys" label="授权哪些子模块" rules={[{ required: true, message: '至少选择一个子模块' }]} extra="每个子模块独立配置权限；以后新同步的子模块不会自动获得授权。">
+              <Checkbox.Group options={selectedIntegration.modules.map((item) => ({
+                value: item.moduleKey, label: item.name || item.moduleKey,
+              })).filter((item) => item.value)} />
+            </Form.Item>
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              {selectedGrantModuleKeys.map((moduleKey) => {
+                const module = selectedIntegration.modules.find((item) => item.moduleKey === moduleKey);
+                if (!module) return null;
+                return <Card key={moduleKey} size="small" title={<Space><Tag color="cyan">{moduleKey}</Tag>{module.name}</Space>}>
+                  <Form.Item name={['module_roles', moduleKey]} label="协作角色" initialValue="member"><Select options={[
+                    { value: 'owner', label: '负责人' }, { value: 'collaborator', label: '协作方' },
+                    { value: 'approver', label: '审批方' }, { value: 'viewer', label: '查看方' },
+                    { value: 'member', label: '成员' },
+                  ]} /></Form.Item>
+                  <Form.Item name={['module_permissions', moduleKey]} label="子模块权限" rules={[{ required: true, message: '请选择子模块权限' }]}><Checkbox.Group options={PERMISSIONS} /></Form.Item>
+                  <Form.Item name={['module_page_keys', moduleKey]} label="可见页面" rules={(module.pages ?? []).length ? [{ required: true, message: '至少选择一个可见页面' }] : []} extra="未勾选的页面不会进入该对象的导航或 AI 页面上下文。">
+                    <Checkbox.Group options={(module.pages ?? []).map((page) => ({ value: page.pageKey, label: page.name }))} />
+                  </Form.Item>
+                  <Form.Item name={['module_action_keys', moduleKey]} label="允许 AI 使用的操作" extra="新增操作不会自动获得授权；高风险操作仍需二次确认。">
+                    <Checkbox.Group options={module.actions.filter((action) => action.aiEnabled).map((action) => ({
+                      value: action.actionKey, label: `${action.name}${action.requiresConfirmation ? '（需确认）' : ''}`,
+                    }))} />
+                  </Form.Item>
+                </Card>;
+              })}
+            </Space>
+          </> : <>
+            <Alert showIcon type="warning" message="旧系统兼容授权" description="当前系统没有可用的 Manifest 子模块，只能按整个应用授权。原生系统同步 Manifest 后会自动出现子模块、页面和 AI 操作。" style={{ marginBottom: 12 }} />
+            <Form.Item name="permissions" label="整个应用权限" rules={[{ required: true }]}><Checkbox.Group options={PERMISSIONS} /></Form.Item>
+          </>}
         </Form>
       </Modal>
 
