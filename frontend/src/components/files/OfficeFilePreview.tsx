@@ -19,6 +19,17 @@ export interface OfficeFilePreviewProps {
 /** Lazily loaded so normal pages and native PDF/image previews stay lightweight. */
 export default function OfficeFilePreview({ file, url, filename, extension, onDownload }: OfficeFilePreviewProps) {
   const isSpreadsheet = SPREADSHEET_EXTENSIONS.has(extension);
+  // The preview-source query periodically renews the OSS signature.  The
+  // object path stays the same, but replacing only the query string makes
+  // FileViewer treat it as a different document and restart a long PDF/PPT
+  // parse.  Freeze the first usable signature for this object; selecting a
+  // different object path still switches immediately.
+  const urlIdentity = url?.split('?', 1)[0] || '';
+  const stableUrlRef = useRef<{ identity: string; url?: string }>({ identity: urlIdentity, url });
+  if (stableUrlRef.current.identity !== urlIdentity || (!stableUrlRef.current.url && url)) {
+    stableUrlRef.current = { identity: urlIdentity, url };
+  }
+  const stableUrl = stableUrlRef.current.url;
   // FileViewer treats a new options object as a new document configuration and
   // reloads its renderer.  Parent query refreshes can re-render this component
   // while a large Office file is still being parsed, so an inline object may
@@ -124,7 +135,7 @@ export default function OfficeFilePreview({ file, url, filename, extension, onDo
       >
         <FileViewer
           file={file}
-          url={url}
+          url={stableUrl}
           filename={filename}
           type={extension}
           style={{ width: '100%', height: '100%' }}
