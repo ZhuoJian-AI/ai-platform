@@ -22,12 +22,16 @@ function safeContextPageUrl(launchUrl: string | undefined, route: unknown): stri
 
 export default function EnterpriseApplicationView({
   application,
+  moduleKey,
+  onModuleChange,
   onAskAI,
   immersive,
   onOpenNavigation,
   onToggleImmersive,
 }: {
   application: TerminalEnterpriseApplication;
+  moduleKey: string | null;
+  onModuleChange: (moduleKey: string) => void;
   onAskAI: (prompt: string, pageContext: Record<string, unknown>) => void;
   immersive: boolean;
   onOpenNavigation: () => void;
@@ -40,11 +44,10 @@ export default function EnterpriseApplicationView({
   const [frameLoaded, setFrameLoaded] = useState(false);
   const [frameSlow, setFrameSlow] = useState(false);
   const [bridgeContext, setBridgeContext] = useState<Record<string, unknown>>({});
-  const [selectedModule, setSelectedModule] = useState<string>();
   const frameRef = useRef<HTMLIFrameElement>(null);
   const { data: launch, isLoading, error, refetch } = useQuery({
-    queryKey: ['terminal-application-launch', application.id, selectedModule],
-    queryFn: () => terminal.launchApplication(application.id, selectedModule),
+    queryKey: ['terminal-application-launch', application.id, moduleKey],
+    queryFn: () => terminal.launchApplication(application.id, moduleKey ?? undefined),
     retry: false,
   });
   const confirmationsQuery = useQuery({
@@ -86,8 +89,8 @@ export default function EnterpriseApplicationView({
   };
 
   useEffect(() => {
-    setSelectedModule(undefined);
-  }, [application.id]);
+    if (!moduleKey && launch?.module_key) onModuleChange(launch.module_key);
+  }, [launch?.module_key, moduleKey, onModuleChange]);
 
   useEffect(() => {
     setFrameLoaded(false); setFrameSlow(false); setBridgeContext({});
@@ -141,6 +144,7 @@ export default function EnterpriseApplicationView({
     return <Result status={forbidden ? '403' : 'error'} title={forbidden ? '无权访问该应用' : '应用加载失败'} subTitle={forbidden ? '当前账号没有此企业模块的 view 权限。' : (error as Error).message} extra={<Button onClick={() => refetch()}>重试</Button>} />;
   }
   if (!launch) return <Empty description="应用入口不可用" />;
+  const activeModule = launch.modules.find((item) => item.module_key === launch.module_key);
 
   return (
     <div className="enterprise-app-view">
@@ -151,14 +155,19 @@ export default function EnterpriseApplicationView({
         <div style={{ width: 30, height: 30, borderRadius: 9, background: '#eef2ff', color: '#6366f1', display: 'grid', placeItems: 'center', overflow: 'hidden' }}>
           {application.icon_url ? <img src={application.icon_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : application.name.slice(0, 1)}
         </div>
-        <div className="enterprise-app-view__identity"><Typography.Text strong>{application.name}</Typography.Text><div>{application.description || '企业业务应用'}</div></div>
-        <Tag color="blue" style={{ marginLeft: 4 }}>{launch.display_mode === 'embedded' ? (immersive ? '完全沉浸' : '沉浸内嵌') : '独立应用'}</Tag>
+        <div className="enterprise-app-view__identity">
+          <Typography.Text strong>{activeModule?.name || application.name}</Typography.Text>
+          <div>{activeModule ? `${application.name} · 原生子模块` : (application.description || '企业业务应用')}</div>
+        </div>
+        <Tag color={activeModule ? 'geekblue' : 'blue'} style={{ marginLeft: 4 }}>
+          {activeModule ? '原生聚合' : (launch.display_mode === 'embedded' ? (immersive ? '完全沉浸' : '沉浸内嵌') : '独立应用')}
+        </Tag>
         {(launch.modules ?? []).length > 1 && <Select
           size="small"
-          value={launch.module_key ?? undefined}
+          value={launch.module_key ?? moduleKey ?? undefined}
           style={{ minWidth: 140 }}
           options={(launch.modules ?? []).map((item) => ({ value: item.module_key, label: item.name }))}
-          onChange={setSelectedModule}
+          onChange={onModuleChange}
           aria-label="选择子模块"
         />}
         <div style={{ flex: 1 }} />
@@ -183,7 +192,7 @@ export default function EnterpriseApplicationView({
             ref={frameRef}
             key={frameKey}
             src={launch.url}
-            title={application.name}
+            title={activeModule?.name || application.name}
             sandbox="allow-downloads allow-forms allow-popups allow-same-origin allow-scripts"
             referrerPolicy="strict-origin"
             onLoad={() => {

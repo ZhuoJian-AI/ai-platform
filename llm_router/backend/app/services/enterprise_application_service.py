@@ -470,6 +470,39 @@ def effective_module_keys(row: EnterpriseApplication, user: CurrentUser) -> list
     })
 
 
+def visible_manifest_modules(
+    row: EnterpriseApplication, user: CurrentUser
+) -> list[dict[str, str]]:
+    """Return the protocol-v2 modules the current user may actually launch.
+
+    The terminal navigation and launch endpoint intentionally share this
+    projection so a child module can never be displayed without the same
+    server-side ``view`` decision that protects its SSO ticket.
+    """
+    integration = row.integration
+    if integration is None or integration.protocol_version < 2:
+        return []
+    manifest_modules = (
+        integration.manifest.get("modules")
+        if isinstance(integration.manifest, dict)
+        else []
+    )
+    if not isinstance(manifest_modules, list):
+        return []
+    visible: list[dict[str, str]] = []
+    for item in manifest_modules:
+        if not isinstance(item, dict) or not item.get("moduleKey"):
+            continue
+        module_key = str(item["moduleKey"])
+        if "view" not in effective_module_permissions(row, user, module_key):
+            continue
+        visible.append({
+            "module_key": module_key,
+            "name": str(item.get("name") or module_key),
+        })
+    return visible
+
+
 def effective_module_permissions(
     row: EnterpriseApplication, user: CurrentUser, module_key: str
 ) -> set[str]:

@@ -295,8 +295,10 @@ async def terminal_applications_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
     rows = await service.list_applications_for_user(db, cu)
-    return [
-        TerminalEnterpriseApplicationRead(
+    applications: list[TerminalEnterpriseApplicationRead] = []
+    for row, permissions in rows:
+        visible_modules = service.visible_manifest_modules(row, cu)
+        applications.append(TerminalEnterpriseApplicationRead(
             id=row.id,
             name=row.name,
             slug=row.slug,
@@ -307,9 +309,9 @@ async def terminal_applications_endpoint(
             assistant_enabled=row.assistant_enabled,
             permissions=sorted(permissions),
             module_keys=service.effective_module_keys(row, cu),
-        )
-        for row, permissions in rows
-    ]
+            modules=visible_modules,
+        ))
+    return applications
 
 
 @router.post(
@@ -333,12 +335,7 @@ async def launch_terminal_application_endpoint(
             raise HTTPException(status_code=409, detail="Subsystem access has been revoked")
         modules = integration.manifest.get("modules") if isinstance(integration.manifest, dict) else []
         modules = modules if isinstance(modules, list) else []
-        for item in modules:
-            if not isinstance(item, dict) or not item.get("moduleKey"):
-                continue
-            key = str(item["moduleKey"])
-            if "view" in service.effective_module_permissions(row, cu, key):
-                accessible_modules.append({"module_key": key, "name": str(item.get("name") or key)})
+        accessible_modules = service.visible_manifest_modules(row, cu)
         if selected_module is None:
             selected_module = accessible_modules[0]["module_key"] if accessible_modules else None
         if selected_module is None:

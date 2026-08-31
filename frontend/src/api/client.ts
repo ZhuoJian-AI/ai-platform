@@ -1515,6 +1515,7 @@ export interface TerminalEnterpriseApplication {
   sort_order: number; assistant_enabled: boolean;
   permissions: EnterpriseApplicationPermission[];
   module_keys: string[];
+  modules: Array<{ module_key: string; name: string }>;
 }
 
 export interface EnterpriseApplicationLaunch {

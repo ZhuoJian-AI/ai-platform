@@ -190,6 +190,11 @@ class EnterpriseApplicationRead(OrmModel):
     updated_at: datetime
 
 
+class EnterpriseApplicationLaunchModuleRead(BaseModel):
+    module_key: str
+    name: str
+
+
 class TerminalEnterpriseApplicationRead(BaseModel):
     id: UUID
     name: str
@@ -201,11 +206,7 @@ class TerminalEnterpriseApplicationRead(BaseModel):
     assistant_enabled: bool
     permissions: list[str]
     module_keys: list[str] = Field(default_factory=list)
-
-
-class EnterpriseApplicationLaunchModuleRead(BaseModel):
-    module_key: str
-    name: str
+    modules: list[EnterpriseApplicationLaunchModuleRead] = Field(default_factory=list)
 
 
 class EnterpriseApplicationLaunchRead(BaseModel):

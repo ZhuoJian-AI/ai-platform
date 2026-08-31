@@ -361,6 +361,7 @@ export default function Terminal() {
   // 左侧功能菜单视图：平台核心能力 + 按授权动态加载的企业应用。
   const [view, setView] = useState<TerminalView>(() => viewFromQuery(location.search));
   const [selectedApplicationId, setSelectedApplicationId] = useState<string | null>(() => new URLSearchParams(location.search).get('app'));
+  const [selectedApplicationModuleKey, setSelectedApplicationModuleKey] = useState<string | null>(() => new URLSearchParams(location.search).get('module'));
   const [applicationNavOpen, setApplicationNavOpen] = useState(false);
   const [applicationImmersive, setApplicationImmersive] = useState(false);
 
@@ -395,6 +396,13 @@ export default function Terminal() {
     setApplicationNavOpen(false);
     setApplicationImmersive(false);
   }, [selectedApplicationId]);
+
+  useEffect(() => {
+    if (!selectedApplication) return;
+    const modules = selectedApplication.modules ?? [];
+    if (selectedApplicationModuleKey && modules.some((item) => item.module_key === selectedApplicationModuleKey)) return;
+    setSelectedApplicationModuleKey(modules[0]?.module_key ?? null);
+  }, [selectedApplication, selectedApplicationModuleKey]);
 
   useEffect(() => {
     if (view !== 'application') {
@@ -451,6 +459,8 @@ export default function Terminal() {
     else params.set('view', view === 'workspaces' ? 'workspace' : view);
     if (view === 'application' && selectedApplicationId) params.set('app', selectedApplicationId);
     else params.delete('app');
+    if (view === 'application' && selectedApplicationModuleKey) params.set('module', selectedApplicationModuleKey);
+    else params.delete('module');
     if (view !== 'workspaces') {
       params.delete('workspace');
       params.delete('path');
@@ -465,7 +475,7 @@ export default function Terminal() {
     const routeTaskId = taskId || null;
     if (routeTaskId !== selectedId && (location.pathname === terminalBasePath || location.pathname.startsWith(`${terminalBasePath}/tasks/`))) return;
     if (desired !== current) navigate(desired, { replace: true });
-  }, [composerOpen, location.pathname, location.search, navigate, selectedApplicationId, selectedId, taskId, terminalBasePath, view]);
+  }, [composerOpen, location.pathname, location.search, navigate, selectedApplicationId, selectedApplicationModuleKey, selectedId, taskId, terminalBasePath, view]);
 
   useEffect(() => {
     if (!selectedTask) return;
@@ -1292,6 +1302,8 @@ export default function Terminal() {
             ) : view === 'application' && selectedApplication ? (
               <EnterpriseApplicationView
                 application={selectedApplication}
+                moduleKey={selectedApplicationModuleKey}
+                onModuleChange={setSelectedApplicationModuleKey}
                 immersive={applicationImmersive}
                 onOpenNavigation={() => setApplicationNavOpen(true)}
                 onToggleImmersive={() => setApplicationImmersive((value) => !value)}
@@ -1371,23 +1383,63 @@ export default function Terminal() {
                 {terminalApplications.length > 0 && (
                   <div style={{ padding: '6px 10px 4px', fontSize: 11, color: '#9ca3af', fontWeight: 600, letterSpacing: .4 }}>企业应用</div>
                 )}
-                {terminalApplications.map((application) => (
-                  <div
-                    key={application.id}
-                    onClick={() => {
-                      setSelectedApplicationId(application.id);
-                      setView('application');
-                      setApplicationNavOpen(false);
-                    }}
-                    style={navItemStyle(selectedApplicationId === application.id)}
-                  >
-                    {application.icon_url
-                      ? <img src={application.icon_url} alt="" style={{ width: 17, height: 17, borderRadius: 5, objectFit: 'cover' }} />
-                      : <AppstoreOutlined style={{ fontSize: 16 }} />}
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{application.name}</span>
-                    {application.assistant_enabled && <Tag color="purple" bordered={false} style={{ margin: '0 0 0 auto', fontSize: 9, lineHeight: '17px' }}>AI</Tag>}
-                  </div>
-                ))}
+                {terminalApplications.map((application) => {
+                  const modules = application.modules ?? [];
+                  const applicationActive = selectedApplicationId === application.id;
+                  if (modules.length === 0) {
+                    return (
+                      <div
+                        key={application.id}
+                        onClick={() => {
+                          setSelectedApplicationId(application.id);
+                          setSelectedApplicationModuleKey(null);
+                          setView('application');
+                          setApplicationNavOpen(false);
+                        }}
+                        style={navItemStyle(applicationActive)}
+                      >
+                        {application.icon_url
+                          ? <img src={application.icon_url} alt="" style={{ width: 17, height: 17, borderRadius: 5, objectFit: 'cover' }} />
+                          : <AppstoreOutlined style={{ fontSize: 16 }} />}
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{application.name}</span>
+                        {application.assistant_enabled && <Tag color="purple" bordered={false} style={{ margin: '0 0 0 auto', fontSize: 9, lineHeight: '17px' }}>AI</Tag>}
+                      </div>
+                    );
+                  }
+                  return (
+                    <div key={application.id} className="terminal-app-nav-group">
+                      <div className="terminal-app-nav-group__title">
+                        {application.icon_url
+                          ? <img src={application.icon_url} alt="" />
+                          : <PartitionOutlined />}
+                        <span>{application.name}</span>
+                        <Tag bordered={false}>{modules.length} 个子模块</Tag>
+                      </div>
+                      <div className="terminal-app-nav-group__modules">
+                        {modules.map((module) => {
+                          const active = applicationActive && selectedApplicationModuleKey === module.module_key;
+                          return (
+                            <button
+                              type="button"
+                              key={module.module_key}
+                              className={`terminal-app-nav-group__module${active ? ' terminal-app-nav-group__module--active' : ''}`}
+                              onClick={() => {
+                                setSelectedApplicationId(application.id);
+                                setSelectedApplicationModuleKey(module.module_key);
+                                setView('application');
+                                setApplicationNavOpen(false);
+                              }}
+                            >
+                              <span className="terminal-app-nav-group__module-mark" />
+                              <span>{module.name}</span>
+                              {application.assistant_enabled && <span className="terminal-app-nav-group__ai">AI</span>}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
                 {terminalApplications.length > 0 && <div style={{ height: 1, background: '#e5e7eb', margin: '8px 10px' }} />}
                 <div onClick={() => { setApplicationNavOpen(false); setView('workspaces'); }} style={navItemStyle(false)}><FolderOpenOutlined style={{ fontSize: 16 }} /><span>工作空间</span></div>
                 <div onClick={() => { setApplicationNavOpen(false); setView('agents'); }} style={navItemStyle(false)}><RobotOutlined style={{ fontSize: 16 }} /><span>智能体</span></div>
