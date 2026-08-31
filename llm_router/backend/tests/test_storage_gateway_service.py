@@ -91,6 +91,38 @@ async def test_upload_and_download_use_scoped_signed_urls(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_browser_signed_download_keeps_public_endpoint(monkeypatch):
+    _configure(monkeypatch)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "url": "https://bucket.oss-cn-hongkong.aliyuncs.com/projects/7/assets/deck.pptx?sig=browser",
+                "headers": {},
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, **kwargs):
+            assert url.endswith("/v1/downloads/sign")
+            assert kwargs["json"] == {"object_key": "projects/7/assets/deck.pptx"}
+            return FakeResponse()
+
+    monkeypatch.setattr(storage.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    signed = await storage.get_browser_signed_download("oss://projects/7/assets/deck.pptx")
+    assert signed["url"].startswith("https://bucket.oss-cn-hongkong.aliyuncs.com/")
+    assert "-internal" not in signed["url"]
+
+
+@pytest.mark.asyncio
 async def test_stream_signed_download_proxies_internal_object_in_chunks(monkeypatch):
     _configure(monkeypatch)
 

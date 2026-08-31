@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
-  Drawer, Upload, message, Typography, Button, Empty, Segmented, Tag,
+  Drawer, Upload, message, Typography, Button, Empty, Segmented, Tag, Progress,
   Input, Select, Checkbox, Modal, List, Dropdown,
 } from 'antd';
 import {
@@ -277,13 +277,29 @@ export default function Workspaces() {
     queryFn: () => workspaces.listFileVersions(versionFile!.id), enabled: !!versionFile,
   });
 
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadName, setUploadName] = useState('');
+  const [uploadStage, setUploadStage] = useState<'uploading' | 'validating'>('uploading');
   const uploadFile = useMutation({
     mutationFn: (v: { path: string; file: File }) => {
       if (!fileModalWs) return Promise.reject(new Error('no ws'));
-      return workspaces.uploadFile(fileModalWs.id, v.file, v.path);
+      setUploadName(v.file.name);
+      setUploadProgress(0);
+      setUploadStage('uploading');
+      return workspaces.uploadFile(fileModalWs.id, v.file, v.path, {
+        onProgress: setUploadProgress,
+        onUploadComplete: () => { setUploadProgress(100); setUploadStage('validating'); },
+      });
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['workspace-files'] }); message.success('文件已上传'); },
-    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '上传失败'),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['workspace-files'] });
+      message.success('文件已上传');
+      setUploadName('');
+    },
+    onError: (e: unknown) => {
+      message.error(e instanceof ApiError ? e.message : '上传失败');
+      setUploadName('');
+    },
   });
 
   const reparseFile = useMutation({
@@ -608,6 +624,22 @@ export default function Workspaces() {
                         上传文件
                       </ToolButton>
                     </Upload>
+                    <Typography.Text
+                      type="secondary"
+                      title="支持 Word、Excel、PPT、PDF、Markdown 等常用文件；10MB 以上自动直传对象存储"
+                      style={{ fontSize: 11, whiteSpace: 'nowrap' }}
+                    >
+                      单文件最大 100MB
+                    </Typography.Text>
+                    {uploadFile.isPending && (
+                      <Progress
+                        percent={uploadProgress}
+                        size="small"
+                        status="active"
+                        style={{ width: 180, margin: 0 }}
+                        format={(percent) => `${uploadStage === 'validating' ? '正在校验' : uploadName} ${percent ?? 0}%`}
+                      />
+                    )}
                   </>
                 }
               />
@@ -884,20 +916,33 @@ function FileViewer({ file, onDownload, onReparse, reparsing }: {
   const content = file.content ?? '';
   const [view, setView] = useState<'original' | 'ai'>('original');
   const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
+  const [previewSourceUrl, setPreviewSourceUrl] = useState<string | null>(null);
+  const [previewSourceHeaders, setPreviewSourceHeaders] = useState<Record<string, string>>({});
+  const [previewMime, setPreviewMime] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
 
   useEffect(() => {
     setView('original');
     setPreviewBlob(null);
+    setPreviewSourceUrl(null);
+    setPreviewSourceHeaders({});
+    setPreviewMime(null);
     setPreviewError(null);
     if (!meta.binary) return;
     let cancelled = false;
     setPreviewLoading(true);
-    workspaces.getFileOriginalPreview(file.id)
-      .then((blob) => {
+    workspaces.getFileOriginalPreviewSource(file.id)
+      .then(async (source) => {
         if (cancelled) return;
-        setPreviewBlob(blob);
+        setPreviewMime(source.mime_type);
+        if (source.mode === 'url' && source.url) {
+          setPreviewSourceUrl(source.url);
+          setPreviewSourceHeaders(source.headers || {});
+          return;
+        }
+        const blob = await workspaces.getFileOriginalPreview(file.id);
+        if (!cancelled) setPreviewBlob(blob);
       })
       .catch((error) => { if (!cancelled) setPreviewError((error as Error)?.message || '原文件预览加载失败'); })
       .finally(() => { if (!cancelled) setPreviewLoading(false); });
@@ -924,6 +969,9 @@ function FileViewer({ file, onDownload, onReparse, reparsing }: {
           {view === 'original' && (
             <OriginalFilePreview
               blob={previewBlob}
+              sourceUrl={previewSourceUrl}
+              sourceHeaders={previewSourceHeaders}
+              mimeType={previewMime}
               filename={workspaceDisplayName(file)}
               loading={previewLoading}
               error={previewError}

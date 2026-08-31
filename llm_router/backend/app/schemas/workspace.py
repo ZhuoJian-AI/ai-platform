@@ -138,6 +138,14 @@ class WorkspaceFilePreviewRead(BaseModel):
     extracted_text: str | None = None
 
 
+class WorkspaceOriginalPreviewSourceRead(BaseModel):
+    mode: str
+    url: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    filename: str
+    mime_type: str
+
+
 class WorkspaceFolderCreate(BaseModel):
     path: str = Field(..., max_length=1024)
 

@@ -221,6 +221,30 @@ async def get_signed_download(content_ref: str) -> dict:
         raise StorageGatewayError("OSS download signing failed") from exc
 
 
+async def get_browser_signed_download(content_ref: str) -> dict:
+    """Issue a short-lived public URL for an authenticated browser preview.
+
+    Internal workers use :func:`get_signed_download`, which rewrites the OSS
+    hostname to the same-region private endpoint. Browsers cannot resolve that
+    private hostname, so this method deliberately preserves the public URL
+    returned by the gateway. The URL is still object-scoped and short-lived.
+    """
+    object_key = object_key_from_ref(content_ref)
+    try:
+        async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
+            response = await client.post(
+                _gateway_url("/v1/downloads/sign"), headers=_auth_headers(), json={"object_key": object_key}
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return {
+                "url": str(payload["url"]),
+                "headers": {str(k): str(v) for k, v in (payload.get("headers") or {}).items()},
+            }
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("OSS browser preview signing failed") from exc
+
+
 async def stream_signed_download(
     url: str, *, headers: dict[str, str] | None = None, max_bytes: int,
 ):

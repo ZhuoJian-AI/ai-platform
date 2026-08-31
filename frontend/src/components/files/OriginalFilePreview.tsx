@@ -17,6 +17,7 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'ogg', 'mov', 'm4v']);
 const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac']);
+const EMPTY_HEADERS: Record<string, string> = {};
 
 function extensionOf(filename: string): string {
   const index = filename.lastIndexOf('.');
@@ -25,6 +26,9 @@ function extensionOf(filename: string): string {
 
 export interface OriginalFilePreviewProps {
   blob: Blob | null;
+  sourceUrl?: string | null;
+  sourceHeaders?: Record<string, string>;
+  mimeType?: string | null;
   filename: string;
   loading?: boolean;
   error?: string | null;
@@ -37,53 +41,102 @@ export interface OriginalFilePreviewProps {
  * to a paginated PDF merely for browser display.
  */
 export default function OriginalFilePreview({
-  blob, filename, loading = false, error, onDownload,
+  blob, sourceUrl, sourceHeaders = EMPTY_HEADERS, mimeType, filename, loading = false, error, onDownload,
 }: OriginalFilePreviewProps) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const [remoteBlob, setRemoteBlob] = useState<Blob | null>(null);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
   const [textContent, setTextContent] = useState<string | null>(null);
   const [textError, setTextError] = useState<string | null>(null);
   const extension = extensionOf(filename);
-
-  const originalFile = useMemo(() => {
-    if (!blob) return null;
-    return new File([blob], filename, {
-      type: blob.type || 'application/octet-stream',
-      lastModified: Date.now(),
-    });
-  }, [blob, filename]);
+  const hasSourceHeaders = Object.keys(sourceHeaders).length > 0;
+  const needsRemoteBlob = OFFICE_EXTENSIONS.has(extension)
+    || TEXT_EXTENSIONS.has(extension)
+    || hasSourceHeaders;
+  const effectiveBlob = blob || remoteBlob;
+  const blobMime = effectiveBlob?.type || '';
+  const effectiveMime = !blobMime || blobMime === 'application/octet-stream'
+    ? (mimeType || blobMime)
+    : blobMime;
+  const directUrl = sourceUrl && !hasSourceHeaders ? sourceUrl : null;
 
   useEffect(() => {
-    if (!blob) {
+    setRemoteBlob(null);
+    setRemoteError(null);
+    if (!sourceUrl || !needsRemoteBlob || blob) return;
+    const controller = new AbortController();
+    setRemoteLoading(true);
+    fetch(sourceUrl, { headers: sourceHeaders, signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`原文件读取失败（HTTP ${response.status}）`);
+        return response.blob();
+      })
+      .then((value) => setRemoteBlob(value))
+      .catch((reason) => {
+        if ((reason as Error).name !== 'AbortError') {
+          setRemoteError((reason as Error)?.message || '原文件读取失败');
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setRemoteLoading(false);
+      });
+    return () => controller.abort();
+  }, [blob, needsRemoteBlob, sourceHeaders, sourceUrl]);
+
+  const originalFile = useMemo(() => {
+    if (!effectiveBlob) return null;
+    return new File([effectiveBlob], filename, {
+      type: effectiveMime || 'application/octet-stream',
+      lastModified: Date.now(),
+    });
+  }, [effectiveBlob, effectiveMime, filename]);
+
+  useEffect(() => {
+    if (!effectiveBlob) {
       setObjectUrl(null);
       return;
     }
-    const url = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(effectiveBlob);
     setObjectUrl(url);
     return () => URL.revokeObjectURL(url);
-  }, [blob]);
+  }, [effectiveBlob]);
 
   useEffect(() => {
     setTextContent(null);
     setTextError(null);
-    if (!blob || !(TEXT_EXTENSIONS.has(extension) || blob.type.startsWith('text/'))) return;
+    if (!effectiveBlob || !(TEXT_EXTENSIONS.has(extension) || effectiveMime.startsWith('text/'))) return;
     let cancelled = false;
-    blob.text()
+    effectiveBlob.text()
       .then((value) => { if (!cancelled) setTextContent(value); })
       .catch((reason) => { if (!cancelled) setTextError((reason as Error)?.message || '文本读取失败'); });
     return () => { cancelled = true; };
-  }, [blob, extension]);
+  }, [effectiveBlob, effectiveMime, extension]);
 
-  if (loading) return <LoadingState label="正在读取原文件…" />;
-  if (!blob || !originalFile) {
+  if (loading || remoteLoading) return <LoadingState label="正在从对象存储读取原文件…" />;
+
+  const previewUrl = directUrl || objectUrl;
+  if ((extension === 'pdf' || effectiveMime === 'application/pdf') && previewUrl) {
+    return <iframe title={filename} src={previewUrl} style={frameStyle} />;
+  }
+
+  if ((IMAGE_EXTENSIONS.has(extension) || effectiveMime.startsWith('image/')) && previewUrl) {
     return (
       <div style={centerStyle}>
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={error || '原文件暂时无法读取'} />
-        <Button icon={<DownloadOutlined />} onClick={onDownload}>下载原文件</Button>
+        <img src={previewUrl} alt={filename} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
       </div>
     );
   }
 
-  if (OFFICE_EXTENSIONS.has(extension)) {
+  if ((VIDEO_EXTENSIONS.has(extension) || effectiveMime.startsWith('video/')) && previewUrl) {
+    return <div style={centerStyle}><video controls src={previewUrl} style={{ maxWidth: '100%', maxHeight: '100%' }} /></div>;
+  }
+
+  if ((AUDIO_EXTENSIONS.has(extension) || effectiveMime.startsWith('audio/')) && previewUrl) {
+    return <div style={centerStyle}><audio controls src={previewUrl} style={{ width: 'min(560px, 90%)' }} /></div>;
+  }
+
+  if (OFFICE_EXTENSIONS.has(extension) && originalFile) {
     return (
       <Suspense fallback={<LoadingState label="正在加载 Office 查看器…" />}>
         <OfficeFilePreview
@@ -96,32 +149,21 @@ export default function OriginalFilePreview({
     );
   }
 
-  if ((extension === 'pdf' || blob.type === 'application/pdf') && objectUrl) {
-    return <iframe title={filename} src={objectUrl} style={frameStyle} />;
-  }
-
-  if ((IMAGE_EXTENSIONS.has(extension) || blob.type.startsWith('image/')) && objectUrl) {
-    return (
-      <div style={centerStyle}>
-        <img src={objectUrl} alt={filename} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
-      </div>
-    );
-  }
-
-  if ((VIDEO_EXTENSIONS.has(extension) || blob.type.startsWith('video/')) && objectUrl) {
-    return <div style={centerStyle}><video controls src={objectUrl} style={{ maxWidth: '100%', maxHeight: '100%' }} /></div>;
-  }
-
-  if ((AUDIO_EXTENSIONS.has(extension) || blob.type.startsWith('audio/')) && objectUrl) {
-    return <div style={centerStyle}><audio controls src={objectUrl} style={{ width: 'min(560px, 90%)' }} /></div>;
-  }
-
-  if (TEXT_EXTENSIONS.has(extension) || blob.type.startsWith('text/')) {
+  if (TEXT_EXTENSIONS.has(extension) || effectiveMime.startsWith('text/')) {
     if (textError) return <div style={centerStyle}><Empty description={textError} /></div>;
     if (textContent === null) return <LoadingState label="正在读取文本…" />;
     return (
       <div style={{ height: '100%', overflow: 'auto', padding: '16px 20px', background: '#fafafa' }}>
         <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'Consolas, monospace' }}>{textContent}</pre>
+      </div>
+    );
+  }
+
+  if (!effectiveBlob || !originalFile) {
+    return (
+      <div style={centerStyle}>
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={remoteError || error || '原文件暂时无法读取'} />
+        <Button icon={<DownloadOutlined />} onClick={onDownload}>下载原文件</Button>
       </div>
     );
   }

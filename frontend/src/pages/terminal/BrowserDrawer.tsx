@@ -9,6 +9,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import OriginalFilePreview from '../../components/files/OriginalFilePreview';
+import type { WorkspaceOriginalPreviewSource } from '../../api/client';
 // mammoth 仅在打开 .docx 时按需动态加载（见下方 useEffect），不进主包。
 
 /** WorkBuddy 配色（与 Terminal.tsx 保持一致）。 */
@@ -242,12 +243,15 @@ export interface BrowserDrawerProps {
   onReparse?: (fileId: string) => Promise<void>;
   /** 鉴权获取未经转换的原始文件，由浏览器按实际格式选择查看器。 */
   loadOriginalPreview?: (fileId: string) => Promise<Blob>;
+  /** 获取短时直连对象存储的预览源；历史文件会返回 blob 回退模式。 */
+  loadOriginalPreviewSource?: (fileId: string) => Promise<WorkspaceOriginalPreviewSource>;
   /** 鉴权下载未经转换的原始文件。 */
   loadOriginalFile?: (fileId: string) => Promise<Blob>;
 }
 
 export default function BrowserDrawer({
-  open, initialHref, onClose, resolveHref, onReparse, loadOriginalPreview, loadOriginalFile,
+  open, initialHref, onClose, resolveHref, onReparse, loadOriginalPreview,
+  loadOriginalPreviewSource, loadOriginalFile,
 }: BrowserDrawerProps) {
   const [history, setHistory] = useState<Source[]>([]);
   const [index, setIndex] = useState(-1);
@@ -257,6 +261,8 @@ export default function BrowserDrawer({
   const [binaryView, setBinaryView] = useState<'original' | 'ai'>('original');
   const [originalPreviewBlob, setOriginalPreviewBlob] = useState<Blob | null>(null);
   const [originalPreviewUrl, setOriginalPreviewUrl] = useState<string | null>(null);
+  const [originalPreviewHeaders, setOriginalPreviewHeaders] = useState<Record<string, string>>({});
+  const [originalPreviewMime, setOriginalPreviewMime] = useState<string | null>(null);
   const [originalPreviewError, setOriginalPreviewError] = useState<string | null>(null);
   const [originalPreviewLoading, setOriginalPreviewLoading] = useState(false);
   // 标记某次 resolve 是否由"刷新"触发——刷新失败时回退展示旧内容，避免清屏。
@@ -283,17 +289,32 @@ export default function BrowserDrawer({
     setOriginalPreviewError(null);
     setOriginalPreviewBlob(null);
     setOriginalPreviewUrl(null);
-    if (!current || (current.kind !== 'parsed' && current.kind !== 'binary') || !loadOriginalPreview) return;
+    setOriginalPreviewHeaders({});
+    setOriginalPreviewMime(null);
+    if (!current || (current.kind !== 'parsed' && current.kind !== 'binary')
+      || (!loadOriginalPreviewSource && !loadOriginalPreview)) return;
     let cancelled = false;
     let objectUrl: string | null = null;
     setOriginalPreviewLoading(true);
-    loadOriginalPreview(current.fileId)
-      .then((blob) => {
+    const load = async () => {
+      if (loadOriginalPreviewSource) {
+        const source = await loadOriginalPreviewSource(current.fileId);
         if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setOriginalPreviewBlob(blob);
-        setOriginalPreviewUrl(objectUrl);
-      })
+        setOriginalPreviewMime(source.mime_type);
+        if (source.mode === 'url' && source.url) {
+          setOriginalPreviewHeaders(source.headers || {});
+          setOriginalPreviewUrl(source.url);
+          return;
+        }
+      }
+      if (!loadOriginalPreview) throw new Error('原文件预览回退不可用');
+      const blob = await loadOriginalPreview(current.fileId);
+      if (cancelled) return;
+      objectUrl = URL.createObjectURL(blob);
+      setOriginalPreviewBlob(blob);
+      setOriginalPreviewUrl(objectUrl);
+    };
+    load()
       .catch((error) => {
         if (!cancelled) setOriginalPreviewError((error as Error)?.message || '原文件预览加载失败');
       })
@@ -302,7 +323,7 @@ export default function BrowserDrawer({
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [current, loadOriginalPreview]);
+  }, [current, loadOriginalPreview, loadOriginalPreviewSource]);
 
   useEffect(() => {
     if (current?.kind !== 'docx-bin') { setDocxHtml(null); setDocxError(null); return; }
@@ -643,6 +664,9 @@ export default function BrowserDrawer({
               {binaryView === 'original' && (
                 <OriginalFilePreview
                   blob={originalPreviewBlob}
+                  sourceUrl={originalPreviewUrl}
+                  sourceHeaders={originalPreviewHeaders}
+                  mimeType={originalPreviewMime}
                   filename={displayNameFromPath(current.path)}
                   loading={originalPreviewLoading}
                   error={originalPreviewError}

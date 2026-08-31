@@ -36,7 +36,7 @@ class OriginalPreviewError(ValueError):
     """A source cannot be safely rendered as an original-file preview."""
 
 
-def _source_metadata(file: WorkspaceFile) -> tuple[str, str]:
+def source_metadata(file: WorkspaceFile) -> tuple[str, str]:
     metadata = file.metadata_ or {}
     if not metadata.get("binary"):
         raise OriginalPreviewError("文本文件请使用 AI 解析内容视图")
@@ -56,5 +56,5 @@ def build_original_preview(file: WorkspaceFile, raw: bytes) -> tuple[bytes, str,
     """Return unchanged source bytes, real media type, and display filename."""
     if not raw:
         raise OriginalPreviewError("原文件为空")
-    filename, mime = _source_metadata(file)
+    filename, mime = source_metadata(file)
     return raw, mime, filename

@@ -124,6 +124,20 @@
   box-shadow: 18px 0 48px rgba(15, 23, 42, .16);
 }
 
+.terminal-app-nav-drawer--pinned {
+  pointer-events: none;
+}
+
+.terminal-app-nav-drawer--pinned .ant-drawer-content-wrapper {
+  pointer-events: auto;
+  box-shadow: 6px 0 20px rgba(15, 23, 42, .07);
+}
+
+.terminal-app-nav-drawer--pinned .ant-drawer-content {
+  border-radius: 0;
+  box-shadow: none;
+}
+
 .terminal-app-nav-drawer__panel {
   height: 100%;
   display: flex;
@@ -141,6 +155,19 @@
   border-bottom: 1px solid #e5e7eb;
   background: rgba(255, 255, 255, .82);
   backdrop-filter: blur(14px);
+}
+
+.terminal-app-nav-drawer__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.terminal-app-nav-drawer__pin {
+  min-width: 58px;
+  padding-inline: 8px;
+  border-radius: 8px;
+  font-size: 12px;
 }
 
 .terminal-app-nav-group {

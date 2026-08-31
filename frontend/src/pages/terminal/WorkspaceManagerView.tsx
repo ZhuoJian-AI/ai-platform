@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
-  Input, Typography, Upload, message, Empty, Spin, Select, Checkbox, Modal, List, Dropdown,
+  Input, Typography, Upload, message, Empty, Spin, Select, Checkbox, Modal, List, Dropdown, Progress,
 } from 'antd';
 import {
   DeleteOutlined, BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined,
@@ -347,16 +347,29 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
     onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '删除文件夹失败'),
   });
 
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadName, setUploadName] = useState('');
+  const [uploadStage, setUploadStage] = useState<'uploading' | 'validating'>('uploading');
   const uploadFile = useMutation({
     mutationFn: (v: { path: string; file: File }) => {
       if (!wsId) return Promise.reject(new Error('no ws'));
-      return terminal.uploadWsFile(wsId, v.file, v.path);
+      setUploadName(v.file.name);
+      setUploadProgress(0);
+      setUploadStage('uploading');
+      return terminal.uploadWsFile(wsId, v.file, v.path, {
+        onProgress: setUploadProgress,
+        onUploadComplete: () => { setUploadProgress(100); setUploadStage('validating'); },
+      });
     },
     onSuccess: (file) => {
       qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
       message.success(file.parse_status === 'ready' ? '文件已上传，可使用' : '文件已上传，正在后台解析');
+      setUploadName('');
     },
-    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '上传失败'),
+    onError: (e: unknown) => {
+      message.error(e instanceof ApiError ? e.message : '上传失败');
+      setUploadName('');
+    },
   });
 
   const reparseFile = async (fileId: string) => {
@@ -604,6 +617,22 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                       <UploadOutlined style={{ fontSize: 13 }} /> 上传文件
                     </button>
                   </Upload>
+                  <Typography.Text
+                    type="secondary"
+                    title="支持 Word、Excel、PPT、PDF、Markdown 等常用文件；10MB 以上自动直传对象存储"
+                    style={{ fontSize: 11, whiteSpace: 'nowrap' }}
+                  >
+                    单文件最大 100MB
+                  </Typography.Text>
+                  {uploadFile.isPending && (
+                    <Progress
+                      percent={uploadProgress}
+                      size="small"
+                      status="active"
+                      style={{ width: 180, margin: 0 }}
+                      format={(percent) => `${uploadStage === 'validating' ? '正在校验' : uploadName} ${percent ?? 0}%`}
+                    />
+                  )}
                 </div>
               </div>
 
@@ -780,6 +809,7 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
         resolveHref={resolveHref}
         onReparse={reparseFile}
         loadOriginalPreview={terminal.getWsFileOriginalPreview}
+        loadOriginalPreviewSource={terminal.getWsFileOriginalPreviewSource}
         loadOriginalFile={terminal.downloadWsFile}
       />
 

@@ -16,7 +16,8 @@ import {
   RightOutlined, DownOutlined,
   LoadingOutlined, CloseOutlined, DeleteOutlined,
   SearchOutlined, UploadOutlined, EditOutlined, DownloadOutlined,
-  PictureOutlined, EyeOutlined, MenuUnfoldOutlined, HistoryOutlined,
+  PictureOutlined, EyeOutlined, MenuUnfoldOutlined, MenuFoldOutlined, HistoryOutlined,
+  PushpinOutlined, PushpinFilled,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -76,6 +77,22 @@ function viewFromQuery(search: string): TerminalView {
   if (value === 'workspace') return 'workspaces';
   if (value === 'agents' || value === 'knowledge' || value === 'skills' || value === 'application' || value === 'work-items') return value;
   return 'assistant';
+}
+
+const APPLICATION_NAV_PIN_KEY_PREFIX = 'zhuojian_terminal_application_nav_pinned';
+
+function applicationNavPinKey(userId?: string | null): string | null {
+  return userId ? `${APPLICATION_NAV_PIN_KEY_PREFIX}:${userId}` : null;
+}
+
+function readApplicationNavPinPreference(userId?: string | null): boolean {
+  const key = applicationNavPinKey(userId);
+  if (!key) return false;
+  try {
+    return window.localStorage.getItem(key) === 'true';
+  } catch {
+    return false;
+  }
 }
 
 // ── 执行过程时间线 block 模型 ──────────────────────────────────────────
@@ -363,7 +380,24 @@ export default function Terminal() {
   const [selectedApplicationId, setSelectedApplicationId] = useState<string | null>(() => new URLSearchParams(location.search).get('app'));
   const [selectedApplicationModuleKey, setSelectedApplicationModuleKey] = useState<string | null>(() => new URLSearchParams(location.search).get('module'));
   const [applicationNavOpen, setApplicationNavOpen] = useState(false);
+  const [applicationNavPinned, setApplicationNavPinned] = useState(() => readApplicationNavPinPreference(user?.id));
   const [applicationImmersive, setApplicationImmersive] = useState(false);
+
+  const updateApplicationNavPinned = useCallback((pinned: boolean) => {
+    setApplicationNavPinned(pinned);
+    setApplicationNavOpen(false);
+    const key = applicationNavPinKey(user?.id);
+    if (!key) return;
+    try {
+      window.localStorage.setItem(key, String(pinned));
+    } catch {
+      // 浏览器禁用持久化时仍保留本次会话状态。
+    }
+  }, [user?.id]);
+
+  useEffect(() => {
+    setApplicationNavPinned(readApplicationNavPinPreference(user?.id));
+  }, [user?.id]);
 
   // 跟随输入（选中任务后的对话）
   const [followUp, setFollowUp] = useState('');
@@ -1081,7 +1115,7 @@ export default function Terminal() {
         {/* 主内容区 */}
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
           {/* 企业应用使用极窄导航轨；平台其他页面继续使用完整侧栏。 */}
-          {applicationShellActive && !applicationImmersive ? (
+          {applicationShellActive && !applicationImmersive && !applicationNavPinned ? (
             <aside className="terminal-app-rail" aria-label="平台快捷导航">
               <Tooltip title="展开平台导航" placement="right">
                 <button type="button" className="terminal-app-rail__button terminal-app-rail__button--primary" aria-label="展开平台导航" onClick={() => setApplicationNavOpen(true)}>
@@ -1274,7 +1308,17 @@ export default function Terminal() {
           ) : null}
 
           {/* 右侧主区 */}
-          <main style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#fff', minWidth: 0 }}>
+          <main
+            style={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              background: '#fff',
+              minWidth: 0,
+              marginLeft: applicationShellActive && !applicationImmersive && applicationNavPinned ? 248 : 0,
+              transition: 'margin-left 180ms ease',
+            }}
+          >
             {view === 'assistant' && runtimeStatus && (
               <div style={{
                 margin: '10px 18px 0', padding: '8px 12px', borderRadius: 8, fontSize: 13,
@@ -1362,17 +1406,36 @@ export default function Terminal() {
 
           <Drawer
             placement="left"
-            width={280}
-            open={applicationShellActive && applicationNavOpen}
+            width={applicationNavPinned ? 248 : 280}
+            open={applicationShellActive && !applicationImmersive && (applicationNavPinned || applicationNavOpen)}
             onClose={() => setApplicationNavOpen(false)}
             closable={false}
-            rootClassName="terminal-app-nav-drawer"
+            keyboard={!applicationNavPinned}
+            mask={!applicationNavPinned}
+            rootClassName={`terminal-app-nav-drawer${applicationNavPinned ? ' terminal-app-nav-drawer--pinned' : ''}`}
             styles={{ body: { padding: 0 }, mask: { background: 'rgba(15, 23, 42, .08)' } }}
           >
             <div className="terminal-app-nav-drawer__panel">
               <div className="terminal-app-nav-drawer__header">
                 <Typography.Text strong><AppstoreOutlined style={{ marginRight: 8, color: WB.primary }} />平台导航</Typography.Text>
-                <Button type="text" aria-label="关闭平台导航" icon={<CloseOutlined />} onClick={() => setApplicationNavOpen(false)} />
+                <div className="terminal-app-nav-drawer__header-actions">
+                  <Button
+                    size="small"
+                    type={applicationNavPinned ? 'primary' : 'text'}
+                    className="terminal-app-nav-drawer__pin"
+                    aria-label={applicationNavPinned ? '取消固定平台导航' : '固定平台导航'}
+                    icon={applicationNavPinned ? <PushpinFilled /> : <PushpinOutlined />}
+                    onClick={() => updateApplicationNavPinned(!applicationNavPinned)}
+                  >
+                    {applicationNavPinned ? '已固定' : '固定'}
+                  </Button>
+                  <Button
+                    type="text"
+                    aria-label={applicationNavPinned ? '收起固定平台导航' : '关闭平台导航'}
+                    icon={applicationNavPinned ? <MenuFoldOutlined /> : <CloseOutlined />}
+                    onClick={() => applicationNavPinned ? updateApplicationNavPinned(false) : setApplicationNavOpen(false)}
+                  />
+                </div>
               </div>
 
               <div style={{ padding: 12 }}>
@@ -1564,6 +1627,7 @@ export default function Terminal() {
         onClose={() => setBrowserOpen(false)}
         resolveHref={resolveHref}
         loadOriginalPreview={terminal.getWsFileOriginalPreview}
+        loadOriginalPreviewSource={terminal.getWsFileOriginalPreviewSource}
         loadOriginalFile={terminal.downloadWsFile}
       />
 
@@ -2298,6 +2362,13 @@ function TaskInputBox(props: {
             >
               <UploadOutlined /> 上传附件
             </button>
+            <Typography.Text
+              type="secondary"
+              title="支持 Word、Excel、PPT、PDF、Markdown 等常用文件"
+              style={{ fontSize: 11, whiteSpace: 'nowrap' }}
+            >
+              单文件最大 100MB
+            </Typography.Text>
             <input
               ref={attachmentInputRef}
               type="file"
@@ -3378,6 +3449,7 @@ function FilePanel({ workspaceId }: { workspaceId: string | null }) {
         onClose={() => setBrowserOpen(false)}
         resolveHref={resolveHref}
         loadOriginalPreview={terminal.getWsFileOriginalPreview}
+        loadOriginalPreviewSource={terminal.getWsFileOriginalPreviewSource}
         loadOriginalFile={terminal.downloadWsFile}
       />
     </div>

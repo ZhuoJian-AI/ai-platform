@@ -92,6 +92,7 @@ from app.schemas.workspace import (
     WorkspaceFileCreate,
     WorkspaceFilePage,
     WorkspaceFilePreviewRead,
+    WorkspaceOriginalPreviewSourceRead,
     WorkspaceFileRead,
     WorkspaceFileVersionRead,
     WorkspaceFolderCreate,
@@ -196,6 +197,7 @@ from app.services.skill_store_service import (
 from app.services.workspace_preview_service import (
     OriginalPreviewError,
     build_original_preview,
+    source_metadata,
 )
 from app.tools.skill_manifest import parse_skill_manifest
 from app.utils.workspace_presentation import clean_display_name, presentation_dict
@@ -989,6 +991,46 @@ async def original_preview_ws_file_endpoint(
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "sandbox",
     })
+
+
+@router.get(
+    "/terminal/files/{file_id}/original-preview-source",
+    response_model=WorkspaceOriginalPreviewSourceRead,
+)
+async def original_preview_source_ws_file_endpoint(
+    file_id: UUID, response: Response, cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return a short-lived public OSS source after workspace authorization."""
+    response.headers["Cache-Control"] = "private, no-store"
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
+    organization = await db.get(Organization, ws.organization_id)
+    if organization is None or not settings.original_preview_enabled_for(organization.slug):
+        raise HTTPException(status_code=404, detail="Original preview is not enabled")
+    try:
+        filename, mime_type = source_metadata(f)
+        if storage_gateway_service.is_object_ref(f.content_ref):
+            signed = await storage_gateway_service.get_browser_signed_download(str(f.content_ref))
+            return WorkspaceOriginalPreviewSourceRead(
+                mode="url",
+                url=str(signed["url"]),
+                headers={str(k): str(v) for k, v in (signed.get("headers") or {}).items()},
+                filename=filename,
+                mime_type=mime_type,
+            )
+        return WorkspaceOriginalPreviewSourceRead(
+            mode="blob", filename=filename, mime_type=mime_type,
+        )
+    except OriginalPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except storage_gateway_service.StorageGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/terminal/files/{file_id}/download")

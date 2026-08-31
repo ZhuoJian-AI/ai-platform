@@ -638,6 +638,14 @@ export interface WorkspaceFilePreview {
   parse_kind: string | null; parse_error: string | null; extracted_text: string | null;
 }
 
+export interface WorkspaceOriginalPreviewSource {
+  mode: 'url' | 'blob';
+  url: string | null;
+  headers: Record<string, string>;
+  filename: string;
+  mime_type: string;
+}
+
 export interface WorkspaceUploadOptions {
   signal?: AbortSignal;
   onProgress?: (percent: number) => void;
@@ -739,6 +747,8 @@ export const workspaces = {
     uploadAdminWorkspaceFile(wsId, file, path, options),
   getFile: (id: string) => request<WorkspaceFile>(`/api/v1/files/${id}`),
   getFilePreview: (id: string) => request<WorkspaceFilePreview>(`/api/v1/files/${id}/preview`),
+  getFileOriginalPreviewSource: (id: string) =>
+    request<WorkspaceOriginalPreviewSource>(`/api/v1/files/${id}/original-preview-source`),
   getFileOriginalPreview: (id: string) => requestBlob(`/api/v1/files/${id}/original-preview`, 'ai_infra_token'),
   downloadFile: (id: string) => requestBlob(`/api/v1/files/${id}/download`, 'ai_infra_token'),
   reparseFile: (id: string) => request<WorkspaceFile>(`/api/v1/files/${id}/reparse`, { method: 'POST' }),
@@ -1372,7 +1382,7 @@ interface DirectUploadSession {
   expires_at: string; max_file_bytes: number;
 }
 
-function putSignedWorkspaceFile(
+function putSignedWorkspaceFileAttempt(
   session: DirectUploadSession, file: File, options?: WorkspaceUploadOptions,
 ): Promise<string | null> {
   return new Promise((resolve, reject) => {
@@ -1384,10 +1394,17 @@ function putSignedWorkspaceFile(
         options?.onProgress?.(Math.min(100, Math.round((event.loaded / event.total) * 100)));
       }
     };
-    xhr.upload.onload = () => options?.onUploadComplete?.();
-    xhr.onload = () => xhr.status >= 200 && xhr.status < 300
-      ? resolve(xhr.getResponseHeader('ETag'))
-      : reject(new ApiError(xhr.status, 'OSS 直传失败'));
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        options?.onUploadComplete?.();
+        resolve(xhr.getResponseHeader('ETag'));
+        return;
+      }
+      const detail = xhr.status === 403
+        ? '上传凭证已失效，请重新选择文件再试'
+        : `对象存储直传失败（HTTP ${xhr.status || '未知'}）`;
+      reject(new ApiError(xhr.status, detail));
+    };
     xhr.onerror = () => reject(new ApiError(0, 'OSS 直传网络错误'));
     xhr.onabort = () => reject(new DOMException('上传已取消', 'AbortError'));
     if (options?.signal) {
@@ -1399,6 +1416,27 @@ function putSignedWorkspaceFile(
     }
     xhr.send(file);
   });
+}
+
+async function putSignedWorkspaceFile(
+  session: DirectUploadSession, file: File, options?: WorkspaceUploadOptions,
+): Promise<string | null> {
+  const maxAttempts = 3;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await putSignedWorkspaceFileAttempt(session, file, options);
+    } catch (error) {
+      lastError = error;
+      if ((error as Error).name === 'AbortError') throw error;
+      const status = error instanceof ApiError ? error.status : 0;
+      const retryable = status === 0 || status === 408 || status === 429 || status >= 500;
+      if (!retryable || attempt === maxAttempts) throw error;
+      options?.onProgress?.(0);
+      await new Promise((resolve) => window.setTimeout(resolve, attempt * 800));
+    }
+  }
+  throw lastError;
 }
 
 async function uploadTerminalWorkspaceFile(
@@ -1922,6 +1960,8 @@ export const terminal = {
     uploadTerminalWorkspaceFile(wsId, file, path, options),
   getWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}`),
   getWsFilePreview: (id: string) => userRequest<WorkspaceFilePreview>(`/api/v1/terminal/files/${id}/preview`),
+  getWsFileOriginalPreviewSource: (id: string) =>
+    userRequest<WorkspaceOriginalPreviewSource>(`/api/v1/terminal/files/${id}/original-preview-source`),
   getWsFileOriginalPreview: (id: string, signal?: AbortSignal) => requestBlob(`/api/v1/terminal/files/${id}/original-preview`, USER_TOKEN_KEY, signal),
   downloadWsFile: (id: string, signal?: AbortSignal) => requestBlob(`/api/v1/terminal/files/${id}/download`, USER_TOKEN_KEY, signal),
   reparseWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}/reparse`, { method: 'POST' }),
