@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button, Empty, Progress, Spin, Typography } from 'antd';
-import { DownloadOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
+import { DownloadOutlined, FullscreenOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
 import {
   GlobalWorkerOptions, getDocument, type PDFDocumentProxy, type PDFPageProxy, type RenderTask,
 } from 'pdfjs-dist';
@@ -17,6 +17,7 @@ export interface PdfFilePreviewProps {
   onDownload: () => void;
   loadInfo?: () => Promise<WorkspacePdfPreviewInfo>;
   loadPage?: (pageNumber: number) => Promise<Blob>;
+  previewLabel?: string;
 }
 
 export default function PdfFilePreview(props: PdfFilePreviewProps) {
@@ -145,11 +146,12 @@ function BrowserPdfPreview({ file, url, filename, onDownload }: PdfFilePreviewPr
 }
 
 function RasterPdfPreview({
-  filename, onDownload, loadInfo, loadPage,
+  filename, onDownload, loadInfo, loadPage, previewLabel = '原页预览',
 }: PdfFilePreviewProps & {
   loadInfo: () => Promise<WorkspacePdfPreviewInfo>;
   loadPage: (pageNumber: number) => Promise<Blob>;
 }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const infoLoaderRef = useRef(loadInfo);
   const pageLoaderRef = useRef(loadPage);
@@ -159,6 +161,11 @@ function RasterPdfPreview({
   const [stageWidth, setStageWidth] = useState(900);
   const [zoom, setZoom] = useState(1);
   const [error, setError] = useState<string | null>(null);
+
+  const enterFullscreen = () => {
+    const root = rootRef.current;
+    if (root?.requestFullscreen) void root.requestFullscreen();
+  };
 
   useEffect(() => {
     let disposed = false;
@@ -185,22 +192,23 @@ function RasterPdfPreview({
   }
 
   return (
-    <div data-testid="pdf-preview" style={{ width: '100%', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', background: '#e8ebef' }}>
+    <div ref={rootRef} data-testid="pdf-preview" style={{ width: '100%', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', background: '#e8ebef' }}>
       <div style={{ minHeight: 46, flex: '0 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', background: '#fff', borderBottom: '1px solid #dfe4ea', gap: 12 }}>
         <Typography.Text ellipsis title={filename} style={{ maxWidth: 360 }}>{filename}</Typography.Text>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {info ? `共 ${info.page_count} 页 · 连续原页预览` : '正在读取原文件'}
+            {info ? `共 ${info.page_count} 页 · ${previewLabel}` : `首次生成${previewLabel}，以后直接打开`}
           </Typography.Text>
           <Button size="small" icon={<ZoomOutOutlined />} disabled={zoom <= 0.6} onClick={() => setZoom((value) => Math.max(0.6, value - 0.2))} />
           <Typography.Text style={{ minWidth: 42, textAlign: 'center', fontSize: 12 }}>{Math.round(zoom * 100)}%</Typography.Text>
           <Button size="small" icon={<ZoomInOutlined />} disabled={zoom >= 2.4} onClick={() => setZoom((value) => Math.min(2.4, value + 0.2))} />
+          <Button size="small" icon={<FullscreenOutlined />} onClick={enterFullscreen}>全屏</Button>
           <Button size="small" icon={<DownloadOutlined />} onClick={onDownload}>下载</Button>
         </div>
       </div>
       <div ref={stageRef} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '20px 18px 40px' }}>
         {!info ? (
-          <div style={centerStyle}><Spin /><Typography.Text type="secondary">正在读取完整 PDF…</Typography.Text></div>
+          <div style={centerStyle}><Spin /><Typography.Text type="secondary">正在生成版式缓存，首次完成后再次打开会很快…</Typography.Text></div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 18 }}>
             {Array.from({ length: info.page_count }, (_, index) => (

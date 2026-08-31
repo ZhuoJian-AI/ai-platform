@@ -10,6 +10,7 @@ from uuid import UUID
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Form,
@@ -917,6 +918,7 @@ async def initiate_ws_upload_endpoint(
 )
 async def complete_ws_upload_endpoint(
     session_id: UUID, data: WorkspaceUploadComplete,
+    background_tasks: BackgroundTasks,
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
     session = await db.get(WorkspaceUploadSession, session_id)
@@ -924,6 +926,7 @@ async def complete_ws_upload_endpoint(
         raise HTTPException(status_code=404, detail="上传会话不存在")
     file = await workspace_governance_service.complete_direct_upload(db, session, cu, client_etag=data.etag)
     await db.commit()
+    background_tasks.add_task(workspace_pdf_preview_service.warm_office_preview, str(file.id))
     return file
 
 
@@ -1046,7 +1049,7 @@ async def pdf_preview_info_ws_file_endpoint(
         raise HTTPException(status_code=404, detail="File not found")
     await workspace_permission_service.assert_can_read(db, ws, cu)
     try:
-        return await workspace_pdf_preview_service.get_pdf_info(f)
+        return await workspace_pdf_preview_service.get_pdf_info(db, f)
     except workspace_pdf_preview_service.WorkspacePdfPreviewError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except storage_gateway_service.StorageGatewayError as exc:
@@ -1066,7 +1069,7 @@ async def pdf_preview_page_ws_file_endpoint(
         raise HTTPException(status_code=404, detail="File not found")
     await workspace_permission_service.assert_can_read(db, ws, cu)
     try:
-        content, media_type = await workspace_pdf_preview_service.get_pdf_page(f, page_number)
+        content, media_type = await workspace_pdf_preview_service.get_pdf_page(db, f, page_number)
     except workspace_pdf_preview_service.WorkspacePdfPreviewError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except storage_gateway_service.StorageGatewayError as exc:

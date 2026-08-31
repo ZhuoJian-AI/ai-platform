@@ -4,7 +4,6 @@ import { DownloadOutlined } from '@ant-design/icons';
 import type { WorkspacePdfPreviewInfo } from '../../api/client';
 
 const OfficeFilePreview = lazy(() => import('./OfficeFilePreview'));
-const PowerPointFilePreview = lazy(() => import('./PowerPointFilePreview'));
 const PdfFilePreview = lazy(() => import('./PdfFilePreview'));
 
 const OFFICE_EXTENSIONS = new Set([
@@ -12,10 +11,6 @@ const OFFICE_EXTENSIONS = new Set([
   'xls', 'xlsx', 'xlsm', 'xlsb', 'xlt', 'xltx', 'xltm', 'ods', 'csv', 'tsv',
   'ppt', 'pptx', 'pptm', 'pps', 'ppsx', 'ppsm', 'pot', 'potx', 'potm', 'odp',
 ]);
-const OPENXML_PRESENTATION_EXTENSIONS = new Set([
-  'pptx', 'pptm', 'ppsx', 'ppsm', 'potx', 'potm',
-]);
-
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif']);
 const TEXT_EXTENSIONS = new Set([
   'txt', 'md', 'markdown', 'json', 'xml', 'yaml', 'yml', 'log', 'ini', 'conf',
@@ -44,9 +39,10 @@ export interface OriginalFilePreviewProps {
 }
 
 /**
- * Render the authenticated original Blob with the viewer appropriate for its
- * actual file type. Office files stay Office files; they are never converted
- * to a paginated PDF merely for browser display.
+ * Render the authenticated original file with the viewer appropriate for its
+ * type. Office downloads remain byte-for-byte original; their visual preview
+ * uses a server-generated, revision-keyed PDF cache so browsers do not parse
+ * the complete Office package on every open.
  */
 export default function OriginalFilePreview({
   blob, sourceUrl, sourceHeaders = EMPTY_HEADERS, mimeType, filename, loading = false, error, onDownload,
@@ -163,14 +159,15 @@ export default function OriginalFilePreview({
     return <div style={centerStyle}><audio controls src={previewUrl} style={{ width: 'min(560px, 90%)' }} /></div>;
   }
 
-  if (OPENXML_PRESENTATION_EXTENSIONS.has(extension) && (originalFile || directUrl)) {
+  if (OFFICE_EXTENSIONS.has(extension) && loadPdfInfo && loadPdfPage) {
     return (
-      <Suspense fallback={<LoadingState label="正在加载 PPTX 查看器…" />}>
-        <PowerPointFilePreview
-          file={originalFile || undefined}
-          url={directUrl || undefined}
+      <Suspense fallback={<LoadingState label="正在加载版式缓存…" />}>
+        <PdfFilePreview
           filename={filename}
           onDownload={onDownload}
+          loadInfo={loadPdfInfo}
+          loadPage={loadPdfPage}
+          previewLabel="版式缓存"
         />
       </Suspense>
     );

@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     File,
     Form,
@@ -250,16 +251,19 @@ async def initiate_admin_upload_endpoint(
 
 @router.post("/workspace-uploads/{session_id}/complete", response_model=WorkspaceFileRead)
 async def complete_admin_upload_endpoint(
-    session_id: UUID, data: WorkspaceUploadComplete,
+    session_id: UUID, data: WorkspaceUploadComplete, background_tasks: BackgroundTasks,
     auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
     session = await db.get(WorkspaceUploadSession, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="上传会话不存在")
     assert_org_write_access(auth, session.organization_id)
-    return await workspace_governance_service.complete_direct_upload(
+    file = await workspace_governance_service.complete_direct_upload(
         db, session, auth, client_etag=data.etag,
     )
+    await db.commit()
+    background_tasks.add_task(workspace_pdf_preview_service.warm_office_preview, str(file.id))
+    return file
 
 
 @router.delete("/workspace-uploads/{session_id}", status_code=204)
@@ -388,7 +392,7 @@ async def pdf_preview_info_endpoint(
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
     try:
-        return await workspace_pdf_preview_service.get_pdf_info(f)
+        return await workspace_pdf_preview_service.get_pdf_info(db, f)
     except workspace_pdf_preview_service.WorkspacePdfPreviewError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except storage_gateway_service.StorageGatewayError as exc:
@@ -405,7 +409,7 @@ async def pdf_preview_page_endpoint(
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
     try:
-        content, media_type = await workspace_pdf_preview_service.get_pdf_page(f, page_number)
+        content, media_type = await workspace_pdf_preview_service.get_pdf_page(db, f, page_number)
     except workspace_pdf_preview_service.WorkspacePdfPreviewError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except storage_gateway_service.StorageGatewayError as exc:
