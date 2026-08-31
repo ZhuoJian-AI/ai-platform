@@ -1374,7 +1374,10 @@ export interface WorkspaceAuditEvent {
   metadata: Record<string, unknown>; created_at: string;
 }
 
-const WORKSPACE_PROXY_UPLOAD_BYTES = 10 * 1024 * 1024;
+// Keep the SaaS API out of the large-file data path. Files above 1MB go
+// directly from the browser to OSS, reducing one full network hop and freeing
+// backend workers for metadata validation and parsing.
+const WORKSPACE_PROXY_UPLOAD_BYTES = 1 * 1024 * 1024;
 export const WORKSPACE_MAX_FILE_BYTES = 100 * 1024 * 1024;
 
 interface DirectUploadSession {

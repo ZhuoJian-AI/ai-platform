@@ -71,7 +71,7 @@ async def initiate_direct_upload(
     if not settings.workspace_object_storage_configured:
         raise HTTPException(status_code=503, detail="大文件上传要求已配置对象存储")
     if data.size <= settings.workspace_proxy_upload_max_bytes:
-        raise HTTPException(status_code=422, detail="10MB 及以下文件请使用普通上传接口")
+        raise HTTPException(status_code=422, detail="文件低于直传阈值，请使用普通上传接口")
     if data.size > settings.workspace_max_file_bytes:
         raise HTTPException(status_code=413, detail="文件超过 100MB 上限")
     path = workspace_service._normalize_path(data.path)
@@ -111,7 +111,7 @@ async def initiate_admin_direct_upload(
     if not settings.workspace_object_storage_configured:
         raise HTTPException(status_code=503, detail="大文件上传要求已配置对象存储")
     if data.size <= settings.workspace_proxy_upload_max_bytes:
-        raise HTTPException(status_code=422, detail="10MB 及以下文件请使用普通上传接口")
+        raise HTTPException(status_code=422, detail="文件低于直传阈值，请使用普通上传接口")
     if data.size > settings.workspace_max_file_bytes:
         raise HTTPException(status_code=413, detail="文件超过 100MB 上限")
     path = workspace_service._normalize_path(data.path)

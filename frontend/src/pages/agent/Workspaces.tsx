@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
-  Drawer, Upload, message, Typography, Button, Empty, Segmented, Tag, Progress,
+  Drawer, Upload, message, Typography, Button, Empty, Segmented, Tag,
   Input, Select, Checkbox, Modal, List, Dropdown,
 } from 'antd';
 import {
@@ -29,6 +29,9 @@ import {
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import { WB, WB_FONT, FS } from '../../components/finder/theme';
 import OriginalFilePreview from '../../components/files/OriginalFilePreview';
+import {
+  useWorkspaceUploadQueue, WorkspaceUploadQueueStatus,
+} from '../../components/files/WorkspaceUploadQueue';
 import { auditSummary, auditTitle, workspaceDisplayName, workspaceVisiblePath } from '../../utils/workspacePresentation';
 
 const SCOPE_LABEL: Record<string, string> = {
@@ -277,28 +280,16 @@ export default function Workspaces() {
     queryFn: () => workspaces.listFileVersions(versionFile!.id), enabled: !!versionFile,
   });
 
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [uploadName, setUploadName] = useState('');
-  const [uploadStage, setUploadStage] = useState<'uploading' | 'validating'>('uploading');
-  const uploadFile = useMutation({
-    mutationFn: (v: { path: string; file: File }) => {
-      if (!fileModalWs) return Promise.reject(new Error('no ws'));
-      setUploadName(v.file.name);
-      setUploadProgress(0);
-      setUploadStage('uploading');
-      return workspaces.uploadFile(fileModalWs.id, v.file, v.path, {
-        onProgress: setUploadProgress,
-        onUploadComplete: () => { setUploadProgress(100); setUploadStage('validating'); },
-      });
-    },
-    onSuccess: () => {
+  const uploadQueue = useWorkspaceUploadQueue<WorkspaceFile>({
+    upload: (request, options) => workspaces.uploadFile(
+      request.workspaceId, request.file, request.path, options,
+    ),
+    onSuccess: (_file, request) => {
       qc.invalidateQueries({ queryKey: ['workspace-files'] });
-      message.success('文件已上传');
-      setUploadName('');
+      message.success(`${request.file.name} 已上传`);
     },
-    onError: (e: unknown) => {
-      message.error(e instanceof ApiError ? e.message : '上传失败');
-      setUploadName('');
+    onError: (error, request) => {
+      message.error(`${request.file.name}：${error instanceof ApiError ? error.message : '上传失败'}`);
     },
   });
 
@@ -611,35 +602,40 @@ export default function Workspaces() {
                     </ToolButton>
                     <Upload
                       showUploadList={false}
+                      multiple
                       beforeUpload={(file) => {
                         if (file.size > WORKSPACE_MAX_FILE_BYTES) {
                           message.warning(`文件过大（> ${WORKSPACE_MAX_FILE_BYTES / 1024 / 1024}MB），请选择更小的文件`);
                           return Upload.LIST_IGNORE;
                         }
-                        uploadFile.mutate({ path: [...cwd, file.name].join('/'), file: file as File });
+                        if (!fileModalWs) return Upload.LIST_IGNORE;
+                        uploadQueue.enqueue([{
+                          workspaceId: fileModalWs.id,
+                          path: [...cwd, file.name].join('/'),
+                          file: file as File,
+                        }]);
                         return false;
                       }}
                     >
-                      <ToolButton icon={<UploadOutlined style={{ fontSize: 13 }} />} disabled={uploadFile.isPending}>
-                        上传文件
+                      <ToolButton icon={<UploadOutlined style={{ fontSize: 13 }} />}>
+                        上传文件（可多选）
                       </ToolButton>
                     </Upload>
                     <Typography.Text
                       type="secondary"
-                      title="支持 Word、Excel、PPT、PDF、Markdown 等常用文件；10MB 以上自动直传对象存储"
+                      title="支持 Word、Excel、PPT、PDF、Markdown 等常用文件；1MB 以上自动直传对象存储"
                       style={{ fontSize: 11, whiteSpace: 'nowrap' }}
                     >
                       单文件最大 100MB
                     </Typography.Text>
-                    {uploadFile.isPending && (
-                      <Progress
-                        percent={uploadProgress}
-                        size="small"
-                        status="active"
-                        style={{ width: 180, margin: 0 }}
-                        format={(percent) => `${uploadStage === 'validating' ? '正在校验' : uploadName} ${percent ?? 0}%`}
-                      />
-                    )}
+                    <WorkspaceUploadQueueStatus
+                      items={uploadQueue.items}
+                      activeCount={uploadQueue.activeCount}
+                      completedCount={uploadQueue.completedCount}
+                      failedCount={uploadQueue.failedCount}
+                      overallProgress={uploadQueue.overallProgress}
+                      onClearFinished={uploadQueue.clearFinished}
+                    />
                   </>
                 }
               />

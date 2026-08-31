@@ -209,7 +209,7 @@ async def upload_file_endpoint(
     while chunk := await file.read(1024 * 1024):
         raw.extend(chunk)
         if len(raw) > settings.workspace_proxy_upload_max_bytes:
-            raise HTTPException(status_code=413, detail="10MB 以上文件请使用 OSS 直传")
+            raise HTTPException(status_code=413, detail="文件超过平台代理阈值，请使用 OSS 直传")
     try:
         saved = await ingest_uploaded_file(
             db, ws, path=path or file.filename or "upload.bin",

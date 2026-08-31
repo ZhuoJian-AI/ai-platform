@@ -3,6 +3,7 @@ import { Button, Empty, Spin, Typography } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 
 const OfficeFilePreview = lazy(() => import('./OfficeFilePreview'));
+const PdfFilePreview = lazy(() => import('./PdfFilePreview'));
 
 const OFFICE_EXTENSIONS = new Set([
   'doc', 'docx', 'docm', 'dot', 'dotx', 'dotm', 'rtf', 'odt',
@@ -120,19 +121,16 @@ export default function OriginalFilePreview({
 
   const previewUrl = directUrl || objectUrl;
 
-  // Use the bundled PDF.js renderer instead of Chrome's native PDF plug-in.
-  // Native iframe previews can remain completely white (and occasionally
-  // replace/close the automation target) even after OSS returns the PDF with
-  // HTTP 200.  The same offline renderer used for Office documents gives us a
-  // deterministic ready/error lifecycle and never leaves the app shell.
+  // Large PDFs use a dedicated demand-driven PDF.js renderer. It requests byte
+  // ranges and paints the selected page instead of waiting for every page to
+  // be decoded, which makes the first screen responsive for large documents.
   if ((extension === 'pdf' || effectiveMime === 'application/pdf') && (originalFile || directUrl)) {
     return (
       <Suspense fallback={<LoadingState label="正在加载 PDF 查看器…" />}>
-        <OfficeFilePreview
+        <PdfFilePreview
           file={originalFile || undefined}
           url={directUrl || undefined}
           filename={filename}
-          extension="pdf"
           onDownload={onDownload}
         />
       </Suspense>

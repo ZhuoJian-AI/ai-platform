@@ -1,0 +1,171 @@
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { Badge, Popover, Progress, Typography } from 'antd';
+
+import type { WorkspaceUploadOptions } from '../../api/client';
+
+export interface WorkspaceUploadRequest {
+  workspaceId: string;
+  path: string;
+  file: File;
+}
+
+export type WorkspaceUploadQueueStatus = 'queued' | 'uploading' | 'validating' | 'success' | 'error';
+
+export interface WorkspaceUploadQueueItem extends WorkspaceUploadRequest {
+  id: string;
+  progress: number;
+  status: WorkspaceUploadQueueStatus;
+  error?: string;
+}
+
+interface UseWorkspaceUploadQueueOptions<T> {
+  upload: (request: WorkspaceUploadRequest, options: WorkspaceUploadOptions) => Promise<T>;
+  onSuccess?: (value: T, request: WorkspaceUploadRequest) => void;
+  onError?: (error: unknown, request: WorkspaceUploadRequest) => void;
+  concurrency?: number;
+}
+
+/**
+ * A persistent upload queue. Every file owns its own request and progress
+ * callbacks, so choosing more files never replaces or aborts an in-flight
+ * upload. A small concurrency cap keeps aggregate throughput high without
+ * overwhelming the browser or OSS connection.
+ */
+export function useWorkspaceUploadQueue<T>({
+  upload, onSuccess, onError, concurrency = 3,
+}: UseWorkspaceUploadQueueOptions<T>) {
+  const [items, setItems] = useState<WorkspaceUploadQueueItem[]>([]);
+  const pendingRef = useRef<WorkspaceUploadQueueItem[]>([]);
+  const activeRef = useRef(0);
+  const uploadRef = useRef(upload);
+  const successRef = useRef(onSuccess);
+  const errorRef = useRef(onError);
+  const pumpRef = useRef<() => void>(() => undefined);
+  uploadRef.current = upload;
+  successRef.current = onSuccess;
+  errorRef.current = onError;
+
+  const updateItem = useCallback((id: string, patch: Partial<WorkspaceUploadQueueItem>) => {
+    setItems((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item));
+  }, []);
+
+  const runItem = useCallback((item: WorkspaceUploadQueueItem) => {
+    activeRef.current += 1;
+    updateItem(item.id, { status: 'uploading', progress: 0, error: undefined });
+    uploadRef.current(item, {
+      onProgress: (progress) => updateItem(item.id, { progress, status: 'uploading' }),
+      onUploadComplete: () => updateItem(item.id, { progress: 100, status: 'validating' }),
+    })
+      .then((value) => {
+        updateItem(item.id, { progress: 100, status: 'success' });
+        successRef.current?.(value, item);
+      })
+      .catch((error: unknown) => {
+        updateItem(item.id, {
+          status: 'error',
+          error: error instanceof Error ? error.message : '上传失败',
+        });
+        errorRef.current?.(error, item);
+      })
+      .finally(() => {
+        activeRef.current -= 1;
+        pumpRef.current();
+      });
+  }, [updateItem]);
+
+  const pump = useCallback(() => {
+    while (activeRef.current < concurrency && pendingRef.current.length > 0) {
+      const next = pendingRef.current.shift();
+      if (next) runItem(next);
+    }
+  }, [concurrency, runItem]);
+  pumpRef.current = pump;
+
+  const enqueue = useCallback((requests: WorkspaceUploadRequest[]) => {
+    if (!requests.length) return;
+    const created = requests.map((request, index): WorkspaceUploadQueueItem => ({
+      ...request,
+      id: `${Date.now()}-${index}-${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}`,
+      progress: 0,
+      status: 'queued',
+    }));
+    pendingRef.current.push(...created);
+    setItems((current) => [...current, ...created].slice(-30));
+    queueMicrotask(() => pumpRef.current());
+  }, []);
+
+  const clearFinished = useCallback(() => {
+    setItems((current) => current.filter((item) => !['success', 'error'].includes(item.status)));
+  }, []);
+
+  const activeCount = items.filter((item) => ['queued', 'uploading', 'validating'].includes(item.status)).length;
+  const completedCount = items.filter((item) => item.status === 'success').length;
+  const failedCount = items.filter((item) => item.status === 'error').length;
+  const overallProgress = items.length
+    ? Math.round(items.reduce((total, item) => total + item.progress, 0) / items.length)
+    : 0;
+
+  return {
+    items, enqueue, clearFinished, activeCount, completedCount, failedCount, overallProgress,
+  };
+}
+
+export function WorkspaceUploadQueueStatus({
+  items, activeCount, completedCount, failedCount, overallProgress, onClearFinished,
+}: {
+  items: WorkspaceUploadQueueItem[];
+  activeCount: number;
+  completedCount: number;
+  failedCount: number;
+  overallProgress: number;
+  onClearFinished: () => void;
+}) {
+  const visibleItems = useMemo(() => [...items].reverse(), [items]);
+  if (!items.length) return null;
+
+  const content = (
+    <div style={{ width: 340, maxHeight: 320, overflowY: 'auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+        <Typography.Text strong>上传队列</Typography.Text>
+        {(completedCount > 0 || failedCount > 0) && (
+          <Typography.Link onClick={onClearFinished}>清除已完成</Typography.Link>
+        )}
+      </div>
+      {visibleItems.map((item) => (
+        <div key={item.id} style={{ marginBottom: 10 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <Typography.Text ellipsis style={{ maxWidth: 240 }} title={item.file.name}>
+              {item.file.name}
+            </Typography.Text>
+            <Typography.Text type={item.status === 'error' ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>
+              {item.status === 'queued' ? '排队中'
+                : item.status === 'uploading' ? `${item.progress}%`
+                  : item.status === 'validating' ? '校验中'
+                    : item.status === 'success' ? '已完成' : '失败'}
+            </Typography.Text>
+          </div>
+          <Progress
+            percent={item.progress}
+            size="small"
+            status={item.status === 'error' ? 'exception' : item.status === 'success' ? 'success' : 'active'}
+            showInfo={false}
+          />
+          {item.error && <Typography.Text type="danger" style={{ fontSize: 11 }}>{item.error}</Typography.Text>}
+        </div>
+      ))}
+    </div>
+  );
+
+  return (
+    <Popover content={content} trigger="click" placement="bottomRight">
+      <div style={{ width: 190, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }} title="点击查看每个文件的上传进度">
+        <Badge count={activeCount} size="small" showZero={false}>
+          <Typography.Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+            {activeCount ? `上传中 ${activeCount} 个` : failedCount ? `${failedCount} 个失败` : `${completedCount} 个已完成`}
+          </Typography.Text>
+        </Badge>
+        <Progress percent={overallProgress} size="small" showInfo={false} style={{ flex: 1, margin: 0 }} />
+      </div>
+    </Popover>
+  );
+}

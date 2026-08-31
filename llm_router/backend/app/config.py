@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     # allowlist: every organization follows the same capability and limits.
     workspace_hybrid_upload_enabled: bool = True
     workspace_max_file_bytes: int = 100 * 1024 * 1024
-    workspace_proxy_upload_max_bytes: int = 10 * 1024 * 1024
+    workspace_proxy_upload_max_bytes: int = 1 * 1024 * 1024
     workspace_upload_session_ttl_seconds: int = 15 * 60
     workspace_trash_retention_days: int = 30
 
