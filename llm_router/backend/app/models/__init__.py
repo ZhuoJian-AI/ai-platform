@@ -11,6 +11,7 @@ from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.data_interface import DataInterface, DataSystem
 from app.models.department import Department
 from app.models.dlp_rule import DlpRule
+from app.models.ecs_runtime import EcsModuleRelease, EcsRuntime
 from app.models.enterprise_application import (
     CrossDepartmentWorkItem,
     EnterpriseApplication,
@@ -63,6 +64,8 @@ __all__ = [
     "LlmProvider",
     "ModelDeployment",
     "DlpRule",
+    "EcsRuntime",
+    "EcsModuleRelease",
     "EnterpriseApplication",
     "EnterpriseApplicationAction",
     "EnterpriseApplicationActionRequest",
