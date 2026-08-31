@@ -6,7 +6,11 @@ import {
 import { GlobalWorkerOptions, getDocument, type PDFDocumentProxy, type RenderTask } from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
-GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+// The first production response for this worker was cached with the legacy
+// application/octet-stream MIME type. Keep an explicit loader revision in the
+// URL so existing browsers refetch it after the server MIME fix instead of
+// reusing that immutable response.
+GlobalWorkerOptions.workerSrc = `${pdfWorkerUrl}?loader=2`;
 
 export interface PdfFilePreviewProps {
   file?: File;
