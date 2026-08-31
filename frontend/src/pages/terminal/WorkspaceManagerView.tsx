@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
-  Input, Typography, Upload, message, Empty, Spin, Select, Checkbox, Modal, List, Dropdown,
+  Input, Typography, message, Empty, Spin, Select, Checkbox, Modal, List, Dropdown,
 } from 'antd';
 import {
   DeleteOutlined, BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined,
@@ -19,7 +19,7 @@ import BrowserDrawer, { classifyFile, classifyUrl, type Source } from './Browser
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import { auditSummary, auditTitle, workspaceDisplayName, workspaceSourceLabel, workspaceVisiblePath } from '../../utils/workspacePresentation';
 import {
-  useWorkspaceUploadQueue, WorkspaceUploadQueueStatus,
+  useWorkspaceUploadQueue, WorkspaceUploadPicker, WorkspaceUploadQueueStatus,
 } from '../../components/files/WorkspaceUploadQueue';
 // extOf 已由 classifyFile 内部使用，此处不再直接引用
 
@@ -591,37 +591,37 @@ export default function WorkspaceManagerView({ resources }: { resources: Termina
                   <button style={toolBtnStyle} disabled={!canCreate} onClick={() => { setFolderName(''); setFolderModalOpen(true); }}>
                     <FolderAddOutlined style={{ fontSize: 13 }} /> 新建文件夹
                   </button>
-                  <Upload
-                    showUploadList={false}
-                    multiple
-                    beforeUpload={(file) => {
+                  <WorkspaceUploadPicker
+                    disabled={!canCreate}
+                    onLimitExceeded={(count) => message.warning(`一次最多上传 5 个文件；已选择 ${count} 个，本次只加入前 5 个`)}
+                    onSelect={(selected) => {
                       if (!canCreate) {
                         message.warning('当前工作空间为只读');
-                        return Upload.LIST_IGNORE;
+                        return;
                       }
-                      if (file.size > WORKSPACE_MAX_FILE_BYTES) {
-                        message.warning(`文件过大（> ${WORKSPACE_MAX_FILE_BYTES / 1024 / 1024}MB），请选择更小的文件`);
-                        return Upload.LIST_IGNORE;
-                      }
-                      if (!wsId) return Upload.LIST_IGNORE;
-                      uploadQueue.enqueue([{
+                      if (!wsId) return;
+                      const accepted = selected.filter((file) => {
+                        if (file.size <= WORKSPACE_MAX_FILE_BYTES) return true;
+                        message.warning(`${file.name} 超过 100MB，未加入上传队列`);
+                        return false;
+                      });
+                      uploadQueue.enqueue(accepted.map((file) => ({
                         workspaceId: wsId,
                         path: [...cwd, file.name].join('/'),
-                        file: file as File,
-                      }]);
-                      return false;
+                        file,
+                      })));
                     }}
                   >
                     <button style={toolBtnStyle} disabled={!canCreate}>
                       <UploadOutlined style={{ fontSize: 13 }} /> 上传文件（可多选）
                     </button>
-                  </Upload>
+                  </WorkspaceUploadPicker>
                   <Typography.Text
                     type="secondary"
                     title="支持 Word、Excel、PPT、PDF、Markdown 等常用文件；1MB 以上自动直传对象存储"
                     style={{ fontSize: 11, whiteSpace: 'nowrap' }}
                   >
-                    单文件最大 100MB
+                    单次最多 5 个 · 单文件最大 100MB
                   </Typography.Text>
                   <WorkspaceUploadQueueStatus
                     items={uploadQueue.items}

@@ -1,7 +1,56 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
 import { Badge, Popover, Progress, Typography } from 'antd';
 
 import type { WorkspaceUploadOptions } from '../../api/client';
+
+export const WORKSPACE_UPLOAD_BATCH_LIMIT = 5;
+
+export function WorkspaceUploadPicker({
+  children, disabled = false, onSelect, onLimitExceeded,
+}: {
+  children: ReactNode;
+  disabled?: boolean;
+  onSelect: (files: File[]) => void;
+  onLimitExceeded?: (selectedCount: number) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const selected = Array.from(event.currentTarget.files || []);
+    // Reset immediately. A later selection is always a new batch and can be
+    // appended while the previous batch is still uploading.
+    event.currentTarget.value = '';
+    if (!selected.length) return;
+    if (selected.length > WORKSPACE_UPLOAD_BATCH_LIMIT) {
+      onLimitExceeded?.(selected.length);
+    }
+    onSelect(selected.slice(0, WORKSPACE_UPLOAD_BATCH_LIMIT));
+  };
+
+  return (
+    <span
+      style={{ display: 'inline-flex' }}
+      onClick={(event) => {
+        if (disabled) {
+          event.preventDefault();
+          return;
+        }
+        inputRef.current?.click();
+      }}
+    >
+      {children}
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        disabled={disabled}
+        aria-label="上传文件，单次最多 5 个"
+        onChange={handleChange}
+        style={{ display: 'none' }}
+      />
+    </span>
+  );
+}
 
 export interface WorkspaceUploadRequest {
   workspaceId: string;
@@ -32,7 +81,7 @@ interface UseWorkspaceUploadQueueOptions<T> {
  * overwhelming the browser or OSS connection.
  */
 export function useWorkspaceUploadQueue<T>({
-  upload, onSuccess, onError, concurrency = 3,
+  upload, onSuccess, onError, concurrency = 5,
 }: UseWorkspaceUploadQueueOptions<T>) {
   const [items, setItems] = useState<WorkspaceUploadQueueItem[]>([]);
   const pendingRef = useRef<WorkspaceUploadQueueItem[]>([]);

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
-  Drawer, Upload, message, Typography, Button, Empty, Segmented, Tag,
+  Drawer, message, Typography, Button, Empty, Segmented, Tag,
   Input, Select, Checkbox, Modal, List, Dropdown,
 } from 'antd';
 import {
@@ -30,7 +30,7 @@ import ConfirmModal from '../../components/finder/ConfirmModal';
 import { WB, WB_FONT, FS } from '../../components/finder/theme';
 import OriginalFilePreview from '../../components/files/OriginalFilePreview';
 import {
-  useWorkspaceUploadQueue, WorkspaceUploadQueueStatus,
+  useWorkspaceUploadQueue, WorkspaceUploadPicker, WorkspaceUploadQueueStatus,
 } from '../../components/files/WorkspaceUploadQueue';
 import { auditSummary, auditTitle, workspaceDisplayName, workspaceVisiblePath } from '../../utils/workspacePresentation';
 
@@ -600,33 +600,32 @@ export default function Workspaces() {
                     <ToolButton icon={<FolderAddOutlined style={{ fontSize: 13 }} />} onClick={() => { setFolderName(''); setFolderModalOpen(true); }}>
                       新建文件夹
                     </ToolButton>
-                    <Upload
-                      showUploadList={false}
-                      multiple
-                      beforeUpload={(file) => {
-                        if (file.size > WORKSPACE_MAX_FILE_BYTES) {
-                          message.warning(`文件过大（> ${WORKSPACE_MAX_FILE_BYTES / 1024 / 1024}MB），请选择更小的文件`);
-                          return Upload.LIST_IGNORE;
-                        }
-                        if (!fileModalWs) return Upload.LIST_IGNORE;
-                        uploadQueue.enqueue([{
+                    <WorkspaceUploadPicker
+                      onLimitExceeded={(count) => message.warning(`一次最多上传 5 个文件；已选择 ${count} 个，本次只加入前 5 个`)}
+                      onSelect={(selected) => {
+                        if (!fileModalWs) return;
+                        const accepted = selected.filter((file) => {
+                          if (file.size <= WORKSPACE_MAX_FILE_BYTES) return true;
+                          message.warning(`${file.name} 超过 100MB，未加入上传队列`);
+                          return false;
+                        });
+                        uploadQueue.enqueue(accepted.map((file) => ({
                           workspaceId: fileModalWs.id,
                           path: [...cwd, file.name].join('/'),
-                          file: file as File,
-                        }]);
-                        return false;
+                          file,
+                        })));
                       }}
                     >
                       <ToolButton icon={<UploadOutlined style={{ fontSize: 13 }} />}>
                         上传文件（可多选）
                       </ToolButton>
-                    </Upload>
+                    </WorkspaceUploadPicker>
                     <Typography.Text
                       type="secondary"
                       title="支持 Word、Excel、PPT、PDF、Markdown 等常用文件；1MB 以上自动直传对象存储"
                       style={{ fontSize: 11, whiteSpace: 'nowrap' }}
                     >
-                      单文件最大 100MB
+                      单次最多 5 个 · 单文件最大 100MB
                     </Typography.Text>
                     <WorkspaceUploadQueueStatus
                       items={uploadQueue.items}
