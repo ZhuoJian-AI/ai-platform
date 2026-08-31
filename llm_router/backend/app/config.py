@@ -71,6 +71,14 @@ class Settings(BaseSettings):
     github_module_publisher_installation_id: str = ""
     github_module_publisher_private_key_b64: str = ""
     github_module_publisher_timeout_seconds: int = 20
+    # Central Coolify control plane.  The bearer token never leaves this
+    # backend; tenant publish keys can only operate on their own deployment
+    # profile and deterministic repository/domain names.
+    coolify_module_deployer_enabled: bool = False
+    coolify_api_url: str = ""
+    coolify_api_token: str = ""
+    coolify_timeout_seconds: int = 30
+    module_saas_origin: str = "https://ai-platform.staging.zhuojianai.com"
     original_preview_enabled: bool = False
     # Native file preview is part of the staging-wide workspace experience;
     # keep the emergency deployment switch but no tenant allowlist.
@@ -115,6 +123,14 @@ class Settings(BaseSettings):
             and self.github_module_publisher_app_id.strip()
             and self.github_module_publisher_installation_id.strip()
             and self.github_module_publisher_private_key_b64.strip()
+        )
+
+    @property
+    def coolify_module_deployer_configured(self) -> bool:
+        return bool(
+            self.coolify_module_deployer_enabled
+            and self.coolify_api_url.strip()
+            and self.coolify_api_token.strip()
         )
 
     def original_preview_enabled_for(self, organization_slug: str) -> bool:

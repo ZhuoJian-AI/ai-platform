@@ -26,6 +26,7 @@ from app.models.enterprise_application import (
 from app.models.judge import JudgeTemplate
 from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.models.memory import Memory
+from app.models.module_deployment import ModuleDeployment, ModuleDeploymentProfile
 from app.models.ontology import Ontology, OntologyFile, OntologyFolder
 from app.models.organization import Organization
 from app.models.platform_extension import (
@@ -115,4 +116,6 @@ __all__ = [
     "Task",
     "TaskMessage",
     "Memory",
+    "ModuleDeployment",
+    "ModuleDeploymentProfile",
 ]
