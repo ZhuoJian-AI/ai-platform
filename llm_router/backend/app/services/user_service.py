@@ -5,12 +5,12 @@ from typing import Any
 from uuid import UUID
 
 import jwt
-from sqlalchemy import select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import hash_password, verify_password
 from app.config import settings
-from app.models.user import User
+from app.models.user import User, user_department_memberships
 from app.schemas.user import UserCreate, UserLoginResponse, UserRead, UserUpdate
 from app.services.memory_lifecycle import soft_delete_node_memory
 from app.services.memory_service import consolidate_user_memory, upsert_user_profile_memory
@@ -19,7 +19,11 @@ from app.services.organization_service import (
     get_org_name_slug_by_id,
     get_team_name_by_id,
 )
-from app.services.skill_scope_service import replace_manager_grants, validate_user_membership
+from app.services.skill_scope_service import (
+    replace_manager_grants,
+    validate_user_departments,
+    validate_user_membership,
+)
 from app.services.workspace_lifecycle import (
     ensure_node_workspace,
     soft_delete_node_workspace,
@@ -30,6 +34,42 @@ from app.services.workspace_lifecycle import (
 def _user_ws_name(user: User) -> str:
     """用户工作空间展示名：优先 display_name，回退 username。"""
     return user.display_name or user.username
+
+
+def _normalize_department_ids(
+    department_ids: list[UUID] | None,
+    primary_department_id: UUID | None,
+) -> list[UUID]:
+    """Deduplicate memberships and keep the compatibility primary department first."""
+    ordered: list[UUID] = []
+    if primary_department_id:
+        ordered.append(primary_department_id)
+    for department_id in department_ids or []:
+        if department_id not in ordered:
+            ordered.append(department_id)
+    return ordered
+
+
+async def _replace_user_departments(
+    db: AsyncSession,
+    user: User,
+    department_ids: list[UUID],
+) -> None:
+    await db.execute(
+        delete(user_department_memberships).where(
+            user_department_memberships.c.user_id == user.id,
+        )
+    )
+    if department_ids:
+        await db.execute(
+            insert(user_department_memberships),
+            [
+                {"user_id": user.id, "department_id": department_id}
+                for department_id in department_ids
+            ],
+        )
+    await db.flush()
+    await db.refresh(user, attribute_names=["departments"])
 
 
 def _create_user_access_token(user: User) -> str:
@@ -91,20 +131,24 @@ async def consolidate_user_profile_memory(db: AsyncSession, user: User) -> dict:
 async def create_user(
     db: AsyncSession, org_id: UUID, data: UserCreate, *, created_by_admin_id: int | None = None,
 ) -> User:
-    await validate_user_membership(db, org_id, data.department_id, data.team_id)
+    department_ids = _normalize_department_ids(data.department_ids, data.department_id)
+    primary_department_id = data.department_id or (department_ids[0] if department_ids else None)
+    await validate_user_departments(db, org_id, department_ids, data.team_id)
+    await validate_user_membership(db, org_id, primary_department_id, data.team_id)
     user = User(
         organization_id=org_id,
         username=data.username,
         display_name=data.display_name,
         role=data.role,
         is_active=data.is_active,
-        department_id=data.department_id,
+        department_id=primary_department_id,
         team_id=data.team_id,
         password_hash=hash_password(data.password),
         must_change_password=True,
     )
     db.add(user)
     await db.flush()
+    await _replace_user_departments(db, user, department_ids)
     await replace_manager_grants(db, user, data.manager_scopes, created_by_admin_id)
     # 组织管理员（role='admin'）非终端用户：不持有工作空间，也不沉淀个人档案记忆。
     if user.role != "admin":
@@ -135,8 +179,28 @@ async def update_user(
     # password 不是列，需单独哈希处理
     password = values.pop("password", None)
     requested_manager_scopes = values.pop("manager_scopes", None)
-    next_department_id = values.get("department_id", user.department_id)
+    department_ids_were_set = "department_ids" in data.model_fields_set
+    requested_department_ids = values.pop("department_ids", None)
+    primary_department_was_set = "department_id" in data.model_fields_set
+    if department_ids_were_set:
+        requested = _normalize_department_ids(requested_department_ids, None)
+        if primary_department_was_set:
+            primary_candidate = values.get("department_id")
+            next_department_ids = _normalize_department_ids(requested, primary_candidate)
+        else:
+            current_primary = UUID(str(user.department_id)) if user.department_id else None
+            primary_candidate = current_primary if current_primary in requested else (requested[0] if requested else None)
+            next_department_ids = _normalize_department_ids(requested, primary_candidate)
+        next_department_id = primary_candidate
+        values["department_id"] = next_department_id
+    elif primary_department_was_set:
+        next_department_id = values.get("department_id")
+        next_department_ids = _normalize_department_ids([], next_department_id)
+    else:
+        next_department_id = user.department_id
+        next_department_ids = [UUID(value) for value in user.department_ids]
     next_team_id = values.get("team_id", user.team_id)
+    await validate_user_departments(db, user.organization_id, next_department_ids, next_team_id)
     await validate_user_membership(db, user.organization_id, next_department_id, next_team_id)
     role_changed = "role" in values
     prev_role = user.role
@@ -147,16 +211,18 @@ async def update_user(
         user.must_change_password = True
     await db.flush()
     await db.refresh(user)
+    if department_ids_were_set or primary_department_was_set:
+        await _replace_user_departments(db, user, next_department_ids)
 
     if requested_manager_scopes is not None:
         await replace_manager_grants(db, user, requested_manager_scopes, created_by_admin_id)
-    elif role_changed or {"department_id", "team_id", "is_active"} & values.keys():
+    elif role_changed or department_ids_were_set or {"department_id", "team_id", "is_active"} & values.keys():
         # 调岗/停用/角色变化时只保留仍与新成员关系一致的授权。
         surviving = []
         for grant in user.manager_assignments or []:
             if grant.deleted_at is not None:
                 continue
-            if grant.scope_type == "department" and str(user.department_id or "") == grant.scope_id:
+            if grant.scope_type == "department" and grant.scope_id in set(user.department_ids):
                 surviving.append({"scope_type": "department", "scope_id": grant.scope_id})
             if grant.scope_type == "team" and str(user.team_id or "") == grant.scope_id:
                 surviving.append({"scope_type": "team", "scope_id": grant.scope_id})
@@ -182,6 +248,7 @@ async def update_user(
     # 个人档案记忆：仅终端用户（非管理员）。姓名/部门/团队变更，或由管理员降为普通用户时同步。
     if not is_admin and (
         {"display_name", "department_id", "team_id"} & values.keys()
+        or department_ids_were_set
         or (role_changed and prev_role == "admin")
     ):
         await _sync_user_profile_memory(db, user)

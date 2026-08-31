@@ -391,6 +391,7 @@ export interface User {
   username: string;
   display_name: string | null;
   role: string;
+  department_ids: string[];
   department_id: string | null;
   team_id: string | null;
   is_active: boolean;
@@ -422,6 +423,7 @@ export interface UserCreateInput {
   username: string;
   display_name?: string | null;
   role: string;
+  department_ids?: string[];
   department_id?: string | null;
   team_id?: string | null;
   is_active?: boolean;
@@ -1333,6 +1335,7 @@ function userRequest<T>(path: string, options?: RequestInit): Promise<T> {
 
 export interface TerminalUser {
   user: User;
+  department_ids: string[];
   department_id: string | null;
   team_id: string | null;
   scopes: [string, string | null][];

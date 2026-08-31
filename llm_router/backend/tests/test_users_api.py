@@ -13,6 +13,15 @@ async def _make_org(client: AsyncClient, slug: str = "user-org") -> str:
     return resp.json()["id"]
 
 
+async def _make_department(client: AsyncClient, org_id: str, name: str, slug: str) -> str:
+    resp = await client.post(
+        f"/api/v1/organizations/{org_id}/departments",
+        json={"name": name, "slug": slug},
+    )
+    assert resp.status_code == 201
+    return resp.json()["id"]
+
+
 @pytest.mark.asyncio
 async def test_create_user(client: AsyncClient):
     org_id = await _make_org(client)
@@ -40,6 +49,43 @@ async def test_create_user_duplicate_username(client: AsyncClient):
     assert r1.status_code == 201
     r2 = await client.post(f"/api/v1/organizations/{org_id}/users", json=payload)
     assert r2.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_user_can_belong_to_multiple_departments(client: AsyncClient):
+    org_id = await _make_org(client, slug="multi-dept-org")
+    sales_id = await _make_department(client, org_id, "销售部", "sales")
+    finance_id = await _make_department(client, org_id, "财务部", "finance")
+
+    created = await client.post(
+        f"/api/v1/organizations/{org_id}/users",
+        json={
+            "username": "multi-member",
+            "password": "test-pass-123",
+            "role": "member",
+            "department_ids": [sales_id, finance_id],
+            "department_id": finance_id,
+            "manager_scopes": [
+                {"scope_type": "department", "scope_id": sales_id},
+                {"scope_type": "department", "scope_id": finance_id},
+            ],
+        },
+    )
+    assert created.status_code == 201
+    data = created.json()
+    assert data["department_id"] == finance_id
+    assert set(data["department_ids"]) == {sales_id, finance_id}
+    assert {item["scope_id"] for item in data["manager_scopes"]} == {sales_id, finance_id}
+
+    user_id = data["id"]
+    updated = await client.patch(
+        f"/api/v1/users/{user_id}",
+        json={"department_ids": [sales_id], "department_id": sales_id},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["department_id"] == sales_id
+    assert updated.json()["department_ids"] == [sales_id]
+    assert [item["scope_id"] for item in updated.json()["manager_scopes"]] == [sales_id]
 
 
 @pytest.mark.asyncio

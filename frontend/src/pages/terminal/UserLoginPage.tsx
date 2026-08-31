@@ -51,6 +51,7 @@ export default function UserLoginPage() {
         organization_id: data.user.organization_id,
         organization_slug: slug,
         organization_name: org?.name ?? slug,
+        department_ids: data.user.department_ids ?? (data.user.department_id ? [data.user.department_id] : []),
         department_id: data.user.department_id,
         team_id: data.user.team_id,
       };

@@ -22,6 +22,14 @@ if TYPE_CHECKING:
 VALID_SCOPE_TYPES = {"organization", "department", "team", "user"}
 
 
+def _user_department_ids(user: User | CurrentUser) -> set[str]:
+    values = {str(value) for value in (getattr(user, "department_ids", ()) or ()) if value}
+    primary = getattr(user, "department_id", None)
+    if primary:
+        values.add(str(primary))
+    return values
+
+
 async def validate_scope_target(
     db: AsyncSession, org_id: UUID | str, scope_type: str, scope_id: str | UUID | None,
 ) -> str | None:
@@ -69,6 +77,31 @@ async def validate_user_membership(
             raise HTTPException(status_code=422, detail="Team must belong to the selected department")
 
 
+async def validate_user_departments(
+    db: AsyncSession, org_id: UUID | str, department_ids: list[UUID], team_id: UUID | None,
+) -> None:
+    """Validate every department membership and the optional primary team."""
+    unique_ids = set(department_ids)
+    if unique_ids:
+        rows = list((await db.execute(select(Department.id).where(
+            Department.id.in_(unique_ids),
+            Department.organization_id == UUID(str(org_id)),
+            Department.deleted_at.is_(None),
+        ))).scalars().all())
+        if set(rows) != unique_ids:
+            raise HTTPException(status_code=422, detail="A department does not belong to this organization")
+    if team_id:
+        team = (await db.execute(select(Team).where(
+            Team.id == team_id,
+            Team.organization_id == UUID(str(org_id)),
+            Team.deleted_at.is_(None),
+        ))).scalar_one_or_none()
+        if team is None:
+            raise HTTPException(status_code=422, detail="Team does not belong to this organization")
+        if team.department_id not in unique_ids:
+            raise HTTPException(status_code=422, detail="Team must belong to one of the selected departments")
+
+
 async def replace_manager_grants(
     db: AsyncSession, user: User, grants: list[ManagerScopeGrant], created_by_admin_id: int | None = None,
 ) -> None:
@@ -78,7 +111,7 @@ async def replace_manager_grants(
     normalized: set[tuple[str, str]] = set()
     for grant in grants:
         sid = await validate_scope_target(db, user.organization_id, grant.scope_type, grant.scope_id)
-        if grant.scope_type == "department" and str(user.department_id or "") != sid:
+        if grant.scope_type == "department" and sid not in _user_department_ids(user):
             raise HTTPException(status_code=422, detail="Department manager must belong to that department")
         if grant.scope_type == "team" and str(user.team_id or "") != sid:
             raise HTTPException(status_code=422, detail="Team manager must belong to that team")
@@ -141,7 +174,7 @@ def user_can_use_folder(cu: CurrentUser, folder: SkillFolder) -> bool:
     if folder.scope_type == "organization":
         return True
     if folder.scope_type == "department":
-        return bool(cu.department_id and folder.scope_id == cu.department_id)
+        return folder.scope_id in _user_department_ids(cu)
     if folder.scope_type == "team":
         return bool(cu.team_id and folder.scope_id == cu.team_id)
     return folder.scope_type == "user" and folder.scope_id == cu.id

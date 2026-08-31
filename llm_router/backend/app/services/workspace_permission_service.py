@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.user_auth import CurrentUser
 from app.models.workspace import Workspace
+from app.services.scope_service import department_scope_ids
 from app.services.skill_scope_service import managed_scopes
 
 
@@ -25,9 +26,10 @@ async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) 
     scope_type = getattr(workspace, "scope_type", "organization")
     scope_id = str(getattr(workspace, "scope_id", None) or "")
     own = scope_type == "user" and scope_id == str(getattr(cu, "id", ""))
+    department_ids = department_scope_ids(cu)
     department_id = getattr(cu, "department_id", None)
     team_id = getattr(cu, "team_id", None)
-    same_department = scope_type == "department" and bool(department_id) and scope_id == str(department_id)
+    same_department = scope_type == "department" and scope_id in department_ids
     same_team = scope_type == "team" and bool(team_id) and scope_id == str(team_id)
     org = scope_type == "organization"
     can_read = own or same_department or same_team or org
@@ -71,7 +73,8 @@ async def assert_publish_target(db: AsyncSession, workspace: Workspace, cu: Curr
     if str(workspace.organization_id) != str(cu.organization_id):
         raise HTTPException(status_code=404, detail="Workspace not found")
     valid = (
-        workspace.scope_type == "department" and str(workspace.scope_id or "") == str(cu.department_id or "")
+        workspace.scope_type == "department"
+        and str(workspace.scope_id or "") in department_scope_ids(cu)
     ) or (
         workspace.scope_type == "team" and str(workspace.scope_id or "") == str(cu.team_id or "")
     )

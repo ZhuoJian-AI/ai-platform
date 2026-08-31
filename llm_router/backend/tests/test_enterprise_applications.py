@@ -159,6 +159,36 @@ async def test_application_is_hidden_by_default_and_grants_union_across_existing
 
 
 @pytest.mark.asyncio
+async def test_application_grant_matches_any_user_department(db_session):
+    org, _, primary_department, team, current = await _organization_tree(db_session)
+    secondary_department = Department(
+        organization_id=org.id,
+        name="Quality",
+        slug=f"quality-{uuid4().hex[:6]}",
+    )
+    db_session.add(secondary_department)
+    await db_session.flush()
+    current.department_ids = (str(primary_department.id), str(secondary_department.id))
+
+    application = await service.create_application(db_session, org.id, EnterpriseApplicationCreate(
+        name="Quality Collaboration",
+        slug="quality-collaboration",
+        entry_url="https://quality.example.test",
+    ))
+    application = await service.replace_grants(db_session, application, [
+        EnterpriseApplicationGrantInput(
+            scope_type="department",
+            scope_id=secondary_department.id,
+            permissions=["view", "ai_query"],
+            module_keys=["quality_review"],
+        ),
+    ])
+
+    assert service.effective_permissions(application, current) == {"view", "ai_query"}
+    assert service.effective_module_keys(application, current) == ["quality_review"]
+
+
+@pytest.mark.asyncio
 async def test_bound_tool_requires_matching_application_operation_permission(db_session):
     org, _, department, _, current = await _organization_tree(db_session)
     connector = ToolConnector(

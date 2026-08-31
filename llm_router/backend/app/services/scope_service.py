@@ -31,14 +31,22 @@ from app.models.workspace import Workspace
 from app.services import multimodal_service
 
 
+def department_scope_ids(cu: CurrentUser) -> tuple[str, ...]:
+    """Return all department ids while accepting legacy projected user objects."""
+    values = {str(value) for value in (getattr(cu, "department_ids", ()) or ()) if value}
+    primary = getattr(cu, "department_id", None)
+    if primary:
+        values.add(str(primary))
+    return tuple(sorted(values))
+
+
 def effective_scope_set(cu: CurrentUser) -> list[tuple[str, str | None]]:
     """返回用户有效 scope 集合 [(scope_type, scope_id), ...]。
 
     organization 级 scope_id 为 None；department/team/user 级为对应 id（未绑定则省略）。
     """
     scopes: list[tuple[str, str | None]] = [("organization", None)]
-    if cu.department_id:
-        scopes.append(("department", cu.department_id))
+    scopes.extend(("department", department_id) for department_id in department_scope_ids(cu))
     if cu.team_id:
         scopes.append(("team", cu.team_id))
     scopes.append(("user", cu.id))
@@ -48,8 +56,9 @@ def effective_scope_set(cu: CurrentUser) -> list[tuple[str, str | None]]:
 def scope_filter(model, cu: CurrentUser):
     """构造 ``model`` 的可见性 WHERE 条件（组织级 + 用户 dept/team/user 命中）。"""
     conds = [model.scope_type == "organization"]
-    if cu.department_id:
-        conds.append((model.scope_type == "department") & (model.scope_id == cu.department_id))
+    department_ids = department_scope_ids(cu)
+    if department_ids:
+        conds.append((model.scope_type == "department") & (model.scope_id.in_(department_ids)))
     if cu.team_id:
         conds.append((model.scope_type == "team") & (model.scope_id == cu.team_id))
     conds.append((model.scope_type == "user") & (model.scope_id == cu.id))
@@ -106,7 +115,7 @@ def is_rag_visible(collection: RagCollection, cu: CurrentUser) -> bool:
     if collection.scope_type == "organization":
         return True
     if collection.scope_type == "department":
-        return bool(cu.department_id and collection.scope_id == cu.department_id)
+        return collection.scope_id in department_scope_ids(cu)
     if collection.scope_type == "team":
         return bool(cu.team_id and collection.scope_id == cu.team_id)
     return collection.scope_type == "user" and collection.scope_id == cu.id
@@ -220,7 +229,7 @@ def is_workspace_visible(ws: Workspace, cu: CurrentUser) -> bool:
     """运行时校验某个 workspace 是否落在用户 scope 内（终端文件读写守卫）。"""
     if ws.scope_type == "organization":
         return True
-    if ws.scope_type == "department" and cu.department_id and ws.scope_id == cu.department_id:
+    if ws.scope_type == "department" and ws.scope_id in department_scope_ids(cu):
         return True
     if ws.scope_type == "team" and cu.team_id and ws.scope_id == cu.team_id:
         return True
@@ -237,8 +246,9 @@ async def list_api_keys_for_user(db: AsyncSession, cu: CurrentUser) -> list[ApiK
     """
     now = datetime.now(UTC)
     conds: list = [ApiKey.scope_type == "organization"]
-    if cu.department_id:
-        conds.append((ApiKey.scope_type == "department") & (ApiKey.department_id == cu.department_id))
+    department_ids = department_scope_ids(cu)
+    if department_ids:
+        conds.append((ApiKey.scope_type == "department") & (ApiKey.department_id.in_(department_ids)))
     if cu.team_id:
         conds.append((ApiKey.scope_type == "team") & (ApiKey.team_id == cu.team_id))
     stmt = select(ApiKey).where(

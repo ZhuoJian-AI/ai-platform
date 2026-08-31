@@ -1,9 +1,23 @@
 """User ORM model."""
 
-from sqlalchemy import ForeignKey, String, UniqueConstraint
+from sqlalchemy import Column, ForeignKey, Index, String, Table, UniqueConstraint
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKeyMixin
+
+user_department_memberships = Table(
+    "user_department_memberships",
+    Base.metadata,
+    Column("user_id", UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "department_id",
+        UUID(as_uuid=True),
+        ForeignKey("departments.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Index("ix_user_department_memberships_department_id", "department_id"),
+)
 
 
 class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
@@ -18,8 +32,8 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     role: Mapped[str] = mapped_column(String(50), nullable=False, default="member")  # admin, member
     is_active: Mapped[bool] = mapped_column(default=True)
-    # 终端用户作用域绑定：驱动资源 scope 过滤与 4 级记忆载入（org + dept + team + user）。
-    # 任一可为空（未分配部门/团队的用户仅命中 organization + user 两级）。
+    # department_id 是兼容存量逻辑的“主部门”；完整成员关系在
+    # user_department_memberships 中。team_id 仍为单一主团队，且必须属于主部门。
     department_id: Mapped[str | None] = mapped_column(
         ForeignKey("departments.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -32,9 +46,23 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
 
     # 关系
     organization = relationship("Organization", back_populates="users")
+    departments = relationship(
+        "Department",
+        secondary=user_department_memberships,
+        lazy="selectin",
+    )
     manager_assignments = relationship(
         "ScopeManagerAssignment", lazy="selectin", primaryjoin="User.id==ScopeManagerAssignment.user_id"
     )
+
+    @property
+    def department_ids(self) -> list[str]:
+        """Return all department memberships with the primary department first."""
+        primary = str(self.department_id) if self.department_id else None
+        values = {str(department.id) for department in (self.departments or [])}
+        if primary:
+            values.add(primary)
+        return ([primary] if primary else []) + sorted(value for value in values if value != primary)
 
     @property
     def manager_scopes(self) -> list[dict]:

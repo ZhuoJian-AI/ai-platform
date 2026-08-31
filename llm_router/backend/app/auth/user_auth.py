@@ -2,7 +2,7 @@
 
 与管理员 JWT（``admin_auth``）分离：用户 token payload 含 ``type='user'``（见
 ``user_service._create_user_access_token``）。``CurrentUser`` 携带 organization_id /
-department_id / team_id，供资源 scope 过滤与 4 级记忆载入使用。
+department_ids / 主 department_id / team_id，供资源 scope 过滤与 4 级记忆载入使用。
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ class CurrentUser:
     role: str
     organization_id: UUID
     department_id: str | None = None
+    department_ids: tuple[str, ...] = ()
     team_id: str | None = None
 
 
@@ -71,6 +72,7 @@ async def require_user(
         role=user.role,
         organization_id=user.organization_id,
         department_id=str(user.department_id) if user.department_id else None,
+        department_ids=tuple(str(value) for value in user.department_ids),
         team_id=str(user.team_id) if user.team_id else None,
     )
 

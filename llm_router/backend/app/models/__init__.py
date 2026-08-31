@@ -40,7 +40,7 @@ from app.models.skill import ScopeManagerAssignment, Skill, SkillExecution, Skil
 from app.models.task import Task, TaskMessage
 from app.models.team import Team
 from app.models.tool_call_log import ToolCallLog
-from app.models.user import User
+from app.models.user import User, user_department_memberships
 from app.models.workspace import (
     Workspace,
     WorkspaceAuditEvent,
@@ -57,6 +57,7 @@ __all__ = [
     "Department",
     "Team",
     "User",
+    "user_department_memberships",
     "ApiKey",
     "LlmProvider",
     "ModelDeployment",

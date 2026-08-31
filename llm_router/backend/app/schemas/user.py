@@ -16,6 +16,7 @@ class UserCreate(BaseModel):
     username: str = Field(..., min_length=1, max_length=320)
     display_name: str | None = Field(None, max_length=255)
     role: Literal["admin", "member"] = "member"
+    department_ids: list[UUID] = Field(default_factory=list)
     department_id: UUID | None = None
     team_id: UUID | None = None
     is_active: bool = True
@@ -27,6 +28,7 @@ class UserUpdate(BaseModel):
     username: str | None = Field(None, min_length=1, max_length=320)
     display_name: str | None = Field(None, max_length=255)
     role: Literal["admin", "member"] | None = None
+    department_ids: list[UUID] | None = None
     department_id: UUID | None = None
     team_id: UUID | None = None
     is_active: bool | None = None
@@ -58,6 +60,7 @@ class UserRead(BaseModel):
     username: str
     display_name: str | None
     role: str
+    department_ids: list[UUID] = Field(default_factory=list)
     department_id: UUID | None = None
     team_id: UUID | None = None
     is_active: bool

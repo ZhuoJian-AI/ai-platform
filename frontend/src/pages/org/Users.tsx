@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
-  Button, Modal, Table, Tag, Form, Input, Select, TreeSelect, Typography, Space,
+  Button, Modal, Table, Tag, Form, Input, Select, Typography, Space,
   Alert, message,
 } from 'antd';
 import { PlusOutlined, DeleteOutlined, EditOutlined, LockOutlined, UserOutlined } from '@ant-design/icons';
@@ -21,7 +21,8 @@ export default function UsersPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<User | null>(null);
   const [form] = Form.useForm();
-  const watchedBelongTo = Form.useWatch('belongTo', form) as string | undefined;
+  const watchedDepartmentIds = Form.useWatch('department_ids', form) as string[] | undefined;
+  const watchedTeamId = Form.useWatch('team_id', form) as string | undefined;
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [resetTarget, setResetTarget] = useState<User | null>(null);
   const [newPassword, setNewPassword] = useState('');
@@ -37,51 +38,37 @@ export default function UsersPage() {
     enabled: !!orgId,
   });
 
-  // 组织架构树：用于「所属」选择器；nodeMap 已含全部 org/dept/team 元信息，
-  // 选中节点后据此自动解析出 department_id / team_id（驱动终端资源 scope 与长期记忆载入）
-  const { treeData, nodeMap } = useOrgTree();
+  const { nodeMap } = useOrgTree();
   const deptName = (id: string | null) => (id ? nodeMap.get(`dept:${id}`)?.name : undefined);
   const teamName = (id: string | null) => (id ? nodeMap.get(`team:${id}`)?.name : undefined);
 
-  // 仅展示当前组织下的子树（组织 → 部门 → 团队），避免跨组织误选
-  const belongTree = useMemo(() => {
-    if (!orgId) return [];
-    const root = treeData.find(n => n.value === `org:${orgId}`);
-    return root ? [root] : [];
-  }, [treeData, orgId]);
+  const departmentOptions = useMemo(() => Array.from(nodeMap.values())
+    .filter(node => node.type === 'department' && node.orgId === orgId)
+    .map(node => ({ value: node.id, label: node.name }))
+    .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN')), [nodeMap, orgId]);
 
-  // 所属节点 value → { department_id, team_id }
-  const resolveBelong = (val: string | undefined): { department_id: string | null; team_id: string | null } => {
-    if (!val) return { department_id: null, team_id: null };
-    const node = nodeMap.get(val);
-    if (!node) return { department_id: null, team_id: null };
-    if (node.type === 'team') return { department_id: node.deptId ?? null, team_id: node.id };
-    if (node.type === 'department') return { department_id: node.id, team_id: null };
-    return { department_id: null, team_id: null }; // 组织级：仅绑定组织
-  };
-  // { department_id, team_id } → 所属节点 value（编辑回填用）
-  const toBelongValue = (deptId: string | null, teamId: string | null): string | undefined => {
-    if (teamId) return `team:${teamId}`;
-    if (deptId) return `dept:${deptId}`;
-    return orgId ? `org:${orgId}` : undefined;
-  };
+  const teamOptions = useMemo(() => {
+    const selected = new Set(watchedDepartmentIds ?? []);
+    return Array.from(nodeMap.values())
+      .filter(node => node.type === 'team' && node.orgId === orgId && !!node.deptId && selected.has(node.deptId))
+      .map(node => ({ value: node.id, label: `${deptName(node.deptId ?? null) ?? ''} / ${node.name}` }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'));
+  }, [nodeMap, orgId, watchedDepartmentIds]);
 
   const isEdit = !!editing;
 
   const managerOptions = useMemo(() => {
-    const membership = resolveBelong(watchedBelongTo);
     const options: { value: string; label: string }[] = [];
-    if (membership.department_id) options.push({
-      value: `department:${membership.department_id}`,
-      label: `部门负责人：${deptName(membership.department_id) ?? membership.department_id}`,
+    for (const departmentId of watchedDepartmentIds ?? []) options.push({
+      value: `department:${departmentId}`,
+      label: `部门负责人：${deptName(departmentId) ?? departmentId}`,
     });
-    if (membership.team_id) options.push({
-      value: `team:${membership.team_id}`,
-      label: `团队负责人：${teamName(membership.team_id) ?? membership.team_id}`,
+    if (watchedTeamId) options.push({
+      value: `team:${watchedTeamId}`,
+      label: `团队负责人：${teamName(watchedTeamId) ?? watchedTeamId}`,
     });
     return options;
-  // nodeMap changes when the organization tree loads; manager labels should update with it.
-  }, [watchedBelongTo, nodeMap]);
+  }, [watchedDepartmentIds, watchedTeamId, nodeMap]);
 
   const openCreate = () => { setEditing(null); form.resetFields(); setModalOpen(true); };
   const openEdit = (r: User) => { setEditing(r); setModalOpen(true); };
@@ -94,7 +81,10 @@ export default function UsersPage() {
         username: editing.username,
         display_name: editing.display_name,
         is_active: editing.is_active,
-        belongTo: toBelongValue(editing.department_id, editing.team_id),
+        department_ids: editing.department_ids?.length
+          ? editing.department_ids
+          : (editing.department_id ? [editing.department_id] : []),
+        team_id: editing.team_id ?? undefined,
         manager_scope_keys: (editing.manager_scopes ?? []).map((grant) => `${grant.scope_type}:${grant.scope_id}`),
       });
     }
@@ -105,7 +95,8 @@ export default function UsersPage() {
   const createUser = useMutation({
     mutationFn: (data: {
       username: string; display_name?: string | null; role: string; is_active: boolean; password: string;
-      department_id?: string | null; team_id?: string | null; manager_scopes?: ManagerScopeGrant[];
+      department_ids?: string[]; department_id?: string | null; team_id?: string | null;
+      manager_scopes?: ManagerScopeGrant[];
     }) => {
       if (!orgId) { message.error('请先创建组织'); return Promise.reject(new Error('No org')); }
       return users.create(orgId, data);
@@ -130,8 +121,10 @@ export default function UsersPage() {
   });
 
   const submit = (v: Record<string, unknown>) => {
-    // 「所属」树节点 → department_id / team_id，选择部门/团队后自动绑定
-    const { department_id, team_id } = resolveBelong(v.belongTo as string | undefined);
+    const department_ids = (v.department_ids as string[] | undefined) ?? [];
+    const team_id = (v.team_id as string | undefined) ?? null;
+    const teamDepartmentId = team_id ? nodeMap.get(`team:${team_id}`)?.deptId : undefined;
+    const department_id = teamDepartmentId ?? department_ids[0] ?? null;
     const manager_scopes = ((v.manager_scope_keys as string[] | undefined) ?? []).map((key) => {
       const [scope_type, scope_id] = key.split(':');
       return { scope_type, scope_id } as ManagerScopeGrant;
@@ -142,6 +135,7 @@ export default function UsersPage() {
       role: 'member',
       is_active: v.is_active,
       password: v.password,
+      department_ids,
       department_id,
       team_id,
       manager_scopes,
@@ -183,8 +177,15 @@ export default function UsersPage() {
               render: (v: string) => <Tag color={ROLE_COLORS[v]}>{ROLE_LABELS[v] || v}</Tag>,
             },
             {
-              title: '部门', dataIndex: 'department_id', width: 140,
-              render: (id: string | null) => (id ? <Tag color="cyan">{deptName(id) ?? id}</Tag> : <Typography.Text type="secondary">—</Typography.Text>),
+              title: '所属部门', dataIndex: 'department_ids', width: 260,
+              render: (ids: string[] | undefined, record: User) => {
+                const values = ids?.length ? ids : (record.department_id ? [record.department_id] : []);
+                return values.length
+                  ? values.map(id => <Tag key={id} color={id === record.department_id ? 'blue' : 'cyan'}>
+                      {deptName(id) ?? id}{id === record.department_id ? '（主）' : ''}
+                    </Tag>)
+                  : <Typography.Text type="secondary">—</Typography.Text>;
+              },
             },
             {
               title: '团队', dataIndex: 'team_id', width: 140,
@@ -237,18 +238,40 @@ export default function UsersPage() {
             </Form.Item>
           )}
           <Form.Item
-            name="belongTo"
-            label="所属"
-            tooltip="选择用户所属的组织架构节点；选中部门/团队后自动绑定对应的部门与团队，驱动终端资源 scope 与长期记忆"
-            rules={[{ required: true, message: '请选择所属组织架构节点' }]}
+            name="department_ids"
+            label="所属部门"
+            tooltip="可选择多个部门。企业模块、Skill、RAG 和工作空间权限会合并计算；第一个部门默认为主部门。"
+            rules={[{ required: true, type: 'array', min: 1, message: '请至少选择一个所属部门' }]}
           >
-            <TreeSelect
-              treeData={belongTree}
-              treeDefaultExpandAll
-              showSearch
-              treeNodeFilterProp="title"
+            <Select
+              mode="multiple"
               allowClear
-              placeholder="选择所属（组织 / 部门 / 团队）"
+              showSearch
+              optionFilterProp="label"
+              options={departmentOptions}
+              placeholder="可选择一个或多个部门"
+              onChange={(departmentIds: string[]) => {
+                const currentTeamId = form.getFieldValue('team_id') as string | undefined;
+                const currentTeam = currentTeamId ? nodeMap.get(`team:${currentTeamId}`) : undefined;
+                if (currentTeam?.deptId && !departmentIds.includes(currentTeam.deptId)) {
+                  form.setFieldValue('team_id', undefined);
+                }
+                form.setFieldValue('manager_scope_keys', []);
+              }}
+            />
+          </Form.Item>
+          <Form.Item
+            name="team_id"
+            label="主团队（可选）"
+            extra="团队只能从已选部门中选择；选中后，该团队所在部门自动作为主部门。"
+          >
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              options={teamOptions}
+              placeholder={watchedDepartmentIds?.length ? '选择一个主团队' : '请先选择所属部门'}
+              disabled={!watchedDepartmentIds?.length}
               onChange={() => form.setFieldValue('manager_scope_keys', [])}
             />
           </Form.Item>

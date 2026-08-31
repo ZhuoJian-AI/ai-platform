@@ -320,6 +320,7 @@ async def me_endpoint(cu: CurrentUser = Depends(require_user)):
     """当前终端用户档案 + 作用域。"""
     return {
         "user": UserRead.model_validate(cu.user).model_dump(),
+        "department_ids": list(cu.department_ids),
         "department_id": cu.department_id,
         "team_id": cu.team_id,
         "scopes": scope_service.effective_scope_set(cu),

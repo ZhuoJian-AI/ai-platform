@@ -22,6 +22,7 @@ from app.schemas.skill import (
     SkillVersionRead,
 )
 from app.services import skill_import_service, skill_runner_client
+from app.services.scope_service import department_scope_ids
 from app.services.skill_scope_service import (
     assert_user_can_manage_folder,
     assert_user_can_manage_scope,
@@ -122,8 +123,7 @@ async def terminal_skill_scopes(
         can_import=("organization", None) in grants, can_manage=("organization", None) in grants,
     )]
     department_ids = {sid for st, sid in grants if st == "department" and sid}
-    if cu.department_id:
-        department_ids.add(cu.department_id)
+    department_ids.update(department_scope_ids(cu))
     departments = list((await db.execute(select(Department).where(
         Department.organization_id == cu.organization_id,
         Department.id.in_([UUID(value) for value in department_ids]) if department_ids else False,
