@@ -4,12 +4,16 @@ import { DownloadOutlined } from '@ant-design/icons';
 import type { WorkspacePdfPreviewInfo } from '../../api/client';
 
 const OfficeFilePreview = lazy(() => import('./OfficeFilePreview'));
+const PowerPointFilePreview = lazy(() => import('./PowerPointFilePreview'));
 const PdfFilePreview = lazy(() => import('./PdfFilePreview'));
 
 const OFFICE_EXTENSIONS = new Set([
   'doc', 'docx', 'docm', 'dot', 'dotx', 'dotm', 'rtf', 'odt',
   'xls', 'xlsx', 'xlsm', 'xlsb', 'xlt', 'xltx', 'xltm', 'ods', 'csv', 'tsv',
   'ppt', 'pptx', 'pptm', 'pps', 'ppsx', 'ppsm', 'pot', 'potx', 'potm', 'odp',
+]);
+const OPENXML_PRESENTATION_EXTENSIONS = new Set([
+  'pptx', 'pptm', 'ppsx', 'ppsm', 'potx', 'potm',
 ]);
 
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif']);
@@ -157,6 +161,19 @@ export default function OriginalFilePreview({
 
   if ((AUDIO_EXTENSIONS.has(extension) || effectiveMime.startsWith('audio/')) && previewUrl) {
     return <div style={centerStyle}><audio controls src={previewUrl} style={{ width: 'min(560px, 90%)' }} /></div>;
+  }
+
+  if (OPENXML_PRESENTATION_EXTENSIONS.has(extension) && (originalFile || directUrl)) {
+    return (
+      <Suspense fallback={<LoadingState label="正在加载 PPTX 查看器…" />}>
+        <PowerPointFilePreview
+          file={originalFile || undefined}
+          url={directUrl || undefined}
+          filename={filename}
+          onDownload={onDownload}
+        />
+      </Suspense>
+    );
   }
 
   if (OFFICE_EXTENSIONS.has(extension) && (originalFile || directUrl)) {
