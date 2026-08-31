@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Alert, Button, Empty, Progress, Spin, Typography } from 'antd';
-import { DownloadOutlined, ZoomInOutlined, ZoomOutOutlined } from '@ant-design/icons';
+import {
+  CompressOutlined,
+  DownloadOutlined,
+  FullscreenExitOutlined,
+  FullscreenOutlined,
+  ZoomInOutlined,
+  ZoomOutOutlined,
+} from '@ant-design/icons';
 import { PptxViewer, type PptxDiagnosticError } from '@file-viewer/pptx';
 
 export interface PowerPointFilePreviewProps {
@@ -25,15 +32,24 @@ function errorText(error: unknown): string {
  * error panel even though the worker successfully produced every slide.
  */
 export default function PowerPointFilePreview({ file, url, filename, onDownload }: PowerPointFilePreviewProps) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<PptxViewer | null>(null);
   const hasSlidesRef = useRef(false);
   const [loading, setLoading] = useState(true);
+  const [visualReady, setVisualReady] = useState(false);
   const [progress, setProgress] = useState(0);
   const [renderedSlides, setRenderedSlides] = useState(0);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [zoom, setZoom] = useState(100);
+  const [fullscreen, setFullscreen] = useState(false);
+
+  useEffect(() => {
+    const syncFullscreen = () => setFullscreen(document.fullscreenElement === rootRef.current);
+    document.addEventListener('fullscreenchange', syncFullscreen);
+    return () => document.removeEventListener('fullscreenchange', syncFullscreen);
+  }, []);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -42,6 +58,7 @@ export default function PowerPointFilePreview({ file, url, filename, onDownload 
     let disposed = false;
     hasSlidesRef.current = false;
     setLoading(true);
+    setVisualReady(false);
     setProgress(0);
     setRenderedSlides(0);
     setFatalError(null);
@@ -73,11 +90,15 @@ export default function PowerPointFilePreview({ file, url, filename, onDownload 
         lazyMedia: true,
         listOptions: { windowed: true, initialSlides: 3, batchSize: 4, overscanViewport: 1.5 },
         onProgress: (value) => { if (!disposed) setProgress(Math.max(0, Math.min(100, Math.round(value)))); },
+        // Most PPTX files contain PowerPoint's own first-page thumbnail. Keep it
+        // visible while the worker parses the remaining slides instead of
+        // covering it with a full-panel loading mask.
+        onThumbnail: () => { if (!disposed) setVisualReady(true); },
         onSlideRendered: (slideNumber) => {
           if (disposed) return;
           hasSlidesRef.current = true;
+          setVisualReady(true);
           setRenderedSlides((current) => Math.max(current, slideNumber));
-          setLoading(false);
         },
         onRenderComplete: () => { if (!disposed) { setProgress(100); setLoading(false); } },
         onError: (reason) => {
@@ -114,18 +135,35 @@ export default function PowerPointFilePreview({ file, url, filename, onDownload 
     await viewerRef.current?.setZoom(normalized);
   };
 
+  const toggleFullscreen = async () => {
+    if (document.fullscreenElement === rootRef.current) {
+      await document.exitFullscreen();
+      return;
+    }
+    await rootRef.current?.requestFullscreen();
+  };
+
   return (
-    <div data-testid="presentation-preview" style={{ width: '100%', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', background: '#e8ebef' }}>
-      <div style={{ minHeight: 46, flex: '0 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', background: '#fff', borderBottom: '1px solid #dfe4ea', gap: 12 }}>
-        <Typography.Text ellipsis title={filename} style={{ maxWidth: 420 }}>{filename}</Typography.Text>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+    <div ref={rootRef} data-testid="presentation-preview" style={{ width: '100%', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', background: '#e8ebef' }}>
+      <div style={{ flex: '0 0 auto', display: 'flex', flexDirection: 'column', padding: '7px 12px 0', background: '#fff', borderBottom: '1px solid #dfe4ea', gap: 6 }}>
+        <div style={{ minHeight: 32, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <Typography.Text ellipsis title={filename} style={{ minWidth: 120, maxWidth: 360, flex: '1 1 auto', fontWeight: 500 }}>{filename}</Typography.Text>
+          <div aria-label="PPT 预览工具栏" style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 6, flex: '0 0 auto' }}>
+            <Button size="small" icon={<ZoomOutOutlined />} disabled={zoom <= 25} onClick={() => void changeZoom(zoom - 20)}>缩小</Button>
+            <Button size="small" style={{ minWidth: 58, cursor: 'default' }}>{zoom}%</Button>
+            <Button size="small" icon={<ZoomInOutlined />} disabled={zoom >= 300} onClick={() => void changeZoom(zoom + 20)}>放大</Button>
+            <Button size="small" icon={<CompressOutlined />} disabled={zoom === 100} onClick={() => void changeZoom(100)}>适应窗口</Button>
+            <Button size="small" icon={fullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />} onClick={() => void toggleFullscreen()}>{fullscreen ? '退出全屏' : '全屏'}</Button>
+            <Button size="small" icon={<DownloadOutlined />} onClick={onDownload}>下载</Button>
+          </div>
+        </div>
+        <div style={{ minHeight: 20, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {loading ? `正在解析原始 PPTX${progress ? ` · ${progress}%` : ''}` : `已载入原始幻灯片${renderedSlides ? ` · 当前 ${renderedSlides} 页` : ''}`}
+            {loading
+              ? visualReady ? `首屏已显示，正在后台解析其余页面${progress ? ` · ${progress}%` : ''}` : `正在读取原始 PPTX${progress ? ` · ${progress}%` : ''}`
+              : `已载入原始幻灯片${renderedSlides ? ` · 当前 ${renderedSlides} 页` : ''}`}
           </Typography.Text>
-          <Button size="small" icon={<ZoomOutOutlined />} disabled={zoom <= 25} onClick={() => void changeZoom(zoom - 20)} />
-          <Typography.Text style={{ width: 42, textAlign: 'center', fontSize: 12 }}>{zoom}%</Typography.Text>
-          <Button size="small" icon={<ZoomInOutlined />} disabled={zoom >= 300} onClick={() => void changeZoom(zoom + 20)} />
-          <Button size="small" icon={<DownloadOutlined />} onClick={onDownload}>下载</Button>
+          {loading && <Progress percent={progress} showInfo={false} size="small" style={{ width: 120, margin: 0 }} />}
         </div>
       </div>
       {warning && renderedSlides > 0 && (
@@ -133,8 +171,8 @@ export default function PowerPointFilePreview({ file, url, filename, onDownload 
       )}
       <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
         <div ref={hostRef} data-testid="presentation-stage" style={{ width: '100%', height: '100%' }} />
-        {loading && (
-          <div style={overlayStyle}><Spin /><Typography.Text type="secondary">正在读取并解析完整 PPTX…</Typography.Text><Progress percent={progress} showInfo={false} style={{ width: 240 }} /></div>
+        {loading && !visualReady && (
+          <div style={overlayStyle}><Spin /><Typography.Text type="secondary">正在读取 PPTX，首张幻灯片生成后即可查看…</Typography.Text><Progress percent={progress} showInfo={false} style={{ width: 240 }} /></div>
         )}
         {fatalError && !renderedSlides && (
           <div style={overlayStyle}><Empty description={`PPTX 预览失败：${fatalError}`} /><Button icon={<DownloadOutlined />} onClick={onDownload}>下载原文件</Button></div>
