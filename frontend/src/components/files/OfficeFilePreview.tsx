@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import { Button, Typography, message } from 'antd';
 import { CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import FileViewer from '@file-viewer/react';
@@ -19,6 +19,42 @@ export interface OfficeFilePreviewProps {
 /** Lazily loaded so normal pages and native PDF/image previews stay lightweight. */
 export default function OfficeFilePreview({ file, url, filename, extension, onDownload }: OfficeFilePreviewProps) {
   const isSpreadsheet = SPREADSHEET_EXTENSIONS.has(extension);
+  // FileViewer treats a new options object as a new document configuration and
+  // reloads its renderer.  Parent query refreshes can re-render this component
+  // while a large Office file is still being parsed, so an inline object may
+  // repeatedly tear down the active Word/Excel/PPT renderer and leave a blank
+  // surface.  Keep the configuration referentially stable for the lifetime of
+  // the selected file.
+  const viewerOptions = useMemo(() => ({
+    preset: officePreset,
+    rendererMode: 'replace' as const,
+    theme: 'light' as const,
+    locale: 'zh-CN',
+    styleIsolation: 'shadow' as const,
+    // Wide spreadsheets must open at a readable 100% scale with native
+    // horizontal scrolling. Fitting the entire sheet can shrink text to
+    // roughly 30%, while page-oriented Word/PPT previews still benefit from
+    // contain-to-view behaviour.
+    fit: isSpreadsheet
+      ? { mode: 'actual' as const, resize: 'initial' as const }
+      : { mode: 'contain' as const, resize: 'until-interaction' as const },
+    toolbar: {
+      position: 'bottom-right' as const,
+      download: false,
+      print: true,
+      exportHtml: false,
+      zoom: true,
+      search: true,
+      theme: false,
+    },
+    spreadsheet: {
+      worker: 'auto' as const,
+      textEncoding: 'auto' as const,
+      resizableColumns: true,
+      resizableRows: true,
+    },
+    docx: { visualPagination: true },
+  }), [isSpreadsheet]);
   // Selection is owned by the canvas renderer. Keeping this flag in a ref is
   // deliberate: a React state update here recreates FileViewer and discards
   // the range the user just selected.
@@ -92,36 +128,7 @@ export default function OfficeFilePreview({ file, url, filename, extension, onDo
           filename={filename}
           type={extension}
           style={{ width: '100%', height: '100%' }}
-          options={{
-            preset: officePreset,
-            rendererMode: 'replace',
-            theme: 'light',
-            locale: 'zh-CN',
-            styleIsolation: 'shadow',
-            // Wide spreadsheets must open at a readable 100% scale with native
-            // horizontal scrolling. Fitting the entire sheet can shrink text to
-            // roughly 30%, while page-oriented Word/PPT previews still benefit
-            // from contain-to-view behaviour.
-            fit: isSpreadsheet
-              ? { mode: 'actual', resize: 'initial' }
-              : { mode: 'contain', resize: 'until-interaction' },
-            toolbar: {
-              position: 'bottom-right',
-              download: false,
-              print: true,
-              exportHtml: false,
-              zoom: true,
-              search: true,
-              theme: false,
-            },
-            spreadsheet: {
-              worker: 'auto',
-              textEncoding: 'auto',
-              resizableColumns: true,
-              resizableRows: true,
-            },
-            docx: { visualPagination: true },
-          }}
+          options={viewerOptions}
         />
       </div>
     </div>

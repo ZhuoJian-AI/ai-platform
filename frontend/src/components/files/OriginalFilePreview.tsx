@@ -56,7 +56,11 @@ export default function OriginalFilePreview({
   // presentations, can leave the outer loading state waiting even though OSS
   // has already completed the response.  Header-authenticated legacy sources
   // still need the Blob fallback.
-  const needsRemoteBlob = TEXT_EXTENSIONS.has(extension) || hasSourceHeaders;
+  // Native PDF plug-ins are unreliable with expiring signed URLs: some Chrome
+  // builds fetch the URL successfully but still leave an empty iframe.  A
+  // same-page object URL avoids expiry, redirect and Content-Disposition
+  // differences while preserving the original PDF bytes.
+  const needsRemoteBlob = extension === 'pdf' || TEXT_EXTENSIONS.has(extension) || hasSourceHeaders;
   const effectiveBlob = blob || remoteBlob;
   const blobMime = effectiveBlob?.type || '';
   const effectiveMime = !blobMime || blobMime === 'application/octet-stream'
