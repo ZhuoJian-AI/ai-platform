@@ -123,6 +123,50 @@ async def test_browser_signed_download_keeps_public_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_large_browser_upload_requests_parallel_multipart(monkeypatch):
+    _configure(monkeypatch)
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "session_id": "multipart-1",
+                "object_key": "projects/7/assets/deck.pptx",
+                "part_size": 4 * 1024 * 1024,
+                "expected_parts": 8,
+                "expires_at": "2026-09-01T00:00:00Z",
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, **kwargs):
+            captured.update({"url": url, "headers": kwargs["headers"], "json": kwargs["json"]})
+            return FakeResponse()
+
+    monkeypatch.setattr(storage.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    result = await storage.sign_browser_upload(
+        filename="deck.pptx",
+        content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        size_bytes=32 * 1024 * 1024,
+    )
+
+    assert captured["url"].endswith("/v1/multipart/initiate")
+    assert captured["headers"]["X-Storage-Subject"] == "ai-platform-control-plane"
+    assert captured["json"]["force_multipart"] is True
+    assert captured["json"]["part_size_bytes"] == 4 * 1024 * 1024
+    assert result["method"] == "MULTIPART"
+    assert result["expected_parts"] == 8
+
+
+@pytest.mark.asyncio
 async def test_stream_signed_download_proxies_internal_object_in_chunks(monkeypatch):
     _configure(monkeypatch)
 

@@ -1391,14 +1391,36 @@ const WORKSPACE_PROXY_UPLOAD_BYTES = 1 * 1024 * 1024;
 export const WORKSPACE_MAX_FILE_BYTES = 100 * 1024 * 1024;
 
 interface DirectUploadSession {
-  id: string; method: 'PUT'; url: string; headers: Record<string, string>;
+  id: string; method: 'PUT' | 'MULTIPART'; url: string | null; headers: Record<string, string>;
   expires_at: string; max_file_bytes: number;
+  part_size: number | null; expected_parts: number | null;
+}
+
+interface MultipartPartSigned {
+  part_number: number; method: 'PUT'; url: string; headers: Record<string, string>; expires_in: number;
+}
+
+interface MultipartUploadPart {
+  part_number: number; etag: string; size: number;
+}
+
+interface MultipartUploadStatus {
+  status: string; part_size: number; expected_parts: number;
+  uploaded_parts: MultipartUploadPart[]; expires_at: string;
+}
+
+interface MultipartPartReceipt {
+  part_number: number; etag: string;
 }
 
 function putSignedWorkspaceFileAttempt(
   session: DirectUploadSession, file: File, options?: WorkspaceUploadOptions,
 ): Promise<string | null> {
   return new Promise((resolve, reject) => {
+    if (!session.url) {
+      reject(new ApiError(500, '对象存储上传地址缺失'));
+      return;
+    }
     const xhr = new XMLHttpRequest();
     xhr.open('PUT', session.url);
     Object.entries(session.headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value));
@@ -1452,6 +1474,112 @@ async function putSignedWorkspaceFile(
   throw lastError;
 }
 
+function putMultipartPartAttempt(
+  signed: MultipartPartSigned,
+  chunk: Blob,
+  signal: AbortSignal,
+  onProgress: (loaded: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', signed.url);
+    Object.entries(signed.headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value));
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress(chunk.size);
+        resolve();
+        return;
+      }
+      reject(new ApiError(xhr.status, `分片 ${signed.part_number} 上传失败（HTTP ${xhr.status || '未知'}）`));
+    };
+    xhr.onerror = () => reject(new ApiError(0, `分片 ${signed.part_number} 网络上传失败`));
+    xhr.onabort = () => reject(new DOMException('上传已取消', 'AbortError'));
+    if (signal.aborted) {
+      reject(new DOMException('上传已取消', 'AbortError'));
+      return;
+    }
+    signal.addEventListener('abort', () => xhr.abort(), { once: true });
+    xhr.send(chunk);
+  });
+}
+
+async function uploadMultipartWorkspaceFile(
+  session: DirectUploadSession,
+  file: File,
+  signPart: (partNumber: number) => Promise<MultipartPartSigned>,
+  getStatus: () => Promise<MultipartUploadStatus>,
+  options?: WorkspaceUploadOptions,
+): Promise<MultipartPartReceipt[]> {
+  const partSize = session.part_size || 0;
+  const expectedParts = session.expected_parts || Math.ceil(file.size / Math.max(partSize, 1));
+  if (partSize <= 0 || expectedParts <= 0) throw new ApiError(500, '对象存储分片参数无效');
+
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort();
+  options?.signal?.addEventListener('abort', abortFromCaller, { once: true });
+  if (options?.signal?.aborted) controller.abort();
+
+  const uploadedBytes = new Map<number, number>();
+  const reportProgress = () => {
+    const loaded = Array.from(uploadedBytes.values()).reduce((sum, bytes) => sum + bytes, 0);
+    options?.onProgress?.(Math.min(99, Math.round((loaded / file.size) * 100)));
+  };
+  let nextPart = 1;
+  const uploadOne = async (partNumber: number) => {
+    const start = (partNumber - 1) * partSize;
+    const chunk = file.slice(start, Math.min(start + partSize, file.size));
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const signed = await signPart(partNumber);
+        await putMultipartPartAttempt(signed, chunk, controller.signal, (loaded) => {
+          uploadedBytes.set(partNumber, loaded);
+          reportProgress();
+        });
+        return;
+      } catch (error) {
+        lastError = error;
+        if ((error as Error).name === 'AbortError') throw error;
+        const status = error instanceof ApiError ? error.status : 0;
+        const retryable = status === 0 || status === 408 || status === 429 || status >= 500;
+        if (!retryable || attempt === 3) throw error;
+        uploadedBytes.set(partNumber, 0);
+        reportProgress();
+        await new Promise((resolve) => window.setTimeout(resolve, attempt * 500));
+      }
+    }
+    throw lastError;
+  };
+  const worker = async () => {
+    while (!controller.signal.aborted) {
+      const partNumber = nextPart;
+      nextPart += 1;
+      if (partNumber > expectedParts) return;
+      await uploadOne(partNumber);
+    }
+  };
+
+  try {
+    await Promise.all(Array.from({ length: Math.min(4, expectedParts) }, () => worker()));
+    const status = await getStatus();
+    const uploaded = [...status.uploaded_parts].sort((a, b) => a.part_number - b.part_number);
+    if (uploaded.length !== expectedParts) {
+      throw new ApiError(409, `分片上传未完成（${uploaded.length}/${expectedParts}）`);
+    }
+    options?.onProgress?.(100);
+    options?.onUploadComplete?.();
+    return uploaded.map((part) => ({ part_number: part.part_number, etag: part.etag }));
+  } catch (error) {
+    controller.abort();
+    throw error;
+  } finally {
+    options?.signal?.removeEventListener('abort', abortFromCaller);
+  }
+}
+
 async function uploadTerminalWorkspaceFile(
   wsId: string, file: File, path: string, options?: WorkspaceUploadOptions,
 ): Promise<WorkspaceFile> {
@@ -1465,9 +1593,22 @@ async function uploadTerminalWorkspaceFile(
     `/api/v1/terminal/workspaces/${wsId}/uploads/initiate`,
     { method: 'POST', body: JSON.stringify({ path, filename: file.name, content_type: file.type || 'application/octet-stream', size: file.size }) },
   );
-  let etag: string | null = null;
   try {
-    etag = await putSignedWorkspaceFile(session, file, options);
+    if (session.method === 'MULTIPART') {
+      const parts = await uploadMultipartWorkspaceFile(
+        session,
+        file,
+        (partNumber) => userRequest<MultipartPartSigned>(
+          `/api/v1/terminal/uploads/${session.id}/parts/${partNumber}/sign`, { method: 'POST' },
+        ),
+        () => userRequest<MultipartUploadStatus>(`/api/v1/terminal/uploads/${session.id}`),
+        options,
+      );
+      return await userRequest<WorkspaceFile>(`/api/v1/terminal/uploads/${session.id}/complete`, {
+        method: 'POST', body: JSON.stringify({ parts }),
+      });
+    }
+    const etag = await putSignedWorkspaceFile(session, file, options);
     return await userRequest<WorkspaceFile>(`/api/v1/terminal/uploads/${session.id}/complete`, {
       method: 'POST', body: JSON.stringify({ etag }),
     });
@@ -1493,6 +1634,20 @@ async function uploadAdminWorkspaceFile(
     }),
   });
   try {
+    if (session.method === 'MULTIPART') {
+      const parts = await uploadMultipartWorkspaceFile(
+        session,
+        file,
+        (partNumber) => request<MultipartPartSigned>(
+          `/api/v1/workspace-uploads/${session.id}/parts/${partNumber}/sign`, { method: 'POST' },
+        ),
+        () => request<MultipartUploadStatus>(`/api/v1/workspace-uploads/${session.id}`),
+        options,
+      );
+      return await request<WorkspaceFile>(`/api/v1/workspace-uploads/${session.id}/complete`, {
+        method: 'POST', body: JSON.stringify({ parts }),
+      });
+    }
     const etag = await putSignedWorkspaceFile(session, file, options);
     return await request<WorkspaceFile>(`/api/v1/workspace-uploads/${session.id}/complete`, {
       method: 'POST', body: JSON.stringify({ etag }),

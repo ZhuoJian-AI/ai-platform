@@ -16,6 +16,8 @@ import httpx
 from app.config import settings
 
 OSS_REF_PREFIX = "oss://"
+WORKSPACE_MULTIPART_THRESHOLD_BYTES = 8 * 1024 * 1024
+STORAGE_AUTHORIZATION_SUBJECT = "ai-platform-control-plane"
 
 
 class StorageGatewayError(RuntimeError):
@@ -39,7 +41,10 @@ def _auth_headers() -> dict[str, str]:
     token = settings.storage_project_token.strip()
     if not token:
         raise StorageGatewayError("Storage project token is not configured")
-    return {"Authorization": f"Bearer {token}"}
+    return {
+        "Authorization": f"Bearer {token}",
+        "X-Storage-Subject": STORAGE_AUTHORIZATION_SUBJECT,
+    }
 
 
 def _gateway_url(path: str) -> str:
@@ -127,25 +132,138 @@ async def upload_skill_archive(raw: bytes, *, organization_id: str, package_hash
 
 
 async def sign_browser_upload(*, filename: str, content_type: str, size_bytes: int) -> dict:
-    """Return a short-lived browser PUT URL without exposing gateway credentials."""
+    """Create a browser upload policy or multipart session without exposing credentials."""
     if size_bytes <= 0 or size_bytes > settings.workspace_max_file_bytes:
         raise StorageGatewayError("Object size is outside the configured workspace limit")
     try:
         async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
+            path = (
+                "/v1/multipart/initiate"
+                if size_bytes >= WORKSPACE_MULTIPART_THRESHOLD_BYTES
+                else "/v1/uploads/sign"
+            )
             response = await client.post(
-                _gateway_url("/v1/uploads/sign"),
+                _gateway_url(path),
                 headers=_auth_headers(),
-                json={"filename": filename, "content_type": content_type, "size_bytes": size_bytes},
+                json={
+                    "filename": filename,
+                    "content_type": content_type,
+                    "size_bytes": size_bytes,
+                    **(
+                        {"part_size_bytes": 4 * 1024 * 1024, "force_multipart": True}
+                        if path == "/v1/multipart/initiate"
+                        else {}
+                    ),
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if path == "/v1/multipart/initiate":
+                return {
+                    "method": "MULTIPART",
+                    "object_key": str(payload["object_key"]),
+                    "gateway_session_id": str(payload["session_id"]),
+                    "part_size": int(payload["part_size"]),
+                    "expected_parts": int(payload["expected_parts"]),
+                    "expires_at": str(payload["expires_at"]),
+                }
+            return {
+                "method": "PUT",
+                "url": str(payload["url"]),
+                "headers": {str(k): str(v) for k, v in (payload.get("headers") or {}).items()},
+                "object_key": str(payload["object_key"]),
+                "expires_in": int(payload.get("expires_in") or 300),
+            }
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("OSS upload signing failed; check token limit and CORS") from exc
+
+
+async def sign_multipart_part(gateway_session_id: str, part_number: int) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
+            response = await client.post(
+                _gateway_url(f"/v1/multipart/{gateway_session_id}/parts/{part_number}/sign"),
+                headers=_auth_headers(),
             )
             response.raise_for_status()
             payload = response.json()
             return {
+                "method": "PUT",
                 "url": str(payload["url"]),
-                "headers": {str(k): str(v) for k, v in (payload.get("headers") or {}).items()},
-                "object_key": str(payload["object_key"]),
+                "headers": {},
+                "part_number": int(payload["part_number"]),
+                "expires_in": int(payload.get("expires_in") or 120),
             }
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
-        raise StorageGatewayError("OSS upload signing failed; check token limit and CORS") from exc
+        raise StorageGatewayError("OSS multipart part signing failed") from exc
+
+
+async def get_multipart_status(gateway_session_id: str) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
+            response = await client.get(
+                _gateway_url(f"/v1/multipart/{gateway_session_id}"), headers=_auth_headers(),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return {
+                "status": str(payload["status"]),
+                "part_size": int(payload["part_size"]),
+                "expected_parts": int(payload["expected_parts"]),
+                "uploaded_parts": [
+                    {
+                        "part_number": int(part["part_number"]),
+                        "etag": str(part["etag"]),
+                        "size": int(part["size"]),
+                    }
+                    for part in payload.get("uploaded_parts") or []
+                ],
+                "expires_at": str(payload["expires_at"]),
+            }
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("OSS multipart status failed") from exc
+
+
+async def complete_multipart_upload(gateway_session_id: str, parts: list[dict]) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
+            response = await client.post(
+                _gateway_url(f"/v1/multipart/{gateway_session_id}/complete"),
+                headers=_auth_headers(),
+                json={"parts": parts},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return {"status": str(payload["status"]), "etag": str(payload.get("etag") or "")}
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("OSS multipart completion failed") from exc
+
+
+async def abort_multipart_upload(gateway_session_id: str) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
+            response = await client.delete(
+                _gateway_url(f"/v1/multipart/{gateway_session_id}"), headers=_auth_headers(),
+            )
+            if response.status_code not in {404, 410}:
+                response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise StorageGatewayError("OSS multipart abort failed") from exc
+
+
+async def finalize_policy_upload(object_key: str) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
+            response = await client.post(
+                _gateway_url("/v2/uploads/finalize"),
+                headers=_auth_headers(),
+                json={"object_key": object_key},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return {"status": str(payload["status"]), "etag": str(payload.get("etag") or "")}
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("OSS upload finalization failed") from exc
 
 
 async def sign_service_upload(*, filename: str, content_type: str, size_bytes: int, max_bytes: int) -> dict:

@@ -91,6 +91,13 @@ async def initiate_direct_upload(
         )
     except storage_gateway_service.StorageGatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    upload_meta = {
+        "transport": str(signed.get("method") or "PUT").lower(),
+        "headers": dict(signed.get("headers") or {}),
+        "gateway_session_id": signed.get("gateway_session_id"),
+        "part_size": signed.get("part_size"),
+        "expected_parts": signed.get("expected_parts"),
+    }
     session = WorkspaceUploadSession(
         organization_id=cu.organization_id,
         workspace_id=ws.id,
@@ -100,8 +107,8 @@ async def initiate_direct_upload(
         content_type=data.content_type,
         expected_size=data.size,
         content_ref=f"oss://{signed['object_key']}",
-        upload_url=signed["url"],
-        upload_headers=signed["headers"],
+        upload_url=signed.get("url"),
+        upload_headers=upload_meta,
         status="pending",
         expires_at=datetime.now(UTC) + timedelta(seconds=settings.workspace_upload_session_ttl_seconds),
     )
@@ -128,6 +135,13 @@ async def initiate_admin_direct_upload(
         )
     except storage_gateway_service.StorageGatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    upload_meta = {
+        "transport": str(signed.get("method") or "PUT").lower(),
+        "headers": dict(signed.get("headers") or {}),
+        "gateway_session_id": signed.get("gateway_session_id"),
+        "part_size": signed.get("part_size"),
+        "expected_parts": signed.get("expected_parts"),
+    }
     session = WorkspaceUploadSession(
         organization_id=ws.organization_id,
         workspace_id=ws.id,
@@ -138,8 +152,8 @@ async def initiate_admin_direct_upload(
         content_type=data.content_type,
         expected_size=data.size,
         content_ref=f"oss://{signed['object_key']}",
-        upload_url=signed["url"],
-        upload_headers=signed["headers"],
+        upload_url=signed.get("url"),
+        upload_headers=upload_meta,
         status="pending",
         expires_at=datetime.now(UTC) + timedelta(seconds=settings.workspace_upload_session_ttl_seconds),
     )
@@ -151,7 +165,7 @@ async def initiate_admin_direct_upload(
 
 async def complete_direct_upload(
     db: AsyncSession, session: WorkspaceUploadSession, actor: CurrentUser | CurrentAdmin,
-    *, client_etag: str | None = None,
+    *, client_etag: str | None = None, parts: list[dict] | None = None,
 ) -> WorkspaceFile:
     is_admin = isinstance(actor, CurrentAdmin)
     actor_matches = (
@@ -170,6 +184,16 @@ async def complete_direct_upload(
         raise HTTPException(status_code=404, detail="工作空间不存在")
     if not is_admin:
         await workspace_permission_service.assert_can_create(db, ws, actor)
+    transport = str((session.upload_headers or {}).get("transport") or "put")
+    try:
+        if transport == "multipart":
+            gateway_session_id = str((session.upload_headers or {}).get("gateway_session_id") or "")
+            if not gateway_session_id or not parts:
+                raise HTTPException(status_code=422, detail="分片上传缺少完整回执")
+            result = await storage_gateway_service.complete_multipart_upload(gateway_session_id, parts)
+            client_etag = str(result.get("etag") or client_etag or "")
+    except storage_gateway_service.StorageGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     try:
         actual = await storage_gateway_service.inspect_object(str(session.content_ref))
     except storage_gateway_service.StorageGatewayError as exc:
@@ -234,7 +258,14 @@ async def cancel_upload(
         raise HTTPException(status_code=404, detail="上传会话不存在")
     if session.status == "completed":
         raise HTTPException(status_code=409, detail="已完成的上传不能取消")
-    if session.content_ref:
+    upload_meta = dict(session.upload_headers or {})
+    gateway_session_id = str(upload_meta.get("gateway_session_id") or "")
+    if upload_meta.get("transport") == "multipart" and gateway_session_id:
+        try:
+            await storage_gateway_service.abort_multipart_upload(gateway_session_id)
+        except storage_gateway_service.StorageGatewayError:
+            pass
+    elif session.content_ref:
         try:
             await storage_gateway_service.delete_object(session.content_ref)
         except storage_gateway_service.StorageGatewayError:
@@ -243,6 +274,43 @@ async def cancel_upload(
     session.upload_url = None
     session.upload_headers = {}
     await db.flush()
+
+
+def _assert_upload_actor(session: WorkspaceUploadSession, actor: CurrentUser | CurrentAdmin) -> None:
+    is_admin = isinstance(actor, CurrentAdmin)
+    actor_matches = session.admin_id == actor.id if is_admin else str(session.user_id or "") == str(actor.id)
+    if not actor_matches:
+        raise HTTPException(status_code=404, detail="上传会话不存在")
+
+
+def _multipart_gateway_session_id(session: WorkspaceUploadSession) -> str:
+    upload_meta = dict(session.upload_headers or {})
+    gateway_session_id = str(upload_meta.get("gateway_session_id") or "")
+    if upload_meta.get("transport") != "multipart" or not gateway_session_id:
+        raise HTTPException(status_code=409, detail="这不是分片上传会话")
+    return gateway_session_id
+
+
+async def sign_upload_part(
+    session: WorkspaceUploadSession, actor: CurrentUser | CurrentAdmin, part_number: int,
+) -> dict:
+    _assert_upload_actor(session, actor)
+    gateway_session_id = _multipart_gateway_session_id(session)
+    try:
+        return await storage_gateway_service.sign_multipart_part(gateway_session_id, part_number)
+    except storage_gateway_service.StorageGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+async def multipart_upload_status(
+    session: WorkspaceUploadSession, actor: CurrentUser | CurrentAdmin,
+) -> dict:
+    _assert_upload_actor(session, actor)
+    gateway_session_id = _multipart_gateway_session_id(session)
+    try:
+        return await storage_gateway_service.get_multipart_status(gateway_session_id)
+    except storage_gateway_service.StorageGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 async def list_versions(db: AsyncSession, file: WorkspaceFile) -> list[WorkspaceFileVersion]:

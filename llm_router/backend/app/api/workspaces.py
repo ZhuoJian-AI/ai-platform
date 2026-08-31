@@ -49,6 +49,8 @@ from app.schemas.workspace import (
     WorkspaceUpdate,
     WorkspaceUploadComplete,
     WorkspaceUploadInitiate,
+    WorkspaceUploadMultipartStatus,
+    WorkspaceUploadPartSigned,
     WorkspaceUploadSessionRead,
 )
 from app.services import storage_gateway_service, workspace_governance_service, workspace_pdf_preview_service
@@ -243,8 +245,14 @@ async def initiate_admin_upload_endpoint(
         raise HTTPException(status_code=404, detail="Workspace not found")
     assert_org_write_access(auth, ws.organization_id)
     session = await workspace_governance_service.initiate_admin_direct_upload(db, ws, auth, data)
+    upload_meta = dict(session.upload_headers or {})
     return WorkspaceUploadSessionRead(
-        id=session.id, url=str(session.upload_url), headers=dict(session.upload_headers or {}),
+        id=session.id,
+        method=str(upload_meta.get("transport") or "put").upper(),
+        url=str(session.upload_url) if session.upload_url else None,
+        headers=dict(upload_meta.get("headers") or {}),
+        part_size=upload_meta.get("part_size"),
+        expected_parts=upload_meta.get("expected_parts"),
         expires_at=session.expires_at, max_file_bytes=settings.workspace_max_file_bytes,
     )
 
@@ -259,11 +267,43 @@ async def complete_admin_upload_endpoint(
         raise HTTPException(status_code=404, detail="上传会话不存在")
     assert_org_write_access(auth, session.organization_id)
     file = await workspace_governance_service.complete_direct_upload(
-        db, session, auth, client_etag=data.etag,
+        db,
+        session,
+        auth,
+        client_etag=data.etag,
+        parts=[part.model_dump() for part in data.parts],
     )
     await db.commit()
     background_tasks.add_task(workspace_pdf_preview_service.warm_office_preview, str(file.id))
     return file
+
+
+@router.get("/workspace-uploads/{session_id}", response_model=WorkspaceUploadMultipartStatus)
+async def status_admin_upload_endpoint(
+    session_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+):
+    session = await db.get(WorkspaceUploadSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="上传会话不存在")
+    assert_org_write_access(auth, session.organization_id)
+    return await workspace_governance_service.multipart_upload_status(session, auth)
+
+
+@router.post(
+    "/workspace-uploads/{session_id}/parts/{part_number}/sign",
+    response_model=WorkspaceUploadPartSigned,
+)
+async def sign_admin_upload_part_endpoint(
+    session_id: UUID,
+    part_number: int,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    session = await db.get(WorkspaceUploadSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="上传会话不存在")
+    assert_org_write_access(auth, session.organization_id)
+    return await workspace_governance_service.sign_upload_part(session, auth, part_number)
 
 
 @router.delete("/workspace-uploads/{session_id}", status_code=204)

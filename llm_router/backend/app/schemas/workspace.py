@@ -178,14 +178,39 @@ class WorkspaceUploadInitiate(BaseModel):
 class WorkspaceUploadSessionRead(BaseModel):
     id: UUID
     method: str = "PUT"
-    url: str
+    url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
+    fields: dict[str, str] = Field(default_factory=dict)
+    part_size: int | None = None
+    expected_parts: int | None = None
     expires_at: datetime
     max_file_bytes: int
 
 
+class WorkspaceUploadPartReceipt(BaseModel):
+    part_number: int = Field(..., ge=1, le=10_000)
+    etag: str = Field(..., min_length=1, max_length=256)
+
+
 class WorkspaceUploadComplete(BaseModel):
     etag: str | None = Field(None, max_length=256)
+    parts: list[WorkspaceUploadPartReceipt] = Field(default_factory=list, max_length=10_000)
+
+
+class WorkspaceUploadPartSigned(BaseModel):
+    part_number: int
+    method: str = "PUT"
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    expires_in: int
+
+
+class WorkspaceUploadMultipartStatus(BaseModel):
+    status: str
+    part_size: int
+    expected_parts: int
+    uploaded_parts: list[dict] = Field(default_factory=list)
+    expires_at: datetime
 
 
 class WorkspaceFileVersionRead(BaseModel):
