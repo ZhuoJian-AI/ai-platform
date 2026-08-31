@@ -122,7 +122,7 @@ export default function OriginalFilePreview({
 
   if (loading || remoteLoading) return <LoadingState label="正在从对象存储读取原文件…" />;
 
-  const previewUrl = directUrl || objectUrl;
+  const previewUrl = needsRemoteBlob ? objectUrl : (directUrl || objectUrl);
   if ((extension === 'pdf' || effectiveMime === 'application/pdf') && previewUrl) {
     return <iframe title={filename} src={previewUrl} style={frameStyle} />;
   }
