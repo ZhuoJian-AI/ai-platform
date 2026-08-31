@@ -33,6 +33,17 @@ from app.services.storage_lifecycle_service import restore
 from app.utils.workspace_presentation import presentation_dict
 
 
+def _validate_direct_upload_size(size: int) -> None:
+    """Validate a browser-to-object-storage upload.
+
+    The proxy/direct threshold is a client-side routing preference, not a
+    protocol constraint. Accepting small direct uploads keeps clients working
+    when their configured thresholds differ from the server.
+    """
+    if size > settings.workspace_max_file_bytes:
+        raise HTTPException(status_code=413, detail="文件超过 100MB 上限")
+
+
 async def audit(
     db: AsyncSession,
     ws: Workspace,
@@ -70,10 +81,7 @@ async def initiate_direct_upload(
         raise HTTPException(status_code=503, detail="新版上传链路已由部署级开关暂时关闭")
     if not settings.workspace_object_storage_configured:
         raise HTTPException(status_code=503, detail="大文件上传要求已配置对象存储")
-    if data.size <= settings.workspace_proxy_upload_max_bytes:
-        raise HTTPException(status_code=422, detail="文件低于直传阈值，请使用普通上传接口")
-    if data.size > settings.workspace_max_file_bytes:
-        raise HTTPException(status_code=413, detail="文件超过 100MB 上限")
+    _validate_direct_upload_size(data.size)
     path = workspace_service._normalize_path(data.path)
     if not path:
         raise HTTPException(status_code=422, detail="文件路径不能为空")
@@ -110,10 +118,7 @@ async def initiate_admin_direct_upload(
         raise HTTPException(status_code=503, detail="新版上传链路已由部署级开关暂时关闭")
     if not settings.workspace_object_storage_configured:
         raise HTTPException(status_code=503, detail="大文件上传要求已配置对象存储")
-    if data.size <= settings.workspace_proxy_upload_max_bytes:
-        raise HTTPException(status_code=422, detail="文件低于直传阈值，请使用普通上传接口")
-    if data.size > settings.workspace_max_file_bytes:
-        raise HTTPException(status_code=413, detail="文件超过 100MB 上限")
+    _validate_direct_upload_size(data.size)
     path = workspace_service._normalize_path(data.path)
     if not path:
         raise HTTPException(status_code=422, detail="文件路径不能为空")

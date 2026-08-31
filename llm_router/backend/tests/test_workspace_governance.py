@@ -21,6 +21,19 @@ from app.services import (
 )
 
 
+def test_direct_upload_accepts_file_below_proxy_threshold(monkeypatch):
+    """Client/server routing-threshold drift must not reject an OSS upload."""
+    monkeypatch.setattr(settings, "workspace_proxy_upload_max_bytes", 10 * 1024 * 1024)
+    workspace_governance_service._validate_direct_upload_size(2 * 1024 * 1024)
+
+
+def test_direct_upload_still_rejects_file_over_workspace_limit(monkeypatch):
+    monkeypatch.setattr(settings, "workspace_max_file_bytes", 100 * 1024 * 1024)
+    with pytest.raises(HTTPException) as exc:
+        workspace_governance_service._validate_direct_upload_size(100 * 1024 * 1024 + 1)
+    assert exc.value.status_code == 413
+
+
 async def _tenant(db_session):
     org = Organization(name="Workspace Org", slug=f"workspace-{uuid4().hex[:8]}")
     foreign_org = Organization(name="Foreign Org", slug=f"foreign-{uuid4().hex[:8]}")
