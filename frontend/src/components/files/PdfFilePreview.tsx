@@ -175,8 +175,6 @@ function PdfPageCanvas({
       const viewport = page.getViewport({ scale: fitScale * zoom });
       const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
       const canvas = canvasRef.current;
-      const context = canvas.getContext('2d', { alpha: false });
-      if (!context) throw new Error('浏览器无法创建 PDF 画布');
       canvas.width = Math.floor(viewport.width * pixelRatio);
       canvas.height = Math.floor(viewport.height * pixelRatio);
       canvas.style.width = `${Math.floor(viewport.width)}px`;
@@ -184,7 +182,6 @@ function PdfPageCanvas({
       renderTaskRef.current?.cancel();
       const task = page.render({
         canvas,
-        canvasContext: context,
         viewport,
         transform: pixelRatio === 1 ? undefined : [pixelRatio, 0, 0, pixelRatio, 0, 0],
       });
