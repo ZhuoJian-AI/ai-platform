@@ -34,6 +34,16 @@ try {
     type: 'zhuojian:context', version: 1, application_slug: 'sample-review', selection: [],
   }, 'sample-review'), null);
 
+  const applicationViewSource = await readFile(
+    resolve('src/pages/terminal/EnterpriseApplicationView.tsx'),
+    'utf8',
+  );
+  assert.match(
+    applicationViewSource,
+    /sandbox="[^"]*allow-modals[^"]*"/,
+    'embedded enterprise applications must be allowed to show confirmation dialogs',
+  );
+
   process.stdout.write('subsystem bridge tests passed\n');
 } finally {
   await rm(tempDirectory, { recursive: true, force: true });

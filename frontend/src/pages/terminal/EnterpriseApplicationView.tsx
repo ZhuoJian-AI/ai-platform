@@ -231,7 +231,7 @@ export default function EnterpriseApplicationView({
             key={frameKey}
             src={launch.url}
             title={activeModule?.name || application.name}
-            sandbox="allow-downloads allow-forms allow-popups allow-same-origin allow-scripts"
+            sandbox="allow-downloads allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
             referrerPolicy="strict-origin"
             onLoad={() => {
               setFrameLoaded(true);
