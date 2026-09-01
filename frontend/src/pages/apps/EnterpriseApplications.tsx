@@ -12,7 +12,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ApiError, connectors, dataInterfaces, enterpriseApplications, roles, skillStore,
   type EnterpriseApplication,
-  type EnterpriseApplicationInput, type EnterpriseApplicationModuleAccess,
+  type EnterpriseApplicationInput,
   type EnterpriseApplicationOperation,
   type EnterpriseApplicationPermission, type EnterpriseApplicationScope,
   type EnterpriseApplicationTarget,
@@ -55,19 +55,7 @@ function slugify(value: string) {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100);
 }
 
-type AppFormValues = EnterpriseApplicationInput & {
-  visibility_mode: 'organization' | 'selected';
-  visible_scopes?: string[];
-};
-
-function grantScopeValue(
-  scopeType: EnterpriseApplicationScope,
-  scopeId: string | null,
-  organizationId?: string,
-) {
-  const prefix = scopeType === 'organization' ? 'org' : scopeType === 'department' ? 'dept' : scopeType;
-  return `${prefix}:${scopeId ?? organizationId ?? ''}`;
-}
+type AppFormValues = EnterpriseApplicationInput;
 
 export default function EnterpriseApplications({ section }: { section: EnterpriseApplicationsSection }) {
   const qc = useQueryClient();
@@ -187,56 +175,9 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   const saveApp = useMutation({
     mutationFn: async (values: AppFormValues) => {
       if (!orgId) throw new Error('请先选择企业');
-      const { visibility_mode, visible_scopes = [], ...applicationInput } = values;
-      let saved: EnterpriseApplication | undefined;
-      try {
-        saved = editing
-          ? await enterpriseApplications.update(editing.id, applicationInput)
-          : await enterpriseApplications.create(orgId, applicationInput);
-
-        const selectedScopes = visibility_mode === 'organization'
-          ? [`org:${orgId}`]
-          : visible_scopes;
-        const desiredViewScopes = new Set(selectedScopes);
-        const currentGrants = editing?.grants ?? saved.grants;
-        const next: Array<{
-          scope_type: EnterpriseApplicationScope;
-          scope_id: string | null;
-          permissions: EnterpriseApplicationPermission[];
-          module_keys?: string[];
-          module_access?: Record<string, EnterpriseApplicationModuleAccess>;
-        }> = currentGrants.flatMap((grant) => {
-          const scope = grantScopeValue(grant.scope_type, grant.scope_id, orgId);
-          const permissions: EnterpriseApplicationPermission[] = grant.permissions.filter(
-            (permission) => permission !== 'view',
-          );
-          if (desiredViewScopes.has(scope)) permissions.unshift('view');
-          return permissions.length ? [{
-            scope_type: grant.scope_type,
-            scope_id: grant.scope_id,
-            permissions,
-            module_keys: grant.module_keys,
-            module_access: grant.module_access,
-          }] : [];
-        });
-        const existingScopes = new Set(currentGrants.map((grant) => (
-          grantScopeValue(grant.scope_type, grant.scope_id, orgId)
-        )));
-        selectedScopes.forEach((scope) => {
-          if (existingScopes.has(scope)) return;
-          const node = scopeInfo(scope);
-          if (!node) throw new Error(`无法识别可见范围：${scope}`);
-          next.push({
-            scope_type: node.type as EnterpriseApplicationScope,
-            scope_id: node.type === 'organization' ? null : node.id,
-            permissions: ['view'],
-          });
-        });
-        return await enterpriseApplications.replaceGrants(saved.id, next);
-      } catch (error) {
-        if (!editing && saved) await enterpriseApplications.delete(saved.id).catch(() => undefined);
-        throw error;
-      }
+      return editing
+        ? enterpriseApplications.update(editing.id, values)
+        : enterpriseApplications.create(orgId, values);
     },
     onSuccess: (saved) => {
       invalidate(); setAppModalOpen(false); setSelectedAppId(saved.id); message.success('企业应用已保存');
@@ -267,23 +208,16 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
     setEditing(null); appForm.resetFields();
     appForm.setFieldsValue({
       display_mode: 'embedded', sort_order: 0, is_active: true, assistant_enabled: true,
-      visibility_mode: 'selected', visible_scopes: [],
     });
     setAppModalOpen(true);
   };
   const openEdit = (row: EnterpriseApplication) => {
     setEditing(row);
-    const viewGrants = row.grants.filter((grant) => grant.permissions.includes('view'));
-    const organizationVisible = viewGrants.some((grant) => grant.scope_type === 'organization');
     appForm.setFieldsValue({
       name: row.name, slug: row.slug, description: row.description, icon_url: row.icon_url,
       entry_url: row.entry_url, display_mode: row.display_mode, sort_order: row.sort_order,
       is_active: row.is_active, assistant_enabled: row.assistant_enabled,
       assistant_prompt: row.assistant_prompt,
-      visibility_mode: organizationVisible ? 'organization' : 'selected',
-      visible_scopes: organizationVisible ? [] : viewGrants.map((grant) => (
-        grantScopeValue(grant.scope_type, grant.scope_id, orgId)
-      )),
     });
     setAppModalOpen(true);
   };
@@ -521,41 +455,11 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
           <Form.Item name="entry_url" label="独立项目入口 URL" rules={[{ required: true }, { type: 'url' }]}><Input prefix={<LinkOutlined />} placeholder="https://business.example.com" /></Form.Item>
           <Form.Item name="icon_url" label="图标 URL" rules={[{ type: 'url', warningOnly: true }]}><Input placeholder="https://.../icon.png" /></Form.Item>
           <Space align="start" style={{ display: 'flex' }}><Form.Item name="display_mode" label="打开方式" style={{ flex: 1 }}><Select options={[{ value: 'embedded', label: '平台内嵌（iframe）' }, { value: 'external', label: '外部打开' }]} /></Form.Item><Form.Item name="sort_order" label="导航排序" style={{ flex: 1 }}><InputNumber style={{ width: '100%' }} /></Form.Item></Space>
-          <Card size="small" title="谁可以看到这个应用" style={{ marginBottom: 18 }}>
-            <Form.Item name="visibility_mode" label="可见范围" rules={[{ required: true }]} style={{ marginBottom: 12 }}>
-              <Select options={[
-                { value: 'selected', label: '指定部门、团队或用户' },
-                { value: 'organization', label: '全企业所有用户' },
-              ]} />
-            </Form.Item>
-            <Form.Item noStyle shouldUpdate={(previous, current) => previous.visibility_mode !== current.visibility_mode}>
-              {({ getFieldValue }) => getFieldValue('visibility_mode') === 'selected' ? (
-                <Form.Item
-                  name="visible_scopes"
-                  label="选择可见对象"
-                  extra="选择部门后，该部门用户登录时会直接在左侧看到此应用；更细的 AI CRUD 权限可在“应用权限”中配置。"
-                  rules={[{
-                    validator: (_, value: string[]) => value?.length
-                      ? Promise.resolve()
-                      : Promise.reject(new Error('请至少选择一个部门、团队或用户')),
-                  }]}
-                >
-                  <TreeSelect
-                    multiple
-                    allowClear
-                    treeData={orgTree}
-                    treeDefaultExpandAll
-                    showSearch
-                    treeNodeFilterProp="title"
-                    loading={treeLoading}
-                    placeholder="例如：爱法贝 / 生产部"
-                  />
-                </Form.Item>
-              ) : (
-                <Alert showIcon type="warning" message="全企业用户都会在左侧看到这个应用。" />
-              )}
-            </Form.Item>
-          </Card>
+          <Alert
+            showIcon type="info" style={{ marginBottom: 18 }}
+            message="登记只负责连接模块系统，不在这里授权员工"
+            description="请在“角色与模块权限”中按业务大模块、子模块、页面和 Action 授权；员工通过一个或多个角色取得权限。"
+          />
           <Space size={32}><Form.Item name="is_active" label="启用应用" valuePropName="checked"><Switch /></Form.Item><Form.Item name="assistant_enabled" label="业务小助手" valuePropName="checked"><Switch /></Form.Item></Space>
         </Form>
       </Modal>

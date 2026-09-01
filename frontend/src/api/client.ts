@@ -1880,6 +1880,12 @@ export interface EnterpriseApplicationManifestDepartment {
   platformDepartmentId?: string | null; matchStatus?: 'matched' | 'unresolved';
 }
 
+export interface EnterpriseApplicationManifestAccessRole {
+  roleKey: string; name: string; description?: string;
+  suggestedDepartmentKey?: string | null;
+  pageKeys: string[]; actionKeys: string[];
+}
+
 export interface EnterpriseApplicationManifestAction {
   actionKey: string; name: string; description?: string;
   operation: EnterpriseApplicationOperation; aiEnabled: boolean;
@@ -1895,6 +1901,7 @@ export interface EnterpriseApplicationManifestPage {
 export interface EnterpriseApplicationManifestModule {
   moduleKey: string; name: string; route: string;
   departments: EnterpriseApplicationManifestDepartment[];
+  accessRoles?: EnterpriseApplicationManifestAccessRole[];
   pages: EnterpriseApplicationManifestPage[];
   actions: EnterpriseApplicationManifestAction[];
 }

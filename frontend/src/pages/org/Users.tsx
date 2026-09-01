@@ -5,6 +5,7 @@ import {
 } from 'antd';
 import { PlusOutlined, DeleteOutlined, EditOutlined, LockOutlined, UserOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { organizations, roles, users } from '../../api/client';
 import type { ManagerScopeGrant, User } from '../../api/client';
 import { ApiError } from '../../api/client';
@@ -14,6 +15,7 @@ import { FinderShell, TitleBar } from '../../components/finder/primitives';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 
 export default function UsersPage() {
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<User | null>(null);
@@ -213,10 +215,11 @@ export default function UsersPage() {
                 : <Typography.Text type="secondary">—</Typography.Text>),
             },
             {
-              title: '操作', width: 230, fixed: 'right',
+              title: '操作', width: 310, fixed: 'right',
               render: (_: unknown, r: User) => (
                 <Space size="small">
                   <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)}>编辑</Button>
+                  <Button size="small" icon={<UserOutlined />} onClick={() => navigate(`/enterprise-apps/permissions?user=${r.id}`)}>访问预览</Button>
                   <Button size="small" icon={<LockOutlined />} onClick={() => openReset(r)}>重置密码</Button>
                   <Button size="small" danger icon={<DeleteOutlined />} onClick={() => setConfirm({ id: r.id, name: r.username })}>删除</Button>
                 </Space>

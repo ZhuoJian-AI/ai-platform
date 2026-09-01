@@ -236,7 +236,27 @@ async def update_department(db: AsyncSession, dept: Department, data: Department
 
 async def soft_delete_department(db: AsyncSession, dept: Department) -> None:
     from datetime import datetime
-    dept.deleted_at = datetime.now(UTC)
+
+    from sqlalchemy import delete, update
+
+    from app.models.enterprise_application import EnterpriseApplicationGrant
+    from app.models.role import RoleDataDepartment
+
+    deleted_at = datetime.now(UTC)
+    dept.deleted_at = deleted_at
+    # Deleted organization nodes must not leave opaque UUID grants in the
+    # administrator UI or continue widening a legacy application's access.
+    await db.execute(
+        update(EnterpriseApplicationGrant)
+        .where(
+            EnterpriseApplicationGrant.organization_id == dept.organization_id,
+            EnterpriseApplicationGrant.scope_type == "department",
+            EnterpriseApplicationGrant.scope_id == str(dept.id),
+            EnterpriseApplicationGrant.deleted_at.is_(None),
+        )
+        .values(deleted_at=deleted_at)
+    )
+    await db.execute(delete(RoleDataDepartment).where(RoleDataDepartment.department_id == dept.id))
     await soft_delete_node_workspace(db, dept.organization_id, "department", str(dept.id))
     await soft_delete_node_memory(db, dept.organization_id, "department", str(dept.id))
     await db.flush()

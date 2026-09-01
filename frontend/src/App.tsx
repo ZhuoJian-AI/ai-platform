@@ -48,6 +48,7 @@ import { BRAND_TITLES, useBrandTitle } from './branding/brand';
 import PlatformExtensions from './pages/platform/PlatformExtensions';
 import EnterpriseApplications from './pages/apps/EnterpriseApplications';
 import EnterpriseApplicationDetail from './pages/apps/EnterpriseApplicationDetail';
+import EnterpriseAccessControl from './pages/apps/EnterpriseAccessControl';
 
 interface MenuEntry {
   path: string;
@@ -71,20 +72,29 @@ interface Subsystem {
 /** 一级菜单：ai_infra 平台五个子系统。built 标识是否已实现页面。 */
 const SUBSYSTEMS: Subsystem[] = [
   {
-    key: 'org_mgmt', label: '组织管理', icon: <ApartmentOutlined />, built: true,
+    key: 'org_mgmt', label: '企业管理', icon: <ApartmentOutlined />, built: true,
     menu: [
       { path: '/org/structure', label: '组织架构', icon: <ApartmentOutlined /> },
+      { path: '/enterprise-apps', label: '企业模块', icon: <AppstoreOutlined /> },
+      { path: '/enterprise-apps/permissions', label: '角色与模块权限', icon: <SafetyOutlined /> },
+      { path: '/org/users', label: '员工与角色', icon: <UserOutlined /> },
+      { path: '/org/roles', label: '角色与数据范围', icon: <TeamOutlined /> },
+      { path: '/enterprise-apps/navigation', label: '员工导航', icon: <SettingOutlined /> },
+      { path: '/enterprise-apps/assistant', label: '业务助手', icon: <LinkOutlined /> },
       { path: '/org/admins', label: '管理员管理', icon: <TeamOutlined />, superOnly: true },
-      { path: '/org/users', label: '用户管理', icon: <UserOutlined /> },
-      { path: '/org/roles', label: '角色与权限', icon: <SafetyOutlined /> },
       { path: '/org/voices', label: '企业音色库', icon: <AudioOutlined /> },
       { path: '/org/contact', label: '联系方式', icon: <PhoneOutlined /> },
     ],
     routes: [
       { path: '/org/structure', element: <Organizations /> },
-      { path: '/org/admins', element: <AdminManagement /> },
       { path: '/org/users', element: <UsersPage /> },
       { path: '/org/roles', element: <RolesPage /> },
+      { path: '/enterprise-apps', element: <EnterpriseApplications section="applications" /> },
+      { path: '/enterprise-apps/:appId', element: <EnterpriseApplicationDetail /> },
+      { path: '/enterprise-apps/navigation', element: <EnterpriseApplications section="navigation" /> },
+      { path: '/enterprise-apps/permissions', element: <EnterpriseAccessControl /> },
+      { path: '/enterprise-apps/assistant', element: <EnterpriseApplications section="assistant" /> },
+      { path: '/org/admins', element: <AdminManagement /> },
       { path: '/org/voices', element: <VoicesPage /> },
       { path: '/org/contact', element: <ContactInfo /> },
     ],
@@ -135,22 +145,6 @@ const SUBSYSTEMS: Subsystem[] = [
       { path: '/tools/data-interfaces', element: <DataInterfaces /> },
       { path: '/tools/skills', element: <Skills /> },
       { path: '/tools/ontology', element: <OntologyPage /> },
-    ],
-  },
-  {
-    key: 'enterprise_apps', label: '企业应用', icon: <AppstoreOutlined />, built: true,
-    menu: [
-      { path: '/enterprise-apps', label: '应用管理', icon: <AppstoreOutlined /> },
-      { path: '/enterprise-apps/navigation', label: '导航配置', icon: <SettingOutlined /> },
-      { path: '/enterprise-apps/permissions', label: '应用权限', icon: <SafetyOutlined /> },
-      { path: '/enterprise-apps/assistant', label: '业务助手', icon: <LinkOutlined /> },
-    ],
-    routes: [
-      { path: '/enterprise-apps', element: <EnterpriseApplications section="applications" /> },
-      { path: '/enterprise-apps/:appId', element: <EnterpriseApplicationDetail /> },
-      { path: '/enterprise-apps/navigation', element: <EnterpriseApplications section="navigation" /> },
-      { path: '/enterprise-apps/permissions', element: <EnterpriseApplications section="permissions" /> },
-      { path: '/enterprise-apps/assistant', element: <EnterpriseApplications section="assistant" /> },
     ],
   },
   {

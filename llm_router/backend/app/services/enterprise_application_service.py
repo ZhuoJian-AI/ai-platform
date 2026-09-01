@@ -43,6 +43,7 @@ def _application_options():
     return (
         selectinload(EnterpriseApplication.grants),
         selectinload(EnterpriseApplication.tool_bindings),
+        selectinload(EnterpriseApplication.integration),
         with_loader_criteria(
             EnterpriseApplicationGrant,
             EnterpriseApplicationGrant.deleted_at.is_(None),
@@ -54,6 +55,34 @@ def _application_options():
             include_aliases=True,
         ),
     )
+
+
+def _uses_role_authorization(row: EnterpriseApplication) -> bool:
+    """Protocol 2.4 makes roles the only native authorization subject.
+
+    Older integrations retain their historical department/team/user grants until an
+    administrator upgrades the subsystem manifest and converts those grants.
+    """
+    integration = row.integration
+    if integration is None or not isinstance(integration.manifest, dict):
+        return False
+    return str(integration.manifest.get("contractRevision") or "") == "2.4"
+
+
+def _matching_grants(row: EnterpriseApplication, user: CurrentUser):
+    if _uses_role_authorization(row):
+        role_ids = {str(role_id) for role_id in user.role_ids}
+        return [
+            grant for grant in row.grants
+            if grant.deleted_at is None
+            and grant.scope_type == "role"
+            and grant.scope_id in role_ids
+        ]
+    scopes = set(scope_service.effective_scope_set(user))
+    return [
+        grant for grant in row.grants
+        if grant.deleted_at is None and (grant.scope_type, grant.scope_id or None) in scopes
+    ]
 
 
 async def create_application(
@@ -126,6 +155,11 @@ async def replace_grants(
     row: EnterpriseApplication,
     grants: list[EnterpriseApplicationGrantInput],
 ) -> EnterpriseApplication:
+    if _uses_role_authorization(row) and any(item.scope_type != "role" for item in grants):
+        raise HTTPException(
+            status_code=422,
+            detail="Contract 2.4 native applications can only be granted to roles",
+        )
     normalized: dict[tuple[str, str | None], tuple[list[str], list[str], dict]] = {}
     for item in grants:
         sid = await skill_scope_service.validate_scope_target(
@@ -438,27 +472,21 @@ async def get_application_overview(db: AsyncSession, row: EnterpriseApplication)
 def effective_permissions(row: EnterpriseApplication, user: CurrentUser) -> set[str]:
     if not row.is_active or row.deleted_at is not None:
         return set()
-    scopes = set(scope_service.effective_scope_set(user))
     permissions: set[str] = set()
-    for grant in row.grants:
-        if grant.deleted_at is None and (grant.scope_type, grant.scope_id or None) in scopes:
-            permissions.update(value for value in (grant.permissions or []) if value in PERMISSIONS)
-            if any(
-                "view" in (access.get("permissions") or [])
-                for access in (grant.module_access or {}).values()
-                if isinstance(access, dict)
-            ):
-                permissions.add("view")
+    for grant in _matching_grants(row, user):
+        permissions.update(value for value in (grant.permissions or []) if value in PERMISSIONS)
+        if any(
+            "view" in (access.get("permissions") or [])
+            for access in (grant.module_access or {}).values()
+            if isinstance(access, dict)
+        ):
+            permissions.add("view")
     return permissions
 
 
 def effective_module_keys(row: EnterpriseApplication, user: CurrentUser) -> list[str]:
     """Return allowed module keys; an empty list means unrestricted for compatibility."""
-    scopes = set(scope_service.effective_scope_set(user))
-    matching = [
-        grant for grant in row.grants
-        if grant.deleted_at is None and (grant.scope_type, grant.scope_id or None) in scopes
-    ]
+    matching = _matching_grants(row, user)
     if not matching:
         return []
     if any(not (grant.module_keys or []) and not (grant.module_access or {}) for grant in matching):
@@ -509,11 +537,8 @@ def effective_module_permissions(
     """Resolve v2 per-module permissions while preserving v1 grants."""
     if not row.is_active or row.deleted_at is not None:
         return set()
-    scopes = set(scope_service.effective_scope_set(user))
     permissions: set[str] = set()
-    for grant in row.grants:
-        if grant.deleted_at is not None or (grant.scope_type, grant.scope_id or None) not in scopes:
-            continue
+    for grant in _matching_grants(row, user):
         access = (grant.module_access or {}).get(module_key)
         if isinstance(access, dict):
             permissions.update(value for value in (access.get("permissions") or []) if value in PERMISSIONS)
@@ -532,15 +557,12 @@ def effective_module_claims(
     Legacy grants without structured module access remain unrestricted for compatibility.
     Structured grants are merged across all scopes that apply to the user.
     """
-    scopes = set(scope_service.effective_scope_set(user))
     action_keys: set[str] = set()
     page_access: dict[str, dict[str, set[str]]] = {}
     unrestricted_actions = False
     unrestricted_pages = False
     matched = False
-    for grant in row.grants:
-        if grant.deleted_at is not None or (grant.scope_type, grant.scope_id or None) not in scopes:
-            continue
+    for grant in _matching_grants(row, user):
         access = (grant.module_access or {}).get(module_key)
         if not isinstance(access, dict):
             keys = grant.module_keys or []
@@ -590,11 +612,8 @@ def effective_page_permissions(
         return effective_module_permissions(row, user, module_key)
     if not row.is_active or row.deleted_at is not None:
         return set()
-    scopes = set(scope_service.effective_scope_set(user))
     permissions: set[str] = set()
-    for grant in row.grants:
-        if grant.deleted_at is not None or (grant.scope_type, grant.scope_id or None) not in scopes:
-            continue
+    for grant in _matching_grants(row, user):
         access = (grant.module_access or {}).get(module_key)
         if isinstance(access, dict):
             page_access = access.get("page_access")
@@ -622,10 +641,7 @@ def action_allowed_for_user(
     """Require one matching grant to authorize the page, operation and action catalog entry."""
     if not row.is_active or row.deleted_at is not None:
         return False
-    scopes = set(scope_service.effective_scope_set(user))
-    for grant in row.grants:
-        if grant.deleted_at is not None or (grant.scope_type, grant.scope_id or None) not in scopes:
-            continue
+    for grant in _matching_grants(row, user):
         access = (grant.module_access or {}).get(module_key)
         if not isinstance(access, dict):
             keys = grant.module_keys or []

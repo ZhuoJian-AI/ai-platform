@@ -100,6 +100,67 @@ def test_protocol_v22_validates_department_page_and_action_limits():
         )
 
 
+def test_protocol_v24_separates_department_responsibility_from_access_roles():
+    manifest = {
+        "protocol": "zhuojian-subsystem",
+        "version": 2,
+        "contractRevision": "2.4",
+        "enterprise": {"key": "aifabei", "name": "爱法贝"},
+        "applicationSlug": "sample-review",
+        "applicationName": "样品评审",
+        "eventsUrl": "/api/integration/events",
+        "eventDeliveriesUrl": "/api/integration/event-deliveries",
+        "auth": {"ssoPath": "/api/integration/sso", "algorithm": "HS256"},
+        "modules": [{
+            "moduleKey": "sample_review",
+            "name": "样品评审",
+            "route": "/sample-review",
+            "departments": [{"key": "design", "name": "设计部", "role": "owner"}],
+            "accessRoles": [{
+                "roleKey": "sample_review.designer",
+                "name": "样品设计负责人",
+                "suggestedDepartmentKey": "design",
+                "pageKeys": ["sample_review.list"],
+                "actionKeys": ["sample_review.query"],
+            }],
+            "pages": [{
+                "pageKey": "sample_review.list",
+                "name": "评审列表",
+                "routePattern": "/sample-review",
+                "queryActionKey": "sample_review.query",
+                "actionKeys": ["sample_review.query"],
+                "contextSchema": {"type": "object"},
+            }],
+            "actions": [{
+                "actionKey": "sample_review.query",
+                "name": "查询评审",
+                "operation": "query",
+                "aiEnabled": True,
+                "requiresConfirmation": False,
+                "inputSchema": {"type": "object"},
+                "resultSchema": {"type": "object"},
+            }],
+        }],
+    }
+    normalized, _, _ = integration_service._validate_manifest_payload(
+        manifest,
+        entry_url="https://sample.example.test/",
+        manifest_url="https://sample.example.test/api/integration/manifest",
+        expected_slug="sample-review",
+    )
+    assert normalized["modules"][0]["departments"][0].get("pageKeys") is None
+    assert normalized["modules"][0]["accessRoles"][0]["roleKey"] == "sample_review.designer"
+
+    manifest["modules"][0]["accessRoles"][0]["actionKeys"] = ["sample_review.delete"]
+    with pytest.raises(ValueError, match="actionKeys must reference module actions"):
+        integration_service._validate_manifest_payload(
+            manifest,
+            entry_url="https://sample.example.test/",
+            manifest_url="https://sample.example.test/api/integration/manifest",
+            expected_slug="sample-review",
+        )
+
+
 async def _organization_tree(db_session):
     org = Organization(name="Tenant Applications", slug=f"apps-{uuid4().hex[:8]}")
     other = Organization(name="Other Tenant", slug=f"other-{uuid4().hex[:8]}")

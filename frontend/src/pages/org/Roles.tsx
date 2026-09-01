@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Button, Checkbox, Form, Input, Modal, Select, Space, Table, Tag, Typography, message } from 'antd';
 import { DeleteOutlined, EditOutlined, PlusOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import { ApiError, organizations, roles, type Role, type RoleDataScope } from '../../api/client';
 import OrgSelect from '../../components/OrgSelect';
 import { FinderShell, TitleBar } from '../../components/finder/primitives';
@@ -16,14 +17,6 @@ const DATA_SCOPE_OPTIONS: { value: RoleDataScope; label: string }[] = [
 ];
 
 const PERMISSION_GROUPS = [
-  { label: '企业应用', options: [
-    { label: '查看企业应用', value: 'enterprise_application.view' },
-    { label: '使用 AI 查询', value: 'enterprise_application.ai_query' },
-    { label: '使用 AI 新增', value: 'enterprise_application.ai_create' },
-    { label: '使用 AI 更新', value: 'enterprise_application.ai_update' },
-    { label: '使用 AI 删除', value: 'enterprise_application.ai_delete' },
-    { label: '使用 AI 审批', value: 'enterprise_application.ai_approve' },
-  ] },
   { label: '语音与全模态', options: [
     { label: '音频转写', value: 'multimodal.audio.transcribe' },
     { label: '音频理解', value: 'multimodal.audio.understand' },
@@ -39,6 +32,7 @@ function slugify(value: string) {
 }
 
 export default function RolesPage() {
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const [form] = Form.useForm();
   const [selectedOrgId, setSelectedOrgId] = useState<string>();
@@ -112,16 +106,16 @@ export default function RolesPage() {
       icon={<SafetyCertificateOutlined />}
       title="角色与数据范围"
       titleExtra={<OrgSelect value={orgId} onChange={setSelectedOrgId} />}
-      extra={<Button type="primary" icon={<PlusOutlined />} disabled={!orgId} onClick={() => {
+      extra={<Space><Button icon={<SafetyCertificateOutlined />} onClick={() => navigate('/enterprise-apps/permissions')}>配置模块权限</Button><Button type="primary" icon={<PlusOutlined />} disabled={!orgId} onClick={() => {
         setEditing(null);
         form.resetFields();
         form.setFieldsValue({ data_scope: 'self', is_active: true, permission_codes: [] });
         setOpen(true);
-      }}>新建角色</Button>}
+      }}>新建角色</Button></Space>}
     />
     <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
       <Typography.Paragraph type="secondary">
-        用户只归属一个部门，但可拥有多个角色；角色权限和数据范围会取并集，且始终受企业边界限制。
+        用户只归属一个部门，但可拥有多个角色；本页只配置平台功能与数据范围。业务大模块、页面和 AI Action 请在“角色与模块权限”配置。
       </Typography.Paragraph>
       <Table dataSource={roleList} rowKey="id" loading={isLoading} columns={[
         { title: '角色', render: (_: unknown, role: Role) => <Space>
@@ -172,7 +166,7 @@ export default function RolesPage() {
           label="指定部门"
           rules={[{ required: true, message: '请至少选择一个部门' }]}
         ><Select mode="multiple" options={departmentOptions} /></Form.Item>}
-        <Form.Item name="permission_codes" label="功能权限">
+        <Form.Item name="permission_codes" label="平台功能权限" extra="这里不包含企业模块权限，避免同一权限在两个入口重复配置。">
           <Checkbox.Group options={PERMISSION_GROUPS.flatMap(group => group.options.map(option => ({
             ...option, label: `${group.label} · ${option.label}`,
           })))} />

@@ -87,7 +87,7 @@ def _validate_manifest_payload(
     normalized_modules: list[dict] = []
     contract_revision = str(payload.get("contractRevision") or "2.0") if version == 2 else "1.0"
     if version == 2:
-        if contract_revision not in {"2.0", "2.1", "2.2", "2.3"}:
+        if contract_revision not in {"2.0", "2.1", "2.2", "2.3", "2.4"}:
             raise ValueError("Unsupported subsystem contractRevision")
         if not modules:
             raise ValueError("Manifest modules must not be empty for protocol v2")
@@ -190,7 +190,7 @@ def _validate_manifest_payload(
             })
         normalized_pages: list[dict] = []
         pages = module.get("pages") if isinstance(module.get("pages"), list) else []
-        if contract_revision in {"2.1", "2.2", "2.3"} and not pages:
+        if contract_revision in {"2.1", "2.2", "2.3", "2.4"} and not pages:
             raise ValueError(f"Module '{key}' must declare pages for contractRevision {contract_revision}")
         module_action_keys = {item["actionKey"] for item in normalized_actions}
         for page in pages:
@@ -267,10 +267,65 @@ def _validate_manifest_payload(
                 raise ValueError(
                     f"Module '{key}' department pageKeys must reference pages in the same module"
                 )
-            normalized_departments.append({
-                **department,
-                "actionKeys": list(dict.fromkeys(department_action_keys)),
-                "pageKeys": list(dict.fromkeys(department_page_keys)),
+            normalized_department = dict(department)
+            if contract_revision == "2.4":
+                # v2.4 departments describe delivery/data responsibility only.
+                # Access hints moved to accessRoles and must never leak back into
+                # the platform as implicit department grants.
+                normalized_department.pop("actionKeys", None)
+                normalized_department.pop("pageKeys", None)
+            else:
+                normalized_department["actionKeys"] = list(dict.fromkeys(department_action_keys))
+                normalized_department["pageKeys"] = list(dict.fromkeys(department_page_keys))
+            normalized_departments.append(normalized_department)
+        access_roles = module.get("accessRoles") if isinstance(module.get("accessRoles"), list) else []
+        normalized_access_roles: list[dict] = []
+        if contract_revision == "2.4" and not access_roles:
+            raise ValueError(f"Module '{key}' must declare accessRoles for contractRevision 2.4")
+        role_keys: set[str] = set()
+        module_page_keys = {item["pageKey"] for item in normalized_pages}
+        department_key_set = {
+            str(item.get("key")) for item in normalized_departments if isinstance(item, dict)
+        }
+        for access_role in access_roles:
+            if not isinstance(access_role, dict):
+                raise ValueError(f"Module '{key}' accessRoles must contain objects")
+            role_key = str(access_role.get("roleKey") or "").strip()
+            if (
+                not role_key or len(role_key) > 120
+                or not STABLE_KEY_RE.fullmatch(role_key) or role_key in role_keys
+            ):
+                raise ValueError(f"Module '{key}' access role keys must be unique stable identifiers")
+            role_keys.add(role_key)
+            role_name = str(access_role.get("name") or "").strip()
+            if not role_name:
+                raise ValueError(f"Module '{key}' access role '{role_key}' must declare name")
+            suggested_department_key = access_role.get("suggestedDepartmentKey")
+            if suggested_department_key is not None and str(suggested_department_key) not in department_key_set:
+                raise ValueError(
+                    f"Module '{key}' access role '{role_key}' references an unknown department"
+                )
+            role_page_keys = access_role.get("pageKeys")
+            role_action_keys = access_role.get("actionKeys")
+            if not isinstance(role_page_keys, list) or any(
+                not isinstance(item, str) or item not in module_page_keys for item in role_page_keys
+            ):
+                raise ValueError(
+                    f"Module '{key}' access role '{role_key}' pageKeys must reference module pages"
+                )
+            if not isinstance(role_action_keys, list) or any(
+                not isinstance(item, str) or item not in module_action_keys for item in role_action_keys
+            ):
+                raise ValueError(
+                    f"Module '{key}' access role '{role_key}' actionKeys must reference module actions"
+                )
+            normalized_access_roles.append({
+                **access_role,
+                "roleKey": role_key,
+                "name": role_name[:120],
+                "suggestedDepartmentKey": suggested_department_key,
+                "pageKeys": list(dict.fromkeys(role_page_keys)),
+                "actionKeys": list(dict.fromkeys(role_action_keys)),
             })
         normalized_modules.append({
             **module,
@@ -280,6 +335,7 @@ def _validate_manifest_payload(
             "departments": normalized_departments,
             "pages": normalized_pages,
             "actions": normalized_actions,
+            "accessRoles": normalized_access_roles,
         })
     if version == 1:
         event_feed = payload.get("eventFeed")
@@ -290,7 +346,7 @@ def _validate_manifest_payload(
         if not payload.get("eventsUrl"):
             raise ValueError("Manifest eventsUrl is required for protocol v2")
         events_url = urljoin(manifest_url, str(payload["eventsUrl"]))
-        if contract_revision in {"2.1", "2.2", "2.3"}:
+        if contract_revision in {"2.1", "2.2", "2.3", "2.4"}:
             deliveries_path = payload.get("eventDeliveriesUrl")
             if deliveries_path != "/api/integration/event-deliveries":
                 raise ValueError("Manifest eventDeliveriesUrl must be '/api/integration/event-deliveries'")
@@ -320,7 +376,10 @@ def _validate_manifest(application: EnterpriseApplication, payload: object, mani
 
 async def _match_departments(db: AsyncSession, organization_id: UUID | str, manifest: dict) -> None:
     departments = list((await db.execute(
-        select(Department).where(Department.organization_id == UUID(str(organization_id)))
+        select(Department).where(
+            Department.organization_id == UUID(str(organization_id)),
+            Department.deleted_at.is_(None),
+        )
     )).scalars().all())
     by_slug = {item.slug: item for item in departments}
     for module in manifest.get("modules") or []:

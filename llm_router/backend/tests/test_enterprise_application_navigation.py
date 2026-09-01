@@ -15,6 +15,7 @@ def _current_user() -> CurrentUser:
         organization_id="organization-1",
         department_id="department-1",
         team_id=None,
+        role_ids=("role-1",),
     )
 
 
@@ -50,3 +51,34 @@ def test_legacy_integrations_do_not_create_native_child_module_navigation():
     )
 
     assert service.visible_manifest_modules(application, _current_user()) == []
+
+
+def test_contract_v24_ignores_department_grants_and_uses_role_grants():
+    module_access = {
+        "sample_review": {
+            "permissions": ["view", "ai_query"],
+            "action_keys": ["sample_review.query"],
+            "page_access": {},
+        }
+    }
+    role_grant = SimpleNamespace(
+        deleted_at=None, scope_type="role", scope_id="role-1",
+        permissions=["view"], module_keys=["sample_review"], module_access=module_access,
+    )
+    department_grant = SimpleNamespace(
+        deleted_at=None, scope_type="department", scope_id="department-1",
+        permissions=["view", "ai_delete"], module_keys=["sample_review"], module_access=module_access,
+    )
+    application = SimpleNamespace(
+        is_active=True,
+        deleted_at=None,
+        grants=[department_grant, role_grant],
+        integration=SimpleNamespace(
+            protocol_version=2,
+            manifest={"contractRevision": "2.4", "modules": []},
+        ),
+    )
+
+    assert service.effective_module_permissions(
+        application, _current_user(), "sample_review"
+    ) == {"view", "ai_query"}
