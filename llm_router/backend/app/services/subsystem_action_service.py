@@ -519,6 +519,13 @@ def issue_launch_ticket(
 ) -> str:
     if not integration.auth_token_encrypted or integration.protocol_version < 2:
         raise HTTPException(status_code=409, detail="Protocol v2 integration secret is not configured")
+    action_keys = module_claims.get("action_keys") if isinstance(module_claims, dict) else None
+    page_access = module_claims.get("page_access") if isinstance(module_claims, dict) else None
+    if not isinstance(action_keys, list) or not isinstance(page_access, dict) or not page_access:
+        raise HTTPException(
+            status_code=403,
+            detail="请联系企业管理员配置该子模块的具体页面和操作权限",
+        )
     now = datetime.now(UTC)
     claims = {
         "iss": "zhuojian-saas",
@@ -537,21 +544,16 @@ def issue_launch_ticket(
         "iat": now,
         "exp": now + SSO_TICKET_TTL,
     }
-    if isinstance(module_claims, dict):
-        action_keys = module_claims.get("action_keys")
-        page_access = module_claims.get("page_access")
-        if isinstance(action_keys, list):
-            claims["actionKeys"] = action_keys
-        if isinstance(page_access, dict):
-            claims["pageAccess"] = {
-                page_key: {
-                    "permissions": page.get("permissions") or [],
-                    "actionKeys": page.get("action_keys") or [],
-                }
-                for page_key, page in page_access.items()
-                if isinstance(page_key, str) and isinstance(page, dict)
-            }
-            claims["pageKeys"] = sorted(claims["pageAccess"])
+    claims["actionKeys"] = action_keys
+    claims["pageAccess"] = {
+        page_key: {
+            "permissions": page.get("permissions") or [],
+            "actionKeys": page.get("action_keys") or [],
+        }
+        for page_key, page in page_access.items()
+        if isinstance(page_key, str) and isinstance(page, dict)
+    }
+    claims["pageKeys"] = sorted(claims["pageAccess"])
     return jwt.encode(
         claims,
         decrypt_provider_api_key(integration.auth_token_encrypted),

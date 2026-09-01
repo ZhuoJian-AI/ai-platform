@@ -179,7 +179,7 @@ export default function EnterpriseApplicationView({
   if (launchLoading) return <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}><Spin tip="正在校验应用权限…" /></div>;
   if (launchError) {
     const forbidden = launchError instanceof ApiError && launchError.status === 403;
-    return <Result status={forbidden ? '403' : 'error'} title={forbidden ? '无权访问该应用' : '应用加载失败'} subTitle={forbidden ? '当前账号没有此企业模块的 view 权限。' : (launchError instanceof Error ? launchError.message : '无法获取新的应用入口')} extra={<Button onClick={() => void requestFreshLaunch().catch(() => undefined)}>重试</Button>} />;
+    return <Result status={forbidden ? '403' : 'error'} title={forbidden ? '该子模块尚未完成授权' : '应用加载失败'} subTitle={forbidden ? (launchError.message || '请联系企业管理员配置可见页面和允许操作。') : (launchError instanceof Error ? launchError.message : '无法获取新的应用入口')} extra={<Button onClick={() => void requestFreshLaunch().catch(() => undefined)}>重试</Button>} />;
   }
   if (!launch) return <Empty description="应用入口不可用" />;
   const activeModule = launch.modules.find((item) => item.module_key === launch.module_key);

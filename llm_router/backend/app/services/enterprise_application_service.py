@@ -498,6 +498,58 @@ def effective_module_keys(row: EnterpriseApplication, user: CurrentUser) -> list
     })
 
 
+def _manifest_read_only_claims(
+    row: EnterpriseApplication, module_key: str
+) -> tuple[set[str], dict[str, dict[str, set[str]]]]:
+    """Project a legacy app-level ``view`` grant onto protocol-v2 pages.
+
+    Grants created before native child-module authorization did not contain
+    page or action allowlists.  A strict v2 subsystem must never receive an
+    unrestricted ticket, so the compatibility ceiling is deliberately small:
+    every declared page may be viewed and only its declared query action may
+    be called.  Mutations, exports, approvals and sensitive actions still need
+    an explicit structured grant from an administrator.
+    """
+    integration = row.integration
+    if integration is None or integration.protocol_version < 2:
+        return set(), {}
+    manifest = integration.manifest if isinstance(integration.manifest, dict) else {}
+    modules = manifest.get("modules")
+    if not isinstance(modules, list):
+        return set(), {}
+    module = next(
+        (
+            item for item in modules
+            if isinstance(item, dict) and item.get("moduleKey") == module_key
+        ),
+        None,
+    )
+    if not isinstance(module, dict):
+        return set(), {}
+
+    action_keys: set[str] = set()
+    page_access: dict[str, dict[str, set[str]]] = {}
+    pages = module.get("pages")
+    for page in pages if isinstance(pages, list) else []:
+        if not isinstance(page, dict) or not isinstance(page.get("pageKey"), str):
+            continue
+        query_action = page.get("queryActionKey")
+        declared_actions = page.get("actionKeys")
+        page_actions = set()
+        if (
+            isinstance(query_action, str)
+            and isinstance(declared_actions, list)
+            and query_action in declared_actions
+        ):
+            page_actions.add(query_action)
+            action_keys.add(query_action)
+        page_access[str(page["pageKey"])] = {
+            "permissions": {"view"},
+            "action_keys": page_actions,
+        }
+    return action_keys, page_access
+
+
 def visible_manifest_modules(
     row: EnterpriseApplication, user: CurrentUser
 ) -> list[dict[str, str]]:
@@ -523,6 +575,9 @@ def visible_manifest_modules(
             continue
         module_key = str(item["moduleKey"])
         if "view" not in effective_module_permissions(row, user, module_key):
+            continue
+        claims = effective_module_claims(row, user, module_key)
+        if not claims.get("page_access"):
             continue
         visible.append({
             "module_key": module_key,
@@ -554,8 +609,9 @@ def effective_module_claims(
 ) -> dict:
     """Build the least-privilege page/action scope embedded in an SSO ticket.
 
-    Legacy grants without structured module access remain unrestricted for compatibility.
-    Structured grants are merged across all scopes that apply to the user.
+    Legacy grants are projected to read-only manifest pages instead of issuing
+    an unrestricted ticket. Structured grants are merged across every scope
+    that applies to the user.
     """
     action_keys: set[str] = set()
     page_access: dict[str, dict[str, set[str]]] = {}
@@ -591,15 +647,43 @@ def effective_module_claims(
             merged["action_keys"].update(
                 str(item) for item in (page.get("action_keys") or []) if isinstance(item, str)
             )
+            if not isinstance(actions, list):
+                action_keys.update(merged["action_keys"])
+    if matched and (unrestricted_actions or unrestricted_pages):
+        fallback_actions, fallback_pages = _manifest_read_only_claims(row, module_key)
+        if unrestricted_pages:
+            for page_key, fallback in fallback_pages.items():
+                merged = page_access.setdefault(
+                    page_key, {"permissions": set(), "action_keys": set()}
+                )
+                merged["permissions"].update(fallback["permissions"])
+                merged["action_keys"].update(fallback["action_keys"])
+        if unrestricted_actions:
+            action_keys.update(fallback_actions)
+
+    launchable_page_access = {
+        page_key: access
+        for page_key, access in page_access.items()
+        if "view" in access["permissions"]
+    }
+
+    # A global action allowlist must be the union of page-scoped actions. This
+    # keeps malformed legacy rows from placing an unbound mutation in a ticket.
+    scoped_action_keys = {
+        action_key
+        for page in launchable_page_access.values()
+        for action_key in page["action_keys"]
+    }
+    action_keys.intersection_update(scoped_action_keys)
     return {
         "permissions": sorted(effective_module_permissions(row, user, module_key)),
-        "action_keys": None if matched and unrestricted_actions else sorted(action_keys),
-        "page_access": None if matched and unrestricted_pages else {
+        "action_keys": sorted(action_keys),
+        "page_access": {
             key: {
                 "permissions": sorted(value["permissions"]),
                 "action_keys": sorted(value["action_keys"]),
             }
-            for key, value in sorted(page_access.items())
+            for key, value in sorted(launchable_page_access.items())
         },
     }
 

@@ -25,18 +25,51 @@ def test_visible_manifest_modules_uses_the_same_view_grants_as_launch(monkeypatc
             protocol_version=2,
             manifest={
                 "modules": [
-                    {"moduleKey": "sample_review", "name": "样品评审"},
-                    {"moduleKey": "review_remediation", "name": "评审整改闭环"},
-                    {"moduleKey": "sample_release_archive", "name": "样品放行与归档"},
+                    {
+                        "moduleKey": "sample_review",
+                        "name": "样品评审",
+                        "pages": [{
+                            "pageKey": "sample_review.list",
+                            "queryActionKey": "sample_review.query",
+                            "actionKeys": ["sample_review.query"],
+                        }],
+                    },
+                    {
+                        "moduleKey": "review_remediation",
+                        "name": "评审整改闭环",
+                        "pages": [{
+                            "pageKey": "review_remediation.list",
+                            "queryActionKey": "review_remediation.query",
+                            "actionKeys": ["review_remediation.query"],
+                        }],
+                    },
+                    {
+                        "moduleKey": "sample_release_archive",
+                        "name": "样品放行与归档",
+                        "pages": [{
+                            "pageKey": "sample_release_archive.list",
+                            "queryActionKey": "sample_release_archive.query",
+                            "actionKeys": ["sample_release_archive.query"],
+                        }],
+                    },
                 ],
             },
         ),
+        is_active=True,
+        deleted_at=None,
+        grants=[],
     )
     allowed = {"sample_review", "sample_release_archive"}
     monkeypatch.setattr(
         service,
         "effective_module_permissions",
         lambda _application, _user, module_key: {"view"} if module_key in allowed else {"query"},
+    )
+    monkeypatch.setattr(
+        service,
+        "effective_module_claims",
+        lambda _application, _user, module_key: {"page_access": {"page": {}}}
+        if module_key in allowed else {"page_access": {}},
     )
 
     assert service.visible_manifest_modules(application, _current_user()) == [
@@ -82,3 +115,61 @@ def test_contract_v24_ignores_department_grants_and_uses_role_grants():
     assert service.effective_module_permissions(
         application, _current_user(), "sample_review"
     ) == {"view", "ai_query"}
+
+
+def test_legacy_view_grant_becomes_manifest_scoped_read_only_claims(monkeypatch):
+    grant = SimpleNamespace(
+        deleted_at=None,
+        scope_type="department",
+        scope_id="department-1",
+        permissions=["view"],
+        module_keys=[],
+        module_access={},
+    )
+    application = SimpleNamespace(
+        is_active=True,
+        deleted_at=None,
+        grants=[grant],
+        integration=SimpleNamespace(
+            protocol_version=2,
+            manifest={
+                "modules": [{
+                    "moduleKey": "chair_catalog",
+                    "pages": [
+                        {
+                            "pageKey": "chair_catalog.list",
+                            "queryActionKey": "chair_catalog.view",
+                            "actionKeys": ["chair_catalog.view", "chair_catalog.delete"],
+                        },
+                        {
+                            "pageKey": "chair_catalog.overview",
+                            "queryActionKey": "chair_catalog.view",
+                            "actionKeys": ["chair_catalog.view"],
+                        },
+                    ],
+                }],
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        service.scope_service,
+        "effective_scope_set",
+        lambda _user: [("department", "department-1")],
+    )
+
+    assert service.effective_module_claims(
+        application, _current_user(), "chair_catalog"
+    ) == {
+        "permissions": ["view"],
+        "action_keys": ["chair_catalog.view"],
+        "page_access": {
+            "chair_catalog.list": {
+                "permissions": ["view"],
+                "action_keys": ["chair_catalog.view"],
+            },
+            "chair_catalog.overview": {
+                "permissions": ["view"],
+                "action_keys": ["chair_catalog.view"],
+            },
+        },
+    }

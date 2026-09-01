@@ -243,12 +243,22 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
         const selectedPages = new Set(values.module_page_keys?.[moduleKey] ?? []);
         const selectedActions = new Set(values.module_action_keys?.[moduleKey] ?? []);
         const moduleActions = new Set((module?.actions ?? []).map((item) => item.actionKey));
-        const actionKeys = Array.from(selectedActions).filter((key) => moduleActions.has(key));
+        const selectedPageDefinitions = (module?.pages ?? [])
+          .filter((page) => selectedPages.has(page.pageKey));
+        const pageQueryActions = new Set(selectedPageDefinitions
+          .map((page) => page.queryActionKey)
+          .filter((key): key is string => (
+            typeof key === 'string' && key.length > 0 && moduleActions.has(key)
+          )));
+        const actionKeys = Array.from(new Set([...selectedActions, ...pageQueryActions]))
+          .filter((key) => moduleActions.has(key));
         const pageAccess = Object.fromEntries((module?.pages ?? [])
           .filter((page) => selectedPages.has(page.pageKey))
           .map((page) => [page.pageKey, {
             permissions: modulePermissions,
-            action_keys: page.actionKeys.filter((key) => selectedActions.has(key)),
+            action_keys: page.actionKeys.filter((key) => (
+              selectedActions.has(key) || key === page.queryActionKey
+            )),
           }]));
         return [moduleKey, {
           role: values.module_roles?.[moduleKey] || 'member',
