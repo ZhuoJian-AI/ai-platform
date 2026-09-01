@@ -167,9 +167,9 @@ export default function UsersPage() {
     <FinderShell>
       <TitleBar
         icon={<UserOutlined />}
-        title="用户管理"
+        title="员工授权"
         titleExtra={<OrgSelect value={orgId} onChange={setSelectedOrgId} />}
-        extra={<Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={!orgId}>新建用户</Button>}
+        extra={<Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={!orgId}>新建员工</Button>}
       />
 
       <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
@@ -230,7 +230,7 @@ export default function UsersPage() {
       </div>
 
       <Modal
-        title={isEdit ? '编辑用户' : '新建用户'}
+        title={isEdit ? '编辑员工' : '新建员工'}
         open={modalOpen}
         onCancel={closeModal}
         onOk={() => form.submit()}
@@ -252,7 +252,7 @@ export default function UsersPage() {
           <Form.Item
             name="department_id"
             label="所属部门"
-            tooltip="一个用户只归属一个部门；可见的应用和子模块请在“应用权限”中单独授权。"
+            tooltip="一个员工只归属一个部门；部门只记录组织关系，不直接授予企业模块权限。"
             rules={[{ required: true, message: '请选择所属部门' }]}
           >
             <Select
@@ -274,7 +274,7 @@ export default function UsersPage() {
           <Form.Item
             name="role_ids"
             label="角色（可多选）"
-            extra="部门只表示组织归属；应用、子模块、AI 操作和数据范围由一个或多个角色叠加决定。"
+            extra="企业模块、业务子模块、最小页面、页面操作和 AI 权限由一个或多个角色叠加决定。"
             rules={[{ required: true, message: '请至少选择一个角色' }]}
           >
             <Select

@@ -117,6 +117,93 @@ def test_contract_v24_ignores_department_grants_and_uses_role_grants():
     ) == {"view", "ai_query"}
 
 
+def test_page_ai_gate_does_not_remove_employee_action_allowlist():
+    grant = SimpleNamespace(
+        deleted_at=None,
+        scope_type="role",
+        scope_id="role-1",
+        permissions=["view", "ai_update"],
+        module_keys=["sample_review"],
+        module_access={
+            "sample_review": {
+                "permissions": ["view", "ai_update"],
+                "action_keys": ["sample_review.update"],
+                "page_access": {
+                    "sample_review.detail": {
+                        "permissions": ["view", "ai_update"],
+                        "action_keys": ["sample_review.update"],
+                        "ai_enabled": False,
+                    },
+                },
+            },
+        },
+    )
+    application = SimpleNamespace(
+        is_active=True,
+        deleted_at=None,
+        grants=[grant],
+        integration=SimpleNamespace(
+            protocol_version=2,
+            manifest={"contractRevision": "2.4", "modules": []},
+        ),
+    )
+
+    claims = service.effective_module_claims(
+        application, _current_user(), "sample_review"
+    )
+    assert claims["page_access"]["sample_review.detail"]["action_keys"] == [
+        "sample_review.update"
+    ]
+    assert service.action_allowed_for_user(
+        application,
+        _current_user(),
+        "sample_review",
+        "sample_review.detail",
+        "sample_review.update",
+        "ai_update",
+    ) is False
+
+
+def test_existing_page_grant_without_ai_gate_remains_ai_compatible():
+    grant = SimpleNamespace(
+        deleted_at=None,
+        scope_type="role",
+        scope_id="role-1",
+        permissions=["view", "ai_query"],
+        module_keys=["sample_review"],
+        module_access={
+            "sample_review": {
+                "permissions": ["view", "ai_query"],
+                "action_keys": ["sample_review.query"],
+                "page_access": {
+                    "sample_review.list": {
+                        "permissions": ["view", "ai_query"],
+                        "action_keys": ["sample_review.query"],
+                    },
+                },
+            },
+        },
+    )
+    application = SimpleNamespace(
+        is_active=True,
+        deleted_at=None,
+        grants=[grant],
+        integration=SimpleNamespace(
+            protocol_version=2,
+            manifest={"contractRevision": "2.4", "modules": []},
+        ),
+    )
+
+    assert service.action_allowed_for_user(
+        application,
+        _current_user(),
+        "sample_review",
+        "sample_review.list",
+        "sample_review.query",
+        "ai_query",
+    ) is True
+
+
 def test_legacy_view_grant_becomes_manifest_scoped_read_only_claims(monkeypatch):
     grant = SimpleNamespace(
         deleted_at=None,

@@ -1823,7 +1823,12 @@ export interface EnterpriseApplicationModuleAccess {
   role: string;
   permissions: EnterpriseApplicationPermission[];
   action_keys: string[];
-  page_access: Record<string, { permissions: EnterpriseApplicationPermission[]; action_keys: string[] }>;
+  page_access: Record<string, {
+    permissions: EnterpriseApplicationPermission[];
+    action_keys: string[];
+    /** 平台侧 AI 总开关；不影响员工在页面内使用已授权按钮。 */
+    ai_enabled?: boolean;
+  }>;
 }
 
 export interface EnterpriseApplicationGrant {

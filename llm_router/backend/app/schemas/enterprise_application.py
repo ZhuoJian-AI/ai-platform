@@ -19,6 +19,10 @@ ApplicationOperation = Literal["query", "create", "update", "delete", "export", 
 class EnterpriseApplicationPageAccess(BaseModel):
     permissions: list[ApplicationPermission] = Field(default_factory=list)
     action_keys: list[str] = Field(default_factory=list, max_length=500)
+    # Existing v2 grants did not persist a separate AI gate.  Keep them
+    # compatible while allowing the admin UI to explicitly turn AI off for a
+    # page without removing the employee's page buttons.
+    ai_enabled: bool = True
 
     @field_validator("permissions")
     @classmethod

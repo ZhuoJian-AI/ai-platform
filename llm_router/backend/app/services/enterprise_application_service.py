@@ -528,7 +528,7 @@ def _manifest_read_only_claims(
         return set(), {}
 
     action_keys: set[str] = set()
-    page_access: dict[str, dict[str, set[str]]] = {}
+    page_access: dict[str, dict] = {}
     pages = module.get("pages")
     for page in pages if isinstance(pages, list) else []:
         if not isinstance(page, dict) or not isinstance(page.get("pageKey"), str):
@@ -640,12 +640,21 @@ def effective_module_claims(
         for page_key, page in pages.items():
             if not isinstance(page_key, str) or not isinstance(page, dict):
                 continue
-            merged = page_access.setdefault(page_key, {"permissions": set(), "action_keys": set()})
+            merged = page_access.setdefault(
+                page_key,
+                {"permissions": set(), "action_keys": set(), "ai_enabled": False},
+            )
             merged["permissions"].update(
                 value for value in (page.get("permissions") or []) if value in PERMISSIONS
             )
             merged["action_keys"].update(
                 str(item) for item in (page.get("action_keys") or []) if isinstance(item, str)
+            )
+            # Multiple roles are merged by union.  Missing values belong to
+            # grants created before the separate AI gate and remain enabled
+            # for compatibility; new admin grants always persist the flag.
+            merged["ai_enabled"] = bool(merged["ai_enabled"]) or bool(
+                page.get("ai_enabled", True)
             )
             if not isinstance(actions, list):
                 action_keys.update(merged["action_keys"])
@@ -654,7 +663,8 @@ def effective_module_claims(
         if unrestricted_pages:
             for page_key, fallback in fallback_pages.items():
                 merged = page_access.setdefault(
-                    page_key, {"permissions": set(), "action_keys": set()}
+                    page_key,
+                    {"permissions": set(), "action_keys": set(), "ai_enabled": False},
                 )
                 merged["permissions"].update(fallback["permissions"])
                 merged["action_keys"].update(fallback["action_keys"])
@@ -741,6 +751,8 @@ def action_allowed_for_user(
         if page_key and isinstance(page_access, dict) and page_access:
             page = page_access.get(page_key)
             if not isinstance(page, dict):
+                continue
+            if page.get("ai_enabled", True) is not True:
                 continue
             permissions = set(page.get("permissions") or [])
             page_actions = page.get("action_keys")

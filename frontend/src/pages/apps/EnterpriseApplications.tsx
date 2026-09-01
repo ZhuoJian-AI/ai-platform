@@ -468,7 +468,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
           <Alert
             showIcon type="info" style={{ marginBottom: 18 }}
             message="登记只负责连接模块系统，不在这里授权员工"
-            description="请在“角色与模块权限”中按业务大模块、子模块、页面和 Action 授权；员工通过一个或多个角色取得权限。"
+            description="请在“角色权限”中按企业模块、业务子模块、最小页面、操作和 AI 授权；员工通过一个或多个角色取得权限。"
           />
           <Space size={32}><Form.Item name="is_active" label="启用应用" valuePropName="checked"><Switch /></Form.Item><Form.Item name="assistant_enabled" label="业务小助手" valuePropName="checked"><Switch /></Form.Item></Space>
         </Form>

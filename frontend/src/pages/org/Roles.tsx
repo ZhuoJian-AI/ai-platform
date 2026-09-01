@@ -1,30 +1,19 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { Button, Checkbox, Form, Input, Modal, Select, Space, Table, Tag, Typography, message } from 'antd';
 import { DeleteOutlined, EditOutlined, PlusOutlined, SafetyCertificateOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { ApiError, organizations, roles, type Role, type RoleDataScope } from '../../api/client';
+import { ApiError, organizations, roles, type Role } from '../../api/client';
 import OrgSelect from '../../components/OrgSelect';
 import { FinderShell, TitleBar } from '../../components/finder/primitives';
-import { useOrgTree } from '../../hooks/useOrgTree';
 
-const DATA_SCOPE_OPTIONS: { value: RoleDataScope; label: string }[] = [
-  { value: 'all', label: '全部数据' },
-  { value: 'custom_departments', label: '指定部门' },
-  { value: 'department', label: '本部门' },
-  { value: 'department_and_children', label: '本部门及下级' },
-  { value: 'self', label: '仅本人' },
-];
-
-const PERMISSION_GROUPS = [
-  { label: '语音与全模态', options: [
-    { label: '音频转写', value: 'multimodal.audio.transcribe' },
-    { label: '音频理解', value: 'multimodal.audio.understand' },
-    { label: '使用朗读音色', value: 'multimodal.speech.use' },
-    { label: '设计音色', value: 'multimodal.voice.design' },
-    { label: '克隆音色', value: 'multimodal.voice.clone' },
-    { label: '管理音色', value: 'multimodal.voice.manage' },
-  ] },
+const PLATFORM_PERMISSIONS = [
+  { label: '音频转写', value: 'multimodal.audio.transcribe' },
+  { label: '音频理解', value: 'multimodal.audio.understand' },
+  { label: '使用朗读音色', value: 'multimodal.speech.use' },
+  { label: '设计音色', value: 'multimodal.voice.design' },
+  { label: '克隆音色', value: 'multimodal.voice.clone' },
+  { label: '管理音色', value: 'multimodal.voice.manage' },
 ];
 
 function slugify(value: string) {
@@ -38,24 +27,17 @@ export default function RolesPage() {
   const [selectedOrgId, setSelectedOrgId] = useState<string>();
   const [editing, setEditing] = useState<Role | null>(null);
   const [open, setOpen] = useState(false);
-  const dataScope = Form.useWatch('data_scope', form) as RoleDataScope | undefined;
   const { data: orgs = [] } = useQuery({ queryKey: ['orgs'], queryFn: organizations.list });
   const orgId = selectedOrgId ?? orgs.find(org => org.is_default)?.id ?? orgs[0]?.id;
   const { data: roleList = [], isLoading } = useQuery({
     queryKey: ['roles', orgId],
-    queryFn: () => orgId ? roles.list(orgId) : Promise.resolve([]),
-    enabled: !!orgId,
+    queryFn: () => orgId ? roles.list(orgId) : Promise.resolve([]), enabled: !!orgId,
   });
-  const { nodeMap } = useOrgTree();
-  const departmentOptions = useMemo(() => Array.from(nodeMap.values())
-    .filter(node => node.type === 'department' && node.orgId === orgId)
-    .map(node => ({ value: node.id, label: node.name })), [nodeMap, orgId]);
 
   const close = () => { setOpen(false); setEditing(null); form.resetFields(); };
   const save = useMutation({
     mutationFn: async (values: {
-      name: string; code: string; description?: string; data_scope: RoleDataScope;
-      department_ids?: string[]; permission_codes?: string[]; is_active: boolean;
+      name: string; code: string; description?: string; permission_codes?: string[]; is_active: boolean;
     }) => {
       if (!orgId) throw new Error('请先选择企业');
       const role = editing
@@ -63,15 +45,10 @@ export default function RolesPage() {
             name: values.name, description: values.description, is_active: values.is_active,
           })
         : await roles.create(orgId, {
-            name: values.name, code: values.code, description: values.description,
-            data_scope: values.data_scope, is_active: values.is_active,
+            name: values.name, code: values.code, description: values.description, is_active: values.is_active,
           });
       await roles.replacePermissions(role.id, values.permission_codes ?? []);
-      return roles.replaceDataScope(
-        role.id,
-        values.data_scope,
-        values.data_scope === 'custom_departments' ? values.department_ids ?? [] : [],
-      );
+      return role;
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['roles', orgId] });
@@ -79,24 +56,19 @@ export default function RolesPage() {
       close();
       message.success('角色已保存');
     },
-    onError: (error) => message.error(error instanceof ApiError ? error.message : '角色保存失败'),
+    onError: error => message.error(error instanceof ApiError ? error.message : '角色保存失败'),
   });
   const remove = useMutation({
     mutationFn: (id: string) => roles.delete(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['roles', orgId] }); message.success('角色已删除'); },
-    onError: (error) => message.error(error instanceof ApiError ? error.message : '角色删除失败'),
+    onError: error => message.error(error instanceof ApiError ? error.message : '角色删除失败'),
   });
 
   const edit = (role: Role) => {
     setEditing(role);
     form.setFieldsValue({
-      name: role.name,
-      code: role.code,
-      description: role.description,
-      data_scope: role.data_scope,
-      department_ids: role.department_ids,
-      permission_codes: role.permission_codes,
-      is_active: role.is_active,
+      name: role.name, code: role.code, description: role.description,
+      permission_codes: role.permission_codes, is_active: role.is_active,
     });
     setOpen(true);
   };
@@ -104,18 +76,21 @@ export default function RolesPage() {
   return <FinderShell>
     <TitleBar
       icon={<SafetyCertificateOutlined />}
-      title="角色与数据范围"
+      title="角色设置"
       titleExtra={<OrgSelect value={orgId} onChange={setSelectedOrgId} />}
-      extra={<Space><Button icon={<SafetyCertificateOutlined />} onClick={() => navigate('/enterprise-apps/permissions')}>配置模块权限</Button><Button type="primary" icon={<PlusOutlined />} disabled={!orgId} onClick={() => {
-        setEditing(null);
-        form.resetFields();
-        form.setFieldsValue({ data_scope: 'self', is_active: true, permission_codes: [] });
-        setOpen(true);
-      }}>新建角色</Button></Space>}
+      extra={<Space>
+        <Button icon={<SafetyCertificateOutlined />} onClick={() => navigate('/enterprise-apps/permissions')}>配置企业模块权限</Button>
+        <Button type="primary" icon={<PlusOutlined />} disabled={!orgId} onClick={() => {
+          setEditing(null);
+          form.resetFields();
+          form.setFieldsValue({ is_active: true, permission_codes: [] });
+          setOpen(true);
+        }}>新建角色</Button>
+      </Space>}
     />
     <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
       <Typography.Paragraph type="secondary">
-        用户只归属一个部门，但可拥有多个角色；本页只配置平台功能与数据范围。业务大模块、页面和 AI Action 请在“角色与模块权限”配置。
+        这里只维护角色名称和平台通用能力。企业模块、业务子模块、页面、操作和 AI 权限统一在“角色权限”配置。
       </Typography.Paragraph>
       <Table dataSource={roleList} rowKey="id" loading={isLoading} columns={[
         { title: '角色', render: (_: unknown, role: Role) => <Space>
@@ -123,11 +98,8 @@ export default function RolesPage() {
           {role.is_builtin && <Tag color="blue">内置</Tag>}
         </Space> },
         { title: '标识', dataIndex: 'code' },
-        { title: '数据范围', dataIndex: 'data_scope', render: (value: RoleDataScope) => (
-          <Tag>{DATA_SCOPE_OPTIONS.find(item => item.value === value)?.label ?? value}</Tag>
-        ) },
-        { title: '权限数', render: (_: unknown, role: Role) => role.permission_codes.includes('*')
-          ? <Tag color="red">全部权限</Tag> : `${role.permission_codes.length} 项` },
+        { title: '平台能力', render: (_: unknown, role: Role) => role.permission_codes.includes('*')
+          ? <Tag color="red">全部平台能力</Tag> : `${role.permission_codes.length} 项` },
         { title: '状态', dataIndex: 'is_active', render: (value: boolean) => (
           <Tag color={value ? 'green' : 'default'}>{value ? '启用' : '停用'}</Tag>
         ) },
@@ -138,13 +110,8 @@ export default function RolesPage() {
       ]} />
     </div>
     <Modal
-      open={open}
-      title={editing ? `编辑角色：${editing.name}` : '新建角色'}
-      width={720}
-      onCancel={close}
-      onOk={() => form.submit()}
-      confirmLoading={save.isPending}
-      forceRender
+      open={open} title={editing ? `编辑角色：${editing.name}` : '新建角色'} width={720}
+      onCancel={close} onOk={() => form.submit()} confirmLoading={save.isPending} forceRender
     >
       <Form form={form} layout="vertical" onFinish={values => save.mutate(values)}>
         <Space align="start" style={{ display: 'flex' }}>
@@ -158,18 +125,8 @@ export default function RolesPage() {
           </Form.Item>
         </Space>
         <Form.Item name="description" label="说明"><Input.TextArea rows={2} /></Form.Item>
-        <Form.Item name="data_scope" label="数据范围" rules={[{ required: true }]}>
-          <Select options={DATA_SCOPE_OPTIONS} />
-        </Form.Item>
-        {dataScope === 'custom_departments' && <Form.Item
-          name="department_ids"
-          label="指定部门"
-          rules={[{ required: true, message: '请至少选择一个部门' }]}
-        ><Select mode="multiple" options={departmentOptions} /></Form.Item>}
-        <Form.Item name="permission_codes" label="平台功能权限" extra="这里不包含企业模块权限，避免同一权限在两个入口重复配置。">
-          <Checkbox.Group options={PERMISSION_GROUPS.flatMap(group => group.options.map(option => ({
-            ...option, label: `${group.label} · ${option.label}`,
-          })))} />
+        <Form.Item name="permission_codes" label="平台通用能力" extra="这里不包含任何企业模块权限。">
+          <Checkbox.Group options={PLATFORM_PERMISSIONS} />
         </Form.Item>
         <Form.Item name="is_active" label="状态"><Select options={[
           { value: true, label: '启用' }, { value: false, label: '停用' },

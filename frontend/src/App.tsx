@@ -22,6 +22,7 @@ import UserLoginPage from './pages/terminal/UserLoginPage';
 import Terminal from './pages/terminal/Terminal';
 import Organizations from './pages/Organizations';
 import ContactInfo from './pages/ContactInfo';
+import EnterpriseProfile from './pages/org/EnterpriseProfile';
 import ApiKeys from './pages/ApiKeys';
 import LlmProviders from './pages/LlmProviders';
 import DlpRules from './pages/DlpRules';
@@ -69,34 +70,44 @@ interface Subsystem {
   routes?: { path: string; element: ReactNode; superOnly?: boolean }[];
 }
 
-/** 一级菜单：ai_infra 平台五个子系统。built 标识是否已实现页面。 */
+/** 一级菜单：按管理员真实任务分组。built 标识是否已实现页面。 */
 const SUBSYSTEMS: Subsystem[] = [
   {
-    key: 'org_mgmt', label: '企业管理', icon: <ApartmentOutlined />, built: true,
+    key: 'enterprise_access', label: '企业与权限', icon: <ApartmentOutlined />, built: true,
     menu: [
       { path: '/org/structure', label: '组织架构', icon: <ApartmentOutlined /> },
       { path: '/enterprise-apps', label: '企业模块', icon: <AppstoreOutlined /> },
-      { path: '/enterprise-apps/permissions', label: '角色与模块权限', icon: <SafetyOutlined /> },
-      { path: '/org/users', label: '员工与角色', icon: <UserOutlined /> },
-      { path: '/org/roles', label: '角色与数据范围', icon: <TeamOutlined /> },
-      { path: '/enterprise-apps/navigation', label: '员工导航', icon: <SettingOutlined /> },
-      { path: '/enterprise-apps/assistant', label: '业务助手', icon: <LinkOutlined /> },
-      { path: '/org/admins', label: '管理员管理', icon: <TeamOutlined />, superOnly: true },
-      { path: '/org/voices', label: '企业音色库', icon: <AudioOutlined /> },
-      { path: '/org/contact', label: '联系方式', icon: <PhoneOutlined /> },
+      { path: '/enterprise-apps/permissions', label: '角色权限', icon: <SafetyOutlined /> },
+      { path: '/org/users', label: '员工授权', icon: <UserOutlined /> },
     ],
     routes: [
       { path: '/org/structure', element: <Organizations /> },
       { path: '/org/users', element: <UsersPage /> },
-      { path: '/org/roles', element: <RolesPage /> },
       { path: '/enterprise-apps', element: <EnterpriseApplications section="applications" /> },
       { path: '/enterprise-apps/:appId', element: <EnterpriseApplicationDetail /> },
-      { path: '/enterprise-apps/navigation', element: <EnterpriseApplications section="navigation" /> },
       { path: '/enterprise-apps/permissions', element: <EnterpriseAccessControl /> },
-      { path: '/enterprise-apps/assistant', element: <EnterpriseApplications section="assistant" /> },
+    ],
+  },
+  {
+    key: 'enterprise_settings', label: '企业设置', icon: <SettingOutlined />, built: true,
+    menu: [
+      { path: '/org/admins', label: '管理员', icon: <TeamOutlined />, superOnly: true },
+      { path: '/org/profile', label: '企业资料', icon: <ApartmentOutlined /> },
+      { path: '/org/contact', label: '联系方式', icon: <PhoneOutlined /> },
+      // 旧入口保留直达路由，但不再占用企业管理主导航。
+      { path: '/org/roles', label: '角色设置', icon: <TeamOutlined />, hidden: true },
+      { path: '/enterprise-apps/navigation', label: '员工导航', icon: <SettingOutlined />, hidden: true },
+      { path: '/enterprise-apps/assistant', label: '业务助手', icon: <LinkOutlined />, hidden: true },
+      { path: '/org/voices', label: '企业音色库', icon: <AudioOutlined />, hidden: true },
+    ],
+    routes: [
       { path: '/org/admins', element: <AdminManagement /> },
-      { path: '/org/voices', element: <VoicesPage /> },
+      { path: '/org/profile', element: <EnterpriseProfile /> },
       { path: '/org/contact', element: <ContactInfo /> },
+      { path: '/org/roles', element: <RolesPage /> },
+      { path: '/enterprise-apps/navigation', element: <EnterpriseApplications section="navigation" /> },
+      { path: '/enterprise-apps/assistant', element: <EnterpriseApplications section="assistant" /> },
+      { path: '/org/voices', element: <VoicesPage /> },
     ],
   },
   {
