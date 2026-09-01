@@ -8,7 +8,7 @@ import {
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import OriginalFilePreview from '../../components/files/OriginalFilePreview';
+import OriginalFilePreview, { supportsPagedWorkspacePreview } from '../../components/files/OriginalFilePreview';
 import type { WorkspaceOriginalPreviewSource, WorkspacePdfPreviewInfo } from '../../api/client';
 // mammoth 仅在打开 .docx 时按需动态加载（见下方 useEffect），不进主包。
 
@@ -294,8 +294,11 @@ export default function BrowserDrawer({
     setOriginalPreviewUrl(null);
     setOriginalPreviewHeaders({});
     setOriginalPreviewMime(null);
+    setOriginalPreviewLoading(false);
     if (!current || (current.kind !== 'parsed' && current.kind !== 'binary')
       || (!loadOriginalPreviewSource && !loadOriginalPreview)) return;
+    if (supportsPagedWorkspacePreview(displayNameFromPath(current.path))
+      && loadPdfPreviewInfo && loadPdfPreviewPage) return;
     let cancelled = false;
     let objectUrl: string | null = null;
     setOriginalPreviewLoading(true);
@@ -326,7 +329,7 @@ export default function BrowserDrawer({
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [current, loadOriginalPreview, loadOriginalPreviewSource]);
+  }, [current, loadOriginalPreview, loadOriginalPreviewSource, loadPdfPreviewInfo, loadPdfPreviewPage]);
 
   useEffect(() => {
     if (current?.kind !== 'docx-bin') { setDocxHtml(null); setDocxError(null); return; }

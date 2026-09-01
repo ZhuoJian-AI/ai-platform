@@ -25,6 +25,11 @@ function extensionOf(filename: string): string {
   return index >= 0 ? filename.slice(index + 1).toLowerCase() : '';
 }
 
+export function supportsPagedWorkspacePreview(filename: string): boolean {
+  const extension = extensionOf(filename);
+  return extension === 'pdf' || OFFICE_EXTENSIONS.has(extension);
+}
+
 export interface OriginalFilePreviewProps {
   blob: Blob | null;
   sourceUrl?: string | null;
@@ -55,6 +60,7 @@ export default function OriginalFilePreview({
   const [textContent, setTextContent] = useState<string | null>(null);
   const [textError, setTextError] = useState<string | null>(null);
   const extension = extensionOf(filename);
+  const hasPagedServerPreview = supportsPagedWorkspacePreview(filename) && !!loadPdfInfo && !!loadPdfPage;
   const hasSourceHeaders = Object.keys(sourceHeaders).length > 0;
   // Signed OSS URLs can be handed directly to the Office renderer.  Fetching
   // them into React state first adds a full-file memory copy and, for larger
@@ -121,13 +127,30 @@ export default function OriginalFilePreview({
     return () => { cancelled = true; };
   }, [effectiveBlob, effectiveMime, extension]);
 
-  if (loading || remoteLoading) return <LoadingState label="正在从对象存储读取原文件…" />;
+  if ((loading || remoteLoading) && !hasPagedServerPreview) {
+    return <LoadingState label="正在从对象存储读取原文件…" />;
+  }
 
   const previewUrl = directUrl || objectUrl;
 
-  // Large PDFs use a dedicated demand-driven PDF.js renderer. It requests byte
-  // ranges and paints the selected page instead of waiting for every page to
-  // be decoded, which makes the first screen responsive for large documents.
+  // Workspace PDF/Office previews are already revision-keyed and page-driven.
+  // Prefer that cache before requesting the complete original file so reopening
+  // never competes with a large background download for browser connections.
+  if (hasPagedServerPreview) {
+    return (
+      <Suspense fallback={<LoadingState label="正在加载版式缓存…" />}>
+        <PdfFilePreview
+          filename={filename}
+          onDownload={onDownload}
+          loadInfo={loadPdfInfo}
+          loadPage={loadPdfPage}
+          previewLabel={extension === 'pdf' ? '原页缓存' : '版式缓存'}
+        />
+      </Suspense>
+    );
+  }
+
+  // PDFs without a workspace page cache use the dedicated PDF.js renderer.
   if ((extension === 'pdf' || effectiveMime === 'application/pdf') && (originalFile || directUrl)) {
     return (
       <Suspense fallback={<LoadingState label="正在加载 PDF 查看器…" />}>
@@ -157,20 +180,6 @@ export default function OriginalFilePreview({
 
   if ((AUDIO_EXTENSIONS.has(extension) || effectiveMime.startsWith('audio/')) && previewUrl) {
     return <div style={centerStyle}><audio controls src={previewUrl} style={{ width: 'min(560px, 90%)' }} /></div>;
-  }
-
-  if (OFFICE_EXTENSIONS.has(extension) && loadPdfInfo && loadPdfPage) {
-    return (
-      <Suspense fallback={<LoadingState label="正在加载版式缓存…" />}>
-        <PdfFilePreview
-          filename={filename}
-          onDownload={onDownload}
-          loadInfo={loadPdfInfo}
-          loadPage={loadPdfPage}
-          previewLabel="版式缓存"
-        />
-      </Suspense>
-    );
   }
 
   if (OFFICE_EXTENSIONS.has(extension) && (originalFile || directUrl)) {

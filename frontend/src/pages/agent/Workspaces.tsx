@@ -28,7 +28,7 @@ import {
 } from '../../components/finder/primitives';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import { WB, WB_FONT, FS } from '../../components/finder/theme';
-import OriginalFilePreview from '../../components/files/OriginalFilePreview';
+import OriginalFilePreview, { supportsPagedWorkspacePreview } from '../../components/files/OriginalFilePreview';
 import {
   useWorkspaceUploadQueue, WorkspaceUploadPicker, WorkspaceUploadQueueStatus,
 } from '../../components/files/WorkspaceUploadQueue';
@@ -924,7 +924,8 @@ function FileViewer({ file, onDownload, onReparse, reparsing }: {
     setPreviewSourceHeaders({});
     setPreviewMime(null);
     setPreviewError(null);
-    if (!meta.binary) return;
+    setPreviewLoading(false);
+    if (!meta.binary || supportsPagedWorkspacePreview(workspaceDisplayName(file))) return;
     let cancelled = false;
     setPreviewLoading(true);
     workspaces.getFileOriginalPreviewSource(file.id)
