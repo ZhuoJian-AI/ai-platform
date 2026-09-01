@@ -40,14 +40,9 @@ def _normalize_department_ids(
     department_ids: list[UUID] | None,
     primary_department_id: UUID | None,
 ) -> list[UUID]:
-    """Deduplicate memberships and keep the compatibility primary department first."""
-    ordered: list[UUID] = []
-    if primary_department_id:
-        ordered.append(primary_department_id)
-    for department_id in department_ids or []:
-        if department_id not in ordered:
-            ordered.append(department_id)
-    return ordered
+    """Return the user's one organizational department in compatibility-list form."""
+    selected = primary_department_id or (department_ids[0] if department_ids else None)
+    return [selected] if selected else []
 
 
 async def _replace_user_departments(
@@ -178,7 +173,10 @@ async def update_user(
     values = data.model_dump(exclude_unset=True)
     # password 不是列，需单独哈希处理
     password = values.pop("password", None)
-    requested_manager_scopes = values.pop("manager_scopes", None)
+    requested_manager_scopes = (
+        data.manager_scopes if "manager_scopes" in data.model_fields_set else None
+    )
+    values.pop("manager_scopes", None)
     department_ids_were_set = "department_ids" in data.model_fields_set
     requested_department_ids = values.pop("department_ids", None)
     primary_department_was_set = "department_id" in data.model_fields_set
@@ -189,7 +187,9 @@ async def update_user(
             next_department_ids = _normalize_department_ids(requested, primary_candidate)
         else:
             current_primary = UUID(str(user.department_id)) if user.department_id else None
-            primary_candidate = current_primary if current_primary in requested else (requested[0] if requested else None)
+            primary_candidate = (
+                current_primary if current_primary in requested else (requested[0] if requested else None)
+            )
             next_department_ids = _normalize_department_ids(requested, primary_candidate)
         next_department_id = primary_candidate
         values["department_id"] = next_department_id

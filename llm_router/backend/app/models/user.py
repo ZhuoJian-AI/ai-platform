@@ -17,6 +17,7 @@ user_department_memberships = Table(
         primary_key=True,
     ),
     Index("ix_user_department_memberships_department_id", "department_id"),
+    UniqueConstraint("user_id", name="uq_user_department_memberships_user_id"),
 )
 
 
@@ -32,8 +33,8 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     role: Mapped[str] = mapped_column(String(50), nullable=False, default="member")  # admin, member
     is_active: Mapped[bool] = mapped_column(default=True)
-    # department_id 是兼容存量逻辑的“主部门”；完整成员关系在
-    # user_department_memberships 中。team_id 仍为单一主团队，且必须属于主部门。
+    # 每个用户只有一个所属部门。关联表仅为兼容旧版本和渐进迁移保留；
+    # 模块可见性由应用/子模块授权决定，不通过多部门成员关系叠加。
     department_id: Mapped[str | None] = mapped_column(
         ForeignKey("departments.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -57,12 +58,8 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
 
     @property
     def department_ids(self) -> list[str]:
-        """Return all department memberships with the primary department first."""
-        primary = str(self.department_id) if self.department_id else None
-        values = {str(department.id) for department in (self.departments or [])}
-        if primary:
-            values.add(primary)
-        return ([primary] if primary else []) + sorted(value for value in values if value != primary)
+        """Compatibility response field containing zero or one department."""
+        return [str(self.department_id)] if self.department_id else []
 
     @property
     def manager_scopes(self) -> list[dict]:

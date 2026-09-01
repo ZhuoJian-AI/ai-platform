@@ -159,7 +159,7 @@ async def test_application_is_hidden_by_default_and_grants_union_across_existing
 
 
 @pytest.mark.asyncio
-async def test_application_grant_matches_any_user_department(db_session):
+async def test_application_grant_does_not_treat_another_department_as_membership(db_session):
     org, _, primary_department, team, current = await _organization_tree(db_session)
     secondary_department = Department(
         organization_id=org.id,
@@ -168,8 +168,6 @@ async def test_application_grant_matches_any_user_department(db_session):
     )
     db_session.add(secondary_department)
     await db_session.flush()
-    current.department_ids = (str(primary_department.id), str(secondary_department.id))
-
     application = await service.create_application(db_session, org.id, EnterpriseApplicationCreate(
         name="Quality Collaboration",
         slug="quality-collaboration",
@@ -184,8 +182,41 @@ async def test_application_grant_matches_any_user_department(db_session):
         ),
     ])
 
-    assert service.effective_permissions(application, current) == {"view", "ai_query"}
-    assert service.effective_module_keys(application, current) == ["quality_review"]
+    assert service.effective_permissions(application, current) == set()
+    assert service.effective_module_keys(application, current) == []
+
+
+@pytest.mark.asyncio
+async def test_one_department_can_receive_multiple_applications_and_modules(db_session):
+    org, _, department, _, current = await _organization_tree(db_session)
+    applications = []
+    for name, slug, module_key in (
+        ("Sample Review", "sample-review", "sample_review"),
+        ("Production Handoff", "production-handoff", "production_handoff"),
+    ):
+        application = await service.create_application(db_session, org.id, EnterpriseApplicationCreate(
+            name=name,
+            slug=f"{slug}-{uuid4().hex[:6]}",
+            entry_url=f"https://{slug}.example.test",
+        ))
+        applications.append(await service.replace_grants(db_session, application, [
+            EnterpriseApplicationGrantInput(
+                scope_type="department",
+                scope_id=department.id,
+                permissions=["view", "ai_query"],
+                module_keys=[module_key],
+            ),
+        ]))
+
+    visible = await service.list_applications_for_user(db_session, current)
+    assert {application.id for application, _ in visible} == {
+        application.id for application in applications
+    }
+    assert {
+        module_key
+        for application in applications
+        for module_key in service.effective_module_keys(application, current)
+    } == {"sample_review", "production_handoff"}
 
 
 @pytest.mark.asyncio
