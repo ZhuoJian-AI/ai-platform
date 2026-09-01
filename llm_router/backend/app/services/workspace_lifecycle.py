@@ -57,9 +57,9 @@ async def ensure_node_workspace(
 ) -> Workspace:
     """确保节点存在同名绑定工作空间；存在则同步 name，不存在则创建，已软删则复活。幂等。
 
-    复活优先于新建：``workspaces`` 上 ``UNIQUE(organization_id, slug)`` 不排除软删行，
-    直接 INSERT 会与同 slug 的软删行冲突，故先按绑定键查含软删的行并 ``deleted_at=None``
-    复用，仅当确无任何绑定行时才新建。
+    同一节点恢复时优先复活原工作空间，保留其历史文件。新节点即使复用了已删除
+    节点的 slug，也必须创建独立工作空间，避免将旧部门文件泄露给新部门。数据库仅对
+    ``deleted_at IS NULL`` 的工作空间限制 ``(organization_id, slug)`` 唯一。
     """
     ws = await get_bound_workspace(db, org_id, scope_type, scope_id)
     if ws is not None:

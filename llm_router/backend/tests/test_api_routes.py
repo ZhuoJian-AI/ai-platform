@@ -2,6 +2,10 @@
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.workspace import Workspace
 
 
 @pytest.mark.asyncio
@@ -59,6 +63,56 @@ async def test_create_department(client: AsyncClient):
     data = resp.json()
     assert data["name"] == "研发部"
     assert data["organization_id"] == org_id
+
+
+@pytest.mark.asyncio
+async def test_recreate_department_with_deleted_slug_gets_a_new_workspace(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """新部门可复用已删除部门的 slug，但不得复活旧部门的工作空间。"""
+    org_resp = await client.post(
+        "/api/v1/organizations",
+        json={"name": "工作空间隔离测试组织", "slug": "workspace-isolation-org"},
+    )
+    org_id = org_resp.json()["id"]
+
+    first_resp = await client.post(
+        f"/api/v1/organizations/{org_id}/departments",
+        json={"name": "原设计部", "slug": "design-dept"},
+    )
+    assert first_resp.status_code == 201
+    first_department_id = first_resp.json()["id"]
+
+    delete_resp = await client.delete(f"/api/v1/departments/{first_department_id}")
+    assert delete_resp.status_code == 204
+
+    second_resp = await client.post(
+        f"/api/v1/organizations/{org_id}/departments",
+        json={"name": "新设计部", "slug": "design-dept"},
+    )
+    assert second_resp.status_code == 201
+    second_department_id = second_resp.json()["id"]
+    assert second_department_id != first_department_id
+
+    workspaces = list(
+        (
+            await db_session.execute(
+                select(Workspace).where(
+                    Workspace.organization_id == org_id,
+                    Workspace.slug == "design-dept",
+                )
+            )
+        ).scalars()
+    )
+    assert len(workspaces) == 2
+    assert {workspace.scope_id for workspace in workspaces} == {
+        first_department_id,
+        second_department_id,
+    }
+    active_workspaces = [workspace for workspace in workspaces if workspace.deleted_at is None]
+    assert len(active_workspaces) == 1
+    assert active_workspaces[0].scope_id == second_department_id
 
 
 @pytest.mark.asyncio

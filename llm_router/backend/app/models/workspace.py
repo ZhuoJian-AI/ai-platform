@@ -8,10 +8,12 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -23,7 +25,16 @@ class Workspace(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     """智能体工作空间：限定 agent 文件读写的根作用域。"""
 
     __tablename__ = "workspaces"
-    __table_args__ = (UniqueConstraint("organization_id", "slug", name="uq_workspace_org_slug"),)
+    __table_args__ = (
+        Index(
+            "uq_workspace_org_slug_active",
+            "organization_id",
+            "slug",
+            unique=True,
+            postgresql_where=text("deleted_at IS NULL"),
+            sqlite_where=text("deleted_at IS NULL"),
+        ),
+    )
 
     organization_id: Mapped[str] = mapped_column(
         ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False, index=True
