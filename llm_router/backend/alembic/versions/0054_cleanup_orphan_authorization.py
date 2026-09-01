@@ -28,32 +28,32 @@ def upgrade() -> None:
     # Retire only genuinely orphaned rows; valid inactive users/custom roles keep
     # their grants so reactivation does not silently lose configuration.
     op.execute(sa.text("""
-        UPDATE enterprise_application_grants AS grant
+        UPDATE enterprise_application_grants AS g
         SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-        WHERE grant.deleted_at IS NULL AND (
-            (grant.scope_type = 'organization' AND grant.scope_id IS NOT NULL)
-            OR (grant.scope_type = 'department' AND NOT EXISTS (
+        WHERE g.deleted_at IS NULL AND (
+            (g.scope_type = 'organization' AND g.scope_id IS NOT NULL)
+            OR (g.scope_type = 'department' AND NOT EXISTS (
                 SELECT 1 FROM departments AS target
-                WHERE target.id::text = grant.scope_id
-                  AND target.organization_id = grant.organization_id
+                WHERE target.id::text = g.scope_id
+                  AND target.organization_id = g.organization_id
                   AND target.deleted_at IS NULL
             ))
-            OR (grant.scope_type = 'team' AND NOT EXISTS (
+            OR (g.scope_type = 'team' AND NOT EXISTS (
                 SELECT 1 FROM teams AS target
-                WHERE target.id::text = grant.scope_id
-                  AND target.organization_id = grant.organization_id
+                WHERE target.id::text = g.scope_id
+                  AND target.organization_id = g.organization_id
                   AND target.deleted_at IS NULL
             ))
-            OR (grant.scope_type = 'user' AND NOT EXISTS (
+            OR (g.scope_type = 'user' AND NOT EXISTS (
                 SELECT 1 FROM users AS target
-                WHERE target.id::text = grant.scope_id
-                  AND target.organization_id = grant.organization_id
+                WHERE target.id::text = g.scope_id
+                  AND target.organization_id = g.organization_id
                   AND target.deleted_at IS NULL
             ))
-            OR (grant.scope_type = 'role' AND NOT EXISTS (
+            OR (g.scope_type = 'role' AND NOT EXISTS (
                 SELECT 1 FROM roles AS target
-                WHERE target.id::text = grant.scope_id
-                  AND target.organization_id = grant.organization_id
+                WHERE target.id::text = g.scope_id
+                  AND target.organization_id = g.organization_id
                   AND target.deleted_at IS NULL
             ))
         )
