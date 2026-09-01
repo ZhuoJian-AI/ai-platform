@@ -1,6 +1,6 @@
 """Repair orphan enterprise grants and reactivate built-in roles.
 
-Revision ID: 0054_cleanup_orphan_authorization
+Revision ID: 0054_auth_cleanup
 Revises: 0053_workspace_active_slug
 Create Date: 2026-09-01
 """
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0054_cleanup_orphan_authorization"
+revision = "0054_auth_cleanup"
 down_revision = "0053_workspace_active_slug"
 branch_labels = None
 depends_on = None
