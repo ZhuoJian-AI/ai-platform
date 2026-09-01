@@ -165,6 +165,7 @@ export default function LlmProviders() {
         provider_type: editing.provider_type,
         region: editing.region,
         workspace_id: editing.workspace_id,
+        access_mode: editing.config?.access_mode ?? 'payg',
         base_url: editing.base_url,
         api_key: undefined,
         supported_models: editing.supported_models,
@@ -196,7 +197,7 @@ export default function LlmProviders() {
         provider_type: data.provider_type,
         region: data.region,
         workspace_id: data.workspace_id,
-        access_mode: 'payg',
+        access_mode: data.access_mode ?? 'payg',
         scope_type: selectedNode.type,
         base_url: data.base_url || undefined,
         api_key: data.api_key,
@@ -480,6 +481,7 @@ export default function LlmProviders() {
                   if (value === 'anthropic') form.setFieldValue('provider_type', 'anthropic');
                   else form.setFieldValue('provider_type', 'openai');
                   if (value === 'aliyun_bailian' || value === 'volcengine_ark') form.setFieldValue('region', 'cn-beijing');
+                  if (value === 'xiaomi_mimo' && !form.getFieldValue('access_mode')) form.setFieldValue('access_mode', 'payg');
                 }} />
               </Form.Item>
             </Col>
@@ -520,6 +522,14 @@ export default function LlmProviders() {
               )}
             </Row>
           )}
+          {vendor === 'xiaomi_mimo' && (
+            <Form.Item name="access_mode" label="接入方式" rules={[{ required: true }]}>
+              <Select options={[
+                { value: 'payg', label: '按量付费 API Key（sk-...）' },
+                { value: 'token_plan', label: 'Token Plan（tp-...）' },
+              ]} />
+            </Form.Item>
+          )}
           <Form.Item
             name="base_url"
             label="Base URL"
@@ -534,7 +544,7 @@ export default function LlmProviders() {
             rules={isEdit ? [] : [{ required: true }]}
             extra={isEdit ? '留空则保持原 Key 不变' : undefined}
           >
-            <Input.Password placeholder={vendor === 'xiaomi_mimo' ? 'sk-...（禁止 tp- Token Plan）' : 'sk-...'} />
+            <Input.Password placeholder={vendor === 'xiaomi_mimo' ? 'sk-... 或 tp-...' : 'sk-...'} />
           </Form.Item>
           <Alert
             type="info" showIcon style={{ marginBottom: 16 }}
@@ -542,7 +552,7 @@ export default function LlmProviders() {
             description={vendor === 'aliyun_bailian'
               ? '请使用按量付费 API Key。Coding Plan / Token Plan 不适用于 SaaS 后端。Key、地域和 Base URL 必须属于同一地域。'
               : vendor === 'xiaomi_mimo'
-                ? 'SaaS 后端只接受按量付费 sk-... 密钥；tp-... Token Plan 会被后端拒绝。ASR、TTS、音色设计和克隆分别声明能力。'
+                ? '支持按量付费 sk-... 和 Token Plan tp-... 凭证。ASR、TTS、音色设计和克隆仍需分别声明实际能力。'
               : vendor === 'volcengine_ark'
                 ? '聊天/视觉、Embedding 和图片生成需要按实际模型选择不同适配器；图片生成不会被当作聊天接口调用。'
                 : '模型必须明确填写能力和适配器，平台不再根据模型名称猜测。'}

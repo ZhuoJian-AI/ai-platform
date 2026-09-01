@@ -53,14 +53,15 @@ def test_role_data_scope_expands_queries_without_changing_membership() -> None:
     assert current_user.department_ids == (str(primary),)
 
 
-def test_mimo_token_plan_is_rejected_and_audio_adapters_are_strict() -> None:
-    with pytest.raises(ValidationError, match="Token Plan"):
-        LlmProviderCreate(
-            name="forbidden-token-plan",
-            vendor="xiaomi_mimo",
-            access_mode="payg",
-            api_key="tp-do-not-use-in-saas",
-        )
+def test_mimo_token_plan_is_supported_and_audio_adapters_are_strict() -> None:
+    token_plan = LlmProviderCreate(
+        name="mimo-token-plan",
+        vendor="xiaomi_mimo",
+        access_mode="token_plan",
+        api_key="tp-test",
+    )
+    assert token_plan.access_mode == "token_plan"
+    assert token_plan.region == "cn"
 
     provider = LlmProviderCreate(
         name="mimo-payg",

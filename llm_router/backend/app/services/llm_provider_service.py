@@ -234,6 +234,7 @@ async def get_provider(db: AsyncSession, provider_id: UUID) -> LlmProvider | Non
 
 async def update_provider(db: AsyncSession, provider: LlmProvider, data: LlmProviderUpdate) -> LlmProvider:
     update_data = data.model_dump(exclude_unset=True)
+    access_mode = update_data.pop("access_mode", None)
     if provider.vendor == "aliyun_bailian" and ({"workspace_id", "region"} & update_data.keys()):
         update_data["workspace_id"] = normalize_bailian_workspace_id(
             update_data.get("workspace_id", provider.workspace_id),
@@ -242,11 +243,14 @@ async def update_provider(db: AsyncSession, provider: LlmProvider, data: LlmProv
     if "api_key" in update_data:
         update_data["api_key_encrypted"] = encrypt_provider_api_key(update_data.pop("api_key"))
         provider.api_key_version += 1
-    if "config" in update_data or "supported_models" in update_data:
-        update_data["config"] = validate_provider_config(
+    if "config" in update_data or "supported_models" in update_data or access_mode is not None:
+        normalized_config = validate_provider_config(
             update_data.get("config", provider.config),
             update_data.get("supported_models", provider.supported_models),
         )
+        if access_mode is not None:
+            normalized_config["access_mode"] = access_mode
+        update_data["config"] = normalized_config
     if {"base_url", "region", "workspace_id"} & update_data.keys():
         update_data["base_url"] = provider_base_url(
             provider.vendor,

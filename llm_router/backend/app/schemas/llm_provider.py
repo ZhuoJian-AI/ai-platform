@@ -146,8 +146,6 @@ class LlmProviderCreate(BaseModel):
         if self.vendor in {"aliyun_bailian", "volcengine_ark"} and not self.region:
             self.region = "cn-beijing"
         if self.vendor == "xiaomi_mimo":
-            if self.access_mode != "payg" or self.api_key.strip().lower().startswith("tp-"):
-                raise ValueError("MiMo Token Plan credentials cannot be used by the SaaS backend")
             self.region = self.region or "cn"
         return self
 
@@ -161,6 +159,7 @@ class LlmProviderUpdate(BaseModel):
     name: str | None = Field(None, max_length=255)
     region: str | None = None
     workspace_id: str | None = None
+    access_mode: str | None = None
     base_url: str | None = None
     api_key: str | None = None
     is_active: bool | None = None
