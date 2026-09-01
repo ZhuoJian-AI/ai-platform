@@ -187,7 +187,7 @@ services:
         limits: { cpus: "1.00", memory: 1G, pids: 256 }
 
   backend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5ae822e8cf1a6359a0a000aa74e3a879431d7968f572289cbd5179c88288f018
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:a25b4e67c6b605717d721a2a6593a55d280bd0beadf4a98ee5fadf045009ca3e
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -293,7 +293,7 @@ services:
         limits: { cpus: "1.50", memory: 2560M }
 
   workspace-parser:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5ae822e8cf1a6359a0a000aa74e3a879431d7968f572289cbd5179c88288f018
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:a25b4e67c6b605717d721a2a6593a55d280bd0beadf4a98ee5fadf045009ca3e
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -331,7 +331,7 @@ services:
         limits: { cpus: "0.75", memory: 1536M }
 
   storage-lifecycle:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5ae822e8cf1a6359a0a000aa74e3a879431d7968f572289cbd5179c88288f018
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:a25b4e67c6b605717d721a2a6593a55d280bd0beadf4a98ee5fadf045009ca3e
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -383,7 +383,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   multimodal-worker:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5ae822e8cf1a6359a0a000aa74e3a879431d7968f572289cbd5179c88288f018
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:a25b4e67c6b605717d721a2a6593a55d280bd0beadf4a98ee5fadf045009ca3e
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -406,6 +406,17 @@ services:
       STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
       STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
     command: ["python", "-m", "app.workers.multimodal_worker"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import pathlib,sys;
+          sys.exit(0 if b'app.workers.multimodal_worker' in
+          pathlib.Path('/proc/1/cmdline').read_bytes() else 1)"
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     extra_hosts:
       - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
     depends_on:
@@ -426,7 +437,7 @@ services:
         limits: { cpus: "1.00", memory: 1536M, pids: 256 }
 
   frontend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:c6e007d5801470967e69220d10c0ae90d703f13b996a2baec0bbd0ea6cd1803d
+    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:a73c0e71fc737c535eb32afe8f692e4a6437f324fe4a6181e28175d87afaa1c2
     labels:
       # Coolify also attaches its public application network. Pin Traefik to
       # that network so it never selects the private Compose default network.
