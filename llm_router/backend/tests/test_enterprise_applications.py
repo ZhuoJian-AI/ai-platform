@@ -576,6 +576,7 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
     )
     assert launch_claims["pageKeys"] == ["sample_review.detail"]
     assert launch_claims["actionKeys"] == ["sample_review.approve"]
+    assert launch_claims["exp"] - launch_claims["iat"] == 120
     assert launch_claims["pageAccess"]["sample_review.detail"] == {
         "permissions": ["ai_approve", "view"],
         "actionKeys": ["sample_review.approve"],

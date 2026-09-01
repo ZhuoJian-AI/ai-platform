@@ -1,11 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Badge, Button, Card, Drawer, Empty, Input, Result, Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import {
   AppstoreOutlined, ExportOutlined, FullscreenExitOutlined, FullscreenOutlined,
   ReloadOutlined, RobotOutlined, SendOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError, terminal, type TerminalEnterpriseApplication } from '../../api/client';
+import {
+  ApiError, terminal, type EnterpriseApplicationLaunch, type TerminalEnterpriseApplication,
+} from '../../api/client';
 import { isPlainObject, parseBridgeContext } from '../../utils/subsystemBridge';
 
 function safeContextPageUrl(launchUrl: string | undefined, route: unknown): string | undefined {
@@ -45,11 +47,34 @@ export default function EnterpriseApplicationView({
   const [frameSlow, setFrameSlow] = useState(false);
   const [bridgeContext, setBridgeContext] = useState<Record<string, unknown>>({});
   const frameRef = useRef<HTMLIFrameElement>(null);
-  const { data: launch, isLoading, error, refetch } = useQuery({
-    queryKey: ['terminal-application-launch', application.id, moduleKey],
-    queryFn: () => terminal.launchApplication(application.id, moduleKey ?? undefined),
-    retry: false,
-  });
+  const launchRequestRef = useRef(0);
+  const [launch, setLaunch] = useState<EnterpriseApplicationLaunch>();
+  const [launchLoading, setLaunchLoading] = useState(true);
+  const [launchError, setLaunchError] = useState<unknown>();
+  const requestFreshLaunch = useCallback(async () => {
+    const requestId = ++launchRequestRef.current;
+    setFrameLoaded(false);
+    setFrameSlow(false);
+    setLaunch(undefined);
+    setLaunchLoading(true);
+    setLaunchError(undefined);
+    try {
+      // Launch URLs contain single-use SSO tickets. They must never enter the
+      // shared React Query cache or be reused when an iframe is remounted.
+      const freshLaunch = await terminal.launchApplication(application.id, moduleKey ?? undefined);
+      if (launchRequestRef.current === requestId) {
+        setLaunch(freshLaunch);
+        setLaunchLoading(false);
+      }
+      return freshLaunch;
+    } catch (launchRequestError) {
+      if (launchRequestRef.current === requestId) {
+        setLaunchError(launchRequestError);
+        setLaunchLoading(false);
+      }
+      throw launchRequestError;
+    }
+  }, [application.id, moduleKey]);
   const confirmationsQuery = useQuery({
     queryKey: ['application-action-confirmations'],
     queryFn: () => terminal.applicationActionConfirmations(),
@@ -73,20 +98,33 @@ export default function EnterpriseApplicationView({
   });
 
   const refreshFrame = async () => {
-    const refreshed = await refetch();
-    if (refreshed.isSuccess) setFrameKey((value) => value + 1);
+    setFrameLoaded(false);
+    try {
+      await requestFreshLaunch();
+      setFrameKey((value) => value + 1);
+    } catch { /* requestFreshLaunch exposes the error in the page state */ }
   };
 
   const openFreshLaunch = async () => {
     const popup = window.open('about:blank', '_blank');
     if (popup) popup.opener = null;
-    const refreshed = await refetch();
-    if (refreshed.isSuccess && refreshed.data?.url && popup) popup.location.replace(refreshed.data.url);
-    else {
+    try {
+      const freshLaunch = await terminal.launchApplication(application.id, moduleKey ?? undefined);
+      if (freshLaunch.url && popup) popup.location.replace(freshLaunch.url);
+      else {
+        popup?.close();
+        if (!popup) message.warning('浏览器阻止了新窗口，请允许弹窗后重试');
+      }
+    } catch (openError) {
       popup?.close();
-      if (!popup) message.warning('浏览器阻止了新窗口，请允许弹窗后重试');
+      message.error(openError instanceof ApiError ? openError.message : '应用入口获取失败');
     }
   };
+
+  useEffect(() => {
+    void requestFreshLaunch().catch(() => undefined);
+    return () => { launchRequestRef.current += 1; };
+  }, [requestFreshLaunch]);
 
   useEffect(() => {
     if (!moduleKey && launch?.module_key) onModuleChange(launch.module_key);
@@ -96,7 +134,7 @@ export default function EnterpriseApplicationView({
     setFrameLoaded(false); setFrameSlow(false); setBridgeContext({});
     const timer = window.setTimeout(() => setFrameSlow(true), 8000);
     return () => window.clearTimeout(timer);
-  }, [application.id, frameKey]);
+  }, [application.id, moduleKey, frameKey]);
 
   useEffect(() => {
     if (!launch?.url || launch.display_mode !== 'embedded') return;
@@ -138,10 +176,10 @@ export default function EnterpriseApplicationView({
     setPrompt(''); setAssistantOpen(false);
   };
 
-  if (isLoading) return <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}><Spin tip="正在校验应用权限…" /></div>;
-  if (error) {
-    const forbidden = error instanceof ApiError && error.status === 403;
-    return <Result status={forbidden ? '403' : 'error'} title={forbidden ? '无权访问该应用' : '应用加载失败'} subTitle={forbidden ? '当前账号没有此企业模块的 view 权限。' : (error as Error).message} extra={<Button onClick={() => refetch()}>重试</Button>} />;
+  if (launchLoading) return <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}><Spin tip="正在校验应用权限…" /></div>;
+  if (launchError) {
+    const forbidden = launchError instanceof ApiError && launchError.status === 403;
+    return <Result status={forbidden ? '403' : 'error'} title={forbidden ? '无权访问该应用' : '应用加载失败'} subTitle={forbidden ? '当前账号没有此企业模块的 view 权限。' : (launchError instanceof Error ? launchError.message : '无法获取新的应用入口')} extra={<Button onClick={() => void requestFreshLaunch().catch(() => undefined)}>重试</Button>} />;
   }
   if (!launch) return <Empty description="应用入口不可用" />;
   const activeModule = launch.modules.find((item) => item.module_key === launch.module_key);

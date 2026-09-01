@@ -4,7 +4,7 @@ from urllib.parse import urlencode, urljoin
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -320,10 +320,12 @@ async def terminal_applications_endpoint(
 )
 async def launch_terminal_application_endpoint(
     app_id: UUID,
+    response: Response,
     module_key: str | None = None,
     cu: CurrentUser = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
+    response.headers["Cache-Control"] = "no-store"
     row, permissions = await service.assert_application_permission(db, app_id, cu, "view")
     module_keys = service.effective_module_keys(row, cu)
     integration = await integration_service.get_integration(db, row.id)

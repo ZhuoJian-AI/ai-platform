@@ -1985,7 +1985,7 @@ export const terminal = {
   applications: () => userRequest<TerminalEnterpriseApplication[]>('/api/v1/terminal/applications'),
   launchApplication: (id: string, moduleKey?: string) => userRequest<EnterpriseApplicationLaunch>(
     `/api/v1/terminal/applications/${id}/launch${moduleKey ? `?module_key=${encodeURIComponent(moduleKey)}` : ''}`,
-    { method: 'POST' },
+    { method: 'POST', cache: 'no-store' },
   ),
   invokeApplicationAction: (
     id: string, actionKey: string, data: { module_key: string; params: Record<string, unknown>; request_id?: string },

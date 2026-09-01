@@ -35,6 +35,7 @@ OPERATION_PERMISSION = {
     "export": "export",
 }
 CONFIRMATION_TTL = timedelta(minutes=5)
+SSO_TICKET_TTL = timedelta(seconds=120)
 
 
 async def list_actions(
@@ -530,7 +531,7 @@ def issue_launch_ticket(
         "permissions": sorted(permissions),
         "jti": uuid4().hex,
         "iat": now,
-        "exp": now + timedelta(seconds=60),
+        "exp": now + SSO_TICKET_TTL,
     }
     if isinstance(module_claims, dict):
         action_keys = module_claims.get("action_keys")
