@@ -310,6 +310,17 @@ services:
       WORKSPACE_MAX_FILE_BYTES: "${WORKSPACE_MAX_FILE_BYTES:-104857600}"
       WORKSPACE_TRASH_RETENTION_DAYS: "${WORKSPACE_TRASH_RETENTION_DAYS:-30}"
     command: ["python", "-m", "app.workers.workspace_parser"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import pathlib,sys;
+          sys.exit(0 if b'app.workers.workspace_parser' in
+          pathlib.Path('/proc/1/cmdline').read_bytes() else 1)"
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     extra_hosts:
       - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
       - "redis:${DATA_PLANE_PREFIX:-10.0.10}.11"
