@@ -43,6 +43,16 @@ try {
     /sandbox="[^"]*allow-modals[^"]*"/,
     'embedded enterprise applications must be allowed to show confirmation dialogs',
   );
+  assert.match(
+    applicationViewSource,
+    /onAskAI: \(prompt: string, pageContext: Record<string, unknown>\) => Promise<string>/,
+    'business assistant must execute inline and return its answer to the application drawer',
+  );
+  assert.match(
+    applicationViewSource,
+    /在当前页面执行/,
+    'business assistant must keep the user on the embedded application page',
+  );
 
   process.stdout.write('subsystem bridge tests passed\n');
 } finally {

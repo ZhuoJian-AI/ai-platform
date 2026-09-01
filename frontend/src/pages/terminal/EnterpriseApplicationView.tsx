@@ -34,7 +34,7 @@ export default function EnterpriseApplicationView({
   application: TerminalEnterpriseApplication;
   moduleKey: string | null;
   onModuleChange: (moduleKey: string) => void;
-  onAskAI: (prompt: string, pageContext: Record<string, unknown>) => void;
+  onAskAI: (prompt: string, pageContext: Record<string, unknown>) => Promise<string>;
   immersive: boolean;
   onOpenNavigation: () => void;
   onToggleImmersive: () => void;
@@ -42,6 +42,11 @@ export default function EnterpriseApplicationView({
   const queryClient = useQueryClient();
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
+  const [assistantRunning, setAssistantRunning] = useState(false);
+  const [assistantMessages, setAssistantMessages] = useState<Array<{
+    role: 'user' | 'assistant';
+    content: string;
+  }>>([]);
   const [frameKey, setFrameKey] = useState(0);
   const [frameLoaded, setFrameLoaded] = useState(false);
   const [frameSlow, setFrameSlow] = useState(false);
@@ -161,19 +166,36 @@ export default function EnterpriseApplicationView({
     return () => window.removeEventListener('message', onMessage);
   }, [application.slug, launch?.display_mode, launch?.url, frameKey]);
 
-  const submit = () => {
+  const submit = async () => {
     const value = prompt.trim();
-    if (!value) return;
-    onAskAI(value, {
-      application_id: application.id,
-      application_slug: application.slug,
-      application_name: application.name,
-      page_url: safeContextPageUrl(launch?.url, bridgeContext.route),
-      source: 'business_assistant',
-      allowed_module_keys: launch?.module_keys ?? [],
-      ...bridgeContext,
-    });
-    setPrompt(''); setAssistantOpen(false);
+    if (!value || assistantRunning) return;
+    setPrompt('');
+    setAssistantMessages((items) => [...items, { role: 'user', content: value }]);
+    setAssistantRunning(true);
+    try {
+      const answer = await onAskAI(value, {
+        application_id: application.id,
+        application_slug: application.slug,
+        application_name: application.name,
+        page_url: safeContextPageUrl(launch?.url, bridgeContext.route),
+        source: 'business_assistant',
+        allowed_module_keys: launch?.module_keys ?? [],
+        ...bridgeContext,
+      });
+      setAssistantMessages((items) => [...items, {
+        role: 'assistant',
+        content: answer || '操作已完成。',
+      }]);
+      await refreshFrame();
+    } catch (assistantError) {
+      const errorMessage = assistantError instanceof Error ? assistantError.message : '业务小助手执行失败';
+      setAssistantMessages((items) => [...items, {
+        role: 'assistant',
+        content: `执行失败：${errorMessage}`,
+      }]);
+    } finally {
+      setAssistantRunning(false);
+    }
   };
 
   if (launchLoading) return <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}><Spin tip="正在校验应用权限…" /></div>;
@@ -275,12 +297,33 @@ export default function EnterpriseApplicationView({
             </Card>)}
           </Space>
         </div>}
+        {assistantMessages.length > 0 && (
+          <div aria-label="业务小助手对话" style={{ display: 'grid', gap: 10, marginBottom: 18 }}>
+            {assistantMessages.map((item, index) => (
+              <div
+                key={`${item.role}-${index}`}
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: 10,
+                  whiteSpace: 'pre-wrap',
+                  background: item.role === 'user' ? '#eef2ff' : '#f5f5f5',
+                  marginLeft: item.role === 'user' ? 28 : 0,
+                  marginRight: item.role === 'assistant' ? 28 : 0,
+                }}
+              >
+                <Typography.Text strong>{item.role === 'user' ? '我' : '业务小助手'}</Typography.Text>
+                <Typography.Paragraph style={{ margin: '4px 0 0' }}>{item.content}</Typography.Paragraph>
+              </div>
+            ))}
+            {assistantRunning && <div style={{ padding: '8px 0' }}><Spin size="small" /> <Typography.Text type="secondary">正在理解当前页面并执行授权操作…</Typography.Text></div>}
+          </div>
+        )}
         <Typography.Paragraph type="secondary">你可以问：</Typography.Paragraph>
         <Space direction="vertical" style={{ width: '100%', marginBottom: 16 }}>
           {['汇总当前页面异常并给出处理建议', '查询今天待处理的业务记录', '根据当前业务数据生成一份 Excel'].map((item) => <Button key={item} block style={{ textAlign: 'left' }} onClick={() => setPrompt(item)}>{item}</Button>)}
         </Space>
-        <Input.TextArea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={6} placeholder="描述你要查询或执行的业务任务…" onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); submit(); } }} />
-        <Button type="primary" block icon={<SendOutlined />} disabled={!prompt.trim()} onClick={submit} style={{ marginTop: 12 }}>交给业务小助手</Button>
+        <Input.TextArea value={prompt} disabled={assistantRunning} onChange={(event) => setPrompt(event.target.value)} rows={6} placeholder="描述你要查询或执行的业务任务…" onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); void submit(); } }} />
+        <Button type="primary" block icon={<SendOutlined />} loading={assistantRunning} disabled={!prompt.trim()} onClick={() => void submit()} style={{ marginTop: 12 }}>在当前页面执行</Button>
       </Drawer>
     </div>
   );

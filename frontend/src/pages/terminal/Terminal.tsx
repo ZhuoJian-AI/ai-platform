@@ -1354,13 +1354,29 @@ export default function Terminal() {
                 immersive={applicationImmersive}
                 onOpenNavigation={() => setApplicationNavOpen(true)}
                 onToggleImmersive={() => setApplicationImmersive((value) => !value)}
-                onAskAI={(prompt, context) => {
-                  setView('assistant');
-                  setSelectedId(null);
-                  setComposerOpen(true);
-                  setInput(prompt);
-                  setConfig((current) => ({ ...current, application_id: selectedApplication.id }));
-                  setPageContext(context);
+                onAskAI={async (prompt, context) => {
+                  const modelAlias = config.model_alias ?? modelData?.models?.[0] ?? null;
+                  if (!modelAlias) throw new Error('当前账号没有可用模型，请联系管理员配置模型权限');
+                  const assistantConfig: TaskConfig = {
+                    ...config,
+                    model_alias: modelAlias,
+                    application_id: selectedApplication.id,
+                  };
+                  const task = await terminal.createTask({ message: prompt, config: assistantConfig });
+                  qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
+                  const result = await terminal.runTask(
+                    task.id,
+                    prompt,
+                    selectedAgentId,
+                    [],
+                    [],
+                    selectedApplication.id,
+                    context,
+                  );
+                  qc.invalidateQueries({ queryKey: ['terminal-task', task.id] });
+                  qc.invalidateQueries({ queryKey: ['terminal-memory'] });
+                  qc.invalidateQueries({ queryKey: ['application-action-confirmations'] });
+                  return result.assistant;
                 }}
               />
             ) : composerOpen ? (
