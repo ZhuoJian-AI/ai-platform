@@ -32,12 +32,23 @@ from app.services import multimodal_service
 
 
 def department_scope_ids(cu: CurrentUser) -> tuple[str, ...]:
-    """Return all department ids while accepting legacy projected user objects."""
+    """Return primary plus role-derived department data scopes.
+
+    The user's organization membership still has exactly one department.  The
+    additional ids are query scopes resolved from roles, not extra memberships.
+    """
     values = {str(value) for value in (getattr(cu, "department_ids", ()) or ()) if value}
     primary = getattr(cu, "department_id", None)
     if primary:
         values.add(str(primary))
+    data_scope = getattr(cu, "effective_data_scopes", None) or {}
+    values.update(str(value) for value in (data_scope.get("department_ids") or ()) if value)
     return tuple(sorted(values))
+
+
+def has_unrestricted_data_scope(cu: CurrentUser) -> bool:
+    """Whether an active role grants all department-owned data in this tenant."""
+    return bool((getattr(cu, "effective_data_scopes", None) or {}).get("unrestricted"))
 
 
 def effective_scope_set(cu: CurrentUser) -> list[tuple[str, str | None]]:
@@ -50,6 +61,7 @@ def effective_scope_set(cu: CurrentUser) -> list[tuple[str, str | None]]:
     if cu.team_id:
         scopes.append(("team", cu.team_id))
     scopes.append(("user", cu.id))
+    scopes.extend(("role", role_id) for role_id in (cu.role_ids or ()))
     return scopes
 
 
@@ -57,7 +69,9 @@ def scope_filter(model, cu: CurrentUser):
     """构造 ``model`` 的可见性 WHERE 条件（组织级 + 用户 dept/team/user 命中）。"""
     conds = [model.scope_type == "organization"]
     department_ids = department_scope_ids(cu)
-    if department_ids:
+    if has_unrestricted_data_scope(cu):
+        conds.append(model.scope_type == "department")
+    elif department_ids:
         conds.append((model.scope_type == "department") & (model.scope_id.in_(department_ids)))
     if cu.team_id:
         conds.append((model.scope_type == "team") & (model.scope_id == cu.team_id))
@@ -115,7 +129,7 @@ def is_rag_visible(collection: RagCollection, cu: CurrentUser) -> bool:
     if collection.scope_type == "organization":
         return True
     if collection.scope_type == "department":
-        return collection.scope_id in department_scope_ids(cu)
+        return has_unrestricted_data_scope(cu) or collection.scope_id in department_scope_ids(cu)
     if collection.scope_type == "team":
         return bool(cu.team_id and collection.scope_id == cu.team_id)
     return collection.scope_type == "user" and collection.scope_id == cu.id
@@ -229,8 +243,8 @@ def is_workspace_visible(ws: Workspace, cu: CurrentUser) -> bool:
     """运行时校验某个 workspace 是否落在用户 scope 内（终端文件读写守卫）。"""
     if ws.scope_type == "organization":
         return True
-    if ws.scope_type == "department" and ws.scope_id in department_scope_ids(cu):
-        return True
+    if ws.scope_type == "department":
+        return has_unrestricted_data_scope(cu) or ws.scope_id in department_scope_ids(cu)
     if ws.scope_type == "team" and cu.team_id and ws.scope_id == cu.team_id:
         return True
     if ws.scope_type == "user" and ws.scope_id == cu.id:
@@ -247,7 +261,9 @@ async def list_api_keys_for_user(db: AsyncSession, cu: CurrentUser) -> list[ApiK
     now = datetime.now(UTC)
     conds: list = [ApiKey.scope_type == "organization"]
     department_ids = department_scope_ids(cu)
-    if department_ids:
+    if has_unrestricted_data_scope(cu):
+        conds.append(ApiKey.scope_type == "department")
+    elif department_ids:
         conds.append((ApiKey.scope_type == "department") & (ApiKey.department_id.in_(department_ids)))
     if cu.team_id:
         conds.append((ApiKey.scope_type == "team") & (ApiKey.team_id == cu.team_id))

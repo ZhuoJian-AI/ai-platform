@@ -2124,10 +2124,17 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
         if is_current_image:
             rendered = "（本轮原始图片由平台视觉路由处理；如需 OCR、裁剪或格式转换再调用 image_tool。）"
         elif workspace_file.parse_status != "ready" and raw_tool:
-            rendered = (
-                f"（原始二进制附件无需正文解析；请使用 {raw_tool} 并把 file_id={fid} 作为 "
-                "input_file_ids 实际读取。不得声称附件不可用，也不得编造处理结果。）"
-            )
+            if raw_tool == "understand_audio":
+                rendered = (
+                    f"（这是音频附件。请使用 understand_audio，传入 workspace_file_id={fid} 和"
+                    "用户当前问题实际理解音频；若当前模型没有音频理解能力，再调用 "
+                    "transcribe_audio。不得声称附件不可用，也不得编造处理结果。）"
+                )
+            else:
+                rendered = (
+                    f"（原始二进制附件无需正文解析；请使用 {raw_tool} 并把 file_id={fid} 作为 "
+                    "input_file_ids 实际读取。不得声称附件不可用，也不得编造处理结果。）"
+                )
         else:
             rendered = content if content.strip() else "（文件内容为空或尚未解析，无法直接分析）"
         file_parts.append(f"[引用文件 file_id={fid} path={workspace_file.path}]\n{rendered}")

@@ -19,6 +19,12 @@ from app.services.organization_service import (
     get_org_name_slug_by_id,
     get_team_name_by_id,
 )
+from app.services.role_service import (
+    BUILTIN_ADMIN,
+    BUILTIN_MEMBER,
+    ensure_builtin_roles,
+    replace_user_roles,
+)
 from app.services.skill_scope_service import (
     replace_manager_grants,
     validate_user_departments,
@@ -143,6 +149,11 @@ async def create_user(
     )
     db.add(user)
     await db.flush()
+    builtins = await ensure_builtin_roles(db, org_id)
+    selected_role_ids = data.role_ids
+    if selected_role_ids is None:
+        selected_role_ids = [builtins[BUILTIN_ADMIN if data.role == "admin" else BUILTIN_MEMBER].id]
+    await replace_user_roles(db, user, selected_role_ids)
     await _replace_user_departments(db, user, department_ids)
     await replace_manager_grants(db, user, data.manager_scopes, created_by_admin_id)
     # 组织管理员（role='admin'）非终端用户：不持有工作空间，也不沉淀个人档案记忆。
@@ -177,6 +188,7 @@ async def update_user(
         data.manager_scopes if "manager_scopes" in data.model_fields_set else None
     )
     values.pop("manager_scopes", None)
+    requested_role_ids = values.pop("role_ids", None)
     department_ids_were_set = "department_ids" in data.model_fields_set
     requested_department_ids = values.pop("department_ids", None)
     primary_department_was_set = "department_id" in data.model_fields_set
@@ -211,6 +223,12 @@ async def update_user(
         user.must_change_password = True
     await db.flush()
     await db.refresh(user)
+    if requested_role_ids is not None:
+        await replace_user_roles(db, user, requested_role_ids)
+    elif role_changed:
+        builtins = await ensure_builtin_roles(db, user.organization_id)
+        selected = builtins[BUILTIN_ADMIN if user.role == "admin" else BUILTIN_MEMBER]
+        await replace_user_roles(db, user, [selected.id])
     if department_ids_were_set or primary_department_was_set:
         await _replace_user_departments(db, user, next_department_ids)
 

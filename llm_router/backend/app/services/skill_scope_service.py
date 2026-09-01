@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.department import Department
+from app.models.role import Role
 from app.models.skill import ScopeManagerAssignment, SkillFile, SkillFolder, SkillVersion
 from app.models.team import Team
 from app.models.user import User
@@ -19,7 +20,7 @@ from app.schemas.user import ManagerScopeGrant
 if TYPE_CHECKING:
     from app.auth.user_auth import CurrentUser
 
-VALID_SCOPE_TYPES = {"organization", "department", "team", "user"}
+VALID_SCOPE_TYPES = {"organization", "department", "team", "user", "role"}
 
 
 def _user_department_ids(user: User | CurrentUser) -> set[str]:
@@ -44,7 +45,7 @@ async def validate_scope_target(
         return None
     if not sid:
         raise HTTPException(status_code=422, detail=f"{scope_type} scope_id is required")
-    model = {"department": Department, "team": Team, "user": User}[scope_type]
+    model = {"department": Department, "team": Team, "user": User, "role": Role}[scope_type]
     row = (await db.execute(select(model).where(
         model.id == UUID(sid), model.organization_id == UUID(org), model.deleted_at.is_(None),
     ))).scalar_one_or_none()

@@ -47,6 +47,7 @@ class OrganizationRead(BaseModel):
 
 
 class DepartmentCreate(BaseModel):
+    parent_id: UUID | None = None
     name: str = Field(..., max_length=255)
     slug: str = Field(..., max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str | None = None
@@ -58,6 +59,7 @@ class DepartmentCreate(BaseModel):
 
 
 class DepartmentUpdate(BaseModel):
+    parent_id: UUID | None = None
     name: str | None = Field(None, max_length=255)
     slug: str | None = Field(None, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str | None = None
@@ -71,6 +73,7 @@ class DepartmentUpdate(BaseModel):
 class DepartmentRead(BaseModel):
     id: UUID
     organization_id: UUID
+    parent_id: UUID | None = None
     name: str
     slug: str
     description: str | None

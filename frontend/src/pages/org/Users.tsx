@@ -5,16 +5,13 @@ import {
 } from 'antd';
 import { PlusOutlined, DeleteOutlined, EditOutlined, LockOutlined, UserOutlined } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { organizations, users } from '../../api/client';
+import { organizations, roles, users } from '../../api/client';
 import type { ManagerScopeGrant, User } from '../../api/client';
 import { ApiError } from '../../api/client';
 import { useOrgTree } from '../../hooks/useOrgTree';
 import OrgSelect from '../../components/OrgSelect';
 import { FinderShell, TitleBar } from '../../components/finder/primitives';
 import ConfirmModal from '../../components/finder/ConfirmModal';
-
-const ROLE_LABELS: Record<string, string> = { admin: '组织管理员', member: '成员' };
-const ROLE_COLORS: Record<string, string> = { admin: 'blue', member: 'default' };
 
 export default function UsersPage() {
   const qc = useQueryClient();
@@ -35,6 +32,11 @@ export default function UsersPage() {
   const { data: userList, isLoading } = useQuery({
     queryKey: ['users', orgId],
     queryFn: () => orgId ? users.list(orgId) : Promise.resolve([]),
+    enabled: !!orgId,
+  });
+  const { data: roleList = [] } = useQuery({
+    queryKey: ['roles', orgId],
+    queryFn: () => orgId ? roles.list(orgId) : Promise.resolve([]),
     enabled: !!orgId,
   });
 
@@ -69,7 +71,13 @@ export default function UsersPage() {
     return options;
   }, [watchedDepartmentId, watchedTeamId, nodeMap]);
 
-  const openCreate = () => { setEditing(null); form.resetFields(); setModalOpen(true); };
+  const openCreate = () => {
+    setEditing(null);
+    form.resetFields();
+    const employeeRole = roleList.find(role => role.code === 'employee');
+    form.setFieldsValue({ role_ids: employeeRole ? [employeeRole.id] : [], is_active: true });
+    setModalOpen(true);
+  };
   const openEdit = (r: User) => { setEditing(r); setModalOpen(true); };
   const openReset = (r: User) => { setResetTarget(r); setNewPassword(''); setResetModalOpen(true); };
   const closeReset = () => { setResetModalOpen(false); setResetTarget(null); setNewPassword(''); };
@@ -80,6 +88,7 @@ export default function UsersPage() {
         username: editing.username,
         display_name: editing.display_name,
         is_active: editing.is_active,
+        role_ids: editing.role_ids ?? [],
         department_id: editing.department_id ?? editing.department_ids?.[0] ?? undefined,
         team_id: editing.team_id ?? undefined,
         manager_scope_keys: (editing.manager_scopes ?? []).map((grant) => `${grant.scope_type}:${grant.scope_id}`),
@@ -92,6 +101,7 @@ export default function UsersPage() {
   const createUser = useMutation({
     mutationFn: (data: {
       username: string; display_name?: string | null; role: string; is_active: boolean; password: string;
+      role_ids?: string[];
       department_ids?: string[]; department_id?: string | null; team_id?: string | null;
       manager_scopes?: ManagerScopeGrant[];
     }) => {
@@ -128,6 +138,7 @@ export default function UsersPage() {
       username: v.username,
       display_name: v.display_name,
       role: 'member',
+      role_ids: (v.role_ids as string[] | undefined) ?? [],
       is_active: v.is_active,
       password: v.password,
       // department_ids 仅保留为旧客户端兼容字段，服务端强制最多一个部门。
@@ -169,8 +180,12 @@ export default function UsersPage() {
             { title: '用户名', dataIndex: 'username', width: 280 },
             { title: '显示名', dataIndex: 'display_name', width: 200 },
             {
-              title: '角色', dataIndex: 'role', width: 120,
-              render: (v: string) => <Tag color={ROLE_COLORS[v]}>{ROLE_LABELS[v] || v}</Tag>,
+              title: '角色', dataIndex: 'roles', width: 220,
+              render: (_: unknown, record: User) => (record.roles?.length
+                ? record.roles.map(role => (
+                    <Tag key={role.id} color={role.is_builtin ? 'blue' : 'purple'}>{role.name}</Tag>
+                  ))
+                : <Typography.Text type="secondary">未分配</Typography.Text>),
             },
             {
               title: '所属部门', dataIndex: 'department_id', width: 200,
@@ -251,6 +266,23 @@ export default function UsersPage() {
                 }
                 form.setFieldValue('manager_scope_keys', []);
               }}
+            />
+          </Form.Item>
+          <Form.Item
+            name="role_ids"
+            label="角色（可多选）"
+            extra="部门只表示组织归属；应用、子模块、AI 操作和数据范围由一个或多个角色叠加决定。"
+            rules={[{ required: true, message: '请至少选择一个角色' }]}
+          >
+            <Select
+              mode="multiple"
+              showSearch
+              optionFilterProp="label"
+              options={roleList.filter(role => role.is_active).map(role => ({
+                value: role.id,
+                label: `${role.name}${role.is_builtin ? '（内置）' : ''}`,
+              }))}
+              placeholder="选择一个或多个角色"
             />
           </Form.Item>
           <Form.Item

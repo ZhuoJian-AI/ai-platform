@@ -92,6 +92,7 @@ export interface Department {
   name: string;
   slug: string;
   description: string | null;
+  parent_id: string | null;
   settings: Record<string, unknown>;
   rate_limit_rpm: number | null;
   rate_limit_tpm: number | null;
@@ -121,7 +122,7 @@ export interface LlmProvider {
   id: string;
   organization_id: string;
   name: string;
-  vendor: 'openai' | 'anthropic' | 'azure_openai' | 'aliyun_bailian' | 'volcengine_ark' | 'custom';
+  vendor: 'openai' | 'anthropic' | 'azure_openai' | 'aliyun_bailian' | 'volcengine_ark' | 'xiaomi_mimo' | 'custom';
   provider_type: string;
   region: string | null;
   workspace_id: string | null;
@@ -144,7 +145,16 @@ export interface LlmProvider {
   updated_at: string;
 }
 
-export type ModelCapability = 'chat' | 'vision' | 'embedding' | 'image_generation';
+export type ModelCapability =
+  | 'chat'
+  | 'vision'
+  | 'embedding'
+  | 'image_generation'
+  | 'audio_understanding'
+  | 'speech_to_text'
+  | 'text_to_speech'
+  | 'voice_design'
+  | 'voice_clone';
 
 export interface ModelDeployment {
   id: string;
@@ -391,6 +401,15 @@ export interface User {
   username: string;
   display_name: string | null;
   role: string;
+  role_ids: string[];
+  roles: RoleSummary[];
+  permission_codes: string[];
+  effective_data_scopes: {
+    unrestricted: boolean;
+    include_self: boolean;
+    own_only: boolean;
+    department_ids: string[];
+  } | null;
   department_ids: string[];
   department_id: string | null;
   team_id: string | null;
@@ -423,6 +442,7 @@ export interface UserCreateInput {
   username: string;
   display_name?: string | null;
   role: string;
+  role_ids?: string[];
   department_ids?: string[];
   department_id?: string | null;
   team_id?: string | null;
@@ -442,6 +462,124 @@ export const users = {
     request<User>(`/api/v1/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) }),
   delete: (id: string) =>
     request<void>(`/api/v1/users/${id}`, { method: 'DELETE' }),
+};
+
+export type RoleDataScope = 'all' | 'custom_departments' | 'department' | 'department_and_children' | 'self';
+
+export interface RoleSummary {
+  id: string;
+  name: string;
+  code: string;
+  data_scope: RoleDataScope;
+  is_builtin: boolean;
+}
+
+export interface Role extends RoleSummary {
+  organization_id: string;
+  description: string | null;
+  is_active: boolean;
+  permission_codes: string[];
+  department_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export const roles = {
+  list: (orgId: string) => request<Role[]>(`/api/v1/organizations/${orgId}/roles`),
+  create: (orgId: string, data: Partial<Role>) =>
+    request<Role>(`/api/v1/organizations/${orgId}/roles`, { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: Partial<Role>) =>
+    request<Role>(`/api/v1/roles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  replacePermissions: (id: string, permissionCodes: string[]) =>
+    request<Role>(`/api/v1/roles/${id}/permissions`, {
+      method: 'PUT', body: JSON.stringify({ permission_codes: permissionCodes }),
+    }),
+  replaceDataScope: (id: string, dataScope: RoleDataScope, departmentIds: string[] = []) =>
+    request<Role>(`/api/v1/roles/${id}/data-scope`, {
+      method: 'PUT', body: JSON.stringify({ data_scope: dataScope, department_ids: departmentIds }),
+    }),
+  replaceUserRoles: (userId: string, roleIds: string[]) =>
+    request<User>(`/api/v1/users/${userId}/roles`, {
+      method: 'PUT', body: JSON.stringify({ role_ids: roleIds }),
+    }),
+  delete: (id: string) => request<void>(`/api/v1/roles/${id}`, { method: 'DELETE' }),
+};
+
+export interface VoiceProfile {
+  id: string;
+  organization_id: string;
+  name: string;
+  voice_type: 'builtin' | 'designed' | 'cloned';
+  provider_voice_id: string | null;
+  design_prompt: string | null;
+  sample_file_id: string | null;
+  status: string;
+  config: Record<string, unknown>;
+  grants: { id: string; scope_type: string; scope_id: string | null }[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VoiceGrantInput {
+  scope_type: 'organization' | 'role' | 'department' | 'user';
+  scope_id?: string | null;
+}
+
+export interface MultimodalJob {
+  id: string;
+  status: 'queued' | 'processing' | 'succeeded' | 'failed' | 'cancelled';
+  request_id: string;
+  result: Record<string, unknown>;
+  usage: Record<string, unknown>;
+  output_url: string | null;
+  error_category: string | null;
+  error_detail: string | null;
+}
+
+export const multimodal = {
+  voices: () => userRequest<VoiceProfile[]>('/api/v1/multimodal/voices'),
+  transcribe: (workspaceFileId: string, language: 'auto' | 'zh' | 'en' = 'auto') =>
+    userRequest<{ job_id: string; request_id: string; status: string }>('/api/v1/multimodal/audio/transcriptions', {
+      method: 'POST', body: JSON.stringify({ workspace_file_id: workspaceFileId, language }),
+    }),
+  speech: (data: {
+    text: string; voice_profile_id: string; style?: string; speed?: number; format?: 'wav' | 'mp3';
+  }) => userRequest<{ job_id: string; request_id: string; status: string }>('/api/v1/multimodal/speech', {
+    method: 'POST', body: JSON.stringify(data),
+  }),
+  job: (id: string) => userRequest<MultimodalJob>(`/api/v1/multimodal/jobs/${id}`),
+};
+
+export const voiceAdmin = {
+  list: (organizationId: string) => request<VoiceProfile[]>(
+    `/api/v1/multimodal/voice-admin?organization_id=${encodeURIComponent(organizationId)}`,
+  ),
+  createBuiltin: (organizationId: string, data: {
+    name: string; provider_voice_id: string; grants: VoiceGrantInput[];
+  }) => request<VoiceProfile>(
+    `/api/v1/multimodal/voices/builtin?organization_id=${encodeURIComponent(organizationId)}`,
+    { method: 'POST', body: JSON.stringify(data) },
+  ),
+  createDesign: (organizationId: string, data: {
+    name: string; design_prompt: string; grants: VoiceGrantInput[];
+  }) => request<VoiceProfile>(
+    `/api/v1/multimodal/voices/design?organization_id=${encodeURIComponent(organizationId)}`,
+    { method: 'POST', body: JSON.stringify(data) },
+  ),
+  createClone: (organizationId: string, data: {
+    name: string; sample_file_id: string; evidence_file_id: string;
+    rights_holder: string; purpose: string; valid_until: string; confirmed: boolean;
+    grants: VoiceGrantInput[];
+  }) => request<VoiceProfile>(
+    `/api/v1/multimodal/voices/clone?organization_id=${encodeURIComponent(organizationId)}`,
+    { method: 'POST', body: JSON.stringify(data) },
+  ),
+  update: (voiceId: string, data: {
+    name?: string; status?: 'active' | 'disabled'; grants?: VoiceGrantInput[];
+  }) => request<VoiceProfile>(`/api/v1/multimodal/voices/${voiceId}`, {
+    method: 'PATCH', body: JSON.stringify(data),
+  }),
+  delete: (voiceId: string) => request<void>(`/api/v1/multimodal/voices/${voiceId}`, { method: 'DELETE' }),
 };
 
 // ── LLM Providers ─────────────────────────────────────────────────────
@@ -1677,7 +1815,7 @@ export interface TaskConfig {
 
 export type EnterpriseApplicationPermission =
   | 'view' | 'ai_query' | 'ai_create' | 'ai_update' | 'ai_delete' | 'ai_approve' | 'export';
-export type EnterpriseApplicationScope = 'organization' | 'department' | 'team' | 'user';
+export type EnterpriseApplicationScope = 'organization' | 'role' | 'department' | 'team' | 'user';
 export type EnterpriseApplicationTarget = 'tool_endpoint' | 'data_interface' | 'skill_folder';
 export type EnterpriseApplicationOperation = 'query' | 'create' | 'update' | 'delete' | 'export' | 'approve';
 

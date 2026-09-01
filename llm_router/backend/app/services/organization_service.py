@@ -18,14 +18,14 @@ from app.schemas.organization import (
     TeamCreate,
     TeamUpdate,
 )
+from app.services.memory_lifecycle import (
+    ensure_node_memory,
+    soft_delete_node_memory,
+)
 from app.services.workspace_lifecycle import (
     ensure_node_workspace,
     soft_delete_node_workspace,
     sync_node_workspace,
-)
-from app.services.memory_lifecycle import (
-    ensure_node_memory,
-    soft_delete_node_memory,
 )
 
 # ── Organization ────────────────────────────────────────────────────────
@@ -181,6 +181,11 @@ async def set_default_organization(db: AsyncSession, org: Organization) -> Organ
 # ── Department ──────────────────────────────────────────────────────────
 
 async def create_department(db: AsyncSession, org_id: UUID, data: DepartmentCreate) -> Department:
+    if data.parent_id:
+        parent = await get_department(db, data.parent_id)
+        if parent is None or str(parent.organization_id) != str(org_id):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=422, detail="Parent department belongs to another organization")
     dept = Department(organization_id=org_id, **data.model_dump())
     db.add(dept)
     await db.flush()
@@ -207,6 +212,14 @@ async def get_department(db: AsyncSession, dept_id: UUID) -> Department | None:
 
 
 async def update_department(db: AsyncSession, dept: Department, data: DepartmentUpdate) -> Department:
+    if data.parent_id == dept.id:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="Department cannot be its own parent")
+    if data.parent_id:
+        parent = await get_department(db, data.parent_id)
+        if parent is None or str(parent.organization_id) != str(dept.organization_id):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=422, detail="Parent department belongs to another organization")
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(dept, field, value)
     await db.flush()

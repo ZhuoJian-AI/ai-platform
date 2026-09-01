@@ -43,6 +43,7 @@ class LlmResult:
     usage: dict  # {"input_tokens": int|None, "output_tokens": int|None}
     provider_id: str
     model_served: str
+    reasoning_content: str | None = None
 
 
 @dataclass
@@ -312,6 +313,7 @@ async def chat(
     else:
         choice = (data.get("choices") or [{}])[0].get("message", {})
         text = choice.get("content") or ""
+        reasoning_content = choice.get("reasoning_content")
         tool_calls = []
         for tc in choice.get("tool_calls") or []:
             fn = tc.get("function", {})
@@ -323,7 +325,10 @@ async def chat(
         u = data.get("usage", {})
         usage = {"input_tokens": u.get("prompt_tokens"), "output_tokens": u.get("completion_tokens")}
 
-    return LlmResult(content=text, tool_calls=tool_calls, usage=usage, provider_id=str(provider.id), model_served=model)
+    return LlmResult(
+        content=text, tool_calls=tool_calls, usage=usage, provider_id=str(provider.id),
+        model_served=model, reasoning_content=reasoning_content if provider.provider_type != "anthropic" else None,
+    )
 
 
 async def stream_chat(
@@ -360,6 +365,7 @@ async def stream_chat(
     oai_tc: dict[int, dict] = {}
     # Anthropic: {block_index: {"id","name","json_acc"}}
     ant_blocks: dict[int, dict] = {}
+    reasoning_parts: list[str] = []
 
     async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
         async with client.stream(
@@ -419,6 +425,8 @@ async def stream_chat(
                 else:
                     for choice in data.get("choices", []) or []:
                         delta = choice.get("delta", {})
+                        if delta.get("reasoning_content"):
+                            reasoning_parts.append(str(delta["reasoning_content"]))
                         if delta.get("content"):
                             yield ("text", delta["content"], None)
                         for tc in delta.get("tool_calls") or []:
@@ -451,6 +459,11 @@ async def stream_chat(
         ]
     if tool_calls:
         yield ("tool_calls", tool_calls, None)
+    if reasoning_parts:
+        # MiMo requires the assistant's reasoning_content to be carried into
+        # the next tool-result turn.  It is intentionally not rendered to the
+        # end user; the DSH bridge stores it as assistant-message metadata.
+        yield ("reasoning_content", "".join(reasoning_parts), None)
 
 
 async def generate_image(

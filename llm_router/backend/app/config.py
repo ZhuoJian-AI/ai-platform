@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     image_generation_org_allowlist: str = "aifabei"
     model_gateway_enabled: bool = True
     model_gateway_org_allowlist: str = "aifabei"
+    multimodal_audio_enabled: bool = False
+    multimodal_audio_org_allowlist: str = "aifabei"
+    multimodal_user_concurrency: int = 2
+    multimodal_daily_audio_seconds: int = 2 * 60 * 60
+    multimodal_worker_poll_seconds: float = 1.0
+    multimodal_worker_lease_seconds: int = 10 * 60
+    multimodal_audio_max_bytes: int = 100 * 1024 * 1024
 
     # Workspace binary object storage (authorized ZhuoJian Storage Gateway).
     # Text workspace files stay inline for editing; Office/PDF/images use this
@@ -174,6 +181,11 @@ class Settings(BaseSettings):
     def model_gateway_enabled_for(self, organization_slug: str) -> bool:
         return self._org_feature_enabled(
             self.model_gateway_enabled, self.model_gateway_org_allowlist, organization_slug,
+        )
+
+    def multimodal_audio_enabled_for(self, organization_slug: str) -> bool:
+        return self._org_feature_enabled(
+            self.multimodal_audio_enabled, self.multimodal_audio_org_allowlist, organization_slug,
         )
 
     # API Key cache

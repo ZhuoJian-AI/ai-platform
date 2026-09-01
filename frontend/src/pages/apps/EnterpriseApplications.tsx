@@ -10,7 +10,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  ApiError, connectors, dataInterfaces, enterpriseApplications, skillStore,
+  ApiError, connectors, dataInterfaces, enterpriseApplications, roles, skillStore,
   type EnterpriseApplication,
   type EnterpriseApplicationInput, type EnterpriseApplicationModuleAccess,
   type EnterpriseApplicationOperation,
@@ -88,6 +88,11 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   const bindingTargetType = Form.useWatch('target_type', bindingForm) as EnterpriseApplicationTarget | undefined;
   const selectedGrantModuleKeys = (Form.useWatch('module_keys', grantForm) ?? []) as string[];
   const { treeData, nodeMap, isLoading: treeLoading } = useOrgTree();
+  const { data: roleList = [], isLoading: rolesLoading } = useQuery({
+    queryKey: ['roles', orgId],
+    queryFn: () => orgId ? roles.list(orgId) : Promise.resolve([]),
+    enabled: !!orgId,
+  });
 
   const { data: apps = [], isLoading } = useQuery({
     queryKey: ['enterprise-applications', orgId],
@@ -152,12 +157,29 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   const orgTree = useMemo(() => {
     if (!orgId) return [];
     const root = treeData.find((node) => node.value === `org:${orgId}`);
-    return root ? [root] : [];
-  }, [treeData, orgId]);
+    if (!root) return [];
+    const roleNodes = roleList.filter(role => role.is_active).map(role => ({
+      value: `role:${role.id}`,
+      key: `role:${role.id}`,
+      title: `角色 · ${role.name}`,
+      isLeaf: true,
+    }));
+    return [{ ...root, children: [...roleNodes, ...(root.children ?? [])] }];
+  }, [treeData, orgId, roleList]);
+
+  const scopeInfo = (value: string) => {
+    if (value.startsWith('role:')) {
+      const id = value.slice('role:'.length);
+      const role = roleList.find(item => item.id === id);
+      return role ? { type: 'role' as const, id: role.id, name: role.name } : undefined;
+    }
+    return nodeMap.get(value);
+  };
 
   const appOptions = apps.map((item) => ({ value: item.id, label: item.name }));
   const scopeLabel = (scopeType: string, scopeId: string | null) => {
     const prefix = scopeType === 'organization' ? 'org' : scopeType === 'department' ? 'dept' : scopeType;
+    if (scopeType === 'role') return roleList.find(role => role.id === scopeId)?.name ?? scopeId;
     return nodeMap.get(`${prefix}:${scopeId ?? orgId}`)?.name ?? (scopeType === 'organization' ? '全企业' : scopeId);
   };
 
@@ -202,7 +224,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
         )));
         selectedScopes.forEach((scope) => {
           if (existingScopes.has(scope)) return;
-          const node = nodeMap.get(scope);
+          const node = scopeInfo(scope);
           if (!node) throw new Error(`无法识别可见范围：${scope}`);
           next.push({
             scope_type: node.type as EnterpriseApplicationScope,
@@ -277,7 +299,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
       module_action_keys?: Record<string, string[]>;
     }) => {
       if (!selectedApp) throw new Error('请先选择应用');
-      const node = nodeMap.get(values.scope);
+      const node = scopeInfo(values.scope);
       if (!node) throw new Error('请选择授权范围');
       const moduleKeys = values.module_keys ?? [];
       const hasNativeModules = (selectedIntegration?.modules.length ?? 0) > 0;
@@ -540,7 +562,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
 
       <Modal width={820} title={grantIndex === null ? '新增子模块授权' : '编辑子模块授权'} open={grantModalOpen} onCancel={() => setGrantModalOpen(false)} onOk={() => grantForm.submit()} confirmLoading={saveGrant.isPending} forceRender>
         <Form form={grantForm} layout="vertical" onFinish={(values) => saveGrant.mutate(values)}>
-          <Form.Item name="scope" label="授权对象" rules={[{ required: true }]}><TreeSelect treeData={orgTree} treeDefaultExpandAll showSearch treeNodeFilterProp="title" loading={treeLoading} placeholder="选择全企业、部门、团队或用户" /></Form.Item>
+          <Form.Item name="scope" label="授权对象" rules={[{ required: true }]}><TreeSelect treeData={orgTree} treeDefaultExpandAll showSearch treeNodeFilterProp="title" loading={treeLoading || rolesLoading} placeholder="选择角色、部门、团队或用户" /></Form.Item>
           {selectedIntegration?.modules.length ? <>
             <Form.Item name="module_keys" label="授权哪些子模块" rules={[{ required: true, message: '至少选择一个子模块' }]} extra="每个子模块独立配置权限；以后新同步的子模块不会自动获得授权。">
               <Checkbox.Group options={selectedIntegration.modules.map((item) => ({

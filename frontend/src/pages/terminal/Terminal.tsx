@@ -5,7 +5,7 @@ import {
 } from 'react';
 import {
   ConfigProvider, Button, Typography, Input, Tag, Drawer, Dropdown, Tabs, Empty, Spin,
-  message, Tree, Avatar, Popover, Tooltip,
+  message, Tree, Avatar, Popover, Tooltip, Select,
 } from 'antd';
 import {
   PlusOutlined, SendOutlined, RobotOutlined, SettingOutlined, FileTextOutlined,
@@ -18,16 +18,18 @@ import {
   SearchOutlined, UploadOutlined, EditOutlined, DownloadOutlined,
   PictureOutlined, EyeOutlined, MenuUnfoldOutlined, MenuFoldOutlined, HistoryOutlined,
   PushpinOutlined, PushpinFilled,
+  AudioOutlined, PauseOutlined, CaretRightOutlined, StopOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
-  terminal, type TaskConfig, type TerminalTask, type TerminalTaskMessage,
+  terminal, multimodal, type TaskConfig, type TerminalTask, type TerminalTaskMessage,
   type TerminalResources, type TerminalMemoryItem, type TerminalModels, type TerminalAgent, type WorkspaceFileListItem,
   type TerminalTaskWithMessages,
   type SkillFolderSummary, type WorkspaceFileSummary, type TerminalEnterpriseApplication,
+  type VoiceProfile,
   WORKSPACE_MAX_FILE_BYTES,
 } from '../../api/client';
 import { useUserAuth } from '../../context/UserAuthContext';
@@ -169,7 +171,7 @@ interface ComposerAttachment extends MessageAttachment {
   status: ComposerAttachmentStatus;
   progress: number;
   error?: string;
-  raw_tool?: 'image_tool' | 'archive_tool';
+  raw_tool?: 'image_tool' | 'archive_tool' | 'audio_tool';
 }
 
 const MAX_ATTACHMENT_BYTES = WORKSPACE_MAX_FILE_BYTES;
@@ -180,6 +182,7 @@ function rawAttachmentTool(name: string): ComposerAttachment['raw_tool'] {
   const lower = name.trim().toLowerCase();
   if (/\.(?:png|jpe?g|webp|tiff?|bmp|pdf)$/.test(lower)) return 'image_tool';
   if (/\.(?:zip|tar|tgz|tar\.gz)$/.test(lower)) return 'archive_tool';
+  if (/\.(?:mp3|wav|m4a|webm|opus)$/.test(lower)) return 'audio_tool';
   return undefined;
 }
 
@@ -1903,6 +1906,10 @@ function TaskInputBox(props: {
   const searchRef = useRef<{ focus: (opts?: unknown) => void } | null>(null);
   const qc = useQueryClient();
   const [dragActive, setDragActive] = useState(false);
+  const [recordingState, setRecordingState] = useState<'idle' | 'recording' | 'paused' | 'processing'>('idle');
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerMode, setPickerMode] = useState<'skill' | 'file'>('skill');
@@ -2118,6 +2125,89 @@ function TaskInputBox(props: {
     input.click();
   }, [queueFiles]);
 
+  const processRecording = useCallback(async (blob: Blob) => {
+    if (!effectiveWorkspaceId) throw new Error('请先选择工作空间');
+    setRecordingState('processing');
+    const extension = blob.type.includes('mp4') ? 'm4a' : 'webm';
+    const filename = `录音-${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`;
+    const file = new File([blob], filename, { type: blob.type || 'audio/webm' });
+    const uploaded = await terminal.uploadWsFile(
+      effectiveWorkspaceId,
+      file,
+      attachmentPath(attachmentScopeKey, filename),
+    );
+    refreshWorkspaceFiles(effectiveWorkspaceId);
+    const created = await multimodal.transcribe(uploaded.id);
+    for (let attempt = 0; attempt < 150; attempt += 1) {
+      const job = await multimodal.job(created.job_id);
+      if (job.status === 'succeeded') {
+        const text = String(job.result.text || '').trim();
+        if (!text) throw new Error('录音已识别，但没有可用文字');
+        setValue(value.trim() ? `${value.trim()}\n${text}` : text);
+        message.success('录音已转写，请确认或编辑后发送');
+        setRecordingState('idle');
+        return;
+      }
+      if (job.status === 'failed' || job.status === 'cancelled') {
+        throw new Error(job.error_detail || job.error_category || '录音转写失败');
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+    }
+    throw new Error('录音转写等待超过 5 分钟，可稍后重试');
+  }, [attachmentScopeKey, effectiveWorkspaceId, refreshWorkspaceFiles, setValue, value]);
+
+  const startRecording = useCallback(async () => {
+    if (!effectiveWorkspaceId) {
+      message.warning('请先选择工作空间，再开始录音');
+      onOpenConfig();
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      message.error('当前浏览器不支持录音');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const preferred = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+        .find((type) => MediaRecorder.isTypeSupported(type));
+      const recorder = new MediaRecorder(stream, preferred ? { mimeType: preferred } : undefined);
+      recordingStreamRef.current = stream;
+      recorderRef.current = recorder;
+      recordingChunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size) recordingChunksRef.current.push(event.data);
+      };
+      recorder.onstop = () => {
+        const blob = new Blob(recordingChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        recordingChunksRef.current = [];
+        recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+        recordingStreamRef.current = null;
+        recorderRef.current = null;
+        void processRecording(blob).catch((error) => {
+          setRecordingState('idle');
+          message.error((error as Error).message || '录音处理失败');
+        });
+      };
+      recorder.start(1000);
+      setRecordingState('recording');
+    } catch (error) {
+      message.error((error as Error).name === 'NotAllowedError' ? '麦克风权限被拒绝' : '无法启动录音');
+    }
+  }, [effectiveWorkspaceId, onOpenConfig, processRecording]);
+
+  const cancelRecording = useCallback(() => {
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.onstop = null;
+      recorder.stop();
+    }
+    recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+    recordingStreamRef.current = null;
+    recorderRef.current = null;
+    recordingChunksRef.current = [];
+    setRecordingState('idle');
+  }, []);
+
   const retryAttachment = useCallback(async (item: ComposerAttachment) => {
     if (item.file.size > MAX_ATTACHMENT_BYTES) {
       message.warning('该文件超过 100MB，请压缩或拆分后重新选择');
@@ -2173,7 +2263,8 @@ function TaskInputBox(props: {
   useEffect(() => () => {
     uploadControllersRef.current.forEach((controller) => controller.abort());
     uploadControllersRef.current.clear();
-  }, []);
+    cancelRecording();
+  }, [cancelRecording]);
 
   const statusLabel: Record<ComposerAttachmentStatus, string> = {
     uploading: '上传中', validating: '校验中', parsing: '解析中', ready: '可以发送', failed: '处理失败',
@@ -2284,7 +2375,7 @@ function TaskInputBox(props: {
                     <div title={item.name} style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</div>
                     <div style={{ fontSize: 11, color: item.status === 'failed' ? '#dc2626' : '#6b7280', marginTop: 2 }}>
                       {item.status === 'ready' && item.raw_tool
-                        ? `可以发送（${item.raw_tool === 'image_tool' ? '图片工具' : '压缩包工具'}读取）`
+                        ? `可以发送（${item.raw_tool === 'image_tool' ? '图片工具' : item.raw_tool === 'audio_tool' ? '音频模型' : '压缩包工具'}读取）`
                         : statusLabel[item.status]}
                       {item.status === 'uploading' ? ` ${item.progress}%` : ''}
                     </div>
@@ -2362,6 +2453,33 @@ function TaskInputBox(props: {
             >
               <UploadOutlined /> 上传附件
             </button>
+            {recordingState === 'idle' ? (
+              <button type="button" style={chipBtnStyle} title="录音并转写" onClick={() => void startRecording()}>
+                <AudioOutlined /> 录音
+              </button>
+            ) : recordingState === 'processing' ? (
+              <span style={chipBtnStyle}><Spin size="small" /> 正在转写</span>
+            ) : (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <button
+                  type="button"
+                  style={chipBtnStyle}
+                  onClick={() => {
+                    const recorder = recorderRef.current;
+                    if (!recorder) return;
+                    if (recorder.state === 'recording') { recorder.pause(); setRecordingState('paused'); }
+                    else if (recorder.state === 'paused') { recorder.resume(); setRecordingState('recording'); }
+                  }}
+                >
+                  {recordingState === 'recording' ? <PauseOutlined /> : <CaretRightOutlined />}
+                  {recordingState === 'recording' ? '暂停' : '继续'}
+                </button>
+                <button type="button" style={chipBtnStyle} onClick={() => recorderRef.current?.stop()}>
+                  <StopOutlined /> 完成转写
+                </button>
+                <button type="button" style={chipBtnStyle} onClick={cancelRecording}>取消</button>
+              </span>
+            )}
             <Typography.Text
               type="secondary"
               title="支持 Word、Excel、PPT、PDF、Markdown 等常用文件"
@@ -2732,6 +2850,107 @@ function ExecutionStatus({ verification, streaming }: { verification: ExecutionV
   );
 }
 
+function SpeechPlaybackButton({ text, disabled }: { text: string; disabled?: boolean }) {
+  const [loading, setLoading] = useState(false);
+  const [voiceLoading, setVoiceLoading] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [voices, setVoices] = useState<VoiceProfile[]>([]);
+  const [voiceId, setVoiceId] = useState<string>();
+  const [style, setStyle] = useState('');
+  const [speed, setSpeed] = useState(1);
+
+  const openSettings = async () => {
+    if (disabled || !text.trim()) return;
+    setOpen(true);
+    if (voices.length || voiceLoading) return;
+    setVoiceLoading(true);
+    try {
+      const available = await multimodal.voices();
+      setVoices(available);
+      setVoiceId(available[0]?.id);
+      if (!available.length) message.warning('管理员尚未为你分配可用音色');
+    } catch (error) {
+      message.error((error as Error).message || '音色加载失败');
+    } finally {
+      setVoiceLoading(false);
+    }
+  };
+
+  const play = async () => {
+    const content = text.trim();
+    if (!content || disabled || loading) return;
+    if (!voiceId) {
+      message.warning('请选择一个可用音色');
+      return;
+    }
+    setLoading(true);
+    try {
+      const created = await multimodal.speech({
+        text: content.slice(0, 20_000),
+        voice_profile_id: voiceId,
+        style: style.trim() || undefined,
+        speed,
+        format: 'wav',
+      });
+      for (let attempt = 0; attempt < 150; attempt += 1) {
+        const job = await multimodal.job(created.job_id);
+        if (job.status === 'succeeded') {
+          if (!job.output_url) throw new Error('朗读文件尚未生成播放地址');
+          await new window.Audio(job.output_url).play();
+          setOpen(false);
+          return;
+        }
+        if (job.status === 'failed' || job.status === 'cancelled') {
+          throw new Error(job.error_detail || job.error_category || '朗读生成失败');
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      }
+      throw new Error('朗读生成等待超过 5 分钟，可稍后重试');
+    } catch (error) {
+      message.error((error as Error).message || '朗读失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+  return (
+    <Popover
+      trigger="click"
+      open={open}
+      onOpenChange={(next) => { if (!next) setOpen(false); else void openSettings(); }}
+      content={<div style={{ width: 280, display: 'grid', gap: 10 }}>
+        <Typography.Text strong>朗读设置</Typography.Text>
+        <Select
+          loading={voiceLoading}
+          value={voiceId}
+          onChange={setVoiceId}
+          placeholder="选择企业授权音色"
+          options={voices.map(voice => ({ value: voice.id, label: `${voice.name} · ${voice.voice_type}` }))}
+        />
+        <Input value={style} onChange={event => setStyle(event.target.value)} placeholder="可选：温和、正式、充满活力……" maxLength={500} />
+        <Select value={speed} onChange={setSpeed} options={[
+          { value: 0.75, label: '慢速 0.75×' },
+          { value: 1, label: '正常 1.0×' },
+          { value: 1.25, label: '较快 1.25×' },
+          { value: 1.5, label: '快速 1.5×' },
+        ]} />
+        <Button type="primary" icon={loading ? <LoadingOutlined /> : <AudioOutlined />} loading={loading} disabled={!voiceId} onClick={() => void play()}>
+          生成并播放
+        </Button>
+      </div>}
+    >
+      <Button
+        type="text"
+        size="small"
+        icon={loading ? <LoadingOutlined /> : <AudioOutlined />}
+        disabled={disabled || !text.trim()}
+        style={{ marginTop: 8, paddingInline: 4, color: '#6b7280' }}
+      >
+        {loading ? '生成朗读中' : '朗读'}
+      </Button>
+    </Popover>
+  );
+}
+
 function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; streaming: boolean; onLink: (href: string) => void; fileLinks: ChatFileLink[] }) {
   const blocks = msg.blocks;
   const hasLiveBlocks = blocks && blocks.length > 0;
@@ -2750,6 +2969,7 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
             </Md>
           </div>
           <ArtifactGallery artifacts={structuredArtifacts} fileLinks={fileLinks} streaming={streaming} onLink={onLink} />
+          <SpeechPlaybackButton text={msg.content} disabled={streaming} />
         </div>
       </div>
     );
@@ -2760,6 +2980,10 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
   const artifacts = structuredArtifacts.length ? structuredArtifacts : extractArtifacts(blocks);
   const artifactPaths = new Set(artifacts.map((artifact) => artifact.path).filter(Boolean));
   const legacyChanges = extractFileChanges(blocks).filter((file) => !artifactPaths.has(file.path));
+  const spokenText = msg.content || blocks
+    .filter((block): block is Extract<Block, { kind: 'text' }> => block.kind === 'text')
+    .map((block) => block.content)
+    .join('\n');
 
   return (
     <div style={{ maxWidth: '92%' }}>
@@ -2820,6 +3044,7 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
           onLink={onLink}
         />
         <ChangesBox files={legacyChanges} onLink={onLink} />
+        <SpeechPlaybackButton text={spokenText} disabled={streaming} />
       </div>
     </div>
   );

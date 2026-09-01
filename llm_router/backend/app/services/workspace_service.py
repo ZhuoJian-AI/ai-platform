@@ -37,6 +37,7 @@ _RAW_IMAGE_TOOL_SUFFIXES = (
     ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp", ".pdf",
 )
 _RAW_ARCHIVE_TOOL_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz")
+_RAW_AUDIO_TOOL_SUFFIXES = (".mp3", ".wav", ".m4a", ".webm", ".opus")
 
 
 class WorkspaceFileUploadError(ValueError):
@@ -57,6 +58,8 @@ def raw_tool_file_kind(f: WorkspaceFile) -> str | None:
         return "image_tool"
     if name.endswith(_RAW_ARCHIVE_TOOL_SUFFIXES):
         return "archive_tool"
+    if name.endswith(_RAW_AUDIO_TOOL_SUFFIXES):
+        return "understand_audio"
     return None
 
 

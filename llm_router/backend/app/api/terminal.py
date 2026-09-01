@@ -324,12 +324,18 @@ async def _user_defaults(db: AsyncSession, cu: CurrentUser) -> dict:
 @router.get("/terminal/me")
 async def me_endpoint(cu: CurrentUser = Depends(require_user)):
     """当前终端用户档案 + 作用域。"""
+    user_payload = UserRead.model_validate(cu.user).model_dump()
+    user_payload["permission_codes"] = list(cu.permission_codes)
+    user_payload["effective_data_scopes"] = cu.effective_data_scopes
     return {
-        "user": UserRead.model_validate(cu.user).model_dump(),
+        "user": user_payload,
         "department_ids": list(cu.department_ids),
         "department_id": cu.department_id,
         "team_id": cu.team_id,
         "scopes": scope_service.effective_scope_set(cu),
+        "roles": list(cu.role_ids),
+        "permission_codes": list(cu.permission_codes),
+        "effective_data_scopes": cu.effective_data_scopes,
     }
 
 

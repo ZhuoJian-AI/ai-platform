@@ -53,7 +53,10 @@ def _to_platform_messages(
         blocks = message.get("content") if isinstance(message.get("content"), list) else []
         if role == "assistant":
             tool_calls = []
+            reasoning_content = ""
             for block in blocks:
+                if block.get("type") == "reasoning":
+                    reasoning_content += str(block.get("text") or "")
                 if block.get("type") == "tool-call":
                     tool_calls.append({
                         "id": str(block.get("id") or ""), "type": "function",
@@ -65,6 +68,8 @@ def _to_platform_messages(
             row: dict[str, Any] = {"role": "assistant", "content": _text(blocks)}
             if tool_calls:
                 row["tool_calls"] = tool_calls
+            if reasoning_content:
+                row["reasoning_content"] = reasoning_content
             converted.append(row)
             continue
         result_blocks = [block for block in blocks if block.get("type") == "tool-result"]
@@ -128,6 +133,7 @@ async def model_stream(
         next_index = 0
         usage = {"input_tokens": 0, "output_tokens": 0}
         tool_calls: list[dict[str, Any]] = []
+        reasoning_content = ""
         with bind_runtime(context.deps):
             async for kind, payload, extra in llm_client.stream_chat(
                 context.db, UUID(context.state["org_id"]),
@@ -152,6 +158,8 @@ async def model_stream(
                     ) + "\n"
                 elif kind == "tool_calls":
                     tool_calls = list(payload or [])
+                elif kind == "reasoning_content":
+                    reasoning_content += str(payload or "")
                 elif kind == "usage" and extra:
                     usage["input_tokens"] += int(extra.get("input_tokens") or 0)
                     usage["output_tokens"] += int(extra.get("output_tokens") or 0)
@@ -174,6 +182,7 @@ async def model_stream(
                 )
                 text = result.content or ""
                 tool_calls = list(result.tool_calls or [])
+                reasoning_content = result.reasoning_content or ""
                 usage["input_tokens"] += int(result.usage.get("input_tokens") or 0)
                 usage["output_tokens"] += int(result.usage.get("output_tokens") or 0)
                 if text:
@@ -188,6 +197,18 @@ async def model_stream(
             yield json.dumps({
                 "type": "block-end", "index": next_index,
                 "block": {"type": "text", "text": text},
+            }, ensure_ascii=False) + "\n"
+            next_index += 1
+        if reasoning_content:
+            yield json.dumps({
+                "type": "block-start", "index": next_index, "blockType": "reasoning",
+            }) + "\n"
+            yield json.dumps({
+                "type": "reasoning-delta", "index": next_index, "text": reasoning_content,
+            }, ensure_ascii=False) + "\n"
+            yield json.dumps({
+                "type": "block-end", "index": next_index,
+                "block": {"type": "reasoning", "text": reasoning_content},
             }, ensure_ascii=False) + "\n"
             next_index += 1
         for call in tool_calls:

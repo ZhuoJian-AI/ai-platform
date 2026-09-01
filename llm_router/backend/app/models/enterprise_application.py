@@ -76,7 +76,7 @@ class EnterpriseApplicationGrant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDelete
             name="uq_enterprise_application_grant_scope",
         ),
         CheckConstraint(
-            "scope_type IN ('organization','department','team','user')",
+            "scope_type IN ('organization','department','team','user','role')",
             name="ck_enterprise_application_grant_scope_type",
         ),
         Index(

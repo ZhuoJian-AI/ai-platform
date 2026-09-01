@@ -55,6 +55,9 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     manager_assignments = relationship(
         "ScopeManagerAssignment", lazy="selectin", primaryjoin="User.id==ScopeManagerAssignment.user_id"
     )
+    role_assignments = relationship(
+        "UserRole", lazy="selectin", cascade="all, delete-orphan"
+    )
 
     @property
     def department_ids(self) -> list[str]:
@@ -68,3 +71,30 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
             for grant in (self.manager_assignments or [])
             if grant.deleted_at is None
         ]
+
+    @property
+    def roles(self) -> list[dict]:
+        return [
+            {
+                "id": assignment.role.id,
+                "name": assignment.role.name,
+                "code": assignment.role.code,
+                "data_scope": assignment.role.data_scope,
+                "is_builtin": assignment.role.is_builtin,
+            }
+            for assignment in (self.role_assignments or [])
+            if assignment.role.deleted_at is None and assignment.role.is_active
+        ]
+
+    @property
+    def role_ids(self) -> list[str]:
+        return [str(item["id"]) for item in self.roles]
+
+    @property
+    def permission_codes(self) -> list[str]:
+        return sorted({
+            permission.permission_code
+            for assignment in (self.role_assignments or [])
+            if assignment.role.deleted_at is None and assignment.role.is_active
+            for permission in assignment.role.permissions
+        })

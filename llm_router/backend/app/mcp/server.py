@@ -22,6 +22,7 @@ search_rag / read_memory / write_memory / list_agents / get_agent_config。
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -37,6 +38,9 @@ from app.tools.capability_tools import (
     _query_ontology,
     _read_memory,
     _search_rag,
+    _synthesize_speech,
+    _transcribe_audio,
+    _understand_audio,
     _write_memory,
 )
 
@@ -137,6 +141,50 @@ async def get_agent_config(agent_slug: str, ctx: Context = None) -> str:  # type
     async with async_session_factory() as db:
         principal = await resolve_principal(ctx, db)
         return await _get_agent_config(db, principal, agent_slug)  # type: ignore[arg-type]
+
+
+@mcp.tool()
+async def transcribe_audio(
+    workspace_file_id: str,
+    language: str = "auto",
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """把有权访问的工作空间音频转成文字，返回可查询的持久任务 ID。"""
+    async with async_session_factory() as db:
+        principal = await resolve_principal(ctx, db)
+        result = await _transcribe_audio(db, principal, UUID(workspace_file_id), language)  # type: ignore[arg-type]
+        await db.commit()
+        return result
+
+
+@mcp.tool()
+async def understand_audio(
+    workspace_file_id: str,
+    question: str,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """理解有权访问的工作空间音频并回答问题。"""
+    async with async_session_factory() as db:
+        principal = await resolve_principal(ctx, db)
+        return await _understand_audio(db, principal, UUID(workspace_file_id), question)  # type: ignore[arg-type]
+
+
+@mcp.tool()
+async def synthesize_speech(
+    text: str,
+    voice_profile_id: str,
+    style: str | None = None,
+    speed: float = 1.0,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> str:
+    """使用当前用户获授权的企业音色生成语音，返回可查询的持久任务 ID。"""
+    async with async_session_factory() as db:
+        principal = await resolve_principal(ctx, db)
+        result = await _synthesize_speech(
+            db, principal, text, UUID(voice_profile_id), style, speed,  # type: ignore[arg-type]
+        )
+        await db.commit()
+        return result
 
 
 def mcp_app():

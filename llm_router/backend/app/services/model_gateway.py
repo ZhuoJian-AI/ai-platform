@@ -8,7 +8,10 @@ client so the rollout is backwards compatible.
 
 from __future__ import annotations
 
+import base64
+import io
 import re
+import wave
 from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID
@@ -33,14 +36,264 @@ _TEST_IMAGE_DATA_URL = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR4nGNQqLhAU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULAEuXoEzmj87AAAAAAElFTkSuQmCC"
 )
+_MIMO_AUDIO_LIMIT_BYTES = 10 * 1024 * 1024
 
 
 class GatewayError(RuntimeError):
     """A credential-safe upstream failure category."""
 
-    def __init__(self, category: str):
+    def __init__(self, category: str, *, retry_after_seconds: float | None = None):
         self.category = category
+        self.retry_after_seconds = retry_after_seconds
         super().__init__(category)
+
+
+def _openai_headers(api_key: str) -> dict[str, str]:
+    return {"authorization": f"Bearer {api_key}", "content-type": "application/json"}
+
+
+async def _post_chat_json(
+    provider: LlmProvider,
+    deployment: ModelDeployment,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """Call one chat-completions deployment without leaking provider payloads."""
+    api_key = await get_decrypted_api_key(provider)
+    path = _safe_endpoint_path(deployment.endpoint_path or "/chat/completions", "Chat API")
+    try:
+        async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
+            response = await client.post(
+                f"{provider.base_url.rstrip('/')}{path}",
+                headers=_openai_headers(api_key),
+                json=body,
+            )
+    except httpx.TimeoutException as exc:
+        raise GatewayError("network_timeout") from exc
+    except httpx.NetworkError as exc:
+        raise GatewayError("network_failure") from exc
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise GatewayError("invalid_provider_response") from exc
+    if response.status_code >= 400:
+        retry_after = response.headers.get("retry-after")
+        try:
+            retry_after_seconds = float(retry_after) if retry_after else None
+        except ValueError:
+            retry_after_seconds = None
+        raise GatewayError(
+            _upstream_error_category(response.status_code, data),
+            retry_after_seconds=retry_after_seconds,
+        )
+    return data
+
+
+def _message_content(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    choices = data.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        raise GatewayError("invalid_provider_response")
+    message = choices[0].get("message") or {}
+    if not isinstance(message, dict):
+        raise GatewayError("invalid_provider_response")
+    return message, data.get("usage") or {}
+
+
+async def transcribe_audio(
+    db: AsyncSession,
+    org_id: UUID,
+    audio: bytes,
+    *,
+    audio_format: str,
+    language: str = "auto",
+    model_alias: str = "default",
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+) -> dict[str, Any]:
+    """Transcribe MP3/WAV bytes through a same-capability deployment only."""
+    normalized_format = audio_format.lower().removeprefix("audio/")
+    if normalized_format not in {"mp3", "mpeg", "wav", "wave", "x-wav"}:
+        raise GatewayError("unsupported_audio_format")
+    if len(audio) > _MIMO_AUDIO_LIMIT_BYTES:
+        raise GatewayError("audio_segment_too_large")
+    resolved = await resolve_deployment(
+        db, org_id, model_alias, "speech_to_text", dept_id=dept_id, team_id=team_id,
+    )
+    if not resolved:
+        raise GatewayError("capability_not_configured")
+    provider, deployment = resolved
+    if deployment.adapter != "openai_audio_transcription_chat":
+        raise GatewayError("capability_mismatch")
+    wire_format = "mp3" if normalized_format in {"mp3", "mpeg"} else "wav"
+    mime_type = "audio/mpeg" if wire_format == "mp3" else "audio/wav"
+    encoded = base64.b64encode(audio).decode("ascii")
+    body = {
+        "model": deployment.model_id,
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "type": "input_audio",
+                "input_audio": {"data": f"data:{mime_type};base64,{encoded}"},
+            }],
+        }],
+        "asr_options": {"language": language},
+        "stream": False,
+    }
+    data = await _post_chat_json(effective_provider(provider, deployment), deployment, body)
+    message, usage = _message_content(data)
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise GatewayError("invalid_provider_response")
+    return {
+        "text": content,
+        "segments": message.get("segments") or [],
+        "usage": usage,
+        "deployment_id": str(deployment.id),
+        "model": deployment.model_id,
+    }
+
+
+async def understand_audio(
+    db: AsyncSession,
+    org_id: UUID,
+    audio_url: str,
+    question: str,
+    *,
+    model_alias: str = "default",
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+) -> LlmResult:
+    """Ask a question about an object-scoped, short-lived audio URL."""
+    resolved = await resolve_deployment(
+        db, org_id, model_alias, "audio_understanding", dept_id=dept_id, team_id=team_id,
+    )
+    if not resolved:
+        raise GatewayError("capability_not_configured")
+    provider, deployment = resolved
+    if deployment.adapter != "openai_chat_completions":
+        raise GatewayError("capability_mismatch")
+    result = await _chat_with_deployment(
+        db,
+        org_id,
+        provider,
+        deployment,
+        [{
+            "role": "user",
+            "content": [
+                {"type": "input_audio", "input_audio": {"data": audio_url}},
+                {"type": "text", "text": question},
+            ],
+        }],
+    )
+    return result
+
+
+async def stream_understand_audio(
+    db: AsyncSession,
+    org_id: UUID,
+    audio_url: str,
+    question: str,
+    *,
+    model_alias: str = "default",
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+) -> AsyncIterator[tuple[str, Any, Any]]:
+    """Stream audio understanding without falling back to a chat-only model."""
+    resolved = await resolve_deployment(
+        db, org_id, model_alias, "audio_understanding", dept_id=dept_id, team_id=team_id,
+    )
+    if not resolved:
+        raise GatewayError("capability_not_configured")
+    provider, deployment = resolved
+    if deployment.adapter != "openai_chat_completions":
+        raise GatewayError("capability_mismatch")
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "input_audio", "input_audio": {"data": audio_url}},
+            {"type": "text", "text": question},
+        ],
+    }]
+    async for event in legacy_client.stream_chat(
+        db,
+        org_id,
+        deployment.model_id,
+        messages,
+        provider_override=effective_provider(provider, deployment),
+        model_override=deployment.model_id,
+    ):
+        yield event
+
+
+async def synthesize_audio(
+    db: AsyncSession,
+    org_id: UUID,
+    *,
+    text: str,
+    voice: str | None = None,
+    audio_format: str = "wav",
+    style: str | None = None,
+    speed: float = 1.0,
+    design_prompt: str | None = None,
+    clone_audio: bytes | None = None,
+    clone_format: str = "wav",
+    model_alias: str = "default",
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+) -> dict[str, Any]:
+    capability = "voice_clone" if clone_audio is not None else "voice_design" if design_prompt else "text_to_speech"
+    resolved = await resolve_deployment(
+        db, org_id, model_alias, capability, dept_id=dept_id, team_id=team_id,
+    )
+    if not resolved:
+        raise GatewayError("capability_not_configured")
+    provider, deployment = resolved
+    if deployment.adapter != "openai_audio_synthesis_chat":
+        raise GatewayError("capability_mismatch")
+    if audio_format not in {"wav", "mp3", "pcm", "pcm16"}:
+        raise GatewayError("unsupported_audio_format")
+    instructions: list[str] = []
+    if design_prompt:
+        instructions.append(design_prompt)
+    if style:
+        instructions.append(style)
+    if speed != 1.0:
+        instructions.append(f"请以 {speed:.2f} 倍的相对语速朗读。")
+    if clone_audio is not None:
+        if clone_format not in {"mp3", "wav"} or len(clone_audio) > _MIMO_AUDIO_LIMIT_BYTES:
+            raise GatewayError("invalid_voice_clone_sample")
+        encoded = base64.b64encode(clone_audio).decode("ascii")
+        mime_type = "audio/mpeg" if clone_format == "mp3" else "audio/wav"
+        voice = f"data:{mime_type};base64,{encoded}"
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": "\n".join(instructions)},
+        {"role": "assistant", "content": text},
+    ]
+    audio: dict[str, Any] = {"format": audio_format}
+    if voice:
+        audio["voice"] = voice
+    if design_prompt:
+        audio["optimize_text_preview"] = False
+    body = {"model": deployment.model_id, "messages": messages, "audio": audio, "stream": False}
+    data = await _post_chat_json(effective_provider(provider, deployment), deployment, body)
+    message, usage = _message_content(data)
+    audio_payload = message.get("audio") or {}
+    encoded_audio = audio_payload.get("data")
+    if not isinstance(encoded_audio, str):
+        raise GatewayError("invalid_provider_response")
+    try:
+        raw = base64.b64decode(encoded_audio, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise GatewayError("invalid_provider_response") from exc
+    if not raw:
+        raise GatewayError("invalid_provider_response")
+    return {
+        "audio": raw,
+        "format": audio_format,
+        "usage": usage,
+        "deployment_id": str(deployment.id),
+        "model": deployment.model_id,
+        "provider_voice_id": audio_payload.get("voice"),
+    }
 
 
 def _upstream_error_category(status_code: int, payload: Any = None) -> str:
@@ -274,8 +527,20 @@ async def resolve_provider(
 def _retryable(exc: Exception) -> bool:
     if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
         return True
+    if isinstance(exc, GatewayError):
+        return exc.category in {
+            "quota_or_rate_limit",
+            "network_timeout",
+            "network_failure",
+            "provider_service_unavailable",
+        }
     lowered = str(exc).lower()
     return any(marker in lowered for marker in _RETRYABLE_MARKERS)
+
+
+def is_retryable_gateway_error(exc: Exception) -> bool:
+    """Public retry policy shared by durable workers."""
+    return _retryable(exc)
 
 
 def _responses_tools(tools: list[dict] | None) -> list[dict] | None:
@@ -395,6 +660,7 @@ async def _responses_chat(
         },
         provider_id=str(provider.id),
         model_served=deployment.model_id,
+        reasoning_content=data.get("reasoning_content"),
     )
 
 
@@ -511,6 +777,8 @@ async def stream_chat(
                     yield ("text", result.content, None)
                 if result.tool_calls:
                     yield ("tool_calls", result.tool_calls, None)
+                if result.reasoning_content:
+                    yield ("reasoning_content", result.reasoning_content, None)
                 yield ("usage", None, result.usage)
                 return
         async for event in legacy_client.stream_chat(
@@ -551,6 +819,9 @@ async def stream_chat(
                 if result.tool_calls:
                     emitted = True
                     yield ("tool_calls", result.tool_calls, None)
+                if result.reasoning_content:
+                    emitted = True
+                    yield ("reasoning_content", result.reasoning_content, None)
                 emitted = True
                 yield ("usage", None, result.usage)
                 return
@@ -786,7 +1057,84 @@ async def test_deployment(
                 endpoint_path=deployment.endpoint_path or "/images/generations",
             )
         return {"bytes": len(image.raw)}
+    if capability in {
+        "audio_understanding", "speech_to_text", "text_to_speech", "voice_design", "voice_clone",
+    }:
+        audio_bytes = _test_wav_bytes()
+        if test_file_id := str((deployment.config or {}).get("test_workspace_file_id") or "").strip():
+            from app.models.workspace import Workspace, WorkspaceFile
+            from app.services.storage_gateway_service import download_bytes
+
+            try:
+                parsed_test_file_id = UUID(test_file_id)
+            except ValueError as exc:
+                raise GatewayError("invalid_test_audio_configuration") from exc
+            test_file = (await db.execute(
+                select(WorkspaceFile)
+                .join(Workspace, Workspace.id == WorkspaceFile.workspace_id)
+                .where(
+                    WorkspaceFile.id == parsed_test_file_id,
+                    WorkspaceFile.deleted_at.is_(None),
+                    Workspace.organization_id == provider.organization_id,
+                    Workspace.deleted_at.is_(None),
+                )
+            )).scalar_one_or_none()
+            if test_file is None or not test_file.content_ref:
+                raise GatewayError("invalid_test_audio_configuration")
+            audio_bytes = await download_bytes(test_file.content_ref)
+        encoded = base64.b64encode(audio_bytes).decode("ascii")
+        if capability in {"audio_understanding", "speech_to_text"}:
+            body: dict[str, Any] = {
+                "model": deployment.model_id,
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": f"data:audio/wav;base64,{encoded}",
+                        },
+                    }],
+                }],
+                "stream": False,
+            }
+            if capability == "audio_understanding":
+                body["messages"][0]["content"].append({"type": "text", "text": "Describe this audio briefly."})
+            else:
+                body["asr_options"] = {"language": "auto"}
+            data = await _post_chat_json(effective, deployment, body)
+            message, usage = _message_content(data)
+            output = message.get("content") or message.get("reasoning_content") or ""
+            return {"output": str(output)[:200], "usage": usage}
+        messages: list[dict[str, Any]] = []
+        if capability == "voice_design":
+            messages.append({"role": "user", "content": "温暖、清晰、专业的普通话女声"})
+        messages.append({"role": "assistant", "content": "灼见语音能力测试。"})
+        audio: dict[str, Any] = {"format": "wav"}
+        if capability == "voice_design":
+            audio["optimize_text_preview"] = False
+        if capability == "voice_clone":
+            if not (deployment.config or {}).get("test_workspace_file_id"):
+                raise GatewayError("test_voice_sample_required")
+            audio["voice"] = f"data:audio/wav;base64,{encoded}"
+        body = {"model": deployment.model_id, "messages": messages, "audio": audio, "stream": False}
+        data = await _post_chat_json(effective, deployment, body)
+        message, usage = _message_content(data)
+        audio_payload = message.get("audio") or {}
+        raw = base64.b64decode(str(audio_payload.get("data") or ""))
+        if not raw:
+            raise GatewayError("invalid_provider_response")
+        return {"bytes": len(raw), "usage": usage}
     raise ValueError(f"unsupported capability: {capability}")
+
+
+def _test_wav_bytes() -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as target:
+        target.setnchannels(1)
+        target.setsampwidth(2)
+        target.setframerate(16000)
+        target.writeframes(b"\x00\x00" * 16000)
+    return output.getvalue()
 
 
 async def test_provider_connection(provider: LlmProvider) -> dict[str, str]:

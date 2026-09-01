@@ -14,6 +14,10 @@ ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
 # 使用无界面组件，避免在服务端安装桌面环境。
 COPY pyproject.toml .
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN python -m pip install --no-cache-dir --retries 10 --timeout 120 -e ".[dev]"
 
 COPY . .

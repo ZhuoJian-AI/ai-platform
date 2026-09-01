@@ -28,6 +28,7 @@ from app.models.judge import JudgeTemplate
 from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.models.memory import Memory
 from app.models.module_deployment import ModuleDeployment, ModuleDeploymentProfile
+from app.models.multimodal import MultimodalJob, VoiceAuthorizationRecord, VoiceProfile, VoiceProfileGrant
 from app.models.ontology import Ontology, OntologyFile, OntologyFolder
 from app.models.organization import Organization
 from app.models.platform_extension import (
@@ -37,6 +38,7 @@ from app.models.platform_extension import (
     PlatformExtensionSource,
 )
 from app.models.rag import RagChunk, RagCollection, RagDocument, RagFolder
+from app.models.role import Role, RoleDataDepartment, RolePermission, UserRole
 from app.models.routing_policy import RoutingPolicy
 from app.models.skill import ScopeManagerAssignment, Skill, SkillExecution, SkillFile, SkillFolder, SkillVersion
 from app.models.task import Task, TaskMessage
@@ -77,6 +79,10 @@ __all__ = [
     "EnterpriseApplicationGrant",
     "EnterpriseApplicationToolBinding",
     "RoutingPolicy",
+    "Role",
+    "UserRole",
+    "RolePermission",
+    "RoleDataDepartment",
     "AuditLog",
     "BudgetUsage",
     "PlatformExtensionSource",
@@ -121,4 +127,8 @@ __all__ = [
     "Memory",
     "ModuleDeployment",
     "ModuleDeploymentProfile",
+    "MultimodalJob",
+    "VoiceProfile",
+    "VoiceProfileGrant",
+    "VoiceAuthorizationRecord",
 ]

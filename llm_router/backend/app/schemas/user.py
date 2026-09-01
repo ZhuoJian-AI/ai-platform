@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.schemas.role import EffectiveDataScopeRead, RoleSummary
+
 
 class ManagerScopeGrant(BaseModel):
     scope_type: Literal["department", "team"]
@@ -23,6 +25,7 @@ class UserCreate(BaseModel):
     is_active: bool = True
     password: str = Field(..., min_length=8, max_length=128)
     manager_scopes: list[ManagerScopeGrant] = Field(default_factory=list)
+    role_ids: list[UUID] | None = Field(None, max_length=100)
 
     @model_validator(mode="after")
     def validate_single_department(self) -> "UserCreate":
@@ -45,6 +48,7 @@ class UserUpdate(BaseModel):
     is_active: bool | None = None
     password: str | None = Field(None, min_length=8, max_length=128)
     manager_scopes: list[ManagerScopeGrant] | None = None
+    role_ids: list[UUID] | None = Field(None, max_length=100)
 
     @model_validator(mode="after")
     def validate_single_department(self) -> "UserUpdate":
@@ -86,6 +90,10 @@ class UserRead(BaseModel):
     is_active: bool
     must_change_password: bool = False
     manager_scopes: list[ManagerScopeGrant] = Field(default_factory=list)
+    role_ids: list[UUID] = Field(default_factory=list)
+    roles: list[RoleSummary] = Field(default_factory=list)
+    permission_codes: list[str] = Field(default_factory=list)
+    effective_data_scopes: EffectiveDataScopeRead | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -7,12 +7,16 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.services.multimodal_service import validate_provider_config
 
-VENDORS = {"openai", "anthropic", "azure_openai", "aliyun_bailian", "volcengine_ark", "custom"}
+VENDORS = {"openai", "anthropic", "azure_openai", "aliyun_bailian", "volcengine_ark", "xiaomi_mimo", "custom"}
 PROVIDER_TYPES = {"anthropic", "openai", "azure_openai", "custom"}
-CAPABILITIES = {"chat", "vision", "embedding", "image_generation"}
+CAPABILITIES = {
+    "chat", "vision", "embedding", "image_generation", "audio_understanding",
+    "speech_to_text", "text_to_speech", "voice_design", "voice_clone",
+}
 ADAPTERS = {
     "openai_chat_completions", "openai_responses", "anthropic_messages",
     "openai_embeddings", "openai_images", "bailian_multimodal_generation", "volcengine_images",
+    "openai_audio_transcription_chat", "openai_audio_synthesis_chat",
 }
 
 
@@ -43,20 +47,26 @@ class ModelDeploymentCreate(BaseModel):
             raise ValueError(f"unsupported model adapter: {self.adapter}")
         normalized = list(dict.fromkeys(self.capabilities))
         if not normalized or not set(normalized).issubset(CAPABILITIES):
-            raise ValueError("capabilities must contain chat, vision, embedding or image_generation")
+            raise ValueError("unsupported model capability")
         if "vision" in normalized and "chat" not in normalized:
             raise ValueError("vision deployments must also declare chat")
         if self.adapter == "anthropic_messages" and ({"embedding", "image_generation"} & set(normalized)):
             raise ValueError("Anthropic Messages does not provide embedding or image generation")
         if self.adapter in {"openai_chat_completions", "openai_responses"} and not set(normalized).issubset(
-            {"chat", "vision"}
+            {"chat", "vision", "audio_understanding"}
         ):
-            raise ValueError("chat adapters only support chat and vision capabilities")
+            raise ValueError("chat adapters only support chat, vision and audio understanding")
         if self.adapter == "openai_embeddings" and normalized != ["embedding"]:
             raise ValueError("openai_embeddings deployments must only declare embedding")
         if self.adapter in {"openai_images", "bailian_multimodal_generation", "volcengine_images"}:
             if normalized != ["image_generation"]:
                 raise ValueError("image adapters must only declare image_generation")
+        if self.adapter == "openai_audio_transcription_chat" and normalized != ["speech_to_text"]:
+            raise ValueError("audio transcription adapter must only declare speech_to_text")
+        if self.adapter == "openai_audio_synthesis_chat" and not set(normalized).issubset(
+            {"text_to_speech", "voice_design", "voice_clone"}
+        ):
+            raise ValueError("audio synthesis adapter has incompatible capabilities")
         if self.endpoint_path:
             path = self.endpoint_path.strip()
             if not path.startswith("/") or "://" in path or ".." in path:
@@ -135,6 +145,10 @@ class LlmProviderCreate(BaseModel):
             raise ValueError("SaaS backend providers must use pay-as-you-go API credentials")
         if self.vendor in {"aliyun_bailian", "volcengine_ark"} and not self.region:
             self.region = "cn-beijing"
+        if self.vendor == "xiaomi_mimo":
+            if self.access_mode != "payg" or self.api_key.strip().lower().startswith("tp-"):
+                raise ValueError("MiMo Token Plan credentials cannot be used by the SaaS backend")
+            self.region = self.region or "cn"
         return self
 
     @field_validator("config")

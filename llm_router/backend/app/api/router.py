@@ -18,17 +18,19 @@ from app.api.connectors import router as connector_router
 from app.api.data_interfaces import router as data_interface_router
 from app.api.departments import router as dept_router
 from app.api.dlp_rules import router as dlp_router
-from app.api.ecs_publisher import router as ecs_publisher_router
 from app.api.dsh_internal import router as dsh_internal_router
+from app.api.ecs_publisher import router as ecs_publisher_router
 from app.api.enterprise_applications import router as enterprise_application_router
 from app.api.llm_providers import router as provider_router
 from app.api.memory import router as memory_router
 from app.api.module_publisher import router as module_publisher_router
 from app.api.monitor import router as monitor_router
+from app.api.multimodal import router as multimodal_router
 from app.api.ontology import router as ontology_router
 from app.api.organizations import router as org_router
 from app.api.platform_extensions import router as platform_extension_router
 from app.api.rag import router as rag_router
+from app.api.roles import router as role_router
 from app.api.routing_policies import router as routing_router
 from app.api.skill_packages import router as skill_package_router
 from app.api.skills import router as skill_router
@@ -57,6 +59,7 @@ api_router.include_router(org_router, tags=["organizations"])
 api_router.include_router(dept_router, tags=["departments"])
 api_router.include_router(team_router, tags=["teams"])
 api_router.include_router(user_router, tags=["users"])
+api_router.include_router(role_router, tags=["roles"])
 api_router.include_router(workspace_router, tags=["workspaces"])
 api_router.include_router(agent_router, tags=["agents"])
 api_router.include_router(agent_playground_router, tags=["agent-playground"])
@@ -76,6 +79,7 @@ api_router.include_router(audit_router, tags=["audit-logs"])
 api_router.include_router(budget_router, tags=["budget"])
 # 应用监控台
 api_router.include_router(monitor_router, tags=["monitor"])
+api_router.include_router(multimodal_router, tags=["multimodal"])
 # 终端用户端（require_user 守卫，用户 JWT）
 api_router.include_router(terminal_router, tags=["terminal"])
 # 长期记忆（管理端维护 org/dept/team 级长期记忆）

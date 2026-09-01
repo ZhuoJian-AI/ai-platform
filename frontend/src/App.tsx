@@ -8,6 +8,7 @@ import {
   FolderOpenOutlined, ExperimentOutlined, DatabaseOutlined, PartitionOutlined,
   ApiOutlined, BarChartOutlined, QuestionCircleOutlined, ReadOutlined,
   MoreOutlined, PhoneOutlined,
+  AudioOutlined,
   AppstoreAddOutlined, DeploymentUnitOutlined, ShopOutlined, HistoryOutlined,
   AppstoreOutlined, LinkOutlined, SettingOutlined, RightOutlined, DownOutlined,
 } from '@ant-design/icons';
@@ -26,6 +27,8 @@ import LlmProviders from './pages/LlmProviders';
 import DlpRules from './pages/DlpRules';
 import AdminManagement from './pages/AdminManagement';
 import UsersPage from './pages/org/Users';
+import RolesPage from './pages/org/Roles';
+import VoicesPage from './pages/org/Voices';
 import Workspaces from './pages/agent/Workspaces';
 import Agents from './pages/agent/Agents';
 import AgentPlayground from './pages/agent/AgentPlayground';
@@ -73,12 +76,16 @@ const SUBSYSTEMS: Subsystem[] = [
       { path: '/org/structure', label: '组织架构', icon: <ApartmentOutlined /> },
       { path: '/org/admins', label: '管理员管理', icon: <TeamOutlined />, superOnly: true },
       { path: '/org/users', label: '用户管理', icon: <UserOutlined /> },
+      { path: '/org/roles', label: '角色与权限', icon: <SafetyOutlined /> },
+      { path: '/org/voices', label: '企业音色库', icon: <AudioOutlined /> },
       { path: '/org/contact', label: '联系方式', icon: <PhoneOutlined /> },
     ],
     routes: [
       { path: '/org/structure', element: <Organizations /> },
       { path: '/org/admins', element: <AdminManagement /> },
       { path: '/org/users', element: <UsersPage /> },
+      { path: '/org/roles', element: <RolesPage /> },
+      { path: '/org/voices', element: <VoicesPage /> },
       { path: '/org/contact', element: <ContactInfo /> },
     ],
   },

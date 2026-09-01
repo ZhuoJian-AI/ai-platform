@@ -16,6 +16,9 @@ class Department(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     organization_id: Mapped[str] = mapped_column(
         ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False
     )
+    parent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("departments.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -31,3 +34,4 @@ class Department(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     # 关系
     organization = relationship("Organization", back_populates="departments")
     teams = relationship("Team", back_populates="department", lazy="selectin")
+    parent = relationship("Department", remote_side="Department.id", lazy="selectin")

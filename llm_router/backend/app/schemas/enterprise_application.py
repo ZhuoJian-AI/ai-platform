@@ -11,7 +11,7 @@ from app.schemas._base import OrmModel
 ApplicationPermission = Literal[
     "view", "ai_query", "ai_create", "ai_update", "ai_delete", "ai_approve", "export"
 ]
-ApplicationScope = Literal["organization", "department", "team", "user"]
+ApplicationScope = Literal["organization", "department", "team", "user", "role"]
 ApplicationTarget = Literal["tool_endpoint", "data_interface", "skill_folder"]
 ApplicationOperation = Literal["query", "create", "update", "delete", "export", "approve"]
 

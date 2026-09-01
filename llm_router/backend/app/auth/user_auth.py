@@ -32,6 +32,9 @@ class CurrentUser:
     department_id: str | None = None
     department_ids: tuple[str, ...] = ()
     team_id: str | None = None
+    role_ids: tuple[str, ...] = ()
+    permission_codes: tuple[str, ...] = ()
+    effective_data_scopes: dict | None = None
 
 
 def decode_user_token(token: str) -> dict | None:
@@ -65,6 +68,8 @@ async def require_user(
     user = await get_user(db, user_id)
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="User account disabled")
+    from app.services.role_service import rbac_for_user
+    rbac = await rbac_for_user(db, user)
     return CurrentUser(
         user=user,
         id=str(user.id),
@@ -74,6 +79,9 @@ async def require_user(
         department_id=str(user.department_id) if user.department_id else None,
         department_ids=tuple(str(value) for value in user.department_ids),
         team_id=str(user.team_id) if user.team_id else None,
+        role_ids=rbac["role_ids"],
+        permission_codes=rbac["permission_codes"],
+        effective_data_scopes=rbac["effective_data_scopes"],
     )
 
 

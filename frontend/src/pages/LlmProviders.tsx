@@ -31,6 +31,7 @@ const TYPE_LABELS: Record<string, string> = {
 const VENDOR_LABELS: Record<string, string> = {
   aliyun_bailian: '阿里云百炼',
   volcengine_ark: '火山方舟',
+  xiaomi_mimo: '小米 MiMo',
   openai: 'OpenAI',
   anthropic: 'Anthropic',
   azure_openai: 'Azure OpenAI',
@@ -39,10 +40,14 @@ const VENDOR_LABELS: Record<string, string> = {
 
 const CAPABILITY_LABELS: Record<ModelCapability, string> = {
   chat: '聊天', vision: '视觉理解', embedding: 'Embedding', image_generation: '生图',
+  audio_understanding: '音频理解', speech_to_text: '语音转文字', text_to_speech: '文字转语音',
+  voice_design: '音色设计', voice_clone: '音色克隆',
 };
 
 const ADAPTER_OPTIONS = [
   { value: 'openai_chat_completions', label: 'OpenAI Chat Completions' },
+  { value: 'openai_audio_transcription_chat', label: 'MiMo ASR（Chat Completions）' },
+  { value: 'openai_audio_synthesis_chat', label: 'MiMo TTS / 音色（Chat Completions）' },
   { value: 'openai_responses', label: 'OpenAI Responses（方舟等）' },
   { value: 'anthropic_messages', label: 'Anthropic Messages' },
   { value: 'openai_embeddings', label: 'OpenAI Embeddings' },
@@ -467,6 +472,7 @@ export default function LlmProviders() {
                 <Select disabled={isEdit} options={[
                   { value: 'aliyun_bailian', label: '阿里云百炼' },
                   { value: 'volcengine_ark', label: '火山方舟' },
+                  { value: 'xiaomi_mimo', label: '小米 MiMo' },
                   { value: 'openai', label: 'OpenAI' },
                   { value: 'anthropic', label: 'Anthropic' },
                   { value: 'custom', label: '自定义兼容服务' },
@@ -479,7 +485,7 @@ export default function LlmProviders() {
             </Col>
             <Col span={12}>
               <Form.Item name="provider_type" label="默认通信协议" rules={[{ required: true }]}>
-                <Select disabled={isEdit || vendor === 'openai' || vendor === 'anthropic' || vendor === 'volcengine_ark'} options={[
+                <Select disabled={isEdit || vendor === 'openai' || vendor === 'anthropic' || vendor === 'volcengine_ark' || vendor === 'xiaomi_mimo'} options={[
                   { value: 'openai', label: 'OpenAI 兼容协议' },
                   { value: 'anthropic', label: 'Anthropic Messages 协议' },
                   { value: 'azure_openai', label: 'Azure OpenAI' },
@@ -518,7 +524,7 @@ export default function LlmProviders() {
             name="base_url"
             label="Base URL"
             rules={(vendor === 'custom' || vendor === 'azure_openai') ? [{ required: true }] : []}
-            extra={(vendor === 'aliyun_bailian' || vendor === 'volcengine_ark' || vendor === 'openai' || vendor === 'anthropic') ? '可留空，由平台根据供应商、地域和协议自动生成' : undefined}
+            extra={(vendor === 'aliyun_bailian' || vendor === 'volcengine_ark' || vendor === 'xiaomi_mimo' || vendor === 'openai' || vendor === 'anthropic') ? '可留空，由平台根据供应商、地域和协议自动生成' : undefined}
           >
             <Input placeholder="留空使用官方端点；自定义服务必须填写 https:// 地址" />
           </Form.Item>
@@ -528,13 +534,15 @@ export default function LlmProviders() {
             rules={isEdit ? [] : [{ required: true }]}
             extra={isEdit ? '留空则保持原 Key 不变' : undefined}
           >
-            <Input.Password placeholder="sk-ant-..." />
+            <Input.Password placeholder={vendor === 'xiaomi_mimo' ? 'sk-...（禁止 tp- Token Plan）' : 'sk-...'} />
           </Form.Item>
           <Alert
             type="info" showIcon style={{ marginBottom: 16 }}
             message="供应商账号与模型能力分开配置"
             description={vendor === 'aliyun_bailian'
               ? '请使用按量付费 API Key。Coding Plan / Token Plan 不适用于 SaaS 后端。Key、地域和 Base URL 必须属于同一地域。'
+              : vendor === 'xiaomi_mimo'
+                ? 'SaaS 后端只接受按量付费 sk-... 密钥；tp-... Token Plan 会被后端拒绝。ASR、TTS、音色设计和克隆分别声明能力。'
               : vendor === 'volcengine_ark'
                 ? '聊天/视觉、Embedding 和图片生成需要按实际模型选择不同适配器；图片生成不会被当作聊天接口调用。'
                 : '模型必须明确填写能力和适配器，平台不再根据模型名称猜测。'}

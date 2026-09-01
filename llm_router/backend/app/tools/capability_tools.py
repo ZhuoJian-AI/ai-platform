@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from uuid import UUID
 
@@ -28,16 +29,18 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.user_auth import CurrentUser
+from app.database import async_session_factory
 from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.rag import RagCollection
 from app.models.skill import SkillFolder
+from app.schemas.multimodal import AudioTranscriptionCreate, SpeechCreate
 from app.schemas.rag import RagRetrieveRequest
-from app.services import memory_service, scope_service
+from app.services import memory_service, multimodal_audio_service, scope_service
 from app.services.rag_service import retrieve as rag_retrieve
-from app.services.skill_store_service import SKILL_MANIFEST_PATH, get_file_by_path as get_skill_file_by_path
+from app.services.skill_store_service import SKILL_MANIFEST_PATH
+from app.services.skill_store_service import get_file_by_path as get_skill_file_by_path
 from app.tools.executor import execute_endpoint
 from app.tools.skill_manifest import parse_skill_manifest
-
 
 # ── 入参 schema（Pydantic）──────────────────────────────────────────────
 
@@ -45,7 +48,10 @@ from app.tools.skill_manifest import parse_skill_manifest
 class QueryOntologyArgs(BaseModel):
     path: str | None = Field(
         default=None,
-        description="可选：只取该路径的本体文件（如 README.md / identifiers.md）。不传则返回用户 scope 内全部本体文件摘要。",
+        description=(
+            "可选：只取该路径的本体文件（如 README.md / identifiers.md）。"
+            "不传则返回用户 scope 内全部本体文件摘要。"
+        ),
     )
 
 
@@ -66,6 +72,23 @@ class WriteMemoryArgs(BaseModel):
 
 class GetAgentConfigArgs(BaseModel):
     agent_slug: str = Field(description="智能体 slug（见 list_agents 返回），须在当前用户 scope 内")
+
+
+class TranscribeAudioArgs(BaseModel):
+    workspace_file_id: UUID = Field(description="当前用户有权访问的工作空间音频文件 ID")
+    language: str = Field(default="auto", description="识别语言：auto、zh 或 en")
+
+
+class UnderstandAudioArgs(BaseModel):
+    workspace_file_id: UUID = Field(description="当前用户有权访问的工作空间音频文件 ID")
+    question: str = Field(description="希望模型基于音频回答的问题")
+
+
+class SynthesizeSpeechArgs(BaseModel):
+    text: str = Field(description="需要朗读的文字")
+    voice_profile_id: UUID = Field(description="当前用户获授权的企业音色 ID")
+    style: str | None = Field(default=None, description="可选的语气或情绪")
+    speed: float = Field(default=1.0, ge=0.5, le=2.0, description="语速")
 
 
 # ── 工具实现（闭包绑定 db + cu）─────────────────────────────────────────
@@ -264,6 +287,67 @@ async def _get_agent_config(db: AsyncSession, cu: CurrentUser, agent_slug: str) 
     return _json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+async def _transcribe_audio(
+    db: AsyncSession, cu: CurrentUser, workspace_file_id: UUID, language: str,
+) -> str:
+    # Keep the agent's request transaction isolated while making the durable
+    # job immediately visible to the worker.
+    _ = db
+    async with async_session_factory() as job_db:
+        job = await multimodal_audio_service.queue_transcription(
+            job_db,
+            cu,
+            AudioTranscriptionCreate(workspace_file_id=workspace_file_id, language=language),
+        )
+        job_id = job.id
+        request_id = job.request_id
+        await job_db.commit()
+    for _attempt in range(150):
+        async with async_session_factory() as poll_db:
+            current = await multimodal_audio_service.get_job(poll_db, cu, job_id)
+            if current.status == "succeeded":
+                text = str((current.result or {}).get("text") or "").strip()
+                return text or f"job_id={job_id} request_id={request_id} status=succeeded"
+            if current.status in {"failed", "cancelled"}:
+                return (
+                    f"job_id={job_id} request_id={request_id} status={current.status} "
+                    f"error={current.error_category or 'audio_processing_failed'}"
+                )
+        await asyncio.sleep(2)
+    return f"job_id={job_id} request_id={request_id} status=processing"
+
+
+async def _understand_audio(
+    db: AsyncSession, cu: CurrentUser, workspace_file_id: UUID, question: str,
+) -> str:
+    result = await multimodal_audio_service.understand_file(
+        db, cu, workspace_file_id, question, "default",
+    )
+    return str(result["content"])
+
+
+async def _synthesize_speech(
+    db: AsyncSession,
+    cu: CurrentUser,
+    text: str,
+    voice_profile_id: UUID,
+    style: str | None,
+    speed: float,
+) -> str:
+    job = await multimodal_audio_service.queue_speech(
+        db,
+        cu,
+        SpeechCreate(
+            text=text,
+            voice_profile_id=voice_profile_id,
+            style=style,
+            speed=speed,
+            format="wav",
+        ),
+    )
+    return f"job_id={job.id} request_id={job.request_id} status={job.status}"
+
+
 # ── 工厂：按请求绑定 db + cu 产出 StructuredTool 列表 ────────────────────
 
 
@@ -306,33 +390,62 @@ def build_capability_tools(db: AsyncSession, cu: CurrentUser) -> list[Structured
     async def _t_get_agent_config(agent_slug: str) -> str:
         return await _get_agent_config(db, cu, agent_slug)
 
+    async def _t_transcribe_audio(workspace_file_id: UUID, language: str = "auto") -> str:
+        return await _transcribe_audio(db, cu, workspace_file_id, language)
+
+    async def _t_understand_audio(workspace_file_id: UUID, question: str) -> str:
+        return await _understand_audio(db, cu, workspace_file_id, question)
+
+    async def _t_synthesize_speech(
+        text: str,
+        voice_profile_id: UUID,
+        style: str | None = None,
+        speed: float = 1.0,
+    ) -> str:
+        return await _synthesize_speech(db, cu, text, voice_profile_id, style, speed)
+
     return [
         StructuredTool.from_function(
             func=_t_query_ontology,
             name="query_ontology",
-            description="查询当前归口用户 scope 内的本体（L2 identifiers：object/link/action-types + 标识符码空间）。调用前先了解可用标识符，避免臆造 ID。",
+            description=(
+                "查询当前归口用户 scope 内的本体（L2 identifiers：object/link/action-types + 标识符码空间）。"
+                "调用前先了解可用标识符，避免臆造 ID。"
+            ),
             args_schema=QueryOntologyArgs,
         ),
         StructuredTool.from_function(
             func=_t_list_skills,
             name="list_skills",
-            description="列出当前归口用户 scope 内全部技能及其绑定的可调用端点。规划调用前先列出，确认 skill_slug 与 endpoint_name。",
+            description=(
+                "列出当前归口用户 scope 内全部技能及其绑定的可调用端点。"
+                "规划调用前先列出，确认 skill_slug 与 endpoint_name。"
+            ),
         ),
         StructuredTool.from_function(
             func=_t_call_skill,
             name="call_skill",
-            description="执行技能绑定的端点（数据接口调用入口）。须先 list_skills 取 skill_slug 与 endpoint_name，入参键名见端点 params_schema。不要臆造参数值，标识符须来自 query_ontology 或接口返回。",
+            description=(
+                "执行技能绑定的端点（数据接口调用入口）。须先 list_skills 取 skill_slug 与 endpoint_name，"
+                "入参键名见端点 params_schema。不要臆造参数值，标识符须来自 query_ontology 或接口返回。"
+            ),
             args_schema=CallSkillArgs,
         ),
         StructuredTool.from_function(
             func=_t_list_data_interfaces,
             name="list_data_interfaces",
-            description="列出当前归口用户 scope 内数据接口目录（name/method/path/参数提示）。仅用于规划，执行请走 call_skill。",
+            description=(
+                "列出当前归口用户 scope 内数据接口目录（name/method/path/参数提示）。"
+                "仅用于规划，执行请走 call_skill。"
+            ),
         ),
         StructuredTool.from_function(
             func=_t_search_rag,
             name="search_rag",
-            description="跨当前归口用户 scope 内全部知识库做语义检索（中文长文亦可）。返回命中片段与 score。提示词须含相关知识库字样以稳定命中。",
+            description=(
+                "跨当前归口用户 scope 内全部知识库做语义检索（中文长文亦可）。返回命中片段与 score。"
+                "提示词须含相关知识库字样以稳定命中。"
+            ),
             args_schema=SearchRagArgs,
         ),
         StructuredTool.from_function(
@@ -349,12 +462,37 @@ def build_capability_tools(db: AsyncSession, cu: CurrentUser) -> list[Structured
         StructuredTool.from_function(
             func=_t_list_agents,
             name="list_agents",
-            description="列出归口用户 scope 内可见的智能体配置（slug/名称/模型/描述，只读不运行）。取完整 system_prompt 用 get_agent_config。",
+            description=(
+                "列出归口用户 scope 内可见的智能体配置（slug/名称/模型/描述，只读不运行）。"
+                "取完整 system_prompt 用 get_agent_config。"
+            ),
         ),
         StructuredTool.from_function(
             func=_t_get_agent_config,
             name="get_agent_config",
-            description="取某个智能体的完整配置内容（只读不运行）：system_prompt（L3 模板 persona/policy/输出骨架）+ 模型 + 绑定技能 slug + 绑定 RAG slug。把 system_prompt 当自身指令，再用 list_skills/call_skill/search_rag/read_memory 自主完成。",
+            description=(
+                "取某个智能体的完整配置内容（只读不运行）：system_prompt（L3 模板 persona/policy/输出骨架）"
+                "+ 模型 + 绑定技能 slug + 绑定 RAG slug。把 system_prompt 当自身指令，"
+                "再用 list_skills/call_skill/search_rag/read_memory 自主完成。"
+            ),
             args_schema=GetAgentConfigArgs,
+        ),
+        StructuredTool.from_function(
+            func=_t_transcribe_audio,
+            name="transcribe_audio",
+            description="把当前用户有权访问的工作空间音频转成文字。返回持久任务 ID；不可直接访问文件或绕过权限。",
+            args_schema=TranscribeAudioArgs,
+        ),
+        StructuredTool.from_function(
+            func=_t_understand_audio,
+            name="understand_audio",
+            description="理解当前用户有权访问的音频并回答问题。文件通过短期签名 URL 发送，模型不会获得 OSS 密钥。",
+            args_schema=UnderstandAudioArgs,
+        ),
+        StructuredTool.from_function(
+            func=_t_synthesize_speech,
+            name="synthesize_speech",
+            description="使用当前用户获授权的企业音色生成语音。返回持久任务 ID；音色设计和克隆不在此工具中开放。",
+            args_schema=SynthesizeSpeechArgs,
         ),
     ]
