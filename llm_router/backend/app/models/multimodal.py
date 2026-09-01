@@ -31,7 +31,13 @@ class MultimodalJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     output_file_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     voice_profile_id: Mapped[str | None] = mapped_column(
-        ForeignKey("voice_profiles.id", ondelete="SET NULL", use_alter=True), nullable=True,
+        ForeignKey(
+            "voice_profiles.id",
+            name="multimodal_jobs_voice_profile_id_fkey",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        nullable=True,
     )
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued", index=True)
     request_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)

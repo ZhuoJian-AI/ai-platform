@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -39,6 +39,8 @@ async def ensure_builtin_roles(db: AsyncSession, org_id: UUID | str) -> dict[str
     }
     for code, (name, data_scope, permissions) in defaults.items():
         if code in by_code:
+            # 内置角色是登录与兜底授权的基础设施，不能保持在历史误停用状态。
+            by_code[code].is_active = True
             continue
         role = Role(
             organization_id=UUID(str(org_id)), name=name, code=code,
@@ -75,6 +77,24 @@ async def create_role(db: AsyncSession, org_id: UUID, data: RoleCreate) -> Role:
 
 
 async def update_role(db: AsyncSession, row: Role, data: RoleUpdate) -> Role:
+    if data.is_active is False and row.is_active:
+        if row.is_builtin:
+            raise HTTPException(status_code=422, detail="内置角色不能停用")
+        active_user_count = int((await db.execute(
+            select(func.count())
+            .select_from(UserRole)
+            .join(User, User.id == UserRole.user_id)
+            .where(
+                UserRole.role_id == row.id,
+                User.deleted_at.is_(None),
+                User.is_active.is_(True),
+            )
+        )).scalar_one())
+        if active_user_count:
+            raise HTTPException(
+                status_code=409,
+                detail=f"该角色仍分配给 {active_user_count} 名在职员工，请先移除员工角色后再停用",
+            )
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(row, field, value)
     await db.flush()

@@ -194,13 +194,19 @@ export default function UsersPage() {
               render: (id: string | null, record: User) => {
                 const departmentId = id ?? record.department_ids?.[0];
                 return departmentId
-                  ? <Tag color="blue">{deptName(departmentId) ?? departmentId}</Tag>
+                  ? (deptName(departmentId)
+                    ? <Tag color="blue">{deptName(departmentId)}</Tag>
+                    : <Tag color="red">原部门已删除，请重新选择</Tag>)
                   : <Typography.Text type="secondary">—</Typography.Text>;
               },
             },
             {
               title: '团队', dataIndex: 'team_id', width: 140,
-              render: (id: string | null) => (id ? <Tag color="geekblue">{teamName(id) ?? id}</Tag> : <Typography.Text type="secondary">—</Typography.Text>),
+              render: (id: string | null) => (id
+                ? (teamName(id)
+                  ? <Tag color="geekblue">{teamName(id)}</Tag>
+                  : <Tag color="red">原团队已删除，请重新选择</Tag>)
+                : <Typography.Text type="secondary">—</Typography.Text>),
             },
             {
               title: '状态', dataIndex: 'is_active', width: 80,

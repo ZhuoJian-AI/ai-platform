@@ -109,6 +109,70 @@ async def test_user_belongs_to_one_department(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_department_and_team_cannot_be_deleted_while_they_have_active_members(
+    client: AsyncClient,
+):
+    org_id = await _make_org(client, slug="delete-membership-guard-org")
+    source_id = await _make_department(client, org_id, "设计部", "design")
+    target_id = await _make_department(client, org_id, "生产部", "production")
+    team = await client.post(
+        f"/api/v1/departments/{source_id}/teams",
+        json={"name": "产品设计组", "slug": "product-design"},
+    )
+    assert team.status_code == 201
+    team_id = team.json()["id"]
+    user = await client.post(
+        f"/api/v1/organizations/{org_id}/users",
+        json={
+            "username": "department-member",
+            "password": "test-pass-123",
+            "department_id": source_id,
+            "team_id": team_id,
+        },
+    )
+    assert user.status_code == 201
+
+    rejected_team = await client.delete(f"/api/v1/teams/{team_id}")
+    assert rejected_team.status_code == 409
+    assert "1 名员工" in rejected_team.json()["detail"]
+
+    rejected_department = await client.delete(f"/api/v1/departments/{source_id}")
+    assert rejected_department.status_code == 409
+    assert "1 名员工" in rejected_department.json()["detail"]
+    assert "1 个团队" in rejected_department.json()["detail"]
+
+    moved = await client.patch(
+        f"/api/v1/users/{user.json()['id']}",
+        json={
+            "department_ids": [target_id],
+            "department_id": target_id,
+            "team_id": None,
+        },
+    )
+    assert moved.status_code == 200
+    assert (await client.delete(f"/api/v1/teams/{team_id}")).status_code == 204
+    assert (await client.delete(f"/api/v1/departments/{source_id}")).status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_department_cannot_be_deleted_while_it_has_active_children(client: AsyncClient):
+    org_id = await _make_org(client, slug="delete-child-guard-org")
+    parent_id = await _make_department(client, org_id, "事业部", "division")
+    child = await client.post(
+        f"/api/v1/organizations/{org_id}/departments",
+        json={"name": "设计部", "slug": "design", "parent_id": parent_id},
+    )
+    assert child.status_code == 201
+
+    rejected = await client.delete(f"/api/v1/departments/{parent_id}")
+    assert rejected.status_code == 409
+    assert "1 个下级部门" in rejected.json()["detail"]
+
+    assert (await client.delete(f"/api/v1/departments/{child.json()['id']}")).status_code == 204
+    assert (await client.delete(f"/api/v1/departments/{parent_id}")).status_code == 204
+
+
+@pytest.mark.asyncio
 async def test_list_update_delete_user(client: AsyncClient):
     org_id = await _make_org(client, slug="crud-org")
     create = await client.post(

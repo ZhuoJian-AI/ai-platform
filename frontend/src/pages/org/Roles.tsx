@@ -128,9 +128,18 @@ export default function RolesPage() {
         <Form.Item name="permission_codes" label="平台通用能力" extra="这里不包含任何企业模块权限。">
           <Checkbox.Group options={PLATFORM_PERMISSIONS} />
         </Form.Item>
-        <Form.Item name="is_active" label="状态"><Select options={[
-          { value: true, label: '启用' }, { value: false, label: '停用' },
-        ]} /></Form.Item>
+        <Form.Item
+          name="is_active"
+          label="状态"
+          extra={editing?.is_builtin
+            ? '内置角色用于基础登录与兜底授权，始终保持启用。'
+            : '已分配给在职员工的角色，需要先从员工处移除后才能停用。'}
+        >
+          <Select
+            disabled={Boolean(editing?.is_builtin)}
+            options={[{ value: true, label: '启用' }, { value: false, label: '停用' }]}
+          />
+        </Form.Item>
       </Form>
     </Modal>
   </FinderShell>;

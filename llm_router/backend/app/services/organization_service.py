@@ -3,7 +3,8 @@
 from datetime import UTC
 from uuid import UUID
 
-from sqlalchemy import select
+from fastapi import HTTPException
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import noload
 
@@ -241,6 +242,42 @@ async def soft_delete_department(db: AsyncSession, dept: Department) -> None:
 
     from app.models.enterprise_application import EnterpriseApplicationGrant
     from app.models.role import RoleDataDepartment
+    from app.models.user import User, user_department_memberships
+
+    member_ids = select(user_department_memberships.c.user_id).where(
+        user_department_memberships.c.department_id == dept.id
+    )
+    active_user_count = int((await db.execute(
+        select(func.count()).select_from(User).where(
+            User.organization_id == dept.organization_id,
+            User.deleted_at.is_(None),
+            or_(User.department_id == dept.id, User.id.in_(member_ids)),
+        )
+    )).scalar_one())
+    active_team_count = int((await db.execute(
+        select(func.count()).select_from(Team).where(
+            Team.department_id == dept.id,
+            Team.deleted_at.is_(None),
+        )
+    )).scalar_one())
+    active_child_count = int((await db.execute(
+        select(func.count()).select_from(Department).where(
+            Department.parent_id == dept.id,
+            Department.deleted_at.is_(None),
+        )
+    )).scalar_one())
+    if active_user_count or active_team_count or active_child_count:
+        dependencies = []
+        if active_user_count:
+            dependencies.append(f"{active_user_count} 名员工")
+        if active_team_count:
+            dependencies.append(f"{active_team_count} 个团队")
+        if active_child_count:
+            dependencies.append(f"{active_child_count} 个下级部门")
+        raise HTTPException(
+            status_code=409,
+            detail=f"该部门仍包含{'、'.join(dependencies)}，请先完成转移或删除后再删除部门",
+        )
 
     deleted_at = datetime.now(UTC)
     dept.deleted_at = deleted_at
@@ -310,7 +347,48 @@ async def update_team(db: AsyncSession, team: Team, data: TeamUpdate) -> Team:
 
 async def soft_delete_team(db: AsyncSession, team: Team) -> None:
     from datetime import datetime
-    team.deleted_at = datetime.now(UTC)
+
+    from sqlalchemy import update
+
+    from app.models.enterprise_application import EnterpriseApplicationGrant
+    from app.models.skill import ScopeManagerAssignment
+    from app.models.user import User
+
+    active_user_count = int((await db.execute(
+        select(func.count()).select_from(User).where(
+            User.organization_id == team.organization_id,
+            User.team_id == team.id,
+            User.deleted_at.is_(None),
+        )
+    )).scalar_one())
+    if active_user_count:
+        raise HTTPException(
+            status_code=409,
+            detail=f"该团队仍包含 {active_user_count} 名员工，请先转移员工后再删除团队",
+        )
+
+    deleted_at = datetime.now(UTC)
+    await db.execute(
+        update(EnterpriseApplicationGrant)
+        .where(
+            EnterpriseApplicationGrant.organization_id == team.organization_id,
+            EnterpriseApplicationGrant.scope_type == "team",
+            EnterpriseApplicationGrant.scope_id == str(team.id),
+            EnterpriseApplicationGrant.deleted_at.is_(None),
+        )
+        .values(deleted_at=deleted_at)
+    )
+    await db.execute(
+        update(ScopeManagerAssignment)
+        .where(
+            ScopeManagerAssignment.organization_id == team.organization_id,
+            ScopeManagerAssignment.scope_type == "team",
+            ScopeManagerAssignment.scope_id == str(team.id),
+            ScopeManagerAssignment.deleted_at.is_(None),
+        )
+        .values(deleted_at=deleted_at)
+    )
+    team.deleted_at = deleted_at
     await soft_delete_node_workspace(db, team.organization_id, "team", str(team.id))
     await soft_delete_node_memory(db, team.organization_id, "team", str(team.id))
     await db.flush()
