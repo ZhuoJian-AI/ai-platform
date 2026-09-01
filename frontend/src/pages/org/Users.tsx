@@ -59,6 +59,10 @@ export default function UsersPage() {
   }, [nodeMap, orgId, watchedDepartmentId]);
 
   const isEdit = !!editing;
+  const activeRoleIds = useMemo(
+    () => new Set(roleList.filter(role => role.is_active).map(role => role.id)),
+    [roleList],
+  );
 
   const managerOptions = useMemo(() => {
     const options: { value: string; label: string }[] = [];
@@ -76,7 +80,7 @@ export default function UsersPage() {
   const openCreate = () => {
     setEditing(null);
     form.resetFields();
-    const employeeRole = roleList.find(role => role.code === 'employee');
+    const employeeRole = roleList.find(role => role.code === 'employee' && role.is_active);
     form.setFieldsValue({ role_ids: employeeRole ? [employeeRole.id] : [], is_active: true });
     setModalOpen(true);
   };
@@ -90,13 +94,15 @@ export default function UsersPage() {
         username: editing.username,
         display_name: editing.display_name,
         is_active: editing.is_active,
-        role_ids: editing.role_ids ?? [],
+        // 历史数据可能仍指向已停用或已删除角色。不可把这些不可见 UUID
+        // 带回提交，否则一次正常的员工修改也会被服务端整体拒绝。
+        role_ids: (editing.role_ids ?? []).filter(roleId => activeRoleIds.has(roleId)),
         department_id: editing.department_id ?? editing.department_ids?.[0] ?? undefined,
         team_id: editing.team_id ?? undefined,
         manager_scope_keys: (editing.manager_scopes ?? []).map((grant) => `${grant.scope_type}:${grant.scope_id}`),
       });
     }
-  }, [modalOpen, editing, form]);
+  }, [modalOpen, editing, form, activeRoleIds]);
 
   const closeModal = () => { setModalOpen(false); setEditing(null); form.resetFields(); };
 
@@ -245,7 +251,7 @@ export default function UsersPage() {
       >
         <Form form={form} layout="vertical" onFinish={submit}>
           <Form.Item name="username" label="用户名" rules={[{ required: true, min: 2, message: '请输入用户名（至少2位）' }]}>
-            <Input placeholder="用户名（同一组织内不可同名）" />
+            <Input placeholder="用户名（同一组织内不可同名）" autoComplete="off" />
           </Form.Item>
           <Form.Item name="display_name" label="显示名">
             <Input placeholder="张三" />
@@ -329,7 +335,7 @@ export default function UsersPage() {
               rules={[{ required: true, min: 8, message: '密码至少 8 位' }]}
               extra="创建后该用户下次登录需修改密码"
             >
-              <Input.Password placeholder="至少 8 位" />
+              <Input.Password placeholder="至少 8 位" autoComplete="new-password" />
             </Form.Item>
           )}
         </Form>

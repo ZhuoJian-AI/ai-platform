@@ -185,8 +185,13 @@ export default function EnterpriseAccessControl() {
       return roles.create(orgId, { ...values, is_active: true });
     },
     onSuccess: created => {
-      qc.invalidateQueries({ queryKey: ['roles', orgId] });
+      // 先把新角色写入缓存再选中，避免查询刷新完成前 fallback effect
+      // 把选择悄悄切回列表里的第一个角色。
+      qc.setQueryData(['roles', orgId], (current: typeof roleList | undefined) => [
+        ...(current ?? []).filter(item => item.id !== created.id), created,
+      ]);
       setSelectedRoleId(created.id);
+      qc.invalidateQueries({ queryKey: ['roles', orgId] });
       setRoleModalOpen(false);
       roleForm.resetFields();
       message.success('角色已创建，现在可以直接配置页面权限');
@@ -198,11 +203,13 @@ export default function EnterpriseAccessControl() {
     mutationFn: async () => {
       if (!role) throw new Error('请先选择角色');
       await Promise.all(appList.map(application => {
-        const integration = integrationByAppId[application.id];
-        const roleOnly = integration?.manifest?.contractRevision === '2.4';
+        const activeRoleIds = new Set(roleList.filter(item => item.is_active).map(item => item.id));
+        // 本页是唯一的企业模块授权入口：无论子系统仍报告 2.3 还是已经升级
+        // 到 2.4，都只提交角色授权。历史部门/团队/用户授权会在管理员保存时
+        // 被收敛掉，部门不再暗中扩大页面权限。
         const retained = application.grants
           .filter(grant => !(grant.scope_type === 'role' && grant.scope_id === role.id))
-          .filter(grant => !roleOnly || grant.scope_type === 'role')
+          .filter(grant => grant.scope_type === 'role' && grant.scope_id && activeRoleIds.has(grant.scope_id))
           .map(grant => ({
             scope_type: grant.scope_type, scope_id: grant.scope_id,
             permissions: grant.permissions, module_keys: grant.module_keys,
@@ -416,6 +423,7 @@ export default function EnterpriseAccessControl() {
           <span>配置角色</span>
           <Select
             showSearch optionFilterProp="label" value={role?.id}
+            getPopupContainer={trigger => trigger.parentElement ?? document.body}
             options={roleList.filter(item => item.is_active).map(item => ({ value: item.id, label: item.name }))}
             onChange={setSelectedRoleId} placeholder="选择角色"
           />

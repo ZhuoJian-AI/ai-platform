@@ -1,11 +1,13 @@
 """Enterprise application visibility and AI-tool authorization tests."""
 
 import json
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import httpx
 import jwt
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.auth.user_auth import CurrentUser
@@ -17,8 +19,10 @@ from app.models.enterprise_application import (
     EnterpriseApplicationActionRequest,
     EnterpriseApplicationEvent,
     EnterpriseApplicationEventDelivery,
+    EnterpriseApplicationGrant,
 )
 from app.models.organization import Organization
+from app.models.role import Role
 from app.models.skill import SkillFile, SkillFolder
 from app.models.team import Team
 from app.models.tool_call_log import ToolCallLog
@@ -245,6 +249,69 @@ async def test_application_grant_does_not_treat_another_department_as_membership
 
     assert service.effective_permissions(application, current) == set()
     assert service.effective_module_keys(application, current) == []
+
+
+@pytest.mark.asyncio
+async def test_replace_grants_repairs_a_preexisting_orphan_scope(db_session):
+    org, _, department, _, _ = await _organization_tree(db_session)
+    role = Role(
+        organization_id=org.id,
+        name="Quality approver",
+        code=f"quality-approver-{uuid4().hex[:6]}",
+        data_scope="self",
+        is_active=True,
+    )
+    db_session.add(role)
+    await db_session.flush()
+    application = await service.create_application(db_session, org.id, EnterpriseApplicationCreate(
+        name="Review Console",
+        slug=f"review-console-{uuid4().hex[:6]}",
+        entry_url="https://review.example.test",
+    ))
+    application = await service.replace_grants(db_session, application, [
+        EnterpriseApplicationGrantInput(
+            scope_type="department", scope_id=department.id, permissions=["view"],
+        ),
+    ])
+
+    department.deleted_at = datetime.now(UTC)
+    await db_session.flush()
+    application = await service.replace_grants(db_session, application, [
+        # A stale replace-all client echoes the now-orphaned grant.
+        EnterpriseApplicationGrantInput(
+            scope_type="department", scope_id=department.id, permissions=["view"],
+        ),
+        EnterpriseApplicationGrantInput(
+            scope_type="role", scope_id=role.id, permissions=["view", "ai_query"],
+        ),
+    ])
+
+    assert [(grant.scope_type, grant.scope_id) for grant in application.grants] == [
+        ("role", str(role.id)),
+    ]
+    stale = (await db_session.execute(select(EnterpriseApplicationGrant).where(
+        EnterpriseApplicationGrant.application_id == application.id,
+        EnterpriseApplicationGrant.scope_type == "department",
+    ))).scalar_one()
+    assert stale.deleted_at is not None
+
+
+@pytest.mark.asyncio
+async def test_replace_grants_still_rejects_a_new_invalid_scope(db_session):
+    org, _, _, _, _ = await _organization_tree(db_session)
+    application = await service.create_application(db_session, org.id, EnterpriseApplicationCreate(
+        name="Strict Console",
+        slug=f"strict-console-{uuid4().hex[:6]}",
+        entry_url="https://strict.example.test",
+    ))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await service.replace_grants(db_session, application, [
+            EnterpriseApplicationGrantInput(
+                scope_type="department", scope_id=uuid4(), permissions=["view"],
+            ),
+        ])
+    assert exc_info.value.status_code == 422
 
 
 @pytest.mark.asyncio

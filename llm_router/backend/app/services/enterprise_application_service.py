@@ -155,31 +155,6 @@ async def replace_grants(
     row: EnterpriseApplication,
     grants: list[EnterpriseApplicationGrantInput],
 ) -> EnterpriseApplication:
-    if _uses_role_authorization(row) and any(item.scope_type != "role" for item in grants):
-        raise HTTPException(
-            status_code=422,
-            detail="Contract 2.4 native applications can only be granted to roles",
-        )
-    normalized: dict[tuple[str, str | None], tuple[list[str], list[str], dict]] = {}
-    for item in grants:
-        sid = await skill_scope_service.validate_scope_target(
-            db,
-            row.organization_id,
-            item.scope_type,
-            item.scope_id,
-        )
-        permissions = [value for value in item.permissions if value in PERMISSIONS]
-        module_access = {
-            key: access.model_dump(mode="json")
-            for key, access in item.module_access.items()
-        }
-        if permissions or module_access:
-            normalized[(item.scope_type, sid)] = (
-                permissions,
-                item.module_keys,
-                module_access,
-            )
-
     all_grants = list(
         (
             await db.execute(
@@ -192,6 +167,50 @@ async def replace_grants(
         .all()
     )
     current = {(grant.scope_type, grant.scope_id): grant for grant in all_grants}
+    role_only = _uses_role_authorization(row)
+    normalized: dict[tuple[str, str | None], tuple[list[str], list[str], dict]] = {}
+    for item in grants:
+        requested_key = (
+            item.scope_type,
+            str(item.scope_id) if item.scope_id else None,
+        )
+        if role_only and item.scope_type != "role":
+            # A replace-all client may echo a historical grant while upgrading an
+            # application to 2.4. Existing legacy rows are omitted and therefore
+            # soft-deleted below; a newly forged non-role scope remains invalid.
+            if requested_key in current:
+                continue
+            raise HTTPException(
+                status_code=422,
+                detail="Contract 2.4 native applications can only be granted to roles",
+            )
+        try:
+            sid = await skill_scope_service.validate_scope_target(
+                db,
+                row.organization_id,
+                item.scope_type,
+                item.scope_id,
+            )
+        except HTTPException as exc:
+            # Older clients submit the complete grant list. If a referenced
+            # department/team/user/role was deleted after the page loaded, let the
+            # same request repair that pre-existing orphan instead of blocking all
+            # unrelated role changes. Unknown invalid targets are still rejected.
+            if exc.status_code == 422 and requested_key in current:
+                continue
+            raise
+        permissions = [value for value in item.permissions if value in PERMISSIONS]
+        module_access = {
+            key: access.model_dump(mode="json")
+            for key, access in item.module_access.items()
+        }
+        if permissions or module_access:
+            normalized[(item.scope_type, sid)] = (
+                permissions,
+                item.module_keys,
+                module_access,
+            )
+
     now = datetime.now(UTC)
     for key, grant in current.items():
         if key not in normalized:

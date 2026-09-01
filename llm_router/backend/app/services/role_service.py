@@ -6,11 +6,12 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.department import Department
+from app.models.enterprise_application import EnterpriseApplicationGrant
 from app.models.role import Role, RoleDataDepartment, RolePermission, UserRole
 from app.models.user import User
 from app.schemas.role import RoleCreate, RoleDataScopeReplace, RoleUpdate
@@ -104,7 +105,18 @@ async def update_role(db: AsyncSession, row: Role, data: RoleUpdate) -> Role:
 async def delete_role(db: AsyncSession, row: Role) -> None:
     if row.is_builtin:
         raise HTTPException(status_code=422, detail="Built-in roles cannot be deleted")
-    row.deleted_at = datetime.now(UTC)
+    deleted_at = datetime.now(UTC)
+    row.deleted_at = deleted_at
+    await db.execute(
+        update(EnterpriseApplicationGrant)
+        .where(
+            EnterpriseApplicationGrant.organization_id == row.organization_id,
+            EnterpriseApplicationGrant.scope_type == "role",
+            EnterpriseApplicationGrant.scope_id == str(row.id),
+            EnterpriseApplicationGrant.deleted_at.is_(None),
+        )
+        .values(deleted_at=deleted_at)
+    )
     await db.execute(delete(UserRole).where(UserRole.role_id == row.id))
     await db.flush()
 

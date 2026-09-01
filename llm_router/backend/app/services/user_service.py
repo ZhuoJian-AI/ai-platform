@@ -5,11 +5,12 @@ from typing import Any
 from uuid import UUID
 
 import jwt
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import hash_password, verify_password
 from app.config import settings
+from app.models.enterprise_application import EnterpriseApplicationGrant
 from app.models.user import User, user_department_memberships
 from app.schemas.user import UserCreate, UserLoginResponse, UserRead, UserUpdate
 from app.services.memory_lifecycle import soft_delete_node_memory
@@ -307,7 +308,18 @@ async def login_user(
 
 
 async def soft_delete_user(db: AsyncSession, user: User) -> None:
-    user.deleted_at = datetime.now(UTC)
+    deleted_at = datetime.now(UTC)
+    user.deleted_at = deleted_at
+    await db.execute(
+        update(EnterpriseApplicationGrant)
+        .where(
+            EnterpriseApplicationGrant.organization_id == user.organization_id,
+            EnterpriseApplicationGrant.scope_type == "user",
+            EnterpriseApplicationGrant.scope_id == str(user.id),
+            EnterpriseApplicationGrant.deleted_at.is_(None),
+        )
+        .values(deleted_at=deleted_at)
+    )
     await replace_manager_grants(db, user, [])
     # 组织管理员本就不持有工作空间/个人记忆，跳过；仅普通用户软删其绑定工作空间与个人记忆。
     if user.role != "admin":
