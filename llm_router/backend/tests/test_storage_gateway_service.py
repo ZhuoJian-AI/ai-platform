@@ -135,8 +135,8 @@ async def test_large_browser_upload_requests_parallel_multipart(monkeypatch):
             return {
                 "session_id": "multipart-1",
                 "object_key": "projects/7/assets/deck.pptx",
-                "part_size": 4 * 1024 * 1024,
-                "expected_parts": 8,
+                "part_size": 2 * 1024 * 1024,
+                "expected_parts": 16,
                 "expires_at": "2026-09-01T00:00:00Z",
             }
 
@@ -161,9 +161,9 @@ async def test_large_browser_upload_requests_parallel_multipart(monkeypatch):
     assert captured["url"].endswith("/v1/multipart/initiate")
     assert captured["headers"]["X-Storage-Subject"] == "ai-platform-control-plane"
     assert captured["json"]["force_multipart"] is True
-    assert captured["json"]["part_size_bytes"] == 4 * 1024 * 1024
+    assert captured["json"]["part_size_bytes"] == 2 * 1024 * 1024
     assert result["method"] == "MULTIPART"
-    assert result["expected_parts"] == 8
+    assert result["expected_parts"] == 16
 
 
 @pytest.mark.asyncio

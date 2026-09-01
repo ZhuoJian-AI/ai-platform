@@ -150,7 +150,7 @@ async def sign_browser_upload(*, filename: str, content_type: str, size_bytes: i
                     "content_type": content_type,
                     "size_bytes": size_bytes,
                     **(
-                        {"part_size_bytes": 4 * 1024 * 1024, "force_multipart": True}
+                        {"part_size_bytes": 2 * 1024 * 1024, "force_multipart": True}
                         if path == "/v1/multipart/initiate"
                         else {}
                     ),

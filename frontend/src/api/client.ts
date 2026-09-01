@@ -1483,6 +1483,9 @@ function putMultipartPartAttempt(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('PUT', signed.url);
+    // A stalled cross-region connection must not occupy one worker forever.
+    // Retrying obtains a fresh signed URL and resumes only this part.
+    xhr.timeout = 60_000;
     Object.entries(signed.headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value));
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress(event.loaded);
@@ -1496,6 +1499,7 @@ function putMultipartPartAttempt(
       reject(new ApiError(xhr.status, `分片 ${signed.part_number} 上传失败（HTTP ${xhr.status || '未知'}）`));
     };
     xhr.onerror = () => reject(new ApiError(0, `分片 ${signed.part_number} 网络上传失败`));
+    xhr.ontimeout = () => reject(new ApiError(408, `分片 ${signed.part_number} 上传超时，正在重试`));
     xhr.onabort = () => reject(new DOMException('上传已取消', 'AbortError'));
     if (signal.aborted) {
       reject(new DOMException('上传已取消', 'AbortError'));
@@ -1563,7 +1567,7 @@ async function uploadMultipartWorkspaceFile(
   };
 
   try {
-    await Promise.all(Array.from({ length: Math.min(4, expectedParts) }, () => worker()));
+    await Promise.all(Array.from({ length: Math.min(6, expectedParts) }, () => worker()));
     const status = await getStatus();
     const uploaded = [...status.uploaded_parts].sort((a, b) => a.part_number - b.part_number);
     if (uploaded.length !== expectedParts) {
