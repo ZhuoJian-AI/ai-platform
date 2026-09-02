@@ -370,6 +370,14 @@ async def resources_endpoint(
     }
 
 
+@router.get("/terminal/effective-access")
+async def effective_access_endpoint(
+    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    """Return role-aware workspace capabilities without listing any files."""
+    return await workspace_permission_service.effective_access(db, cu)
+
+
 @router.post("/terminal/skills-pack/export")
 async def export_skills_pack_endpoint(
     request: Request,
@@ -1226,7 +1234,7 @@ async def reparse_ws_file_endpoint(
     ws = await workspace_service.get_workspace(db, f.workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="File not found")
-    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    await workspace_permission_service.assert_can_update(db, ws, cu)
     f = await workspace_service.reparse_file(db, f)
     await db.commit()
     return f
@@ -1254,7 +1262,7 @@ async def update_ws_file_endpoint(
     ws = await workspace_service.get_workspace(db, f.workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="File not found")
-    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    await workspace_permission_service.assert_can_update(db, ws, cu)
     updated = await workspace_service.upsert_file(db, ws, data, created_by_user_id=cu.id)
     await db.commit()
     return updated
@@ -1271,7 +1279,7 @@ async def delete_ws_file_endpoint(
     ws = await workspace_service.get_workspace(db, f.workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="File not found")
-    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    await workspace_permission_service.assert_can_delete(db, ws, cu)
     await workspace_service.soft_delete_file(db, f, user_id=cu.id)
     await workspace_governance_service.audit(
         db, ws, "file_deleted", user_id=cu.id, file=f, version_id=f.current_version_id,
@@ -1313,7 +1321,7 @@ async def delete_ws_folder_endpoint(
     ws = await workspace_service.get_workspace(db, folder.workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="Folder not found")
-    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    await workspace_permission_service.assert_can_delete(db, ws, cu)
     await workspace_service.soft_delete_folder(db, folder, user_id=cu.id)
     await workspace_governance_service.audit(
         db, ws, "folder_deleted", user_id=cu.id, metadata={"path": folder.path},
@@ -1353,7 +1361,7 @@ async def list_ws_trash_endpoint(
     ws_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
     ws = await _get_visible_workspace(db, ws_id, cu)
-    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    await workspace_permission_service.assert_can_delete(db, ws, cu)
     return await workspace_governance_service.list_trash(db, ws)
 
 
@@ -1444,7 +1452,7 @@ async def delete_ws_folder_path_endpoint(
     """Delete a real or inferred folder path recursively."""
     assert_user_write(cu)
     ws = await _get_visible_workspace(db, ws_id, cu)
-    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    await workspace_permission_service.assert_can_delete(db, ws, cu)
     try:
         deleted = await workspace_service.soft_delete_folder_path(db, ws.id, path, user_id=cu.id)
     except ValueError as exc:
@@ -1468,7 +1476,7 @@ async def bulk_delete_ws_items_endpoint(
 ):
     assert_user_write(cu)
     ws = await _get_visible_workspace(db, ws_id, cu)
-    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    await workspace_permission_service.assert_can_delete(db, ws, cu)
     try:
         deleted = await workspace_service.bulk_soft_delete_items(
             db,

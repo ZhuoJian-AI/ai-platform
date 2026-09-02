@@ -14,6 +14,7 @@ from app.auth.admin_auth import (
     require_org_access,
     require_org_access_write,
 )
+from app.auth.user_auth import current_user_for_user
 from app.database import get_db
 from app.schemas.user import (
     UserCreate,
@@ -24,6 +25,7 @@ from app.schemas.user import (
     UserSlugLoginRequest,
     UserUpdate,
 )
+from app.services import workspace_permission_service
 from app.services.organization_service import get_organization, get_organization_by_slug
 from app.services.user_service import (
     create_user,
@@ -102,6 +104,21 @@ async def get_user_endpoint(
         raise HTTPException(status_code=404, detail="User not found")
     assert_org_access(auth, user.organization_id)
     return user
+
+
+@router.get("/users/{user_id}/effective-access")
+async def get_user_effective_access_endpoint(
+    user_id: UUID,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Preview exactly the workspace permissions the selected employee receives."""
+    user = await get_user(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    assert_org_access(auth, user.organization_id)
+    principal = await current_user_for_user(db, user)
+    return await workspace_permission_service.effective_access(db, principal)
 
 
 @router.patch("/users/{user_id}", response_model=UserRead)

@@ -68,7 +68,13 @@ async def require_user(
     user = await get_user(db, user_id)
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="User account disabled")
+    return await current_user_for_user(db, user)
+
+
+async def current_user_for_user(db: AsyncSession, user: User) -> CurrentUser:
+    """Build the same effective terminal principal for login and admin previews."""
     from app.services.role_service import rbac_for_user
+
     rbac = await rbac_for_user(db, user)
     return CurrentUser(
         user=user,

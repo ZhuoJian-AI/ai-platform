@@ -401,7 +401,7 @@ async def list_audit_events(
 
 
 async def restore_from_trash(db: AsyncSession, ws: Workspace, file_id: UUID, cu: CurrentUser) -> WorkspaceFile:
-    await workspace_permission_service.assert_can_manage(db, ws, cu)
+    await workspace_permission_service.assert_can_delete(db, ws, cu)
     file = (await db.execute(select(WorkspaceFile).where(
         WorkspaceFile.id == file_id, WorkspaceFile.workspace_id == ws.id,
         WorkspaceFile.deleted_at.is_not(None),

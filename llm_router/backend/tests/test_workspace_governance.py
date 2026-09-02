@@ -97,13 +97,16 @@ async def test_member_capabilities_and_cross_tenant_are_consistent(db_session):
     cu, personal, department_ws, organization_ws, foreign_ws = await _tenant(db_session)
 
     assert await workspace_permission_service.capabilities(db_session, personal, cu) == {
-        "read": True, "create": True, "manage": True, "publish": False,
+        "read": True, "create": True, "update": True, "delete": True,
+        "manage": True, "publish": False,
     }
     assert await workspace_permission_service.capabilities(db_session, department_ws, cu) == {
-        "read": True, "create": False, "manage": False, "publish": False,
+        "read": True, "create": False, "update": False, "delete": False,
+        "manage": False, "publish": False,
     }
     assert await workspace_permission_service.capabilities(db_session, organization_ws, cu) == {
-        "read": True, "create": False, "manage": False, "publish": False,
+        "read": True, "create": False, "update": False, "delete": False,
+        "manage": False, "publish": False,
     }
     assert not (await workspace_permission_service.capabilities(db_session, foreign_ws, cu))["read"]
     with pytest.raises(HTTPException) as exc:
@@ -132,20 +135,26 @@ async def test_role_codes_grant_cross_department_read_and_upload(db_session):
     await db_session.flush()
 
     assert await workspace_permission_service.capabilities(db_session, workspace, cu) == {
-        "read": False, "create": False, "manage": False, "publish": False,
+        "read": False, "create": False, "update": False, "delete": False,
+        "manage": False, "publish": False,
     }
     cu.permission_codes = (
         f"{workspace_permission_service.DEPARTMENT_READ_PREFIX}{department.id}",
     )
     assert await workspace_permission_service.capabilities(db_session, workspace, cu) == {
-        "read": True, "create": False, "manage": False, "publish": False,
+        "read": True, "create": False, "update": False, "delete": False,
+        "manage": False, "publish": False,
     }
     cu.permission_codes = (
         f"{workspace_permission_service.DEPARTMENT_UPLOAD_PREFIX}{department.id}",
     )
     assert await workspace_permission_service.capabilities(db_session, workspace, cu) == {
-        "read": True, "create": True, "manage": True, "publish": False,
+        "read": True, "create": True, "update": True, "delete": False,
+        "manage": True, "publish": False,
     }
+    with pytest.raises(HTTPException) as exc:
+        await workspace_permission_service.assert_can_delete(db_session, workspace, cu)
+    assert exc.value.status_code == 403
 
 
 @pytest.mark.asyncio

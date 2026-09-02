@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.user_auth import CurrentUser
@@ -32,10 +33,23 @@ def _department_workspace_access(cu: CurrentUser, department_id: str) -> tuple[b
     department access must be granted by one of the user's roles.
     """
     codes = set(getattr(cu, "permission_codes", ()) or ())
-    can_upload = f"{DEPARTMENT_UPLOAD_PREFIX}{department_id}" in codes
-    explicit_read = f"{DEPARTMENT_READ_PREFIX}{department_id}" in codes
+    wildcard = "*" in codes
+    can_upload = wildcard or f"{DEPARTMENT_UPLOAD_PREFIX}{department_id}" in codes
+    explicit_read = wildcard or f"{DEPARTMENT_READ_PREFIX}{department_id}" in codes
     home_department = department_id == str(getattr(cu, "department_id", None) or "")
     return home_department or explicit_read or can_upload, can_upload
+
+
+def _role_sources(cu: CurrentUser, permission_code: str) -> list[dict[str, str]]:
+    """Return active roles contributing one concrete permission code."""
+    sources: list[dict[str, str]] = []
+    for assignment in getattr(getattr(cu, "user", None), "role_assignments", ()) or ():
+        role = getattr(assignment, "role", None)
+        if role is None or not role.is_active or role.deleted_at is not None:
+            continue
+        if any(item.permission_code in {"*", permission_code} for item in role.permissions):
+            sources.append({"type": "role", "id": str(role.id), "name": role.name})
+    return sorted(sources, key=lambda item: (item["name"], item["id"]))
 
 
 async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) -> dict[str, bool]:
@@ -43,10 +57,20 @@ async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) 
     # integrations and tests intentionally pass lightweight projected objects;
     # keep read-only compatibility without weakening checks for real rows.
     if not hasattr(workspace, "organization_id"):
-        return {"read": True, "create": False, "manage": False, "publish": False}
+        return {
+            "read": True, "create": False, "update": False, "delete": False,
+            "manage": False, "publish": False,
+        }
     cross_tenant = str(workspace.organization_id) != str(getattr(cu, "organization_id", None))
-    if cross_tenant or getattr(workspace, "deleted_at", None) is not None:
-        return {"read": False, "create": False, "manage": False, "publish": False}
+    if (
+        cross_tenant
+        or getattr(workspace, "deleted_at", None) is not None
+        or not getattr(workspace, "is_active", True)
+    ):
+        return {
+            "read": False, "create": False, "update": False, "delete": False,
+            "manage": False, "publish": False,
+        }
     scope_type = getattr(workspace, "scope_type", "organization")
     scope_id = str(getattr(workspace, "scope_id", None) or "")
     own = scope_type == "user" and scope_id == str(getattr(cu, "id", ""))
@@ -62,12 +86,87 @@ async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) 
     # role data-scope field.
     can_read = own or same_department or same_team or same_organization
     can_write_department = scope_type == "department" and department_upload
+    can_update = own or can_write_department
     return {
         "read": can_read,
         "create": own or can_write_department,
-        "manage": own or can_write_department,
+        "update": can_update,
+        # Shared workspace deletion is intentionally not granted by the
+        # department "upload / modify" permission.
+        "delete": own,
+        # Compatibility for existing clients while mutation endpoints migrate
+        # to the explicit update/delete capabilities.
+        "manage": can_update,
         "publish": False,
     }
+
+
+def capability_sources(workspace: Workspace, cu: CurrentUser) -> dict[str, list[dict[str, str]]]:
+    """Explain why the principal has each workspace capability."""
+    scope_type = getattr(workspace, "scope_type", "organization")
+    scope_id = str(getattr(workspace, "scope_id", None) or "")
+    own = scope_type == "user" and scope_id == str(getattr(cu, "id", ""))
+    if own:
+        source = [{"type": "ownership", "id": str(cu.id), "name": "个人工作空间"}]
+        return {key: source for key in ("read", "create", "update", "delete")}
+    if scope_type == "organization":
+        return {"read": [{"type": "organization", "id": str(cu.organization_id), "name": "同公司公共只读"}]}
+    if scope_type == "team" and scope_id == str(getattr(cu, "team_id", None) or ""):
+        return {"read": [{"type": "membership", "id": scope_id, "name": "所属团队"}]}
+    if scope_type != "department":
+        return {}
+
+    read_code = f"{DEPARTMENT_READ_PREFIX}{scope_id}"
+    upload_code = f"{DEPARTMENT_UPLOAD_PREFIX}{scope_id}"
+    read_sources = _role_sources(cu, read_code)
+    upload_sources = _role_sources(cu, upload_code)
+    if scope_id == str(getattr(cu, "department_id", None) or ""):
+        read_sources = [
+            {"type": "membership", "id": scope_id, "name": "主部门默认只读"},
+            *read_sources,
+        ]
+    # Upload implies read in the role editor and server-side resolver.
+    read_sources.extend(item for item in upload_sources if item not in read_sources)
+    result: dict[str, list[dict[str, str]]] = {}
+    if read_sources:
+        result["read"] = read_sources
+    if upload_sources:
+        result["create"] = upload_sources
+        result["update"] = upload_sources
+    return result
+
+
+async def effective_access(db: AsyncSession, cu: CurrentUser) -> dict:
+    """Resolve the user's role-aware workspace access without listing files."""
+    workspaces = list((await db.execute(select(Workspace).where(
+        Workspace.organization_id == cu.organization_id,
+        Workspace.deleted_at.is_(None),
+        Workspace.is_active.is_(True),
+    ))).scalars().all())
+    scope_order = {"organization": 0, "department": 1, "team": 2, "user": 3}
+    rows = []
+    for workspace in sorted(
+        workspaces,
+        key=lambda item: (scope_order.get(item.scope_type, 9), item.name, str(item.id)),
+    ):
+        caps = await capabilities(db, workspace, cu)
+        rows.append({
+            "id": str(workspace.id),
+            "name": workspace.name,
+            "slug": workspace.slug,
+            "scope_type": workspace.scope_type,
+            "scope_id": str(workspace.scope_id) if workspace.scope_id else None,
+            "capabilities": caps,
+            "sources": capability_sources(workspace, cu),
+        })
+    roles = [
+        {
+            "id": str(item["id"]), "name": item["name"], "code": item["code"],
+            "data_scope": item["data_scope"], "is_builtin": item["is_builtin"],
+        }
+        for item in (getattr(getattr(cu, "user", None), "roles", ()) or ())
+    ]
+    return {"roles": roles, "workspaces": rows}
 
 
 async def _assert(db: AsyncSession, workspace: Workspace, cu: CurrentUser, capability: str) -> None:
@@ -89,7 +188,15 @@ async def assert_can_create(db: AsyncSession, workspace: Workspace, cu: CurrentU
 
 
 async def assert_can_manage(db: AsyncSession, workspace: Workspace, cu: CurrentUser) -> None:
-    await _assert(db, workspace, cu, "manage")
+    await _assert(db, workspace, cu, "update")
+
+
+async def assert_can_update(db: AsyncSession, workspace: Workspace, cu: CurrentUser) -> None:
+    await _assert(db, workspace, cu, "update")
+
+
+async def assert_can_delete(db: AsyncSession, workspace: Workspace, cu: CurrentUser) -> None:
+    await _assert(db, workspace, cu, "delete")
 
 
 async def assert_can_publish(db: AsyncSession, workspace: Workspace, cu: CurrentUser) -> None:

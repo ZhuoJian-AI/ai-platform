@@ -203,21 +203,21 @@ async def list_data_interfaces_for_user(db: AsyncSession, cu: CurrentUser) -> li
 
 
 async def list_workspaces_for_user(db: AsyncSession, cu: CurrentUser) -> list[Workspace]:
-    visibility = scope_filter(Workspace, cu)
-    granted_department_ids = workspace_permission_service.department_workspace_scope_ids(cu)
-    if granted_department_ids:
-        visibility = or_(
-            visibility,
-            (Workspace.scope_type == "department")
-            & (Workspace.scope_id.in_(granted_department_ids)),
-        )
+    """Return only workspaces readable under the dedicated role matrix.
+
+    Generic role data_scope still governs business records and other scoped
+    resources, but it must not silently broaden workspace-file visibility.
+    """
     stmt = select(Workspace).where(
         Workspace.organization_id == cu.organization_id,
         Workspace.deleted_at.is_(None),
         Workspace.is_active.is_(True),
-        visibility,
     )
-    return list((await db.execute(stmt)).scalars().all())
+    rows = list((await db.execute(stmt)).scalars().all())
+    return [
+        workspace for workspace in rows
+        if (await workspace_permission_service.capabilities(db, workspace, cu))["read"]
+    ]
 
 
 async def list_agents_for_user(db: AsyncSession, cu: CurrentUser) -> list[Agent]:
@@ -248,14 +248,21 @@ async def get_user_workspace(db: AsyncSession, cu: CurrentUser) -> Workspace | N
 
 
 def is_workspace_visible(ws: Workspace, cu: CurrentUser) -> bool:
-    """运行时校验某个 workspace 是否落在用户 scope 内（终端文件读写守卫）。"""
+    """Runtime read check using the dedicated workspace role matrix."""
+    if (
+        str(ws.organization_id) != str(cu.organization_id)
+        or ws.deleted_at is not None
+        or not getattr(ws, "is_active", True)
+    ):
+        return False
     if ws.scope_type == "organization":
         return True
     if ws.scope_type == "department":
+        codes = set(getattr(cu, "permission_codes", ()) or ())
         return (
-            has_unrestricted_data_scope(cu)
-            or ws.scope_id in department_scope_ids(cu)
-            or ws.scope_id in workspace_permission_service.department_workspace_scope_ids(cu)
+            str(ws.scope_id) == str(cu.department_id or "")
+            or "*" in codes
+            or str(ws.scope_id) in workspace_permission_service.department_workspace_scope_ids(cu)
         )
     if ws.scope_type == "team" and cu.team_id and ws.scope_id == cu.team_id:
         return True
