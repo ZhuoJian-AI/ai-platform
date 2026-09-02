@@ -1,3 +1,6 @@
+ARG AI_PLATFORM_BACKEND_DEPS_BASE
+FROM ${AI_PLATFORM_BACKEND_DEPS_BASE} AS python-deps
+
 FROM python:3.12-slim
 
 ARG SOURCE_COMMIT=unknown
@@ -14,8 +17,8 @@ ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     PIP_RETRIES=10 \
     PYTHONPATH=/app
 
-# LibreOffice is intentionally isolated in this worker image. The API image
-# remains small and never performs synchronous Office conversion.
+# Keep Office conversion isolated from the API image while reusing the
+# project's prebuilt Python dependency layer.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         libreoffice-core \
@@ -25,8 +28,7 @@ RUN apt-get update \
         fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml .
-RUN python -m pip install --no-cache-dir --retries 10 --timeout 120 -e ".[dev]"
+COPY --from=python-deps /usr/local /usr/local
 
 COPY . .
 
