@@ -20,6 +20,7 @@ class Department(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
             postgresql_where=text("deleted_at IS NULL"),
             sqlite_where=text("deleted_at IS NULL"),
         ),
+        Index("ix_departments_org_sort_order", "organization_id", "sort_order"),
     )
 
     organization_id: Mapped[str] = mapped_column(
@@ -32,6 +33,7 @@ class Department(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     settings: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     # 部门级限制 (NULL = 继承组织)
     rate_limit_rpm: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -15,12 +15,18 @@ from app.auth.admin_auth import (
     require_org_access_write,
 )
 from app.database import get_db
-from app.schemas.organization import DepartmentCreate, DepartmentRead, DepartmentUpdate
+from app.schemas.organization import (
+    DepartmentCreate,
+    DepartmentRead,
+    DepartmentReorder,
+    DepartmentUpdate,
+)
 from app.services.organization_service import (
     create_department,
     get_department,
     get_organization,
     list_departments,
+    reorder_departments,
     soft_delete_department,
     update_department,
 )
@@ -29,7 +35,12 @@ router = APIRouter()
 
 
 @router.post("/organizations/{org_id}/departments", response_model=DepartmentRead, status_code=201)
-async def create_dept(org_id: UUID, data: DepartmentCreate, _: CurrentAdmin = Depends(require_org_access_write), db: AsyncSession = Depends(get_db)):
+async def create_dept(
+    org_id: UUID,
+    data: DepartmentCreate,
+    _: CurrentAdmin = Depends(require_org_access_write),
+    db: AsyncSession = Depends(get_db),
+):
     org = await get_organization(db, org_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
@@ -45,6 +56,19 @@ async def list_depts(org_id: UUID, _: CurrentAdmin = Depends(require_org_access)
     return await list_departments(db, org_id)
 
 
+@router.put("/organizations/{org_id}/departments/reorder", response_model=list[DepartmentRead])
+async def reorder_depts(
+    org_id: UUID,
+    data: DepartmentReorder,
+    _: CurrentAdmin = Depends(require_org_access_write),
+    db: AsyncSession = Depends(get_db),
+):
+    org = await get_organization(db, org_id)
+    if not org:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    return await reorder_departments(db, org_id, data.department_ids)
+
+
 @router.get("/departments/{dept_id}", response_model=DepartmentRead)
 async def get_dept(dept_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     dept = await get_department(db, dept_id)
@@ -55,7 +79,12 @@ async def get_dept(dept_id: UUID, auth: CurrentAdmin = Depends(require_admin), d
 
 
 @router.patch("/departments/{dept_id}", response_model=DepartmentRead)
-async def update_dept(dept_id: UUID, data: DepartmentUpdate, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def update_dept(
+    dept_id: UUID,
+    data: DepartmentUpdate,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
     dept = await get_department(db, dept_id)
     if not dept:
         raise HTTPException(status_code=404, detail="Department not found")

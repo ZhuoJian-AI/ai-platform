@@ -4,7 +4,7 @@ import {
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, ApartmentOutlined, StarOutlined,
-  TeamOutlined,
+  TeamOutlined, ArrowUpOutlined, ArrowDownOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { organizations, departments, teams } from '../api/client';
@@ -125,6 +125,23 @@ export default function Organizations() {
     onError: onMutationError,
   });
 
+  const reorderDept = useMutation({
+    mutationFn: (departmentIds: string[]) => departments.reorder(selectedOrg!.id, departmentIds),
+    onSuccess: (orderedDepartments) => {
+      qc.setQueryData(['depts', selectedOrg?.id], orderedDepartments);
+      message.success('部门顺序已更新');
+    },
+    onError: onMutationError,
+  });
+
+  const moveDepartment = (index: number, direction: -1 | 1) => {
+    const targetIndex = index + direction;
+    if (!selectedOrg || targetIndex < 0 || targetIndex >= deptItems.length || reorderDept.isPending) return;
+    const next = deptItems.map(dept => dept.id);
+    [next[index], next[targetIndex]] = [next[targetIndex], next[index]];
+    reorderDept.mutate(next);
+  };
+
   // ── 编辑 ──
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editForm] = Form.useForm();
@@ -244,7 +261,7 @@ export default function Organizations() {
           <div style={{ flex: 1, overflow: 'auto' }} className="wb-scroll-hide">
             {!selectedOrg ? <FinderEmpty description="← 请先选择组织" /> :
               deptItems.length === 0 ? <FinderEmpty description="暂无部门" /> :
-              deptItems.map(dept => {
+              deptItems.map((dept, index) => {
                 const active = selectedDept?.id === dept.id;
                 return (
                   <div
@@ -260,6 +277,18 @@ export default function Organizations() {
                       <div style={{ fontSize: FS.micro, color: WB.textAux, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dept.slug}</div>
                     </div>
                     <div className="row-actions" style={{ display: 'flex', gap: 2, flex: '0 0 auto' }}>
+                      <IconActionButton
+                        icon={<ArrowUpOutlined />}
+                        title="上移"
+                        disabled={index === 0 || reorderDept.isPending}
+                        onClick={(e) => { e.stopPropagation(); moveDepartment(index, -1); }}
+                      />
+                      <IconActionButton
+                        icon={<ArrowDownOutlined />}
+                        title="下移"
+                        disabled={index === deptItems.length - 1 || reorderDept.isPending}
+                        onClick={(e) => { e.stopPropagation(); moveDepartment(index, 1); }}
+                      />
                       <IconActionButton icon={<EditOutlined />} title="编辑" onClick={(e) => { e.stopPropagation(); openEdit('dept', dept); }} />
                       <IconActionButton variant="danger" icon={<DeleteOutlined />} title="删除" onClick={(e) => { e.stopPropagation(); setConfirm({ kind: 'dept', id: dept.id, name: dept.name }); }} />
                     </div>

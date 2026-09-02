@@ -187,7 +187,17 @@ async def create_department(db: AsyncSession, org_id: UUID, data: DepartmentCrea
         if parent is None or str(parent.organization_id) != str(org_id):
             from fastapi import HTTPException
             raise HTTPException(status_code=422, detail="Parent department belongs to another organization")
-    dept = Department(organization_id=org_id, **data.model_dump())
+    next_sort_order = await db.scalar(
+        select(func.coalesce(func.max(Department.sort_order), -1) + 1).where(
+            Department.organization_id == org_id,
+            Department.deleted_at.is_(None),
+        )
+    )
+    dept = Department(
+        organization_id=org_id,
+        sort_order=int(next_sort_order or 0),
+        **data.model_dump(),
+    )
     db.add(dept)
     await db.flush()
     await ensure_node_workspace(db, org_id, "department", str(dept.id), dept.name, dept.slug)
@@ -200,9 +210,46 @@ async def list_departments(db: AsyncSession, org_id: UUID) -> list[Department]:
     result = await db.execute(
         select(Department).where(
             Department.organization_id == org_id, Department.deleted_at.is_(None)
-        )
+        ).order_by(Department.sort_order, Department.created_at, Department.id)
     )
     return list(result.scalars().all())
+
+
+async def reorder_departments(
+    db: AsyncSession,
+    org_id: UUID,
+    department_ids: list[UUID],
+) -> list[Department]:
+    """Persist the administrator-defined order for every active department."""
+    if len(set(department_ids)) != len(department_ids):
+        raise HTTPException(status_code=422, detail="Department order contains duplicate ids")
+
+    result = await db.execute(
+        select(Department)
+        .where(
+            Department.organization_id == org_id,
+            Department.deleted_at.is_(None),
+        )
+        .with_for_update()
+    )
+    active_departments = list(result.scalars().all())
+    active_by_id = {dept.id: dept for dept in active_departments}
+    if set(department_ids) != set(active_by_id):
+        raise HTTPException(
+            status_code=422,
+            detail="Department order must contain every active department exactly once",
+        )
+
+    for sort_order, dept_id in enumerate(department_ids):
+        active_by_id[dept_id].sort_order = sort_order
+    await db.flush()
+    ordered_result = await db.execute(
+        select(Department)
+        .where(Department.id.in_(department_ids))
+        .order_by(Department.sort_order, Department.created_at, Department.id)
+        .execution_options(populate_existing=True)
+    )
+    return list(ordered_result.scalars().all())
 
 
 async def get_department(db: AsyncSession, dept_id: UUID) -> Department | None:
