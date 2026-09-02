@@ -18,6 +18,7 @@ export interface OrgNodeInfo {
   slug: string;
   orgId: string;
   deptId?: string;
+  sortOrder?: number;
 }
 
 interface TreeNode {
@@ -104,7 +105,7 @@ async function fetchFullTree(): Promise<{
       const deptValue = `dept:${dept.id}`;
       nodeMap.set(deptValue, {
         type: 'department', id: dept.id, name: dept.name, slug: dept.slug,
-        orgId: org.id, deptId: dept.id,
+        orgId: org.id, deptId: dept.id, sortOrder: dept.sort_order,
       });
 
       const teamList = teamsByDept.get(dept.id) ?? [];

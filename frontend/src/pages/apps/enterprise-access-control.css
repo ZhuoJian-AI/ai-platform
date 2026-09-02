@@ -34,7 +34,6 @@
 
 .system-filter {
   min-width: 230px;
-  margin-left: 16px;
 }
 
 .granted-filter {
@@ -61,7 +60,28 @@
   font-size: 20px;
 }
 
-.permission-table-card {
+.toolbar-summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-left: auto;
+  padding-bottom: 4px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.toolbar-summary strong {
+  color: #334155;
+  font-weight: 600;
+}
+
+.toolbar-summary i {
+  width: 1px;
+  height: 14px;
+  background: #dbe1ea;
+}
+
+.permission-editor-card {
   display: flex;
   flex: 1;
   min-height: 0;
@@ -73,58 +93,118 @@
   box-shadow: 0 8px 28px rgba(15, 23, 42, .04);
 }
 
-.workspace-permission-card {
-  background: #fff;
-  border: 1px solid #e7e9f1;
-  border-radius: 12px;
-  margin-bottom: 16px;
-  overflow: hidden;
-}
-
-.workspace-permission-card > header {
-  align-items: center;
-  border-bottom: 1px solid #eef0f5;
+.permission-editor-card > .ant-tabs {
   display: flex;
-  justify-content: space-between;
-  padding: 14px 18px;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
 }
 
-.workspace-permission-card > header div {
+.permission-editor-card .ant-tabs-nav {
+  margin: 0;
+  padding: 0 18px;
+}
+
+.permission-editor-card .ant-tabs-tab {
+  padding: 15px 4px 13px;
+  font-weight: 600;
+}
+
+.permission-editor-card .ant-tabs-content-holder,
+.permission-editor-card .ant-tabs-content,
+.permission-editor-card .ant-tabs-tabpane {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+.permission-tab-pane {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.tab-guidance,
+.module-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-height: 68px;
+  padding: 10px 18px;
+  border-bottom: 1px solid #edf0f4;
+  background: #fbfcfe;
+}
+
+.tab-guidance {
+  justify-content: space-between;
+}
+
+.tab-guidance > div {
   display: flex;
   flex-direction: column;
   gap: 3px;
 }
 
-.workspace-permission-card > header span {
+.tab-guidance strong {
+  color: #1f2937;
+  font-size: 13px;
+}
+
+.tab-guidance span {
   color: #7b8192;
   font-size: 12px;
 }
 
-.workspace-permission-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  max-height: 220px;
+.workspace-permission-table-scroll {
+  flex: 1;
+  min-height: 0;
   overflow: auto;
-  padding: 8px 12px 12px;
 }
 
-.workspace-permission-row {
-  align-items: center;
-  border-bottom: 1px solid #f0f1f5;
-  display: grid;
-  gap: 12px;
-  grid-template-columns: minmax(120px, 1fr) auto auto;
-  min-height: 54px;
-  padding: 6px 10px;
+.workspace-permission-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
 }
 
-.workspace-permission-row > div {
-  display: flex;
-  flex-direction: column;
+.workspace-permission-table th,
+.workspace-permission-table td {
+  padding: 12px 18px;
+  border-bottom: 1px solid #edf0f4;
+  text-align: left;
 }
 
-.workspace-permission-row small {
+.workspace-permission-table th {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+}
+
+.workspace-permission-table th:first-child,
+.workspace-permission-table td:first-child {
+  width: auto;
+}
+
+.workspace-permission-table th:not(:first-child),
+.workspace-permission-table td:not(:first-child) {
+  width: 180px;
+  text-align: center;
+}
+
+.workspace-permission-table td strong,
+.workspace-permission-table td small {
+  display: block;
+}
+
+.workspace-permission-table td small {
+  margin-top: 2px;
   color: #9aa0ae;
+  font-size: 11px;
 }
 
 .permission-table-scroll {

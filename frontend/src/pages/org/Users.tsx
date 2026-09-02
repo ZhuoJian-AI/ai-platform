@@ -51,8 +51,8 @@ export default function UsersPage() {
 
   const departmentOptions = useMemo(() => Array.from(nodeMap.values())
     .filter(node => node.type === 'department' && node.orgId === orgId)
-    .map(node => ({ value: node.id, label: node.name }))
-    .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN')), [nodeMap, orgId]);
+    .sort((a, b) => (a.sortOrder ?? Number.MAX_SAFE_INTEGER) - (b.sortOrder ?? Number.MAX_SAFE_INTEGER))
+    .map(node => ({ value: node.id, label: node.name })), [nodeMap, orgId]);
 
   const teamOptions = useMemo(() => {
     return Array.from(nodeMap.values())
