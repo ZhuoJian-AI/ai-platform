@@ -1340,7 +1340,11 @@ export default function Terminal() {
             {view === 'work-items' ? (
               <CrossDepartmentWorkItemsView />
             ) : view === 'workspaces' ? (
-              <WorkspaceManagerView resources={resources} />
+              <WorkspaceManagerView
+                resources={resources}
+                homeDepartmentId={user?.department_id}
+                homeTeamId={user?.team_id}
+              />
             ) : view === 'agents' ? (
               <AgentManagerView />
             ) : view === 'knowledge' ? (

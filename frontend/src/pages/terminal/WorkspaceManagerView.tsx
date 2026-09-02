@@ -49,27 +49,52 @@ interface TreeNode {
   children?: TreeNode[];
 }
 
-/** 把用户可见的扁平工作空间列表（各 scope 级至多一个）组织成「组织→部门→团队→个人」的单链树。 */
-function buildTree(workspaces: Workspace[]): { treeData: TreeNode[]; wsById: Map<string, Workspace> } {
+/** 把用户可见的扁平工作空间列表组织成树。
+ *
+ * 一个角色可能同时获授多个部门工作空间，不能按 scope_type 只保留第一项。
+ * 当前用户的个人空间挂在其主部门下；无法确认父级的团队/个人空间仍保留在组织根节点下。
+ */
+function buildTree(
+  workspaces: Workspace[],
+  homeDepartmentId?: string | null,
+  homeTeamId?: string | null,
+): { treeData: TreeNode[]; wsById: Map<string, Workspace> } {
   const wsById = new Map<string, Workspace>();
   for (const w of workspaces) wsById.set(w.id, w);
-  const byScope = new Map<string, Workspace>();
-  for (const w of workspaces) if (!byScope.has(w.scope_type)) byScope.set(w.scope_type, w);
-  const present = SCOPE_ORDER.filter((s) => byScope.has(s));
-  let child: TreeNode | null = null;
-  for (let i = present.length - 1; i >= 0; i--) {
-    const s = present[i];
-    const w = byScope.get(s)!;
-    const node: TreeNode = {
-      key: `ws:${w.id}`,
-      name: w.name,
-      scope: s,
-      wsId: w.id,
-      children: child ? [child] : undefined,
-    };
-    child = node;
+  const toNode = (w: Workspace): TreeNode => ({
+    key: `ws:${w.id}`,
+    name: w.name,
+    scope: w.scope_type,
+    wsId: w.id,
+  });
+
+  const departments = workspaces
+    .filter((w) => w.scope_type === 'department')
+    .map(toNode);
+  const homeDepartment = departments.find((node) => wsById.get(node.wsId)?.scope_id === homeDepartmentId);
+  const teams = workspaces.filter((w) => w.scope_type === 'team').map(toNode);
+  const homeTeam = teams.find((node) => wsById.get(node.wsId)?.scope_id === homeTeamId);
+  const people = workspaces.filter((w) => w.scope_type === 'user').map(toNode);
+  if (homeTeam && people.length) homeTeam.children = people;
+  else if (homeDepartment && people.length) homeDepartment.children = people;
+  if (homeDepartment && homeTeam) {
+    homeDepartment.children = [homeTeam, ...(homeDepartment.children ?? [])];
   }
-  return { treeData: child ? [child] : [], wsById };
+
+  const rootChildren = [
+    ...departments,
+    ...teams.filter((node) => node !== homeTeam),
+    ...(homeDepartment || homeTeam ? [] : people),
+  ];
+  const organizations = workspaces.filter((w) => w.scope_type === 'organization').map(toNode);
+  if (organizations.length) {
+    organizations[0].children = [
+      ...(organizations[0].children ?? []),
+      ...rootChildren,
+    ];
+    return { treeData: [...organizations, ...workspaces.filter((w) => !SCOPE_ORDER.includes(w.scope_type as typeof SCOPE_ORDER[number])).map(toNode)], wsById };
+  }
+  return { treeData: rootChildren, wsById };
 }
 
 /** 文件扩展名（小写、无点）。 */
@@ -97,11 +122,22 @@ const PARSE_LABEL: Record<string, string> = {
  *  左栏（2:8）为用户权限可见的工作空间树（组织→部门→团队→个人，逐级嵌套）；
  *  右栏为选中工作空间的文件夹 / 文件图标浏览器。
  *  全部字体沿用终端 WB_FONT，字号与终端一致（标题 14 / 主文本 13 / 辅助 12 / 微 11）。 */
-export default function WorkspaceManagerView({ resources }: { resources: TerminalResources | undefined }) {
+export default function WorkspaceManagerView({
+  resources,
+  homeDepartmentId,
+  homeTeamId,
+}: {
+  resources: TerminalResources | undefined;
+  homeDepartmentId?: string | null;
+  homeTeamId?: string | null;
+}) {
   const qc = useQueryClient();
   const [urlParams, setUrlParams] = useSearchParams();
   const workspaces = resources?.workspaces ?? [];
-  const { treeData, wsById } = useMemo(() => buildTree(workspaces), [workspaces]);
+  const { treeData, wsById } = useMemo(
+    () => buildTree(workspaces, homeDepartmentId, homeTeamId),
+    [homeDepartmentId, homeTeamId, workspaces],
+  );
 
   // 默认选中用户个人工作空间（或 defaults.workspace_id，或首个可见工作空间）
   const defaultWsId = resources?.defaults?.workspace_id
