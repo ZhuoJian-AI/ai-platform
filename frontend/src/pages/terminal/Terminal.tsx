@@ -1,6 +1,6 @@
 import {
   useCallback, useDeferredValue, useEffect, useRef, useState, forwardRef, useImperativeHandle, useMemo,
-  type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent,
+  type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent,
   type Dispatch, type FormEvent, type KeyboardEvent, type ReactNode, type SetStateAction,
 } from 'react';
 import {
@@ -1067,7 +1067,7 @@ export default function Terminal() {
   // 资源配置抽屉的编辑上下文：作曲器（新任务）or 聊天（已存在任务，PATCH 落库）
   const [cfgContext, setCfgContext] = useState<'composer' | 'chat'>('composer');
   const patchTaskConfig = useCallback(async (c: TaskConfig) => {
-    if (!selectedId) return;
+    if (!selectedId) return false;
     // 智能体为逐次运行覆盖、不落库：PATCH 前剥掉 template_agent_id，避免回写进 task.config。
     const { template_agent_id: _tpl, ...cfgRest } = c;
     void _tpl;
@@ -1075,9 +1075,10 @@ export default function Terminal() {
       await terminal.updateTask(selectedId, { config: cfgRest });
     } catch (e) {
       message.error((e as Error).message);
-      return;
+      return false;
     }
     qc.invalidateQueries({ queryKey: ['terminal-task', selectedId] });
+    return true;
   }, [selectedId, qc]);
 
   // 把对话中的链接 href 解析为浏览器抽屉可渲染的 Source。
@@ -1389,6 +1390,10 @@ export default function Terminal() {
                 config={config}
                 resources={resources}
                 onSetExecMode={(m) => setConfig((c) => ({ ...c, exec_mode: m }))}
+                onSetWorkspace={(workspaceId) => {
+                  setConfig((current) => ({ ...current, workspace_id: workspaceId }));
+                  return true;
+                }}
                 onOpenConfig={() => { setCfgContext('composer'); setCfgOpen(true); }}
                 onImportSkill={() => setView('skills')}
                 onStart={startTask}
@@ -1407,6 +1412,7 @@ export default function Terminal() {
                 onNew={newTask}
                 config={taskConfig} resources={resources}
                 onSetExecMode={(m) => patchTaskConfig({ ...taskConfig, exec_mode: m })}
+                onSetWorkspace={(workspaceId) => patchTaskConfig({ ...taskConfig, workspace_id: workspaceId })}
                 onOpenConfig={() => { setCfgContext('chat'); setCfgOpen(true); }}
                 onImportSkill={() => setView('skills')}
                 selectedId={selectedId}
@@ -1693,6 +1699,7 @@ type PendingMention = { node: Text; offset: number; ch: '/' | '@' };
 const MentionInput = forwardRef<ComposerInputHandle, {
   value: string; onChange: (v: string) => void; placeholder: string;
   onSkillIdsChange: (ids: string[]) => void;
+  onPasteFiles: (event: ReactClipboardEvent<HTMLDivElement>) => void;
   onSlashTrigger: () => void; onAtTrigger: () => void; onSubmit: () => void; canSend: boolean;
 }>(function MentionInput(props, ref) {
   const { value, placeholder } = props;
@@ -1872,6 +1879,7 @@ const MentionInput = forwardRef<ComposerInputHandle, {
       data-placeholder={placeholder}
       onInput={handleInput}
       onKeyDown={handleKeyDown}
+      onPaste={props.onPasteFiles}
       onFocus={() => {
         const el = editorRef.current;
         if (el && el.childNodes.length === 1 && el.firstChild?.nodeName === 'BR') el.textContent = '';
@@ -1894,6 +1902,7 @@ function TaskInputBox(props: {
   placeholder: string;
   config: TaskConfig; resources: TerminalResources | undefined;
   onSetExecMode: (m: TaskConfig['exec_mode']) => void;
+  onSetWorkspace: (workspaceId: string) => boolean | Promise<boolean>;
   onOpenConfig: () => void;
   onImportSkill: () => void;
   /** 当前选中智能体显示名（null=通用），点 chip 打开同一抽屉在模型下方切换。 */
@@ -1903,9 +1912,11 @@ function TaskInputBox(props: {
   const {
     value, setValue, invokedSkills, setInvokedSkills, attachments, setAttachments, attachmentScopeKey,
     onSend, onStop, streaming, placeholder, config, resources,
-    onSetExecMode, onOpenConfig, onImportSkill, agentLabel, maxWidth = 800, sendLabel = '开始执行',
+    onSetExecMode, onSetWorkspace, onOpenConfig, onImportSkill, agentLabel, maxWidth = 800, sendLabel = '开始执行',
   } = props;
-  const effectiveWorkspaceId = config.workspace_id ?? resources?.defaults?.workspace_id ?? null;
+  const configuredWorkspaceId = config.workspace_id ?? resources?.defaults?.workspace_id ?? null;
+  const [workspaceOverride, setWorkspaceOverride] = useState<string | null>(null);
+  const effectiveWorkspaceId = workspaceOverride ?? configuredWorkspaceId;
   const wsName = (effectiveWorkspaceId && resources?.workspaces.find((w) => w.id === effectiveWorkspaceId)?.name) || null;
   const hasReadyAttachment = attachments.some((item) => item.status === 'ready');
   const attachmentsReady = attachments.every((item) => item.status === 'ready');
@@ -1930,6 +1941,10 @@ function TaskInputBox(props: {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerMode, setPickerMode] = useState<'skill' | 'file'>('skill');
   const [query, setQuery] = useState('');
+
+  useEffect(() => {
+    if (workspaceOverride && configuredWorkspaceId === workspaceOverride) setWorkspaceOverride(null);
+  }, [configuredWorkspaceId, workspaceOverride]);
 
   const { data: wsFiles } = useQuery<WorkspaceFileSummary[]>({
     queryKey: ['terminal-ws-files'], queryFn: () => terminal.listAllWsFiles(),
@@ -2080,11 +2095,38 @@ function TaskInputBox(props: {
     }
   }, [refreshWorkspaceFiles, updateAttachment, waitForAttachmentParse]);
 
-  const queueFiles = useCallback(async (fileList: FileList | File[]) => {
-    const workspaceId = effectiveWorkspaceId;
-    if (!workspaceId) {
-      message.warning('请先选择工作空间，再上传聊天附件');
+  const ensureWritableWorkspace = useCallback(async () => {
+    const selected = effectiveWorkspaceId
+      ? resources?.workspaces.find((workspace) => workspace.id === effectiveWorkspaceId)
+      : undefined;
+    // 兼容尚未返回 capabilities 的旧后端；只有明确只读时才自动回退。
+    if (effectiveWorkspaceId && selected?.capabilities?.create !== false) return effectiveWorkspaceId;
+
+    const personal = resources?.workspaces.find((workspace) => (
+      workspace.id === resources.defaults?.workspace_id && workspace.capabilities?.create !== false
+    ));
+    if (!personal) {
+      message.warning('当前工作空间不可写，且没有可用的个人工作空间');
       onOpenConfig();
+      return null;
+    }
+    // 已存在任务的配置 PATCH 与资源查询刷新之间有一个短窗口；本地覆盖确保这段
+    // 时间内附件队列不会又按旧的只读工作空间处理。
+    setWorkspaceOverride(personal.id);
+    const switched = await onSetWorkspace(personal.id);
+    if (!switched) {
+      setWorkspaceOverride(null);
+      return null;
+    }
+    // 避免工作空间切换 effect 把刚加入队列的附件误认为旧工作空间附件而清空。
+    previousWorkspaceRef.current = personal.id;
+    message.info(`“${selected?.name ?? '当前工作空间'}”为只读，已切换到个人工作空间“${personal.name}”上传`);
+    return personal.id;
+  }, [effectiveWorkspaceId, onOpenConfig, onSetWorkspace, resources]);
+
+  const queueFiles = useCallback(async (fileList: FileList | File[]) => {
+    const workspaceId = await ensureWritableWorkspace();
+    if (!workspaceId) {
       return;
     }
     const available = Math.max(0, MAX_ATTACHMENTS - attachmentsRef.current.length);
@@ -2121,7 +2163,25 @@ function TaskInputBox(props: {
       { length: Math.min(MAX_UPLOAD_CONCURRENCY, pending.length) },
       () => worker(),
     ));
-  }, [attachmentScopeKey, effectiveWorkspaceId, onOpenConfig, setAttachments, uploadOne]);
+  }, [attachmentScopeKey, ensureWritableWorkspace, setAttachments, uploadOne]);
+
+  const pasteFiles = useCallback((event: ReactClipboardEvent<HTMLDivElement>) => {
+    const clipboardFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file')
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (!clipboardFiles.length) return;
+    event.preventDefault();
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const normalized = clipboardFiles.map((file, index) => {
+      if (file.name && file.name !== 'image.png') return file;
+      const extension = file.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+      return new File([file], `粘贴附件-${timestamp}-${index + 1}.${extension}`, {
+        type: file.type, lastModified: file.lastModified,
+      });
+    });
+    void queueFiles(normalized);
+  }, [queueFiles]);
 
   const openAttachmentPicker = useCallback(async () => {
     const browserWindow = window as BrowserWindowWithFilePicker;
@@ -2253,8 +2313,12 @@ function TaskInputBox(props: {
       }
       return;
     }
-    await uploadOne(item, item.workspace_id);
-  }, [refreshWorkspaceFiles, updateAttachment, uploadOne, waitForAttachmentParse]);
+    const workspaceId = await ensureWritableWorkspace();
+    if (!workspaceId) return;
+    const retryDraft = { ...item, workspace_id: workspaceId };
+    updateAttachment(item.client_id, { workspace_id: workspaceId });
+    await uploadOne(retryDraft, workspaceId);
+  }, [ensureWritableWorkspace, refreshWorkspaceFiles, updateAttachment, uploadOne, waitForAttachmentParse]);
 
   const removeAttachment = useCallback((item: ComposerAttachment) => {
     uploadControllersRef.current.get(item.client_id)?.abort();
@@ -2423,6 +2487,7 @@ function TaskInputBox(props: {
             return skill ? [{ id: skill.id, name: skill.name, slug: skill.slug, scope_type: skill.scope_type }] : [];
           }))}
           placeholder={placeholder}
+          onPasteFiles={pasteFiles}
           onSlashTrigger={() => openPicker('skill')}
           onAtTrigger={() => openPicker('file')}
           onSubmit={onSend} canSend={canSend}
@@ -2464,7 +2529,7 @@ function TaskInputBox(props: {
             <button
               type="button"
               style={chipBtnStyle}
-              title="从电脑选择新文件并上传到当前工作空间（可多选）"
+              title="从电脑选择新文件（可多选），也可以在输入框直接粘贴图片或文件"
               onClick={() => { void openAttachmentPicker(); }}
             >
               <UploadOutlined /> 上传附件
@@ -2568,12 +2633,13 @@ function HomeView(props: {
   config: TaskConfig;
   resources: TerminalResources | undefined;
   onSetExecMode: (m: TaskConfig['exec_mode']) => void;
+  onSetWorkspace: (workspaceId: string) => boolean | Promise<boolean>;
   onOpenConfig: () => void; onImportSkill: () => void; onStart: () => void; streaming: boolean;
   agentLabel: string;
 }) {
   const {
     input, setInput, invokedSkills, setInvokedSkills, attachments, setAttachments, attachmentScopeKey, placeholder,
-    config, resources, onSetExecMode, onOpenConfig, onImportSkill, onStart, streaming, agentLabel,
+    config, resources, onSetExecMode, onSetWorkspace, onOpenConfig, onImportSkill, onStart, streaming, agentLabel,
   } = props;
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
@@ -2605,6 +2671,7 @@ function HomeView(props: {
           placeholder={placeholder}
           config={config} resources={resources}
           onSetExecMode={onSetExecMode}
+          onSetWorkspace={onSetWorkspace}
           onOpenConfig={onOpenConfig}
           onImportSkill={onImportSkill}
           agentLabel={agentLabel}
@@ -2690,6 +2757,7 @@ function ChatView(props: {
   onTogglePanel: () => void; onNew: () => void;
   config: TaskConfig; resources: TerminalResources | undefined;
   onSetExecMode: (m: TaskConfig['exec_mode']) => void;
+  onSetWorkspace: (workspaceId: string) => boolean | Promise<boolean>;
   onOpenConfig: () => void;
   onImportSkill: () => void;
   selectedId: string | null;
@@ -2703,7 +2771,7 @@ function ChatView(props: {
   const {
     taskTitle, chat, streaming, followUp, setFollowUp, invokedSkills, setInvokedSkills,
     attachments, setAttachments,
-    onSend, onStop, onNew, config, resources, onSetExecMode, onOpenConfig,
+    onSend, onStop, onNew, config, resources, onSetExecMode, onSetWorkspace, onOpenConfig,
     onImportSkill, selectedId, onLink, fileLinks, fileRefMap, fileRefsLoaded, onDeleteTurn, agentLabel,
   } = props;
   // slug → 技能名称，供用户消息气泡把 /slug 还原为技能名 chip（样式与输入框一致）
@@ -2817,6 +2885,7 @@ function ChatView(props: {
             placeholder="追加消息（Enter 发送，Shift+Enter 换行）"
             config={config} resources={resources}
             onSetExecMode={onSetExecMode}
+            onSetWorkspace={onSetWorkspace}
             onOpenConfig={onOpenConfig}
             onImportSkill={onImportSkill}
             agentLabel={agentLabel}

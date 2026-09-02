@@ -41,7 +41,8 @@ const OPERATION_PERMISSION: Record<EnterpriseApplicationOperation, EnterpriseApp
 };
 
 function errorText(error: unknown) {
-  return error instanceof ApiError ? error.message : '角色权限保存失败';
+  if (error instanceof ApiError) return error.message;
+  return error instanceof Error && error.message ? error.message : '角色权限保存失败';
 }
 
 function cloneDraft(value?: AppDraft) {
@@ -229,11 +230,20 @@ export default function EnterpriseAccessControl() {
         return enterpriseApplications.replaceGrants(application.id, retained);
       }));
     },
+    onMutate: () => {
+      message.loading({ key: 'role-permission-save', content: `正在保存“${role?.name ?? '当前角色'}”的权限…`, duration: 0 });
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['enterprise-applications', orgId] });
-      message.success(`已保存“${role?.name}”在全部企业模块中的权限`);
+      message.success({
+        key: 'role-permission-save',
+        content: `已保存“${role?.name}”在全部企业模块中的权限`,
+        duration: 3,
+      });
     },
-    onError: error => message.error(errorText(error)),
+    onError: error => message.error({
+      key: 'role-permission-save', content: `保存失败：${errorText(error)}`, duration: 6,
+    }),
   });
 
   const updatePage = (
@@ -295,11 +305,11 @@ export default function EnterpriseAccessControl() {
         delete appDraft[module.moduleKey];
       } else {
         const pageAccess = Object.fromEntries(module.pages.map(page => {
-          const queryKeys = page.queryActionKey && page.actionKeys.includes(page.queryActionKey)
-            ? [page.queryActionKey] : [];
+          const pageActions = selectedActions(module, page.actionKeys);
           return [page.pageKey, {
-            permissions: permissionsForActions(selectedActions(module, queryKeys)),
-            action_keys: queryKeys, ai_enabled: false,
+            permissions: permissionsForActions(pageActions),
+            action_keys: pageActions.map(action => action.actionKey),
+            ai_enabled: pageActions.some(action => action.aiEnabled),
           } satisfies PageAccess];
         }));
         appDraft[module.moduleKey] = rebuildModuleAccess(module, {
@@ -354,7 +364,7 @@ export default function EnterpriseAccessControl() {
           <strong>{application.name}</strong><small>{application.slug}</small><Tag color="blue">原生接入</Tag>
         </td>}
         {pageIndex === 0 && <td rowSpan={pages.length} className="module-cell">
-          <label>
+          <label title="一键选择或取消该业务子模块的全部页面和全部可用操作">
             <Checkbox
               checked={pageCount(applicationDraft[module.moduleKey]) === module.pages.length && module.pages.length > 0}
               indeterminate={pageCount(applicationDraft[module.moduleKey]) > 0 && pageCount(applicationDraft[module.moduleKey]) < module.pages.length}
