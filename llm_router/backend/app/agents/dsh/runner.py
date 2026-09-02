@@ -48,6 +48,20 @@ _SSE_HEADERS = {
 }
 
 
+class DshRunError(RuntimeError):
+    """Structured failure emitted by the DSH runtime stream."""
+
+    def __init__(self, message: str, *, code: str | None = None):
+        super().__init__(message)
+        self.code = code
+
+
+def _public_failure_message(exc: Exception) -> str:
+    if isinstance(exc, DshRunError) and exc.code == "MAX_STEPS_EXCEEDED":
+        return "达到最大步数，未产生最终回答。"
+    return "智能体暂时无法完成本次请求，请稍后重试。"
+
+
 def _merge(state: dict, patch: dict | None) -> None:
     if patch:
         state.update(patch)
@@ -152,6 +166,7 @@ async def _consume_dsh(
     }
     text = ""
     successful_tools = 0
+    failed_tools: list[tuple[str, str]] = []
     tool_arguments: dict[str, str] = {}
     usage = {"input_tokens": 0, "output_tokens": 0}
     async for event in client.stream_run(request):
@@ -169,6 +184,11 @@ async def _consume_dsh(
             _publish(handle, staged, event)
             ok = bool(event.get("ok"))
             successful_tools += int(ok)
+            if not ok:
+                failed_tools.append((
+                    str(event.get("name") or "tool"),
+                    str(event.get("content") or "工具未返回错误详情"),
+                ))
             state.setdefault("steps", []).append({"step": "tool", "name": event.get("name"), "ok": ok})
             _trace_for_tool(
                 state, str(event.get("name") or ""), str(event.get("id") or ""),
@@ -179,7 +199,10 @@ async def _consume_dsh(
             usage["input_tokens"] += int(event.get("input_tokens") or 0)
             usage["output_tokens"] += int(event.get("output_tokens") or 0)
         elif kind == "error":
-            raise RuntimeError(str(event.get("message") or "DSH runtime failed"))
+            raise DshRunError(
+                str(event.get("message") or "DSH runtime failed"),
+                code=str(event.get("code") or "") or None,
+            )
         elif kind == "done":
             text = str(event.get("text") or text)
 
@@ -189,7 +212,16 @@ async def _consume_dsh(
         text = "本轮未产生真实工具调用，因此无法确认任务已执行。请重试或检查当前模型的工具调用能力。"
         _publish(handle, staged, {"type": "text", "delta": text})
         state.setdefault("steps", []).append({"step": "tool_claim_rejected"})
-    state["assistant_final"] = text or "(达到最大步数，未产生终答)"
+    if not text:
+        if failed_tools:
+            tool_name, detail = failed_tools[-1]
+            state["error"] = f"Tool '{tool_name}' failed: {detail[:1000]}"
+            text = f"工具执行失败（{tool_name}）：{detail[:500]}"
+        else:
+            state["error"] = "DSH runtime completed without a final response"
+            text = "模型未返回最终回答，请重试。"
+        _publish(handle, staged, {"type": "text", "delta": text})
+    state["assistant_final"] = text
     state["usage"] = usage
     state.setdefault("messages", []).append({"role": "assistant", "content": state["assistant_final"]})
     state.setdefault("steps", []).append({"step": "llm_final"})
@@ -236,7 +268,7 @@ async def _finish_failed_run(state: dict, deps: dict, exc: Exception) -> None:
     """Preserve the public graceful-error contract when the coordinator is unavailable."""
     message = f"DSH runtime failed: {exc}"
     state["error"] = message
-    state["assistant_final"] = "智能体暂时无法完成本次请求，请稍后重试。"
+    state["assistant_final"] = _public_failure_message(exc)
     state.setdefault("messages", []).append(
         {"role": "assistant", "content": state["assistant_final"]},
     )

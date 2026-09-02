@@ -1983,6 +1983,39 @@ def _compact_ontologies(files: list[OntologyFile]) -> str:
     return "\n\n".join(parts)
 
 
+def _skill_catalog_prompt(state: AgentState, *, load_skill_available: bool) -> str:
+    """Render Skill discovery without advertising an unavailable host tool."""
+    skill_catalog = list(state.get("skill_catalog") or [])
+    if not skill_catalog:
+        return ""
+    default_ids = {item.get("id") for item in state.get("default_skills") or []}
+    invoked_ids = {item.get("id") for item in state.get("invoked_skills") or []}
+    lines: list[str] = []
+    for item in skill_catalog[:80]:
+        priority = "本轮明确" if item.get("id") in invoked_ids else (
+            "智能体默认" if item.get("id") in default_ids else "可用"
+        )
+        executable = "可执行" if item.get("is_executable") else "说明/API"
+        description = str(item.get("description") or "").replace("\n", " ")[:240]
+        lines.append(
+            f"- [{priority}] id={item.get('id')} /{item.get('slug')} {item.get('name')} | "
+            f"{item.get('scope_type')} | {executable} | {description}"
+        )
+    if len(skill_catalog) > 80:
+        lines.append(f"- 其余 {len(skill_catalog) - 80} 个技能未展开；请让用户用选择器明确指定。")
+    if load_skill_available:
+        instruction = (
+            "此目录仅用于发现能力。不要把目录内容当作已执行结果；需要说明时调用 load_skill，"
+            "需要脚本或企业操作时必须实际调用相应工具。"
+        )
+    else:
+        instruction = (
+            "此目录仅用于发现能力。本轮没有提供 Skill 载入工具，不得调用或声称已经调用 load_skill；"
+            "只能使用本轮工具列表中真实存在的工具。"
+        )
+    return "\n\n[当前用户可用 Skill 目录]\n" + instruction + "\n" + "\n".join(lines)
+
+
 async def prepare_dsh_turn(state: AgentState) -> dict:
     """Assemble the authorized prompt and tool catalog for the DSH coordinator.
 
@@ -2071,28 +2104,6 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
         _emit({"type": "trace", **trace})
         traces.append(trace)
 
-    skill_catalog = list(state.get("skill_catalog") or [])
-    if skill_catalog:
-        default_ids = {item.get("id") for item in state.get("default_skills") or []}
-        invoked_ids = {item.get("id") for item in state.get("invoked_skills") or []}
-        lines: list[str] = []
-        for item in skill_catalog[:80]:
-            priority = "本轮明确" if item.get("id") in invoked_ids else (
-                "智能体默认" if item.get("id") in default_ids else "可用"
-            )
-            executable = "可执行" if item.get("is_executable") else "说明/API"
-            description = str(item.get("description") or "").replace("\n", " ")[:240]
-            lines.append(
-                f"- [{priority}] id={item.get('id')} /{item.get('slug')} {item.get('name')} | "
-                f"{item.get('scope_type')} | {executable} | {description}"
-            )
-        if len(skill_catalog) > 80:
-            lines.append(f"- 其余 {len(skill_catalog) - 80} 个技能未展开；请让用户用选择器明确指定。")
-        system_prompt = (
-            f"{system_prompt}\n\n[当前用户可用 Skill 目录]\n"
-            "此目录仅用于发现能力。不要把目录内容当作已执行结果；需要说明时调用 load_skill，"
-            "需要脚本或企业操作时必须实际调用相应工具。\n" + "\n".join(lines)
-        )
     ambiguities = state.get("skill_slug_ambiguities") or []
     if ambiguities:
         system_prompt = (
@@ -2205,11 +2216,25 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
                 f"- id={item.get('id')} {item['name']} (/{item['slug']}, {item.get('activation', 'explicit')})"
                 for item in referenced
             )
+            if "load_skill" in registry:
+                instruction = (
+                    "请先调用 load_skill 加载其完整说明，并在任务需要操作时务必实际调用脚本或接口，"
+                    "不得仅声称完成："
+                )
+            else:
+                instruction = (
+                    "本轮没有提供 Skill 载入工具，不得调用或声称已经调用 load_skill；"
+                    "如无其他对应工具，应明确说明当前无法执行："
+                )
             system_prompt = (
                 f"{system_prompt}\n\n[用户本轮明确调用的 Skill] 以下选择仅对当前轮有效。"
-                "请先加载其完整说明，并在任务需要操作时务必实际调用脚本或接口，不得仅声称完成：\n"
-                f"{lines}"
+                f"{instruction}\n{lines}"
             )
+
+    system_prompt = (
+        f"{system_prompt}"
+        f"{_skill_catalog_prompt(state, load_skill_available='load_skill' in registry)}"
+    )
 
     provider, model, system_prompt = await _configure_visual_turn(
         state, db, user, messages, system_prompt,
