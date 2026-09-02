@@ -28,7 +28,7 @@ from app.models.organization import Organization
 from app.models.rag import RagCollection
 from app.models.skill import SkillFile, SkillFolder
 from app.models.workspace import Workspace
-from app.services import multimodal_service
+from app.services import multimodal_service, workspace_permission_service
 
 
 def department_scope_ids(cu: CurrentUser) -> tuple[str, ...]:
@@ -203,11 +203,19 @@ async def list_data_interfaces_for_user(db: AsyncSession, cu: CurrentUser) -> li
 
 
 async def list_workspaces_for_user(db: AsyncSession, cu: CurrentUser) -> list[Workspace]:
+    visibility = scope_filter(Workspace, cu)
+    granted_department_ids = workspace_permission_service.department_workspace_scope_ids(cu)
+    if granted_department_ids:
+        visibility = or_(
+            visibility,
+            (Workspace.scope_type == "department")
+            & (Workspace.scope_id.in_(granted_department_ids)),
+        )
     stmt = select(Workspace).where(
         Workspace.organization_id == cu.organization_id,
         Workspace.deleted_at.is_(None),
         Workspace.is_active.is_(True),
-        scope_filter(Workspace, cu),
+        visibility,
     )
     return list((await db.execute(stmt)).scalars().all())
 
@@ -244,7 +252,11 @@ def is_workspace_visible(ws: Workspace, cu: CurrentUser) -> bool:
     if ws.scope_type == "organization":
         return True
     if ws.scope_type == "department":
-        return has_unrestricted_data_scope(cu) or ws.scope_id in department_scope_ids(cu)
+        return (
+            has_unrestricted_data_scope(cu)
+            or ws.scope_id in department_scope_ids(cu)
+            or ws.scope_id in workspace_permission_service.department_workspace_scope_ids(cu)
+        )
     if ws.scope_type == "team" and cu.team_id and ws.scope_id == cu.team_id:
         return True
     if ws.scope_type == "user" and ws.scope_id == cu.id:

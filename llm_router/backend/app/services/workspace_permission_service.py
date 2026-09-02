@@ -12,6 +12,18 @@ DEPARTMENT_READ_PREFIX = "workspace.department.read:"
 DEPARTMENT_UPLOAD_PREFIX = "workspace.department.upload:"
 
 
+def department_workspace_scope_ids(cu: CurrentUser) -> tuple[str, ...]:
+    """Return departments explicitly exposed to the user by role permissions."""
+    department_ids: set[str] = set()
+    for code in set(getattr(cu, "permission_codes", ()) or ()):
+        for prefix in (DEPARTMENT_READ_PREFIX, DEPARTMENT_UPLOAD_PREFIX):
+            if code.startswith(prefix):
+                department_id = code.removeprefix(prefix).strip()
+                if department_id:
+                    department_ids.add(department_id)
+    return tuple(sorted(department_ids))
+
+
 def _department_workspace_access(cu: CurrentUser, department_id: str) -> tuple[bool, bool]:
     """Return explicit role-based read/upload access for one department.
 
