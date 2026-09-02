@@ -31,6 +31,7 @@ _SSE_HEADERS = {
 def initial_state(agent_id: str, org_id: str, message: str, session_id: str | None) -> AgentState:
     return {
         "mode": "agent", "agent_id": agent_id, "org_id": org_id,
+        "run_started_monotonic": time.monotonic(),
         "session_id": session_id or f"sess-{uuid.uuid4()}", "request": message,
         "messages": [], "steps": [], "usage": {"input_tokens": 0, "output_tokens": 0},
     }
@@ -44,6 +45,7 @@ def general_initial_state(
     invoked = list(invoked_skills or [])
     return {
         "mode": "general", "org_id": org_id, "task_id": task_id, "user_id": user.id,
+        "run_started_monotonic": time.monotonic(),
         "department_id": user.department_id, "team_id": user.team_id,
         "session_id": session_id or f"sess-{uuid.uuid4()}", "request": message,
         "messages": [], "steps": [], "usage": {"input_tokens": 0, "output_tokens": 0},

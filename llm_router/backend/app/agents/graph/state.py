@@ -17,6 +17,7 @@ class AgentState(TypedDict, total=False):
     org_id: str
     session_id: str
     run_id: int | None  # AgentRun.id，启动时创建、收口节点更新
+    run_started_monotonic: float  # 仅进程内使用，用于落库真实运行耗时
     # general 模式（终端通用智能体）专用标识
     mode: str  # "agent"（管理端 playground）/ "general"（终端）
     task_id: str | None

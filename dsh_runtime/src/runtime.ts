@@ -23,6 +23,8 @@ interface ActiveRun {
   agent?: Awaited<ReturnType<Context['agents']['create']>>['agent']
 }
 
+type AgentHandle = Awaited<ReturnType<Context['agents']['create']>>
+
 export interface RuntimeOptions {
   backendUrl: string
   serviceToken: string
@@ -58,6 +60,7 @@ export class DshRuntime {
   private restarts = 0
   private draining = false
   private activating = false
+  private readonly pendingDisposals = new Set<Promise<void>>()
 
   constructor(private readonly options: RuntimeOptions) {}
 
@@ -124,7 +127,19 @@ export class DshRuntime {
       release_checksum: this.releaseChecksum,
       loaded_extensions: this.loadedExtensions,
       runtime_restarts: this.restarts,
+      pending_disposals: this.pendingDisposals.size,
     }
+  }
+
+  private disposeInBackground(handle: AgentHandle): void {
+    let disposal: Promise<void>
+    disposal = Promise.resolve()
+      .then(() => handle.dispose())
+      .catch(error => {
+        console.warn(`agent disposal failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      .finally(() => this.pendingDisposals.delete(disposal))
+    this.pendingDisposals.add(disposal)
   }
 
   async validateRelease(request: ReleaseRequest): Promise<Record<string, unknown>> {
@@ -225,7 +240,7 @@ export class DshRuntime {
       }
     })
 
-    let handle: Awaited<ReturnType<Context['agents']['create']>> | undefined
+    let handle: AgentHandle | undefined
     try {
       emit({ type: 'status', status: 'running' })
       handle = await ctx.agents.create({
@@ -267,10 +282,13 @@ export class DshRuntime {
       if (cancelled) emit({ type: 'status', status: 'cancelled' })
       emit({ type: 'error', message, code: message === 'MAX_STEPS_EXCEEDED' ? message : undefined })
     } finally {
-      await handle?.dispose().catch(() => undefined)
       listener()
       this.activeByRun.delete(request.run_id)
       this.activeBySession.delete(sessionId)
+      // The terminal event is the request boundary.  DSH's lifecycle disposal
+      // can drain internal continuations for much longer and must not hold the
+      // NDJSON response or the platform admission slot open.
+      if (handle) this.disposeInBackground(handle)
     }
   }
 

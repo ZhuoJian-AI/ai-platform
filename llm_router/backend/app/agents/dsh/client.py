@@ -27,7 +27,13 @@ async def stream_run(payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if line.strip():
-                    yield json.loads(line)
+                    event = json.loads(line)
+                    yield event
+                    # ``done``/``error`` are protocol-terminal events.  Do not wait for
+                    # the Runtime process to finish best-effort agent disposal before
+                    # releasing the caller and its admission permit.
+                    if event.get("type") in {"done", "error"}:
+                        break
 
 
 async def cancel_run(run_id: str) -> bool:

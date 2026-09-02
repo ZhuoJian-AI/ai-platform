@@ -165,3 +165,19 @@ test('keeps a hard safety ceiling above the platform admission limit', async () 
   assert(firstEvents.some(event => event.type === 'done'))
   assert.equal(runtime.health().active_runs, 0)
 })
+
+test('tracks agent disposal without holding the completed run open', async () => {
+  const runtime = new DshRuntime({ backendUrl: 'http://127.0.0.1:1', serviceToken: 'secret' })
+  let release!: () => void
+  const draining = new Promise<void>(resolve => { release = resolve })
+  const internals = runtime as unknown as {
+    disposeInBackground: (handle: { dispose: () => Promise<void> }) => void
+  }
+
+  internals.disposeInBackground({ dispose: () => draining })
+
+  assert.equal(runtime.health().pending_disposals, 1)
+  release()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(runtime.health().pending_disposals, 0)
+})

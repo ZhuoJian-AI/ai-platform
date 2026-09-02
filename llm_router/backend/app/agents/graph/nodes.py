@@ -17,6 +17,7 @@ import copy
 import json
 import mimetypes
 import re
+import time
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import Any
@@ -2697,6 +2698,8 @@ async def write_run_log(state: AgentState) -> dict:
     usage = state.get("usage", {})
     in_tok = usage.get("input_tokens") or 0
     out_tok = usage.get("output_tokens") or 0
+    started = state.get("run_started_monotonic")
+    latency_ms = max(0, int((time.monotonic() - started) * 1000)) if started is not None else 0
     if run_id is not None:
         run = await db.get(AgentRun, run_id)
         if run is not None:
@@ -2707,7 +2710,7 @@ async def write_run_log(state: AgentState) -> dict:
             run.judge_score = state.get("judge_result")
             run.error = state.get("error")
             run.status = "error" if state.get("error") else "success"
-            run.latency_ms = 0  # 由 endpoint 计算总耗时更准确；此处占位
+            run.latency_ms = latency_ms
             await db.flush()
 
     # 写审计日志：agent 运行时直连上游、不经 /v1 代理端点，故 audit_logs 此前缺这部分
@@ -2736,7 +2739,7 @@ async def write_run_log(state: AgentState) -> dict:
         model_served=model_served,
         input_tokens=in_tok or None,
         output_tokens=out_tok or None,
-        latency_ms=None,
+        latency_ms=latency_ms,
         status_code=500 if err else 200,
         dlp_violations=[],
         error_message=err if err else None,

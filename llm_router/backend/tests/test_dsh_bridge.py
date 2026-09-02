@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.agents.dsh import client as dsh_client
 from app.agents.dsh import runner
 from app.agents.graph.nodes import _skill_catalog_prompt
 from app.api.dsh_internal import _to_platform_messages, _to_platform_tools
@@ -75,6 +76,48 @@ def test_skill_catalog_never_advertises_an_unavailable_load_tool():
     assert "不得调用或声称已经调用 load_skill" in disabled
     assert "需要说明时调用 load_skill" not in disabled
     assert "需要说明时调用 load_skill" in enabled
+
+
+@pytest.mark.asyncio
+async def test_dsh_client_stops_at_protocol_terminal_event(monkeypatch):
+    stream_closed = False
+    read_past_terminal = False
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            nonlocal read_past_terminal
+            yield '{"type":"done","text":"完成"}'
+            read_past_terminal = True
+            yield '{"type":"status","status":"late-cleanup"}'
+
+    class FakeStream:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, *_args):
+            nonlocal stream_closed
+            stream_closed = True
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return FakeStream()
+
+    monkeypatch.setattr(dsh_client.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+
+    events = [event async for event in dsh_client.stream_run({"run_id": "run-1"})]
+
+    assert events == [{"type": "done", "text": "完成"}]
+    assert stream_closed is True
+    assert read_past_terminal is False
 
 
 @pytest.mark.asyncio
