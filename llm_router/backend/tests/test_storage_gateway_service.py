@@ -128,6 +128,36 @@ async def test_browser_signed_download_uses_acceleration_with_public_fallback(mo
 
 
 @pytest.mark.asyncio
+async def test_browser_signed_download_rewrites_accelerated_gateway_url_to_public_fallback(monkeypatch):
+    _configure(monkeypatch)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "url": "https://bucket.oss-accelerate.aliyuncs.com/projects/7/assets/deck.pptx?sig=browser",
+                "headers": {},
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(storage.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    signed = await storage.get_browser_signed_download("oss://projects/7/assets/deck.pptx")
+    assert signed["url"].startswith("https://bucket.oss-accelerate.aliyuncs.com/")
+    assert signed["fallback_url"].startswith("https://bucket.oss-cn-hongkong.aliyuncs.com/")
+
+
+@pytest.mark.asyncio
 async def test_large_browser_upload_requests_parallel_multipart(monkeypatch):
     _configure(monkeypatch)
     captured: dict = {}

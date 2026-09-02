@@ -57,25 +57,46 @@ def _gateway_url(path: str) -> str:
 
 
 def _rewrite_signed_url(signed_url: str, target_endpoint: str) -> str:
-    """Replace only the configured OSS endpoint while retaining bucket prefix."""
-    public = settings.storage_public_endpoint.strip()
+    """Replace a configured OSS endpoint while retaining the bucket prefix.
+
+    The storage gateway may sign with the regional, internal, or acceleration
+    endpoint.  Browser fallback must therefore recognise all configured source
+    hosts instead of assuming the gateway always returns the public regional
+    host.
+    """
     target = target_endpoint.strip()
-    if not public or not target:
+    if not target:
         return signed_url
     source = urlsplit(signed_url)
-    public_host = (urlsplit(public).hostname or "").lower()
     target_parts = urlsplit(target)
     target_endpoint_host = (target_parts.hostname or "").lower()
     source_host = (source.hostname or "").lower()
-    if not public_host or not target_endpoint_host:
+    if not source_host or not target_endpoint_host:
         return signed_url
-    if source_host == public_host:
-        target_host = target_endpoint_host
-    elif source_host.endswith(f".{public_host}"):
-        bucket_prefix = source_host[:-(len(public_host) + 1)]
-        target_host = f"{bucket_prefix}.{target_endpoint_host}"
-    else:
+
+    bucket_prefix: str | None = None
+    source_endpoints = (
+        settings.storage_public_endpoint,
+        settings.storage_internal_endpoint,
+        settings.storage_accelerate_endpoint,
+    )
+    for endpoint in source_endpoints:
+        endpoint_host = (urlsplit(endpoint.strip()).hostname or "").lower()
+        if not endpoint_host:
+            continue
+        if source_host == endpoint_host:
+            bucket_prefix = ""
+            break
+        if source_host.endswith(f".{endpoint_host}"):
+            bucket_prefix = source_host[:-(len(endpoint_host) + 1)]
+            break
+    if bucket_prefix is None:
         return signed_url
+    target_host = (
+        f"{bucket_prefix}.{target_endpoint_host}"
+        if bucket_prefix
+        else target_endpoint_host
+    )
     port = f":{target_parts.port}" if target_parts.port else ""
     return urlunsplit((
         target_parts.scheme or source.scheme,
