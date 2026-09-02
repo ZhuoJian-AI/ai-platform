@@ -355,6 +355,11 @@ export default function EnterpriseAccessControl() {
   };
 
   const selectedUser = userList.find(item => item.id === previewUserId) ?? userList[0];
+  const { data: previewAccess, isLoading: previewAccessLoading } = useQuery({
+    queryKey: ['user-effective-access', selectedUser?.id],
+    queryFn: () => users.effectiveAccess(selectedUser!.id),
+    enabled: previewOpen && Boolean(selectedUser?.id),
+  });
   const previewRoleIds = new Set(selectedUser?.role_ids ?? []);
   const previewApps = useMemo(() => appList.map(application => {
     const integration = integrationByAppId[application.id];
@@ -585,6 +590,32 @@ export default function EnterpriseAccessControl() {
         <div><strong>{selectedUser.display_name || selectedUser.username}</strong><span>{nodeMap.get(`dept:${selectedUser.department_id}`)?.name ?? '未归属部门'}</span></div>
         <Space wrap>{selectedUser.roles.map(item => <Tag color="purple" key={item.id}>{item.name}</Tag>)}</Space>
       </div>}
+      <div className="preview-app-list">
+        <section>
+          <h4>工作空间有效权限</h4>
+          {previewAccess?.workspaces.map(workspace => {
+            const capabilities = workspace.capabilities;
+            const allowed = [
+              capabilities.read && '查看文件',
+              capabilities.create && '上传/新建',
+              capabilities.update && '修改/重命名/版本恢复',
+              capabilities.delete && '删除',
+            ].filter(Boolean) as string[];
+            const sources = Array.from(new Set(Object.values(workspace.sources).flatMap(items => (
+              items?.map(item => item.name) ?? []
+            ))));
+            return <div key={workspace.id}>
+              <strong>{workspace.name}</strong>
+              <Space wrap>
+                <Tag color={allowed.length ? 'blue' : 'default'}>{allowed.join('、') || '无权限'}</Tag>
+                {sources.map(source => <Tag key={source}>{source}</Tag>)}
+              </Space>
+            </div>;
+          })}
+          {previewAccessLoading && <span>正在解析工作空间权限…</span>}
+          {!previewAccessLoading && !previewAccess?.workspaces.length && <Empty description="暂无工作空间权限" />}
+        </section>
+      </div>
       <div className="preview-app-list">
         {previewApps.map(item => <section key={item.application.id}>
           <h4>{item.application.name}</h4>
