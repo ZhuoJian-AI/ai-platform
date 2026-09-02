@@ -62,6 +62,11 @@ class AgentState(TypedDict, total=False):
     referenced_file_ids: list[str]
     # 本轮结构化附件的服务端校验快照；写入 user TaskMessage.metadata 供历史回放。
     attachment_files: list[dict]
+    # Effective roles/workspace capabilities contain no file names or content.
+    effective_access: dict
+    # Server-resolved per-turn scope. Personal is always present; shared
+    # workspaces appear only after explicit natural-language or @file targeting.
+    workspace_intent: dict
 
     # ── 对话 ──
     request: str  # 本轮用户输入

@@ -61,7 +61,7 @@ def effective_scope_set(cu: CurrentUser) -> list[tuple[str, str | None]]:
     if cu.team_id:
         scopes.append(("team", cu.team_id))
     scopes.append(("user", cu.id))
-    scopes.extend(("role", role_id) for role_id in (cu.role_ids or ()))
+    scopes.extend(("role", role_id) for role_id in (getattr(cu, "role_ids", ()) or ()))
     return scopes
 
 

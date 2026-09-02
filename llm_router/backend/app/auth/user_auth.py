@@ -12,10 +12,13 @@ from uuid import UUID
 
 import jwt
 from fastapi import Depends, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import get_db
+from app.models.role import Role, UserRole
 from app.models.user import User
 from app.services.user_service import get_user
 
@@ -75,6 +78,17 @@ async def current_user_for_user(db: AsyncSession, user: User) -> CurrentUser:
     """Build the same effective terminal principal for login and admin previews."""
     from app.services.role_service import rbac_for_user
 
+    fresh = (await db.execute(
+        select(User)
+        .options(
+            selectinload(User.role_assignments).selectinload(UserRole.role).selectinload(Role.permissions),
+            selectinload(User.role_assignments).selectinload(UserRole.role).selectinload(Role.data_departments),
+        )
+        .where(User.id == user.id, User.deleted_at.is_(None))
+        .execution_options(populate_existing=True)
+    )).scalar_one_or_none()
+    if fresh is not None:
+        user = fresh
     rbac = await rbac_for_user(db, user)
     return CurrentUser(
         user=user,

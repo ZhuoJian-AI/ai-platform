@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +13,13 @@ from app.models.workspace import Workspace
 
 DEPARTMENT_READ_PREFIX = "workspace.department.read:"
 DEPARTMENT_UPLOAD_PREFIX = "workspace.department.upload:"
+PERMISSION_QUESTION_MARKERS = (
+    "权限", "角色", "能不能", "能否", "可以吗", "能做什么", "可做什么", "哪些部门", "什么部门",
+)
+WRITE_ACTION_MARKERS = ("修改", "上传", "写入", "保存", "生成", "重命名", "恢复", "新建", "创建")
+DIRECT_FILE_ACTION_MARKERS = (
+    "读取", "查看", "列出", "扫描", "处理", "分析", "修改", "上传", "写入", "保存", "生成", "重命名", "恢复",
+)
 
 
 def department_workspace_scope_ids(cu: CurrentUser) -> tuple[str, ...]:
@@ -43,7 +52,8 @@ def _department_workspace_access(cu: CurrentUser, department_id: str) -> tuple[b
 def _role_sources(cu: CurrentUser, permission_code: str) -> list[dict[str, str]]:
     """Return active roles contributing one concrete permission code."""
     sources: list[dict[str, str]] = []
-    for assignment in getattr(getattr(cu, "user", None), "role_assignments", ()) or ():
+    user_state = getattr(getattr(cu, "user", None), "__dict__", {})
+    for assignment in user_state.get("role_assignments", ()) or ():
         role = getattr(assignment, "role", None)
         if role is None or not role.is_active or role.deleted_at is not None:
             continue
@@ -149,6 +159,10 @@ async def effective_access(db: AsyncSession, cu: CurrentUser) -> dict:
         workspaces,
         key=lambda item: (scope_order.get(item.scope_type, 9), item.name, str(item.id)),
     ):
+        if workspace.scope_type == "user" and str(workspace.scope_id) != str(cu.id):
+            # Other employees' personal workspace names are not part of the
+            # organization permission catalogue and must not be disclosed.
+            continue
         caps = await capabilities(db, workspace, cu)
         rows.append({
             "id": str(workspace.id),
@@ -159,14 +173,104 @@ async def effective_access(db: AsyncSession, cu: CurrentUser) -> dict:
             "capabilities": caps,
             "sources": capability_sources(workspace, cu),
         })
-    roles = [
-        {
-            "id": str(item["id"]), "name": item["name"], "code": item["code"],
-            "data_scope": item["data_scope"], "is_builtin": item["is_builtin"],
-        }
-        for item in (getattr(getattr(cu, "user", None), "roles", ()) or ())
-    ]
+    user_state = getattr(getattr(cu, "user", None), "__dict__", {})
+    roles = [{
+        "id": str(assignment.role.id), "name": assignment.role.name,
+        "code": assignment.role.code, "data_scope": assignment.role.data_scope,
+        "is_builtin": assignment.role.is_builtin,
+    } for assignment in (user_state.get("role_assignments", ()) or ())
+        if assignment.role.is_active and assignment.role.deleted_at is None]
     return {"roles": roles, "workspaces": rows}
+
+
+def resolve_workspace_intent(
+    access: dict,
+    request: str,
+    *,
+    referenced_workspace_ids: list[str] | tuple[str, ...] = (),
+) -> dict:
+    """Resolve this turn's shared-workspace boundary without reading file metadata.
+
+    The personal workspace is always the default. Shared workspace names only
+    authorize tools for a concrete file operation, while permission questions
+    are answered from ``access`` alone.
+    """
+    text = (request or "").casefold().strip()
+    workspaces = list(access.get("workspaces") or [])
+    personal_ids = {
+        str(item["id"]) for item in workspaces
+        if item.get("scope_type") == "user" and item.get("capabilities", {}).get("read")
+    }
+    # A referenced file authorizes that exact file in the tool layer, never
+    # the rest of its workspace. The caller still supplies workspace ids so
+    # this distinction stays explicit at the boundary.
+    direct_file_operation = (
+        any(marker in text for marker in DIRECT_FILE_ACTION_MARKERS)
+        and any(marker in text for marker in ("文件", "表格", "文档", "附件", "目录", "工作空间"))
+    )
+    leading_permission_question = any(marker in text for marker in ("能不能", "能否", "是否", "可不可以"))
+    permission_question = leading_permission_question or (
+        any(marker in text for marker in PERMISSION_QUESTION_MARKERS) and not direct_file_operation
+    )
+    file_operation = direct_file_operation and not permission_question
+    write_operation = file_operation and any(marker in text for marker in WRITE_ACTION_MARKERS)
+
+    aliases: dict[str, list[dict]] = {}
+    for item in workspaces:
+        if item.get("scope_type") == "user":
+            continue
+        for raw in (item.get("name"), item.get("slug")):
+            key = str(raw or "").casefold().strip()
+            if key:
+                aliases.setdefault(key, []).append(item)
+    organization_rows = [item for item in workspaces if item.get("scope_type") == "organization"]
+    if any(phrase in text for phrase in ("公司公共", "公司空间", "企业公共", "组织公共")):
+        aliases.setdefault("__organization__", []).extend(organization_rows)
+
+    matched: dict[str, dict] = {}
+    ambiguous: list[str] = []
+    for alias, rows in aliases.items():
+        if alias == "__organization__":
+            mentioned = True
+        elif re.fullmatch(r"[a-z0-9][a-z0-9_-]*", alias):
+            mentioned = bool(re.search(rf"(?<![a-z0-9_-]){re.escape(alias)}(?![a-z0-9_-])", text))
+        else:
+            mentioned = alias in text
+        if not mentioned:
+            continue
+        unique = {str(item["id"]): item for item in rows}
+        if len(unique) > 1:
+            ambiguous.append("公司公共空间" if alias == "__organization__" else alias)
+            continue
+        matched.update(unique)
+
+    if any(phrase in text for phrase in ("所有我有权限的部门", "全部我有权限的部门", "所有有权限的部门")):
+        for item in workspaces:
+            if item.get("scope_type") == "department" and item.get("capabilities", {}).get("read"):
+                matched[str(item["id"])] = item
+
+    read_ids = set(personal_ids)
+    write_ids = set(personal_ids)
+    if file_operation and not ambiguous:
+        read_ids.update(
+            workspace_id for workspace_id, item in matched.items()
+            if item.get("capabilities", {}).get("read")
+        )
+        if write_operation:
+            write_ids.update(
+                workspace_id for workspace_id, item in matched.items()
+                if item.get("capabilities", {}).get("create")
+                or item.get("capabilities", {}).get("update")
+            )
+    return {
+        "permission_question": permission_question,
+        "file_operation": file_operation,
+        "write_operation": write_operation,
+        "matched_workspace_ids": sorted(matched),
+        "read_workspace_ids": sorted(read_ids),
+        "write_workspace_ids": sorted(write_ids),
+        "ambiguous_names": sorted(set(ambiguous)),
+    }
 
 
 async def _assert(db: AsyncSession, workspace: Workspace, cu: CurrentUser, capability: str) -> None:

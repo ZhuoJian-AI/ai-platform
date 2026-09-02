@@ -26,6 +26,7 @@ import structlog
 
 from app.agents.graph.context import get_deps, get_stream_writer
 from app.agents.graph.state import AgentState
+from app.auth.user_auth import current_user_for_user
 from app.config import settings
 from app.dlp.scanner import scan_request
 from app.models.agent import Agent
@@ -328,6 +329,24 @@ def _builtin_tool_defs(
                 "quality": {"type": "string", "enum": ["auto", "low", "medium", "high"]},
             }, "required": ["prompt"]},
         }})
+    for item in tools:
+        function = item.get("function") or {}
+        properties = (function.get("parameters") or {}).get("properties")
+        if not isinstance(properties, dict):
+            continue
+        tool_name = function.get("name")
+        if tool_name in {"workspace_list_files", "workspace_read_file", "workspace_delete_file"}:
+            properties["workspace_id"] = {
+                "type": "string",
+                "description": "仅当用户本轮明确点名共享工作空间时传入；省略则使用个人空间",
+            }
+        if tool_name in {
+            "workspace_write_file", "generate_docx", "image_generation_tool", *PLATFORM_TOOL_NAMES,
+        }:
+            properties["target_workspace_id"] = {
+                "type": "string",
+                "description": "输出目标；省略时始终写入个人空间，点名且有写权限时可写共享空间",
+            }
     if include_workspace:
         return tools
     return [
@@ -374,6 +393,76 @@ async def _validated_runner_output(item: dict, fallback_mime: str) -> tuple[str,
     return content_ref, actual_size, mime, actual_etag
 
 
+async def _fresh_user_principal(db, user):
+    """Rebuild mutable role permissions immediately before a file operation."""
+    if user is None or getattr(user, "user", None) is None:
+        return user
+    return await current_user_for_user(db, user.user)
+
+
+async def _resolve_tool_workspace(
+    state: AgentState,
+    params: dict,
+    user,
+    *,
+    capability: str,
+    parameter: str,
+):
+    """Resolve default personal or explicit shared target and enforce this turn's scope."""
+    deps = get_deps()
+    db = deps["db"]
+    default_id = str(state.get("workspace_id") or "")
+    requested_id = str(params.get(parameter) or default_id).strip()
+    if not requested_id:
+        return None, user, "no workspace bound to this task"
+    if (state.get("workspace_intent") or {}).get("permission_question"):
+        return None, user, "权限问题只能依据权限摘要回答，不能扫描或读取文件"
+    allowed_key = "write_workspace_ids" if capability in {"create", "update", "delete"} else "read_workspace_ids"
+    allowed_ids = set((state.get("workspace_intent") or {}).get(allowed_key) or [])
+    if not state.get("workspace_intent") and requested_id == default_id:
+        # Management playground and legacy persisted runs remain bound to their
+        # single configured workspace; general terminal runs always carry intent.
+        allowed_ids.add(default_id)
+    if requested_id not in allowed_ids:
+        return None, user, "该工作空间未被用户在本轮明确指定"
+    try:
+        workspace = await workspace_service.get_workspace(db, UUID(requested_id))
+    except (ValueError, TypeError, AttributeError):
+        workspace = None
+    if workspace is None:
+        return None, user, "工作空间不存在或无权访问"
+    principal = await _fresh_user_principal(db, user)
+    if principal is not None and not (
+        await workspace_permission_service.capabilities(db, workspace, principal)
+    ).get(capability, False):
+        return None, principal, "工作空间权限已撤销或不允许此操作"
+    return workspace, principal, None
+
+
+async def _authorized_input_file(state: AgentState, value: object, user):
+    deps = get_deps()
+    db = deps["db"]
+    try:
+        file = await workspace_service.get_file(db, UUID(str(value)))
+    except (ValueError, TypeError, AttributeError):
+        file = None
+    if file is None:
+        return None, user
+    referenced_ids = set(state.get("referenced_file_ids") or [])
+    allowed_ids = set((state.get("workspace_intent") or {}).get("read_workspace_ids") or [])
+    if not state.get("workspace_intent") and state.get("workspace_id"):
+        allowed_ids.add(str(state["workspace_id"]))
+    if str(file.id) not in referenced_ids and str(file.workspace_id) not in allowed_ids:
+        return None, user
+    workspace = await workspace_service.get_workspace(db, file.workspace_id)
+    principal = await _fresh_user_principal(db, user)
+    if workspace is None or (principal is not None and not (
+        await workspace_permission_service.capabilities(db, workspace, principal)
+    )["read"]):
+        return None, principal
+    return file, principal
+
+
 async def _execute_platform_file_tool(
     state: AgentState, name: str, params: dict, ws, user,
 ) -> str:
@@ -384,6 +473,14 @@ async def _execute_platform_file_tool(
     db = deps["db"]
     tool_kind = name.removesuffix("_tool")
     action = str(params.get("action") or "").strip().lower()
+    produces_output = action not in {"inspect", "ocr", "list", "search", "fetch"}
+    ws, user, workspace_error = await _resolve_tool_workspace(
+        state, params, user,
+        capability="create" if produces_output else "read",
+        parameter="target_workspace_id",
+    )
+    if workspace_error and not (name == "web_tool" and action in {"search", "fetch"}):
+        return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
     requested_ids = params.get("input_file_ids")
     if requested_ids is None:
         requested_ids = [] if name == "web_tool" else (state.get("referenced_file_ids") or [])
@@ -395,14 +492,14 @@ async def _execute_platform_file_tool(
         return json.dumps({"status": "error", "error": "请先绑定工作空间"}, ensure_ascii=False)
     runner_inputs: list[dict] = []
     for value in requested_ids:
-        try:
-            file = await workspace_service.get_file(db, UUID(str(value)))
-        except (ValueError, TypeError, AttributeError):
-            file = None
-        if file is None or ws is None or str(file.workspace_id) != str(ws.id):
+        file, user = await _authorized_input_file(state, value, user)
+        if file is None:
             return json.dumps({"status": "error", "error": f"Input file {value} is unavailable"})
         runner_inputs.append(await _runner_input(file))
-    runner_params = {key: value for key, value in params.items() if key != "input_file_ids"}
+    runner_params = {
+        key: value for key, value in params.items()
+        if key not in {"input_file_ids", "target_workspace_id"}
+    }
     try:
         result, latency = await skill_runner_client.execute_builtin(
             tool_kind=tool_kind,
@@ -415,6 +512,12 @@ async def _execute_platform_file_tool(
         task_source = await _task_source_fields(db, state)
         if result.get("outputs") and ws is None:
             return json.dumps({"status": "error", "error": "下载文件前请先绑定工作空间"}, ensure_ascii=False)
+        if result.get("outputs") and not produces_output:
+            ws, user, workspace_error = await _resolve_tool_workspace(
+                state, params, user, capability="create", parameter="target_workspace_id",
+            )
+            if workspace_error:
+                return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         task_part = state.get("task_id") or "playground"
         for item in result.get("outputs") or []:
@@ -505,6 +608,11 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
             if name == "image_generation_tool":
                 if state.get("exec_mode") != "craft":
                     return json.dumps({"status": "error", "error": "请切换到 Craft 模式执行生图"}, ensure_ascii=False)
+                ws, user, workspace_error = await _resolve_tool_workspace(
+                    state, params, user, capability="create", parameter="target_workspace_id",
+                )
+                if workspace_error:
+                    return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
                 if ws is None or user is None:
                     return json.dumps({"status": "error", "error": "请先绑定工作空间"}, ensure_ascii=False)
                 scoped = await multimodal_service.resolve_image_generation(
@@ -579,6 +687,11 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
             if name in PLATFORM_TOOL_NAMES:
                 return await _execute_platform_file_tool(state, name, params, ws, user)
             if name == "workspace_list_files":
+                ws, user, workspace_error = await _resolve_tool_workspace(
+                    state, params, user, capability="read", parameter="workspace_id",
+                )
+                if workspace_error:
+                    return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
                 files = await workspace_service.list_files(db, ws.id)
                 return json.dumps(
                     [{"file_id": str(f.id), "path": f.path} for f in files],
@@ -589,14 +702,13 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 path = str(params.get("path") or "").strip()
                 f = None
                 if file_id:
-                    try:
-                        f = await workspace_service.get_file(db, UUID(file_id))
-                    except (ValueError, AttributeError):
-                        f = None
-                    # 内置工具始终受当前任务绑定工作空间约束；不能借 file_id 跨工作空间读取。
-                    if f is not None and str(f.workspace_id) != str(ws.id):
-                        f = None
+                    f, user = await _authorized_input_file(state, file_id, user)
                 elif path:
+                    ws, user, workspace_error = await _resolve_tool_workspace(
+                        state, params, user, capability="read", parameter="workspace_id",
+                    )
+                    if workspace_error:
+                        return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
                     f = await workspace_service.get_file_by_path(db, ws.id, path)
                 else:
                     return "file_id or path is required"
@@ -615,6 +727,11 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     ensure_ascii=False,
                 )
             if name == "workspace_write_file":
+                ws, user, workspace_error = await _resolve_tool_workspace(
+                    state, params, user, capability="update", parameter="target_workspace_id",
+                )
+                if workspace_error:
+                    return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
                 # 标记产出文件归属的任务，供删除任务时一并清理工作空间输出。
                 meta: dict = {}
                 task_id = state.get("task_id")
@@ -625,6 +742,11 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     metadata=meta))
                 return f"wrote {params.get('path', '')}"
             if name == "workspace_delete_file":
+                ws, user, workspace_error = await _resolve_tool_workspace(
+                    state, params, user, capability="delete", parameter="workspace_id",
+                )
+                if workspace_error:
+                    return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
                 f = await workspace_service.get_file_by_path(db, ws.id, params.get("path", ""))
                 if f is None:
                     return "file not found"
@@ -634,6 +756,11 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 import base64 as _b64
 
                 from app.tools.docx_builder import markdown_to_docx_bytes
+                ws, user, workspace_error = await _resolve_tool_workspace(
+                    state, params, user, capability="create", parameter="target_workspace_id",
+                )
+                if workspace_error:
+                    return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
                 filename = (params.get("filename") or "document.docx").strip()
                 if not filename.lower().endswith(".docx"):
                     filename += ".docx"
@@ -774,6 +901,10 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
     slug_ambiguities: list[str] = []
     # 结构化附件优先进入 state；正文中的历史 @UUID 再补充，按出现顺序去重。
     referenced_file_ids: list[str] = []
+    access_summary: dict = {"roles": [], "workspaces": []}
+    workspace_intent: dict = {
+        "read_workspace_ids": [], "write_workspace_ids": [], "ambiguous_names": [],
+    }
 
     if user is not None:
         visible_folders = await scope_service.list_skills_for_user(db, user)
@@ -845,6 +976,30 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
                 seen_fids.add(fid)
                 referenced_file_ids.append(fid)
 
+        access_summary = await workspace_permission_service.effective_access(db, user)
+        referenced_workspace_ids: list[str] = [
+            str(item.get("workspace_id"))
+            for item in (state.get("attachment_files") or [])
+            if item.get("workspace_id")
+        ]
+        for fid in referenced_file_ids:
+            try:
+                file = await workspace_service.get_file(db, UUID(fid))
+            except (ValueError, TypeError, AttributeError):
+                file = None
+            if file is None:
+                continue
+            workspace = await workspace_service.get_workspace(db, file.workspace_id)
+            if workspace is not None and (
+                await workspace_permission_service.capabilities(db, workspace, user)
+            )["read"]:
+                referenced_workspace_ids.append(str(workspace.id))
+        workspace_intent = workspace_permission_service.resolve_workspace_intent(
+            access_summary,
+            state.get("request", "") or "",
+            referenced_workspace_ids=referenced_workspace_ids,
+        )
+
     run = AgentRun(
         organization_id=org_id,
         agent_id=None,
@@ -892,6 +1047,8 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
         "rag_collection_ids": rag_ids,
         "referenced_skills": referenced_skills,
         "referenced_file_ids": referenced_file_ids,
+        "effective_access": access_summary,
+        "workspace_intent": workspace_intent,
         "workspace_id": state.get("workspace_id"),
         "temperature": None,
         "max_tokens": None,
@@ -1024,25 +1181,20 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
                     continue
 
         available_files: dict[str, WorkspaceFile] = {}
-        bound_workspace_id = str(state.get("workspace_id") or "")
         user = deps.get("user")
-        workspace_visible = False
-        if bound_workspace_id and user is not None:
-            try:
-                workspace = await workspace_service.get_workspace(db, UUID(bound_workspace_id))
-            except (ValueError, TypeError, AttributeError):
-                workspace = None
-            workspace_visible = bool(workspace is not None and (
-                await workspace_permission_service.capabilities(db, workspace, user)
-            )["read"])
-        if attachment_ids and workspace_visible:
+        if attachment_ids and user is not None:
             file_rows = await db.execute(
                 select(WorkspaceFile).where(
                     WorkspaceFile.id.in_(attachment_ids),
                     WorkspaceFile.deleted_at.is_(None),
                 )
             )
-            available_files = {str(f.id): f for f in file_rows.scalars().all()}
+            for file in file_rows.scalars().all():
+                workspace = await workspace_service.get_workspace(db, file.workspace_id)
+                if workspace is not None and (
+                    await workspace_permission_service.capabilities(db, workspace, user)
+                )["read"]:
+                    available_files[str(file.id)] = file
 
         past = []
         for message in history:
@@ -1059,8 +1211,7 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
                     file = available_files.get(file_id)
                     available = bool(
                         file is not None
-                        and str(file.workspace_id) == bound_workspace_id
-                        and expected_workspace_id == bound_workspace_id
+                        and expected_workspace_id == str(file.workspace_id)
                     )
                     refs.append({
                         "file_id": file_id,
@@ -1114,8 +1265,8 @@ async def _prepare_current_turn_images(state: AgentState, db, user) -> list[mult
             file = await workspace_service.get_file(db, UUID(str(item.get("file_id"))))
         except (ValueError, TypeError, AttributeError):
             file = None
-        if file is None or str(file.workspace_id) != str(state.get("workspace_id") or ""):
-            raise ValueError("图片附件已不存在或不属于当前工作空间")
+        if file is None:
+            raise ValueError("图片附件已不存在或无权访问")
         workspace = await workspace_service.get_workspace(db, file.workspace_id)
         if workspace is None or user is None or not (
             await workspace_permission_service.capabilities(db, workspace, user)
@@ -1389,6 +1540,10 @@ async def _build_tools(
                 "type": "array", "items": {"type": "string"},
                 "description": "工作空间输入文件 UUID；未传时使用本轮聊天附件",
             })
+            properties.setdefault("target_workspace_id", {
+                "type": "string",
+                "description": "输出目标；省略时写入个人空间，点名且有写权限时可写共享空间",
+            })
             params["properties"] = properties
             tools.append({"type": "function", "function": {
                 "name": tool_name,
@@ -1487,6 +1642,10 @@ async def _build_tools(
                         "type": "array", "items": {"type": "string"},
                         "description": "工作空间输入文件 UUID；省略时使用本轮附件",
                     },
+                    "target_workspace_id": {
+                        "type": "string",
+                        "description": "输出目标；省略时写入个人空间，点名且有写权限时可写共享空间",
+                    },
                 }, "required": ["skill_id", "script_path"]},
             }})
         tool_names = ["load_skill", "read_skill_resource"]
@@ -1539,6 +1698,7 @@ async def _execute_code_skill(
     deps = get_deps()
     db = deps["db"]
     user = deps.get("user")
+    user = await _fresh_user_principal(db, user)
     folder: SkillFolder = entry["folder"]
     version: SkillVersion = entry["version"]
     if user is None or not skill_scope_service.user_can_use_folder(user, folder):
@@ -1564,14 +1724,14 @@ async def _execute_code_skill(
             return json.dumps({"status": "error", "error": "Agent Skills are not enabled for this organization"})
     if state.get("exec_mode") != "craft":
         return json.dumps({"status": "error", "error": "请切换到 Craft 模式执行代码 Skill"}, ensure_ascii=False)
-    ws_id = state.get("workspace_id")
-    if not ws_id:
-        return json.dumps({"status": "error", "error": "请先绑定工作空间"}, ensure_ascii=False)
-    ws = await workspace_service.get_workspace(db, UUID(ws_id))
-    if ws is None or not (await workspace_permission_service.capabilities(db, ws, user))["read"]:
-        return json.dumps({"status": "error", "error": "Workspace is unavailable"})
     params = dict(params)
     requested_ids = params.pop("input_file_ids", None) or state.get("referenced_file_ids") or []
+    ws, user, workspace_error = await _resolve_tool_workspace(
+        state, params, user, capability="create", parameter="target_workspace_id",
+    )
+    params.pop("target_workspace_id", None)
+    if workspace_error:
+        return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
     if script_path is not None:
         platform = version.manifest.get("_platform") if isinstance(version.manifest, dict) else None
         allowed_scripts = {
@@ -1583,11 +1743,8 @@ async def _execute_code_skill(
     inputs: list[dict] = []
     valid_ids: list[str] = []
     for value in requested_ids:
-        try:
-            file = await workspace_service.get_file(db, UUID(str(value)))
-        except (ValueError, TypeError, AttributeError):
-            file = None
-        if file is None or str(file.workspace_id) != str(ws.id):
+        file, user = await _authorized_input_file(state, value, user)
+        if file is None:
             return json.dumps({"status": "error", "error": f"Input file {value} is unavailable"})
         inputs.append(await _runner_input(file))
         valid_ids.append(str(file.id))
@@ -2016,6 +2173,45 @@ def _skill_catalog_prompt(state: AgentState, *, load_skill_available: bool) -> s
     return "\n\n[当前用户可用 Skill 目录]\n" + instruction + "\n" + "\n".join(lines)
 
 
+def _workspace_access_prompt(access: dict, intent: dict) -> str:
+    """Render capabilities only; never include file names or contents."""
+    roles = access.get("roles") or []
+    role_text = "、".join(str(item.get("name") or item.get("code")) for item in roles) or "无已生效角色"
+    rows: list[str] = []
+    labels = {"read": "读取", "create": "新建/上传", "update": "修改/重命名/版本恢复", "delete": "删除"}
+    for item in access.get("workspaces") or []:
+        caps = item.get("capabilities") or {}
+        allowed = [label for key, label in labels.items() if caps.get(key)]
+        source_names = sorted({
+            str(source.get("name"))
+            for values in (item.get("sources") or {}).values()
+            for source in values
+            if source.get("name")
+        })
+        rows.append(
+            f"- {item.get('name')}（workspace_id={item.get('id')}，{item.get('slug')}，{item.get('scope_type')}）："
+            f"{('、'.join(allowed) if allowed else '无权限')}"
+            f"；来源：{('、'.join(source_names) if source_names else '无')}"
+        )
+    explicit_ids = set(intent.get("read_workspace_ids") or [])
+    explicit_names = [
+        str(item.get("name")) for item in access.get("workspaces") or []
+        if str(item.get("id")) in explicit_ids
+    ]
+    ambiguity = intent.get("ambiguous_names") or []
+    return (
+        "\n\n[当前用户有效权限摘要]\n"
+        f"角色（全部角色取并集）：{role_text}\n"
+        + "\n".join(rows)
+        + "\n规则：此摘要只描述权限，不代表已扫描任何文件。用户询问能访问哪些部门或能执行什么操作时，"
+        "直接依据摘要回答，禁止调用文件列表或读取工具。个人空间是默认读写和输出位置。公司公共空间与"
+        "主部门默认只读；共享空间永远不能删除。只有用户明确要求查看/处理文件且点名共享空间，或精确引用"
+        "其中的 @文件时，才可调用文件工具。"
+        f"\n本轮服务端允许读取的目标：{('、'.join(explicit_names) if explicit_names else '无')}。"
+        + (f"\n本轮名称存在歧义：{'、'.join(ambiguity)}；必须先询问用户，不能扫描候选空间。" if ambiguity else "")
+    )
+
+
 async def prepare_dsh_turn(state: AgentState) -> dict:
     """Assemble the authorized prompt and tool catalog for the DSH coordinator.
 
@@ -2028,6 +2224,10 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
     messages: list[dict] = list(state.get("messages", []))
     traces: list[dict] = list(state.get("traces", []))
     system_prompt = state.get("system_prompt", "")
+    system_prompt = (
+        f"{system_prompt}"
+        f"{_workspace_access_prompt(state.get('effective_access') or {}, state.get('workspace_intent') or {})}"
+    )
 
     memory_context = ""
     mem_ctx = state.get("memory_context") or []
