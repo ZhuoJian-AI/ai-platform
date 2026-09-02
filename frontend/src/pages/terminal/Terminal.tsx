@@ -346,7 +346,7 @@ function restoreChat(messages: TerminalTaskMessage[]): ChatMsg[] {
       if (blocks && m.content) blocks.push({ kind: 'text', content: m.content });
       return {
         role: 'assistant' as const, content: m.content, blocks,
-        createdAt: m.created_at,
+        createdAt: m.updated_at || m.created_at,
         executionVerification: m.execution_verification, artifacts: messageArtifacts(m.metadata),
       };
     });
@@ -841,7 +841,7 @@ export default function Terminal() {
             return dbm ? { ...m, id: dbm.id, createdAt: dbm.created_at } : m;
           }
           const dbm = dbAssistants[assistantIdx++];
-          return dbm ? { ...m, createdAt: dbm.created_at } : m;
+          return dbm ? { ...m, createdAt: dbm.updated_at || dbm.created_at } : m;
         }));
       } catch { /* 回填失败不影响展示 */ }
     } catch (e) {
