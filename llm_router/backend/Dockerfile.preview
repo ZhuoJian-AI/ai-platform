@@ -1,7 +1,4 @@
-ARG AI_PLATFORM_BACKEND_DEPS_BASE
 ARG AI_PLATFORM_PYTHON_OFFICE_BASE
-FROM ${AI_PLATFORM_BACKEND_DEPS_BASE} AS python-deps
-
 FROM ${AI_PLATFORM_PYTHON_OFFICE_BASE}
 
 ARG SOURCE_COMMIT=unknown
@@ -13,8 +10,6 @@ LABEL org.opencontainers.image.revision=${SOURCE_COMMIT} \
 WORKDIR /app
 
 ENV PYTHONPATH=/app
-
-COPY --from=python-deps /usr/local /usr/local
 
 COPY . .
 

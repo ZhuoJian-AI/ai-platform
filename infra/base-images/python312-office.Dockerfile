@@ -1,4 +1,5 @@
-FROM python:3.12-slim-bookworm
+ARG AI_PLATFORM_BACKEND_DEPS_BASE
+FROM ${AI_PLATFORM_BACKEND_DEPS_BASE}
 
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' \
         /etc/apt/sources.list.d/debian.sources \
