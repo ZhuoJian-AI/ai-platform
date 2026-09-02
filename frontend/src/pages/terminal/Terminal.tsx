@@ -110,6 +110,7 @@ type Block =
 interface ChatMsg {
   role: 'user' | 'assistant';
   content: string;       // 终答文本（历史回放用；实时渲染走 blocks）
+  createdAt?: string;    // 后端消息时间；live 回合先用客户端时间，完成后再以 DB 为准
   blocks?: Block[];      // 实时执行过程（仅本轮 live 会有）
   id?: string;           // user 消息 ID（DB 回放后携带；用于按轮删除对话）
   // 该轮用户消息发送时选中的智能体名（逐次覆盖，不落库；仅本轮 live 气泡展示，历史回放无）。
@@ -118,6 +119,43 @@ interface ChatMsg {
   invokedSkills?: InvokedSkill[];
   executionVerification?: TerminalTaskMessage['execution_verification'];
   artifacts?: ArtifactOutput[];
+}
+
+function messageTimeParts(value?: string): { label: string; title: string } | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+
+  const now = new Date();
+  const sameDay = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+  const sameYear = date.getFullYear() === now.getFullYear();
+  const time = new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(date);
+  const label = sameDay
+    ? time
+    : `${sameYear ? '' : `${date.getFullYear()}-`}${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${time}`;
+  const title = new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).format(date);
+  return { label, title };
+}
+
+function MessageTimestamp({ value }: { value?: string }) {
+  const formatted = messageTimeParts(value);
+  if (!formatted) return null;
+  return (
+    <time
+      dateTime={value}
+      title={formatted.title}
+      style={{ fontSize: 11, color: '#9ca3af', fontWeight: 400, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}
+    >
+      {formatted.label}
+    </time>
+  );
 }
 
 type RuntimeUiStatus = {
@@ -298,6 +336,7 @@ function restoreChat(messages: TerminalTaskMessage[]): ChatMsg[] {
       if (m.role !== 'assistant') {
         return {
           role: 'user', content: m.content, id: m.id,
+          createdAt: m.created_at,
           attachments: messageAttachments(m.metadata),
           invokedSkills: messageInvokedSkills(m.metadata),
         };
@@ -307,6 +346,7 @@ function restoreChat(messages: TerminalTaskMessage[]): ChatMsg[] {
       if (blocks && m.content) blocks.push({ kind: 'text', content: m.content });
       return {
         role: 'assistant' as const, content: m.content, blocks,
+        createdAt: m.created_at,
         executionVerification: m.execution_verification, artifacts: messageArtifacts(m.metadata),
       };
     });
@@ -751,10 +791,11 @@ export default function Terminal() {
     // 乐观载入：立即显示用户消息 + 一个「思考中」回合，第一时间给反馈
     // 该轮若选了智能体，把智能体名挂到用户消息上，气泡内按技能 chip 同款展示（逐次覆盖、不落库）。
     const turnAgentName = selectedAgentId ? agentLabel : null;
+    const optimisticCreatedAt = new Date().toISOString();
     setChat((c) => [
       ...c,
-      { role: 'user', content: msg, agentName: turnAgentName, attachments, invokedSkills },
-      { role: 'assistant', content: '', blocks: [{ kind: 'phase', index: 0 }] },
+      { role: 'user', content: msg, createdAt: optimisticCreatedAt, agentName: turnAgentName, attachments, invokedSkills },
+      { role: 'assistant', content: '', createdAt: optimisticCreatedAt, blocks: [{ kind: 'phase', index: 0 }] },
     ]);
     setTraceLog([]);
     setRuntimeStatus(null);
@@ -787,16 +828,20 @@ export default function Terminal() {
       qc.invalidateQueries({ queryKey: ['terminal-memory'] });
       // 刷新工作空间文件清单：让本轮新生成的文件在对话正文里变为可点击
       qc.invalidateQueries({ queryKey: ['terminal-ws-files'] });
-      // 流式结束后从 DB 回填 user 消息 id 到 live chat，让该轮对话的删除按钮立即可用。
-      // 不替换 blocks——保留实时执行过程展示；仅补 id。
+      // 流式结束后从 DB 回填消息 id 和服务端时间。保留 live blocks，只同步持久化字段。
       try {
         const fresh = await terminal.getTask(taskId);
         const dbUsers = fresh.messages.filter((m) => m.role === 'user');
-        let idx = 0;
+        const dbAssistants = fresh.messages.filter((m) => m.role === 'assistant');
+        let userIdx = 0;
+        let assistantIdx = 0;
         setChat((c) => c.map((m) => {
-          if (m.role !== 'user') return m;
-          const dbm = dbUsers[idx++];
-          return dbm ? { ...m, id: dbm.id } : m;
+          if (m.role === 'user') {
+            const dbm = dbUsers[userIdx++];
+            return dbm ? { ...m, id: dbm.id, createdAt: dbm.created_at } : m;
+          }
+          const dbm = dbAssistants[assistantIdx++];
+          return dbm ? { ...m, createdAt: dbm.created_at } : m;
         }));
       } catch { /* 回填失败不影响展示 */ }
     } catch (e) {
@@ -818,7 +863,7 @@ export default function Terminal() {
       // 已有运行中 assistant 占位则不重复追加（防 useEffect 重入）
       const last = c[c.length - 1];
       if (last && last.role === 'assistant') return c;
-      return [...c, { role: 'assistant', content: '', blocks: [{ kind: 'phase', index: 0 }] }];
+      return [...c, { role: 'assistant', content: '', createdAt: new Date().toISOString(), blocks: [{ kind: 'phase', index: 0 }] }];
     });
     setTraceLog([]);
     setStreaming(true);
@@ -2836,6 +2881,7 @@ function ChatView(props: {
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                         <Avatar size={20} style={{ background: '#ede9fe', color: '#7c3aed', fontSize: 10 }}>{'我'}</Avatar>
                         <span style={{ fontSize: 12, color: '#6b7280' }}>我</span>
+                        <MessageTimestamp value={m.createdAt} />
                       </div>
                       {!!m.attachments?.length && (
                         <div style={{ display: 'grid', gap: 6, marginBottom: m.content ? 8 : 0 }}>
@@ -3050,7 +3096,7 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
   if (!hasLiveBlocks) {
     return (
       <div style={{ maxWidth: '92%' }}>
-        <AvatarHeader />
+        <AvatarHeader createdAt={msg.createdAt} />
         <div style={{ background: WB.botMsg, border: `1px solid ${WB.border}`, borderRadius: '16px 16px 16px 4px', boxShadow: '0 1px 2px rgba(0,0,0,0.04)', padding: 16 }}>
           <ExecutionStatus verification={verification} streaming={streaming} />
           <div className="wb-md">
@@ -3077,7 +3123,7 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
 
   return (
     <div style={{ maxWidth: '92%' }}>
-      <AvatarHeader streaming={streaming} />
+      <AvatarHeader streaming={streaming} createdAt={msg.createdAt} />
       <div style={{ background: WB.botMsg, border: `1px solid ${WB.border}`, borderRadius: '16px 16px 16px 4px', boxShadow: '0 1px 2px rgba(0,0,0,0.04)', padding: 16 }}>
         <ExecutionStatus verification={verification} streaming={streaming} />
 
@@ -3485,12 +3531,13 @@ function ChangesBox({ files, onLink }: { files: { path: string; generated: boole
   );
 }
 
-function AvatarHeader({ streaming }: { streaming?: boolean }) {
+function AvatarHeader({ streaming, createdAt }: { streaming?: boolean; createdAt?: string }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
       <BrandLogoSlot slot={BRAND_LOGO_SLOTS.assistantAvatar} width={28} height={28} />
       <span style={{ fontSize: 14, fontWeight: 500, color: '#1f2937' }}>灼见</span>
       {streaming && <Tag color="processing" style={{ marginInlineStart: 4, fontSize: 11 }}>live</Tag>}
+      <MessageTimestamp value={createdAt} />
     </div>
   );
 }
