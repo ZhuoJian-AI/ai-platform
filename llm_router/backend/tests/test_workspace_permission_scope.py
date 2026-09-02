@@ -10,12 +10,6 @@ from app.models.workspace import Workspace
 from app.services import scope_service, workspace_permission_service
 
 
-@pytest.fixture(autouse=True)
-def db_engine():
-    """These capability tests are intentionally database-free."""
-    yield
-
-
 def test_role_workspace_codes_add_cross_department_visibility() -> None:
     cu = SimpleNamespace(
         id="user-1",
