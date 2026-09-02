@@ -28,6 +28,7 @@ type AppDraft = Record<string, EnterpriseApplicationModuleAccess>;
 type DraftByApplication = Record<string, AppDraft>;
 type DepartmentWorkspaceAccess = { read: boolean; upload: boolean };
 type DepartmentWorkspaceDraft = Record<string, DepartmentWorkspaceAccess>;
+type SaveNotice = { type: 'info' | 'success' | 'error'; text: string };
 
 const DEPARTMENT_READ_PREFIX = 'workspace.department.read:';
 const DEPARTMENT_UPLOAD_PREFIX = 'workspace.department.upload:';
@@ -118,6 +119,7 @@ export default function EnterpriseAccessControl() {
   const [selectedOrgId, setSelectedOrgId] = useState<string>();
   const [selectedRoleId, setSelectedRoleId] = useState<string>();
   const [systemFilter, setSystemFilter] = useState<string>('all');
+  const [saveNotice, setSaveNotice] = useState<SaveNotice>();
   const [onlyGranted, setOnlyGranted] = useState(false);
   const [drafts, setDrafts] = useState<DraftByApplication>({});
   const [departmentDraft, setDepartmentDraft] = useState<DepartmentWorkspaceDraft>({});
@@ -257,20 +259,24 @@ export default function EnterpriseAccessControl() {
       ])))]);
     },
     onMutate: () => {
+      setSaveNotice({ type: 'info', text: `正在保存“${role?.name ?? '当前角色'}”的权限…` });
       message.loading({ key: 'role-permission-save', content: `正在保存“${role?.name ?? '当前角色'}”的权限…`, duration: 0 });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['enterprise-applications', orgId] });
       qc.invalidateQueries({ queryKey: ['roles', orgId] });
+      setSaveNotice({ type: 'success', text: `已保存“${role?.name}”的企业模块与部门工作空间权限` });
       message.success({
         key: 'role-permission-save',
         content: `已保存“${role?.name}”的企业模块与部门工作空间权限`,
         duration: 3,
       });
     },
-    onError: error => message.error({
-      key: 'role-permission-save', content: `保存失败：${errorText(error)}`, duration: 6,
-    }),
+    onError: error => {
+      const text = `保存失败：${errorText(error)}`;
+      setSaveNotice({ type: 'error', text });
+      message.error({ key: 'role-permission-save', content: text, duration: 6 });
+    },
   });
 
   const updatePage = (
@@ -449,6 +455,14 @@ export default function EnterpriseAccessControl() {
     />
 
     <div className="permission-page">
+      {saveNotice && <Alert
+        type={saveNotice.type}
+        showIcon
+        closable
+        message={saveNotice.text}
+        onClose={() => setSaveNotice(undefined)}
+        data-testid="role-permission-save-status"
+      />}
       <Alert
         type="info" showIcon
         message="鉴权后聚合：员工只会看到其角色已获授权的系统、业务子模块和页面"
