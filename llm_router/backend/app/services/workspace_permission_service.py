@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.user_auth import CurrentUser
 from app.models.workspace import Workspace
 from app.services.scope_service import department_scope_ids
-from app.services.skill_scope_service import managed_scopes
 
 
 async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) -> dict[str, bool]:
@@ -20,26 +19,26 @@ async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) 
     cross_tenant = str(workspace.organization_id) != str(getattr(cu, "organization_id", None))
     if cross_tenant or getattr(workspace, "deleted_at", None) is not None:
         return {"read": False, "create": False, "manage": False, "publish": False}
-    if getattr(cu, "role", "member") == "admin":
-        return {"read": True, "create": True, "manage": True, "publish": True}
-
     scope_type = getattr(workspace, "scope_type", "organization")
     scope_id = str(getattr(workspace, "scope_id", None) or "")
     own = scope_type == "user" and scope_id == str(getattr(cu, "id", ""))
     department_ids = department_scope_ids(cu)
-    department_id = getattr(cu, "department_id", None)
     team_id = getattr(cu, "team_id", None)
     same_department = scope_type == "department" and scope_id in department_ids
     same_team = scope_type == "team" and bool(team_id) and scope_id == str(team_id)
     org = scope_type == "organization"
-    can_read = own or same_department or same_team or org
-    can_create = own or same_department or same_team
-    can_manage = own or (scope_type, scope_id or None) in await managed_scopes(db, cu)
+    # Terminal work is always personal. Department/team/organization
+    # workspaces remain readable as shared reference libraries, but neither a
+    # member, a scope manager nor an administrator may mutate them from the
+    # end-user terminal. Administrative maintenance uses the separate admin
+    # workspace API and its own authorization path.
+    terminal_admin = getattr(cu, "role", "member") == "admin"
+    can_read = terminal_admin or own or same_department or same_team or org
     return {
         "read": can_read,
-        "create": can_create or can_manage,
-        "manage": can_manage,
-        "publish": own and bool(department_id or team_id),
+        "create": own,
+        "manage": own,
+        "publish": False,
     }
 
 

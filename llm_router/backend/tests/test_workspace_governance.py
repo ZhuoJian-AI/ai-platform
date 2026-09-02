@@ -97,10 +97,10 @@ async def test_member_capabilities_and_cross_tenant_are_consistent(db_session):
     cu, personal, department_ws, organization_ws, foreign_ws = await _tenant(db_session)
 
     assert await workspace_permission_service.capabilities(db_session, personal, cu) == {
-        "read": True, "create": True, "manage": True, "publish": True,
+        "read": True, "create": True, "manage": True, "publish": False,
     }
     assert await workspace_permission_service.capabilities(db_session, department_ws, cu) == {
-        "read": True, "create": True, "manage": False, "publish": False,
+        "read": True, "create": False, "manage": False, "publish": False,
     }
     assert await workspace_permission_service.capabilities(db_session, organization_ws, cu) == {
         "read": True, "create": False, "manage": False, "publish": False,
@@ -112,7 +112,7 @@ async def test_member_capabilities_and_cross_tenant_are_consistent(db_session):
 
 
 @pytest.mark.asyncio
-async def test_publish_keeps_personal_original_and_never_silently_overwrites(db_session):
+async def test_terminal_cannot_publish_into_shared_workspace(db_session):
     cu, personal, department_ws, _, _ = await _tenant(db_session)
     source = await workspace_service.upsert_file(
         db_session,
@@ -120,22 +120,13 @@ async def test_publish_keeps_personal_original_and_never_silently_overwrites(db_
         WorkspaceFileCreate(path="report.txt", content="personal-v1"),
         created_by_user_id=cu.id,
     )
-    first = await workspace_governance_service.publish_file(
-        db_session, personal, source, department_ws, cu, None,
-    )
-    second = await workspace_governance_service.publish_file(
-        db_session, personal, source, department_ws, cu, None,
-    )
-
+    with pytest.raises(HTTPException) as exc:
+        await workspace_governance_service.publish_file(
+            db_session, personal, source, department_ws, cu, None,
+        )
+    assert exc.value.status_code == 403
     assert source.workspace_id == personal.id
     assert source.deleted_at is None
-    assert first.path == "report.txt"
-    assert second.path != first.path
-    assert second.path.startswith("report-")
-    assert first.current_version_id is not None
-    assert second.current_version_id is not None
-    assert WorkspaceFileRead.model_validate(first).updated_at is not None
-    assert WorkspaceFileRead.model_validate(second).updated_at is not None
 
 
 @pytest.mark.asyncio

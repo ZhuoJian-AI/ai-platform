@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { ReactNode } from 'react';
-import { Drawer, Select, Typography, Space, Tag, Empty, TreeSelect, Divider } from 'antd';
-import type { TaskConfig, TerminalResources, TerminalAgent, TerminalModels, Workspace } from '../../api/client';
+import { Drawer, Select, Typography, Space, Tag, Empty, Divider } from 'antd';
+import type { TaskConfig, TerminalResources, TerminalAgent, TerminalModels } from '../../api/client';
 
 interface Props {
   open: boolean;
@@ -20,63 +19,32 @@ interface Props {
   onAgentChange: (id: string | null) => void;
 }
 
-const SCOPE_OPTIONS = [
-  { label: '组织级', value: 'organization' },
-  { label: '部门级', value: 'department' },
-  { label: '团队级', value: 'team' },
-  { label: '个人级', value: 'user' },
-];
-
-const SCOPE_LABEL: Record<string, string> = Object.fromEntries(
-  SCOPE_OPTIONS.map((o) => [o.value, o.label]),
-);
-
 /** 任务资源配置抽屉：工作空间 / 模型。
 
  * RAG 固定绑定在智能体；智能体 Skill 是默认推荐，聊天仍可按当前轮选择其他有权 Skill。
  */
 export default function TaskConfigDrawer({ open, onApply, resources, config, models, modelCapabilities, visionFallbackAvailable, imageGenerationAvailable, agents, agentId, onAgentChange }: Props) {
   const [local, setLocal] = useState<TaskConfig>(config);
+  const personalWorkspace = useMemo(() => (
+    resources?.workspaces.find((workspace) => workspace.id === resources.defaults?.workspace_id)
+      ?? resources?.workspaces.find((workspace) => workspace.scope_type === 'user')
+  ), [resources]);
 
   useEffect(() => {
     if (open) {
-      setLocal(config);
+      setLocal({ ...config, workspace_id: personalWorkspace?.id ?? null });
     }
-  }, [open, config]);
+  }, [open, config, personalWorkspace?.id]);
 
   const update = (patch: Partial<TaskConfig>) => setLocal((c) => ({ ...c, ...patch }));
 
-  const apply = () => onApply(local);
+  const apply = () => onApply({ ...local, workspace_id: personalWorkspace?.id ?? null });
 
   // 模型下拉：直接列用户权限范围内 API Key 允许的全部模型（embedding 已在后端过滤）
   const modelOptions = models.map((m) => ({
     value: m,
     label: modelCapabilities?.[m]?.vision ? `${m}（视觉）` : m,
   }));
-
-  // 工作空间树：用户权限可见的工作空间按 scope 层级（组织→部门→团队→个人）嵌套成单链。
-  // 用户至多见每层一个工作空间，构成一条路径；value = workspace.id。
-  const wsTreeData = useMemo(() => {
-    const rank: Record<string, number> = { organization: 0, department: 1, team: 2, user: 3 };
-    const items = (resources?.workspaces ?? [])
-      .slice()
-      .sort((a, b) => (rank[a.scope_type] ?? 9) - (rank[b.scope_type] ?? 9));
-    const labelOf = (w: Workspace): ReactNode => (
-      <Space size="small">
-        <span>{w.name}</span>
-        <Tag color="blue">{SCOPE_LABEL[w.scope_type] ?? w.scope_type}</Tag>
-      </Space>
-    );
-    interface WsTreeNode { value: string; title: ReactNode; children?: WsTreeNode[] }
-    let root: WsTreeNode | null = null;
-    let cursor: WsTreeNode | null = null;
-    for (const w of items) {
-      const node: WsTreeNode = { value: w.id, title: labelOf(w) };
-      if (!root || !cursor) { root = node; cursor = node; }
-      else { cursor.children = [node]; cursor = node; }
-    }
-    return root ? [root] : [];
-  }, [resources?.workspaces]);
 
   return (
     <Drawer
@@ -91,15 +59,15 @@ export default function TaskConfigDrawer({ open, onApply, resources, config, mod
       </Typography.Text>
 
       <Divider orientation="left">工作空间</Divider>
-      <TreeSelect
-        style={{ width: '100%' }} allowClear showSearch treeNodeFilterProp="title"
-        treeDefaultExpandAll
-        placeholder="选择工作空间（可读写其中文件）"
-        value={local.workspace_id ?? undefined}
-        onChange={(v) => update({ workspace_id: (v as string) ?? null })}
-        treeData={wsTreeData}
-        notFoundContent="当前作用域下无可用工作空间"
-      />
+      <div style={{ padding: '10px 12px', background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8 }}>
+        <Space>
+          <span>{personalWorkspace?.name ?? '尚未创建个人工作空间'}</span>
+          <Tag color="blue">个人</Tag>
+        </Space>
+        <Typography.Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>
+          任务和 AI 文件操作固定在个人工作空间；部门与企业资源只能按权限读取，不能在此直接改写。
+        </Typography.Text>
+      </div>
 
       <Divider orientation="left">模型</Divider>
       <Select

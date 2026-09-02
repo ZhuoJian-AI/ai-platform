@@ -554,13 +554,12 @@ async def create_task_endpoint(
         await enterprise_application_service.assert_application_permission(
             db, data.config.application_id, cu, "view",
         )
-    # 未显式选择工作空间/模型时，填入用户默认（个人工作空间 + 最近一次使用的模型）。
-    if data.config.workspace_id is None or data.config.model_alias is None:
-        defaults = await _user_defaults(db, cu)
-        if data.config.workspace_id is None:
-            data.config.workspace_id = defaults["workspace_id"]
-        if data.config.model_alias is None:
-            data.config.model_alias = defaults["model_alias"]
+    # 终端任务始终绑定用户个人工作空间。调用方不能通过手工构造请求把
+    # AI 的写入范围提升到部门、团队或企业工作空间。
+    defaults = await _user_defaults(db, cu)
+    data.config.workspace_id = defaults["workspace_id"]
+    if data.config.model_alias is None:
+        data.config.model_alias = defaults["model_alias"]
     task = await task_service.create_task(
         db, org_id=cu.organization_id, user_id=cu.id,
         department_id=cu.department_id, team_id=cu.team_id, data=data,
@@ -605,6 +604,8 @@ async def update_task_endpoint(
         await enterprise_application_service.assert_application_permission(
             db, data.config.application_id, cu, "view",
         )
+    if data.config is not None:
+        data.config.workspace_id = (await _user_defaults(db, cu))["workspace_id"]
     await task_service.update_task(db, task, data)
     await db.commit()
     return task
@@ -674,7 +675,7 @@ async def run_task_endpoint(
     """运行通用智能体。stream=true 返回 SSE，否则返回最终结果。"""
     task = await _get_owned_task(db, task_id, cu)
     assert_user_write(cu)
-    # 旧任务 config 可能缺 workspace_id，运行时按用户默认补齐。
+    # 历史任务可能绑定过共享工作空间；运行时一律收敛到个人工作空间。
     # 模型必须显式选择（创建时未选且无最近使用默认则空）——不选模型不允许执行。
     provided = data.model_dump(exclude_unset=True)
     cfg = _merge_application_run_context(
@@ -683,6 +684,8 @@ async def run_task_endpoint(
         application_id=data.application_id,
         page_context=data.page_context,
     )
+    defaults = await _user_defaults(db, cu)
+    cfg["workspace_id"] = defaults["workspace_id"]
     if cfg.get("application_id"):
         application, application_permissions = await enterprise_application_service.assert_application_permission(
             db, cfg["application_id"], cu, "view",
@@ -715,12 +718,9 @@ async def run_task_endpoint(
     persisted_cfg = dict(task.config or {})
     persisted_cfg["application_id"] = cfg.get("application_id")
     persisted_cfg["page_context"] = dict(cfg.get("page_context") or {})
+    persisted_cfg["workspace_id"] = cfg.get("workspace_id")
     task.config = persisted_cfg
     await db.flush()
-    if not cfg.get("workspace_id"):
-        defaults = await _user_defaults(db, cu)
-        if defaults["workspace_id"]:
-            cfg["workspace_id"] = defaults["workspace_id"]
     if not cfg.get("model_alias"):
         raise HTTPException(status_code=400, detail="请先选择模型后再执行任务")
     attachment_files = await _resolve_task_attachments(
