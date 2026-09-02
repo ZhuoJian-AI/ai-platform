@@ -1534,10 +1534,10 @@ export interface WorkspaceAuditEvent {
   metadata: Record<string, unknown>; created_at: string;
 }
 
-// Keep the SaaS API out of the large-file data path. Files above 1MB go
-// directly from the browser to OSS, reducing one full network hop and freeing
-// backend workers for metadata validation and parsing.
-const WORKSPACE_PROXY_UPLOAD_BYTES = 1 * 1024 * 1024;
+// Keep the SaaS API out of the file data path. Every non-empty browser upload
+// goes directly to OSS after the API has authorised and signed the request.
+// The legacy proxy is retained only for zero-byte files, which OSS direct
+// upload sessions intentionally reject.
 export const WORKSPACE_MAX_FILE_BYTES = 5 * 1024 * 1024 * 1024;
 export const WORKSPACE_AI_PARSE_MAX_FILE_BYTES = 100 * 1024 * 1024;
 
@@ -1786,7 +1786,7 @@ async function uploadTerminalWorkspaceFile(
   wsId: string, file: File, path: string, options?: WorkspaceUploadOptions,
 ): Promise<WorkspaceFile> {
   if (file.size > WORKSPACE_MAX_FILE_BYTES) throw new ApiError(413, '文件超过 5GB 存储上限');
-  if (file.size <= WORKSPACE_PROXY_UPLOAD_BYTES) {
+  if (file.size === 0) {
     return uploadWorkspaceFile(
       `/api/v1/terminal/workspaces/${wsId}/files/upload`, file, path, USER_TOKEN_KEY, options,
     );
@@ -1839,7 +1839,7 @@ async function uploadAdminWorkspaceFile(
   wsId: string, file: File, path: string, options?: WorkspaceUploadOptions,
 ): Promise<WorkspaceFile> {
   if (file.size > WORKSPACE_MAX_FILE_BYTES) throw new ApiError(413, '文件超过 5GB 存储上限');
-  if (file.size <= WORKSPACE_PROXY_UPLOAD_BYTES) {
+  if (file.size === 0) {
     return uploadWorkspaceFile(
       `/api/v1/workspaces/${wsId}/files/upload`, file, path, 'ai_infra_token', options,
     );
