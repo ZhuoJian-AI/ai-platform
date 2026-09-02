@@ -1,7 +1,8 @@
 import { lazy, Suspense, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { Button, Empty, Spin, Typography } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
-import type { WorkspacePdfPreviewInfo } from '../../api/client';
+import type { WorkspaceFallbackPreview, WorkspacePdfPreviewInfo, WorkspacePreviewSession } from '../../api/client';
+import WorkspacePreviewSessionView from './WorkspacePreviewSessionView';
 
 const OfficeFilePreview = lazy(() => import('./OfficeFilePreview'));
 const PdfFilePreview = lazy(() => import('./PdfFilePreview'));
@@ -41,6 +42,10 @@ export interface OriginalFilePreviewProps {
   onDownload: () => void;
   loadPdfInfo?: () => Promise<WorkspacePdfPreviewInfo>;
   loadPdfPage?: (pageNumber: number) => Promise<Blob>;
+  loadPreviewSession?: () => Promise<WorkspacePreviewSession>;
+  refreshPreviewSession?: (accessToken: string, refreshToken: string, refreshContext: string) => Promise<WorkspacePreviewSession>;
+  startFallbackPreview?: () => Promise<WorkspaceFallbackPreview>;
+  getFallbackPreview?: () => Promise<WorkspaceFallbackPreview>;
 }
 
 /**
@@ -50,9 +55,27 @@ export interface OriginalFilePreviewProps {
  * the complete Office package on every open.
  */
 export default function OriginalFilePreview({
+  loadPreviewSession, refreshPreviewSession, startFallbackPreview, getFallbackPreview, ...legacyProps
+}: OriginalFilePreviewProps) {
+  if (loadPreviewSession && refreshPreviewSession && startFallbackPreview && getFallbackPreview) {
+    return (
+      <WorkspacePreviewSessionView
+        filename={legacyProps.filename}
+        onDownload={legacyProps.onDownload}
+        loadSession={loadPreviewSession}
+        refreshSession={refreshPreviewSession}
+        startFallback={startFallbackPreview}
+        getFallback={getFallbackPreview}
+      />
+    );
+  }
+  return <LegacyOriginalFilePreview {...legacyProps} />;
+}
+
+function LegacyOriginalFilePreview({
   blob, sourceUrl, sourceHeaders = EMPTY_HEADERS, mimeType, filename, loading = false, error, onDownload,
   loadPdfInfo, loadPdfPage,
-}: OriginalFilePreviewProps) {
+}: Omit<OriginalFilePreviewProps, 'loadPreviewSession' | 'refreshPreviewSession' | 'startFallbackPreview' | 'getFallbackPreview'>) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [remoteBlob, setRemoteBlob] = useState<Blob | null>(null);
   const [remoteLoading, setRemoteLoading] = useState(false);

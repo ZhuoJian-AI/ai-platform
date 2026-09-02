@@ -81,7 +81,7 @@ interface UseWorkspaceUploadQueueOptions<T> {
  * overwhelming the browser or OSS connection.
  */
 export function useWorkspaceUploadQueue<T>({
-  upload, onSuccess, onError, concurrency = 5,
+  upload, onSuccess, onError, concurrency = 2,
 }: UseWorkspaceUploadQueueOptions<T>) {
   const [items, setItems] = useState<WorkspaceUploadQueueItem[]>([]);
   const pendingRef = useRef<WorkspaceUploadQueueItem[]>([]);

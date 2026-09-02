@@ -117,7 +117,12 @@ class Settings(BaseSettings):
     workspace_max_file_bytes: int = 5 * 1024 * 1024 * 1024
     workspace_ai_parse_max_bytes: int = 100 * 1024 * 1024
     workspace_proxy_upload_max_bytes: int = 1 * 1024 * 1024
-    workspace_upload_session_ttl_seconds: int = 15 * 60
+    workspace_upload_session_ttl_seconds: int = 24 * 60 * 60
+    workspace_weboffice_enabled: bool = False
+    workspace_weboffice_max_bytes: int = 200 * 1024 * 1024
+    workspace_pdf_direct_preview_max_bytes: int = 20 * 1024 * 1024
+    workspace_preview_job_poll_seconds: float = 1.0
+    workspace_preview_job_lease_seconds: int = 15 * 60
     workspace_trash_retention_days: int = 30
 
     @property

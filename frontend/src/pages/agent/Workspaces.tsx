@@ -28,7 +28,7 @@ import {
 } from '../../components/finder/primitives';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import { WB, WB_FONT, FS } from '../../components/finder/theme';
-import OriginalFilePreview, { supportsPagedWorkspacePreview } from '../../components/files/OriginalFilePreview';
+import OriginalFilePreview from '../../components/files/OriginalFilePreview';
 import {
   useWorkspaceUploadQueue, WorkspaceUploadPicker, WorkspaceUploadQueueStatus,
 } from '../../components/files/WorkspaceUploadQueue';
@@ -308,14 +308,38 @@ export default function Workspaces() {
   const downloadBinary = async (f: WorkspaceFile) => {
     try {
       const meta = (f.metadata ?? {}) as { mime?: string; name?: string };
-      const blob = await workspaces.downloadFile(f.id);
-      const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url;
-      a.download = meta.name || basename(f.path);
+      const ticket = await workspaces.getFileDownloadTicket(f.id);
+      let target = ticket.url;
+      try {
+        const probe = await fetch(ticket.url, {
+          headers: { ...ticket.headers, Range: 'bytes=0-0' },
+        });
+        if (!probe.ok && ticket.fallback_url) target = ticket.fallback_url;
+      } catch {
+        if (ticket.fallback_url) target = ticket.fallback_url;
+      }
+      a.href = target;
+      a.download = ticket.filename || meta.name || basename(f.path);
+      a.target = '_blank';
+      a.rel = 'noopener';
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(url);
+      a.remove();
     } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        try {
+          const meta = (f.metadata ?? {}) as { name?: string };
+          const blob = await workspaces.downloadFile(f.id);
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = meta.name || basename(f.path);
+          a.click();
+          window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+          return;
+        } catch { /* report the original compatibility failure below */ }
+      }
       message.error(e instanceof ApiError ? e.message : '下载失败');
     }
   };
@@ -910,40 +934,10 @@ function FileViewer({ file, onDownload, onReparse, reparsing }: {
   const ext = extOf(file.path);
   const content = file.content ?? '';
   const [view, setView] = useState<'original' | 'ai'>('original');
-  const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
-  const [previewSourceUrl, setPreviewSourceUrl] = useState<string | null>(null);
-  const [previewSourceHeaders, setPreviewSourceHeaders] = useState<Record<string, string>>({});
-  const [previewMime, setPreviewMime] = useState<string | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
 
   useEffect(() => {
     setView('original');
-    setPreviewBlob(null);
-    setPreviewSourceUrl(null);
-    setPreviewSourceHeaders({});
-    setPreviewMime(null);
-    setPreviewError(null);
-    setPreviewLoading(false);
-    if (!meta.binary || supportsPagedWorkspacePreview(workspaceDisplayName(file))) return;
-    let cancelled = false;
-    setPreviewLoading(true);
-    workspaces.getFileOriginalPreviewSource(file.id)
-      .then(async (source) => {
-        if (cancelled) return;
-        setPreviewMime(source.mime_type);
-        if (source.mode === 'url' && source.url) {
-          setPreviewSourceUrl(source.url);
-          setPreviewSourceHeaders(source.headers || {});
-          return;
-        }
-        const blob = await workspaces.getFileOriginalPreview(file.id);
-        if (!cancelled) setPreviewBlob(blob);
-      })
-      .catch((error) => { if (!cancelled) setPreviewError((error as Error)?.message || '原文件预览加载失败'); })
-      .finally(() => { if (!cancelled) setPreviewLoading(false); });
-    return () => { cancelled = true; };
-  }, [file.id, meta.binary]);
+  }, [file.id]);
 
   // 二进制文件
   if (meta.binary) {
@@ -964,16 +958,15 @@ function FileViewer({ file, onDownload, onReparse, reparsing }: {
         <div style={{ flex: 1, minHeight: 0 }}>
           {view === 'original' && (
             <OriginalFilePreview
-              blob={previewBlob}
-              sourceUrl={previewSourceUrl}
-              sourceHeaders={previewSourceHeaders}
-              mimeType={previewMime}
+              blob={null}
               filename={workspaceDisplayName(file)}
-              loading={previewLoading}
-              error={previewError}
               onDownload={onDownload}
               loadPdfInfo={() => workspaces.getFilePdfPreviewInfo(file.id)}
               loadPdfPage={(pageNumber) => workspaces.getFilePdfPreviewPage(file.id, pageNumber)}
+              loadPreviewSession={() => workspaces.createFilePreviewSession(file.id)}
+              refreshPreviewSession={(accessToken, refreshToken, refreshContext) => workspaces.refreshFilePreviewSession(file.id, accessToken, refreshToken, refreshContext)}
+              startFallbackPreview={() => workspaces.startFileFallbackPreview(file.id)}
+              getFallbackPreview={() => workspaces.getFileFallbackPreview(file.id)}
             />
           )}
           {view === 'ai' && hasAiContent && (

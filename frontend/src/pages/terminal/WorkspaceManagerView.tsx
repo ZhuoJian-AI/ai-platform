@@ -849,6 +849,11 @@ export default function WorkspaceManagerView({
         loadPdfPreviewInfo={terminal.getWsFilePdfPreviewInfo}
         loadPdfPreviewPage={terminal.getWsFilePdfPreviewPage}
         loadOriginalFile={terminal.downloadWsFile}
+        loadDownloadTicket={terminal.getWsFileDownloadTicket}
+        loadPreviewSession={terminal.createWsFilePreviewSession}
+        refreshPreviewSession={terminal.refreshWsFilePreviewSession}
+        startFallbackPreview={terminal.startWsFileFallbackPreview}
+        getFallbackPreview={terminal.getWsFileFallbackPreview}
       />
 
       {/* 新建文件夹 */}

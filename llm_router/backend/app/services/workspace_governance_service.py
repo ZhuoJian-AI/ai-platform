@@ -24,6 +24,7 @@ from app.models.workspace import (
     WorkspaceAuditEvent,
     WorkspaceFile,
     WorkspaceFileVersion,
+    WorkspacePreviewJob,
     WorkspaceShareLink,
     WorkspaceUploadSession,
 )
@@ -547,6 +548,11 @@ async def purge_expired(db: AsyncSession) -> int:
         if active_shares:
             continue
         refs = {str(version.content_ref) for version in await list_versions(db, file) if version.content_ref}
+        preview_refs = (await db.execute(select(WorkspacePreviewJob.output_ref).where(
+            WorkspacePreviewJob.workspace_file_id == file.id,
+            WorkspacePreviewJob.output_ref.is_not(None),
+        ))).scalars().all()
+        refs.update(str(ref) for ref in preview_refs if ref)
         if file.content_ref:
             refs.add(str(file.content_ref))
         can_purge = True

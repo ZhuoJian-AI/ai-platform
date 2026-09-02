@@ -7,6 +7,7 @@ gateway for short-lived, project-scoped signed URLs and stores only an opaque
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -16,9 +17,9 @@ import httpx
 from app.config import settings
 
 OSS_REF_PREFIX = "oss://"
-WORKSPACE_MULTIPART_THRESHOLD_BYTES = 100 * 1024 * 1024
-WORKSPACE_MULTIPART_PART_BYTES = 100 * 1024 * 1024
-WORKSPACE_WEAK_NETWORK_PART_BYTES = 1 * 1024 * 1024
+WORKSPACE_MULTIPART_THRESHOLD_BYTES = 8 * 1024 * 1024
+WORKSPACE_MULTIPART_PART_BYTES = 8 * 1024 * 1024
+WORKSPACE_WEAK_NETWORK_PART_BYTES = 2 * 1024 * 1024
 STORAGE_AUTHORIZATION_SUBJECT = "ai-platform-control-plane"
 
 
@@ -170,15 +171,17 @@ async def upload_skill_archive(raw: bytes, *, organization_id: str, package_hash
 
 async def sign_browser_upload(
     *, filename: str, content_type: str, size_bytes: int, weak_network: bool = False,
+    max_allowed_bytes: int | None = None,
 ) -> dict:
     """Create a browser upload policy or multipart session without exposing credentials."""
-    if size_bytes <= 0 or size_bytes > settings.workspace_max_file_bytes:
+    limit = settings.workspace_max_file_bytes if max_allowed_bytes is None else max_allowed_bytes
+    if size_bytes <= 0 or size_bytes > limit:
         raise StorageGatewayError("Object size is outside the configured workspace limit")
     try:
         async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
             path = (
                 "/v1/multipart/initiate"
-                if size_bytes > WORKSPACE_MULTIPART_THRESHOLD_BYTES
+                if size_bytes >= WORKSPACE_MULTIPART_THRESHOLD_BYTES
                 else "/v1/uploads/sign"
             )
             response = await client.post(
@@ -338,6 +341,79 @@ async def sign_service_upload(*, filename: str, content_type: str, size_bytes: i
         raise StorageGatewayError("OSS service upload signing failed") from exc
 
 
+async def upload_path(
+    source: Path, *, filename: str, content_type: str, max_bytes: int,
+) -> str:
+    """Stream a worker artifact to OSS without materializing it in API memory."""
+    try:
+        size_bytes = source.stat().st_size
+    except OSError as exc:
+        raise StorageGatewayError("Service artifact is unavailable") from exc
+    if size_bytes <= 0 or size_bytes > max_bytes:
+        raise StorageGatewayError("Service artifact size is outside the configured limit")
+    signed = await sign_browser_upload(
+        filename=filename, content_type=content_type, size_bytes=size_bytes,
+        max_allowed_bytes=max_bytes,
+    )
+    content_ref = f"{OSS_REF_PREFIX}{signed['object_key']}"
+    gateway_session_id = str(signed.get("gateway_session_id") or "")
+
+    def _put(url: str, headers: dict[str, str], offset: int, length: int) -> str:
+        with source.open("rb") as handle, httpx.Client(
+            timeout=httpx.Timeout(settings.storage_gateway_timeout_seconds, write=300),
+            trust_env=False,
+        ) as client:
+            handle.seek(offset)
+            chunk = handle.read(length)
+            if len(chunk) != length:
+                raise OSError("preview artifact changed during upload")
+            response = client.put(url, headers=headers, content=chunk)
+            response.raise_for_status()
+            return response.headers.get("etag", "").strip('"')
+
+    try:
+        if signed["method"] == "MULTIPART":
+            if not gateway_session_id:
+                raise StorageGatewayError("OSS multipart session is missing")
+            part_size = int(signed["part_size"])
+            expected_parts = int(signed["expected_parts"])
+            receipts: list[dict] = []
+            for part_number in range(1, expected_parts + 1):
+                offset = (part_number - 1) * part_size
+                length = min(part_size, size_bytes - offset)
+                part = await sign_multipart_part(gateway_session_id, part_number)
+                etag = await asyncio.to_thread(
+                    _put,
+                    _internal_signed_url(str(part["url"])),
+                    {str(k): str(v) for k, v in (part.get("headers") or {}).items()},
+                    offset,
+                    length,
+                )
+                if not etag:
+                    raise StorageGatewayError("OSS multipart ETag is missing")
+                receipts.append({"part_number": part_number, "etag": etag})
+            await complete_multipart_upload(gateway_session_id, receipts)
+        else:
+            await asyncio.to_thread(
+                _put,
+                _internal_signed_url(str(signed["url"])),
+                {str(k): str(v) for k, v in (signed.get("headers") or {}).items()},
+                0,
+                size_bytes,
+            )
+        actual = await inspect_object(content_ref)
+    except (httpx.HTTPError, OSError, StorageGatewayError) as exc:
+        if gateway_session_id:
+            try:
+                await abort_multipart_upload(gateway_session_id)
+            except StorageGatewayError:
+                pass
+        raise StorageGatewayError("OSS service artifact upload failed") from exc
+    if int(actual.get("size") or -1) != size_bytes:
+        raise StorageGatewayError("OSS service artifact size verification failed")
+    return content_ref
+
+
 async def inspect_object(content_ref: str) -> dict:
     """Verify an uploaded object through a signed ranged GET.
 
@@ -388,7 +464,12 @@ async def get_signed_download(content_ref: str) -> dict:
         raise StorageGatewayError("OSS download signing failed") from exc
 
 
-async def get_browser_signed_download(content_ref: str, *, expires_in_seconds: int = 15 * 60) -> dict:
+async def get_browser_signed_download(
+    content_ref: str,
+    *,
+    expires_in_seconds: int = 15 * 60,
+    filename: str | None = None,
+) -> dict:
     """Issue a short-lived public URL for an authenticated browser preview.
 
     Internal workers use :func:`get_signed_download`, which rewrites the OSS
@@ -402,7 +483,11 @@ async def get_browser_signed_download(content_ref: str, *, expires_in_seconds: i
             response = await client.post(
                 _gateway_url("/v1/downloads/sign"),
                 headers=_auth_headers(),
-                json={"object_key": object_key, "expires_in_seconds": expires_in_seconds},
+                json={
+                    "object_key": object_key,
+                    "expires_in_seconds": expires_in_seconds,
+                    **({"filename": filename} if filename else {}),
+                },
             )
             response.raise_for_status()
             payload = response.json()
@@ -415,6 +500,74 @@ async def get_browser_signed_download(content_ref: str, *, expires_in_seconds: i
             }
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise StorageGatewayError("OSS browser preview signing failed") from exc
+
+
+async def generate_weboffice_token(
+    content_ref: str, *, filename: str, user_id: str, user_name: str = "WorkspaceUser",
+) -> dict:
+    """Generate one read-only IMM session for the already-authorized actor."""
+    object_key = object_key_from_ref(content_ref)
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.storage_gateway_timeout_seconds, trust_env=False,
+        ) as client:
+            response = await client.post(
+                _gateway_url("/v1/weboffice/tokens"),
+                headers=_auth_headers(),
+                json={
+                    "object_key": object_key,
+                    "filename": filename,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return {
+                "weboffice_url": str(payload["weboffice_url"]),
+                "access_token": str(payload["access_token"]),
+                "refresh_token": str(payload["refresh_token"]),
+                "access_token_expired_time": str(payload["access_token_expired_time"]),
+                "refresh_token_expired_time": str(payload["refresh_token_expired_time"]),
+                "refresh_context": str(payload["refresh_context"]),
+            }
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("WebOffice session creation failed") from exc
+
+
+async def refresh_weboffice_token(
+    content_ref: str, *, access_token: str, refresh_token: str, refresh_context: str,
+    user_id: str,
+) -> dict:
+    """Refresh an IMM session only after the business API reauthorizes the file."""
+    object_key = object_key_from_ref(content_ref)
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.storage_gateway_timeout_seconds, trust_env=False,
+        ) as client:
+            response = await client.post(
+                _gateway_url("/v1/weboffice/tokens/refresh"),
+                headers=_auth_headers(),
+                json={
+                    "object_key": object_key,
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "refresh_context": refresh_context,
+                    "user_id": user_id,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return {
+                "weboffice_url": payload.get("weboffice_url"),
+                "access_token": str(payload["access_token"]),
+                "refresh_token": str(payload["refresh_token"]),
+                "access_token_expired_time": str(payload["access_token_expired_time"]),
+                "refresh_token_expired_time": str(payload["refresh_token_expired_time"]),
+                "refresh_context": str(payload["refresh_context"]),
+            }
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("WebOffice session refresh failed") from exc
 
 
 async def stream_signed_download(

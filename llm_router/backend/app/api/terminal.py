@@ -5,13 +5,13 @@
 """
 
 import asyncio
+import hashlib
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     File,
     Form,
@@ -92,6 +92,7 @@ from app.schemas.workspace import (
     WorkspaceBulkDeleteRequest,
     WorkspaceBulkDeleteResult,
     WorkspaceDownloadTicketRead,
+    WorkspaceFallbackPreviewRead,
     WorkspaceFileCreate,
     WorkspaceFilePage,
     WorkspaceFilePreviewRead,
@@ -100,6 +101,8 @@ from app.schemas.workspace import (
     WorkspaceFolderCreate,
     WorkspaceFolderRead,
     WorkspaceOriginalPreviewSourceRead,
+    WorkspacePreviewSessionRead,
+    WorkspacePreviewSessionRefresh,
     WorkspacePublishRequest,
     WorkspaceRead,
     WorkspaceShareCreate,
@@ -124,6 +127,7 @@ from app.services import (
     workspace_governance_service,
     workspace_pdf_preview_service,
     workspace_permission_service,
+    workspace_preview_session_service,
     workspace_service,
 )
 from app.services.agent_service import (
@@ -914,9 +918,10 @@ async def upload_ws_file_endpoint(
     status_code=201,
 )
 async def initiate_ws_upload_endpoint(
-    ws_id: UUID, data: WorkspaceUploadInitiate,
+    ws_id: UUID, data: WorkspaceUploadInitiate, response: Response,
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
+    response.headers["Cache-Control"] = "private, no-store"
     ws = await _get_visible_workspace(db, ws_id, cu)
     session = await workspace_governance_service.initiate_direct_upload(db, ws, cu, data)
     upload_meta = dict(session.upload_headers or {})
@@ -939,7 +944,6 @@ async def initiate_ws_upload_endpoint(
 )
 async def complete_ws_upload_endpoint(
     session_id: UUID, data: WorkspaceUploadComplete,
-    background_tasks: BackgroundTasks,
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
     session = await db.get(WorkspaceUploadSession, session_id)
@@ -953,7 +957,6 @@ async def complete_ws_upload_endpoint(
         parts=[part.model_dump() for part in data.parts],
     )
     await db.commit()
-    background_tasks.add_task(workspace_pdf_preview_service.warm_office_preview, str(file.id))
     return file
 
 
@@ -976,9 +979,11 @@ async def status_ws_upload_endpoint(
 async def sign_ws_upload_part_endpoint(
     session_id: UUID,
     part_number: int,
+    response: Response,
     cu: CurrentUser = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
+    response.headers["Cache-Control"] = "private, no-store"
     session = await db.get(WorkspaceUploadSession, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="上传会话不存在")
@@ -1115,7 +1120,7 @@ async def download_ticket_ws_file_endpoint(
     try:
         filename, mime_type = source_metadata(f)
         signed = await storage_gateway_service.get_browser_signed_download(
-            str(f.content_ref), expires_in_seconds=15 * 60,
+            str(f.content_ref), expires_in_seconds=15 * 60, filename=filename,
         )
     except OriginalPreviewError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1133,6 +1138,95 @@ async def download_ticket_ws_file_endpoint(
         size=int(f.size or 0),
         headers={str(k): str(v) for k, v in (signed.get("headers") or {}).items()},
     )
+
+
+@router.post(
+    "/terminal/files/{file_id}/preview-session", response_model=WorkspacePreviewSessionRead,
+)
+async def preview_session_ws_file_endpoint(
+    file_id: UUID, response: Response, cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
+    try:
+        actor = hashlib.sha256(f"user:{cu.id}".encode()).hexdigest()[:15]
+        result = await workspace_preview_session_service.create_preview_session(
+            db, f, weboffice_user_id=actor,
+        )
+        await db.commit()
+        return WorkspacePreviewSessionRead(**result)
+    except OriginalPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except storage_gateway_service.StorageGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post(
+    "/terminal/files/{file_id}/preview-session/refresh",
+    response_model=WorkspacePreviewSessionRead,
+)
+async def refresh_preview_session_ws_file_endpoint(
+    file_id: UUID, data: WorkspacePreviewSessionRefresh, response: Response,
+    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
+    try:
+        actor = hashlib.sha256(f"user:{cu.id}".encode()).hexdigest()[:15]
+        token = await workspace_preview_session_service.refresh_preview_session(
+            f, access_token=data.access_token, refresh_token=data.refresh_token,
+            refresh_context=data.refresh_context, weboffice_user_id=actor,
+        )
+        filename, mime_type = source_metadata(f)
+        return WorkspacePreviewSessionRead(
+            mode="weboffice", filename=filename, mime_type=mime_type,
+            size=int(f.size or 0), **token,
+        )
+    except OriginalPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except storage_gateway_service.StorageGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post(
+    "/terminal/files/{file_id}/fallback-preview", response_model=WorkspaceFallbackPreviewRead,
+)
+@router.get(
+    "/terminal/files/{file_id}/fallback-preview", response_model=WorkspaceFallbackPreviewRead,
+)
+async def fallback_preview_ws_file_endpoint(
+    file_id: UUID, response: Response, cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
+    try:
+        result = await workspace_preview_session_service.fallback_status(db, f)
+        await db.commit()
+        return WorkspaceFallbackPreviewRead(**result)
+    except OriginalPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except storage_gateway_service.StorageGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/terminal/files/{file_id}/pdf-preview/info")
