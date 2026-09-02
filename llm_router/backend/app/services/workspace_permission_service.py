@@ -54,11 +54,13 @@ async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) 
     department_read, department_upload = _department_workspace_access(cu, scope_id)
     same_department = scope_type == "department" and department_read
     same_team = scope_type == "team" and bool(team_id) and scope_id == str(team_id)
+    same_organization = scope_type == "organization"
     # Terminal work is personal by default.  Shared department workspaces are
     # readable for the home department and for departments explicitly granted
-    # to a role.  Shared writes are never inferred from administrator status or
-    # the legacy role data-scope field.
-    can_read = own or same_department or same_team
+    # to a role.  The organization workspace is a company-wide read-only area.
+    # Shared writes are never inferred from administrator status or the legacy
+    # role data-scope field.
+    can_read = own or same_department or same_team or same_organization
     can_write_department = scope_type == "department" and department_upload
     return {
         "read": can_read,
