@@ -46,6 +46,19 @@ logger = structlog.get_logger()
 _SSE_HEADERS = {
     "cache-control": "no-cache", "connection": "keep-alive", "x-accel-buffering": "no",
 }
+_FILE_OUTPUT_ACTIONS = {
+    "spreadsheet_tool": {"create", "edit", "convert"},
+    "document_tool": {"create", "edit", "convert"},
+    "presentation_tool": {"create", "edit", "convert"},
+    "pdf_tool": {"create", "edit", "convert"},
+    "text_tool": {"create", "edit", "convert"},
+    "image_tool": {"convert", "resize", "crop", "compress"},
+    "archive_tool": {"create", "extract"},
+}
+_FILE_DELIVERY_TERMS = (
+    "处理", "生成", "创建", "导出", "转换", "保存", "修改", "编辑",
+    "process", "generate", "create", "export", "convert", "save", "edit",
+)
 
 
 class DshRunError(RuntimeError):
@@ -78,6 +91,31 @@ def _tool_specs(tools: list[dict]) -> list[dict]:
                 "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
             })
     return result
+
+
+def _requires_skill_file_delivery(state: dict) -> bool:
+    """Return whether this turn explicitly asks an invoked Skill to deliver a file."""
+    request = str(state.get("request") or "").lower()
+    return bool(
+        (state.get("exec_mode") or "craft") == "craft"
+        and state.get("attachment_files")
+        and state.get("invoked_skill_ids")
+        and any(term in request for term in _FILE_DELIVERY_TERMS)
+    )
+
+
+def _is_file_output_tool(state: dict, name: str, arguments: Any) -> bool:
+    if name in {"workspace_write_file", "image_generation_tool"}:
+        return True
+    entry = (state.get("_dsh_tool_registry") or {}).get(name) or {}
+    if entry.get("kind") == "run_skill_script":
+        return True
+    if not isinstance(arguments, dict):
+        try:
+            arguments = json.loads(str(arguments or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            arguments = {}
+    return str(arguments.get("action") or "") in _FILE_OUTPUT_ACTIONS.get(name, set())
 
 
 def _history(state: dict) -> list[dict[str, str]]:
@@ -166,45 +204,79 @@ async def _consume_dsh(
     }
     text = ""
     successful_tools = 0
+    successful_output_tools: set[str] = set()
     failed_tools: list[tuple[str, str]] = []
     tool_arguments: dict[str, str] = {}
+    tool_argument_values: dict[str, Any] = {}
     usage = {"input_tokens": 0, "output_tokens": 0}
-    async for event in client.stream_run(request):
-        kind = event.get("type")
-        if kind == "text_delta":
-            delta = str(event.get("delta") or "")
-            text += delta
-            _publish(handle, staged, {"type": "text", "delta": delta})
-        elif kind in {"phase", "tool_call"}:
-            _publish(handle, staged, event)
-            if kind == "tool_call":
-                tool_arguments[str(event.get("id") or "")] = str(event.get("arguments") or "")
-                state.setdefault("steps", []).append({"step": "llm", "tool_calls": [event.get("name")]})
-        elif kind == "tool_result":
-            _publish(handle, staged, event)
-            ok = bool(event.get("ok"))
-            successful_tools += int(ok)
-            if not ok:
-                failed_tools.append((
-                    str(event.get("name") or "tool"),
-                    str(event.get("content") or "工具未返回错误详情"),
-                ))
-            state.setdefault("steps", []).append({"step": "tool", "name": event.get("name"), "ok": ok})
-            _trace_for_tool(
-                state, str(event.get("name") or ""), str(event.get("id") or ""),
-                tool_arguments.get(str(event.get("id") or ""), ""),
-                str(event.get("content") or ""), ok,
-            )
-        elif kind == "usage":
-            usage["input_tokens"] += int(event.get("input_tokens") or 0)
-            usage["output_tokens"] += int(event.get("output_tokens") or 0)
-        elif kind == "error":
-            raise DshRunError(
-                str(event.get("message") or "DSH runtime failed"),
-                code=str(event.get("code") or "") or None,
-            )
-        elif kind == "done":
-            text = str(event.get("text") or text)
+    async def consume(current_request: dict) -> None:
+        nonlocal text, successful_tools
+        async for event in client.stream_run(current_request):
+            kind = event.get("type")
+            if kind == "text_delta":
+                delta = str(event.get("delta") or "")
+                text += delta
+                _publish(handle, staged, {"type": "text", "delta": delta})
+            elif kind in {"phase", "tool_call"}:
+                _publish(handle, staged, event)
+                if kind == "tool_call":
+                    call_id = str(event.get("id") or "")
+                    tool_argument_values[call_id] = event.get("arguments")
+                    tool_arguments[call_id] = str(event.get("arguments") or "")
+                    state.setdefault("steps", []).append({"step": "llm", "tool_calls": [event.get("name")]})
+            elif kind == "tool_result":
+                _publish(handle, staged, event)
+                ok = bool(event.get("ok"))
+                name = str(event.get("name") or "tool")
+                successful_tools += int(ok)
+                call_id = str(event.get("id") or "")
+                if ok and _is_file_output_tool(state, name, tool_argument_values.get(call_id)):
+                    successful_output_tools.add(name)
+                else:
+                    if not ok:
+                        failed_tools.append((name, str(event.get("content") or "工具未返回错误详情")))
+                state.setdefault("steps", []).append({"step": "tool", "name": name, "ok": ok})
+                _trace_for_tool(
+                    state, name, call_id, tool_arguments.get(call_id, ""),
+                    str(event.get("content") or ""), ok,
+                )
+            elif kind == "usage":
+                usage["input_tokens"] += int(event.get("input_tokens") or 0)
+                usage["output_tokens"] += int(event.get("output_tokens") or 0)
+            elif kind == "error":
+                raise DshRunError(
+                    str(event.get("message") or "DSH runtime failed"),
+                    code=str(event.get("code") or "") or None,
+                )
+            elif kind == "done":
+                text = str(event.get("text") or text)
+
+    await consume(request)
+
+    requires_file = _requires_skill_file_delivery(state)
+    delivered_file = bool(successful_output_tools)
+    if requires_file and not delivered_file:
+        if text:
+            _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
+        text = ""
+        state.setdefault("steps", []).append({"step": "skill_file_delivery_continuation"})
+        retry_request = {
+            **request,
+            "run_id": f"{request['run_id']}-continuation",
+            "message": (
+                f"{request['message']}\n\n[系统续执行要求] 上一次只完成了技能加载或说明读取，尚未产生用户要求的文件。"
+                "请重新调用必要的 Skill/文件工具并实际生成产物；只有真实 tool_result 返回输出文件后才能结束。"
+            ),
+        }
+        await consume(retry_request)
+        delivered_file = bool(successful_output_tools)
+
+    if requires_file and not delivered_file:
+        if text:
+            _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
+        state["error"] = "Skill execution completed without producing the requested file"
+        text = "技能已加载，但本轮未生成用户要求的文件，请重试或检查该 Skill 的可执行资源。"
+        _publish(handle, staged, {"type": "text", "delta": text})
 
     if successful_tools == 0 and contains_unverified_tool_success_claim(text):
         if text:

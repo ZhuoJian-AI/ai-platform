@@ -108,6 +108,89 @@ async def test_failed_tool_without_final_text_is_an_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_skill_file_delivery_continues_after_load_only_completion(monkeypatch):
+    requests: list[dict] = []
+
+    async def stream_run(request):
+        requests.append(request)
+        if len(requests) == 1:
+            yield {"type": "tool_call", "id": "load-1", "name": "load_skill", "arguments": "{}"}
+            yield {
+                "type": "tool_result", "id": "load-1", "name": "load_skill",
+                "content": "loaded", "ok": True,
+            }
+            yield {"type": "done", "text": "我先加载技能。", "steps": 1, "tool_calls": 1}
+            return
+        yield {
+            "type": "tool_call", "id": "sheet-1", "name": "spreadsheet_tool",
+            "arguments": {"action": "create", "output_name": "output.xlsx"},
+        }
+        yield {
+            "type": "tool_result", "id": "sheet-1", "name": "spreadsheet_tool",
+            "content": "output.xlsx", "ok": True,
+        }
+        yield {"type": "done", "text": "处理完成，文件已生成。", "steps": 1, "tool_calls": 1}
+
+    monkeypatch.setattr(runner.client, "stream_run", stream_run)
+    state = {
+        "run_id": 4, "request": "请使用技能处理附件并保存结果", "messages": [], "steps": [],
+        "exec_mode": "craft", "attachment_files": [{"file_id": "file-1"}],
+        "invoked_skill_ids": ["skill-1"], "_dsh_tool_registry": {},
+    }
+    staged: list[dict] = []
+
+    await runner._consume_dsh(
+        state,
+        {"system_prompt": "", "tools": []},
+        "run-token",
+        None,
+        staged,
+    )
+
+    assert len(requests) == 2
+    assert requests[1]["run_id"] == "4-continuation"
+    assert state.get("error") is None
+    assert state["assistant_final"] == "处理完成，文件已生成。"
+    assert {step["step"] for step in state["steps"]} >= {
+        "skill_file_delivery_continuation", "llm_final",
+    }
+    assert any(event.get("type") == "text_retract" for event in staged)
+
+
+@pytest.mark.asyncio
+async def test_skill_file_delivery_without_output_is_an_error_after_one_continuation(monkeypatch):
+    requests: list[dict] = []
+
+    async def stream_run(request):
+        requests.append(request)
+        yield {"type": "tool_call", "id": f"load-{len(requests)}", "name": "load_skill", "arguments": "{}"}
+        yield {
+            "type": "tool_result", "id": f"load-{len(requests)}", "name": "load_skill",
+            "content": "loaded", "ok": True,
+        }
+        yield {"type": "done", "text": "技能已加载。", "steps": 1, "tool_calls": 1}
+
+    monkeypatch.setattr(runner.client, "stream_run", stream_run)
+    state = {
+        "run_id": 5, "request": "请使用技能处理附件并保存结果", "messages": [], "steps": [],
+        "exec_mode": "craft", "attachment_files": [{"file_id": "file-1"}],
+        "invoked_skill_ids": ["skill-1"], "_dsh_tool_registry": {},
+    }
+
+    await runner._consume_dsh(
+        state,
+        {"system_prompt": "", "tools": []},
+        "run-token",
+        None,
+        [],
+    )
+
+    assert len(requests) == 2
+    assert state["error"] == "Skill execution completed without producing the requested file"
+    assert "未生成用户要求的文件" in state["assistant_final"]
+
+
+@pytest.mark.asyncio
 async def test_empty_success_without_tools_is_not_reported_as_max_steps(monkeypatch):
     async def stream_run(_request):
         yield {"type": "done", "text": "", "steps": 1, "tool_calls": 0}

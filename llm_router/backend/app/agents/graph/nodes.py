@@ -137,6 +137,9 @@ OUTPUT_PROTOCOL_PROMPT = (
     "本体、知识库检索命中或用户给定，不可拼凑不存在的标识符。\n"
     "3. 任何‘已调用工具 / 执行成功 / 已生成文件’的声明，以及 file_id、输出路径和处理结果，都必须来自"
     "本轮真实 tool_result。若本轮没有真实 tool_call，只能如实说明尚未执行，严禁编造 UUID、路径或成功状态。"
+    "\n4. 用户明确要求使用 Skill 处理附件并交付文件时，load_skill / read_skill_resource 仅是准备步骤；"
+    "必须继续调用脚本或平台文件工具，直到真实 tool_result 确认产物已生成。不得以‘先加载技能’、"
+    "‘接下来处理’等进度说明作为最终回答。"
 )
 
 def _emit(event: dict) -> None:
