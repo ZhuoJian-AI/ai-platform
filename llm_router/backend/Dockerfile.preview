@@ -1,7 +1,8 @@
 ARG AI_PLATFORM_BACKEND_DEPS_BASE
+ARG AI_PLATFORM_PYTHON_OFFICE_BASE
 FROM ${AI_PLATFORM_BACKEND_DEPS_BASE} AS python-deps
 
-FROM python:3.12-slim
+FROM ${AI_PLATFORM_PYTHON_OFFICE_BASE}
 
 ARG SOURCE_COMMIT=unknown
 ARG SOURCE_REPOSITORY=https://github.com/ZhuoJian-AI/ai-platform
@@ -11,22 +12,7 @@ LABEL org.opencontainers.image.revision=${SOURCE_COMMIT} \
 
 WORKDIR /app
 
-ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-    PIP_TRUSTED_HOST=mirrors.aliyun.com \
-    PIP_DEFAULT_TIMEOUT=120 \
-    PIP_RETRIES=10 \
-    PYTHONPATH=/app
-
-# Keep Office conversion isolated from the API image while reusing the
-# project's prebuilt Python dependency layer.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        libreoffice-core \
-        libreoffice-writer \
-        libreoffice-calc \
-        libreoffice-impress \
-        fonts-noto-cjk \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONPATH=/app
 
 COPY --from=python-deps /usr/local /usr/local
 
