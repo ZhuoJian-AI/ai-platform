@@ -213,6 +213,14 @@ Read references/rules.md, then run scripts/clean.py with the input attachment.
     assert [item["function"]["name"] for item in tools] == [
         "load_skill", "read_skill_resource", "run_skill_script", "web_tool",
     ]
+    run_tool = next(
+        item["function"] for item in tools
+        if item.get("function", {}).get("name") == "run_skill_script"
+    )
+    args_description = run_tool["parameters"]["properties"]["args"]["description"]
+    assert "{input_file}" in args_description
+    assert "{output_dir}" in args_description
+    assert "严禁猜测" in args_description
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": cu})
     state = {"org_id": str(org.id)}
     loaded = json.loads(await nodes._execute_agent_skill_tool(

@@ -1640,7 +1640,11 @@ async def _build_tools(
                     "script_path": {"type": "string", "description": "load_skill 返回的 scripts/ 相对路径"},
                     "args": {
                         "type": "array", "items": {"type": "string"},
-                        "description": "直接传给脚本的参数数组，不是 Shell 命令",
+                        "description": (
+                            "直接传给脚本的参数数组，不是 Shell 命令。严禁猜测服务器文件名、UUID 或相对路径；"
+                            "输入文件必须写 {input_file}（多个输入用 {input_dir}），输出路径必须写在 "
+                            "{output_dir} 下，例如 ['{input_file}', '{output_dir}/处理后.xlsx']。"
+                        ),
                     },
                     "input_file_ids": {
                         "type": "array", "items": {"type": "string"},

@@ -21,6 +21,7 @@ def repackage_agent_skill(
     source_script: str = "process_bank_statement.py",
     target_script: str = "scripts/process_bank_statement.py",
     drop_paths: tuple[str, ...] = (),
+    instruction_replacements: tuple[tuple[str, str], ...] = (),
 ) -> bytes:
     """Move one legacy script into ``scripts/`` and rebuild a deterministic ZIP.
 
@@ -45,7 +46,14 @@ def repackage_agent_skill(
         skill_md = repaired[skill_path].decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("SKILL.md must be UTF-8") from exc
-    repaired[skill_path] = skill_md.replace(source, target).encode("utf-8")
+    skill_md = skill_md.replace(source, target)
+    for old, new in instruction_replacements:
+        if not old:
+            raise ValueError("instruction replacement source cannot be empty")
+        if old not in skill_md:
+            raise ValueError(f"Instruction text is missing from SKILL.md: {old}")
+        skill_md = skill_md.replace(old, new)
+    repaired[skill_path] = skill_md.encode("utf-8")
 
     archive, _, _ = _normalize_files(repaired)
     return archive

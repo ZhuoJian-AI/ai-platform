@@ -125,3 +125,34 @@ def test_bank_skill_v2_renames_existing_scripts_process_entrypoint() -> None:
     assert "scripts/process.py" not in files
     assert "scripts/process_bank_statement.py" in files
     assert b"scripts/process_bank_statement.py" in files["SKILL.md"]
+
+
+def test_bank_skill_v2_repairs_stale_runtime_instruction() -> None:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "SKILL.md",
+            "---\nname: Ningbo Bank\ndescription: Process statements\n---\n"
+            "Run `node process_bank_statement.js \"<input>\" \"<output>\"`.\n",
+        )
+        archive.writestr("process_bank_statement.py", "print('ok')\n")
+
+    repaired = repackage_agent_skill(
+        out.getvalue(),
+        instruction_replacements=((
+            "node process_bank_statement.js",
+            "python scripts/process_bank_statement.py",
+        ),),
+    )
+    _, files, _ = skill_import_service._safe_archive(repaired, "bank-v2.zip")
+    skill_md = files["SKILL.md"].decode("utf-8")
+    assert "node process_bank_statement.js" not in skill_md
+    assert "python scripts/process_bank_statement.py" in skill_md
+
+
+def test_bank_skill_repackage_rejects_missing_instruction_replacement() -> None:
+    with pytest.raises(ValueError, match="Instruction text is missing"):
+        repackage_agent_skill(
+            _legacy_bank_package(),
+            instruction_replacements=(("node missing.js", "python scripts/process.py"),),
+        )
