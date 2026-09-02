@@ -7,7 +7,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.user_auth import CurrentUser
 from app.models.workspace import Workspace
-from app.services.scope_service import department_scope_ids
+
+DEPARTMENT_READ_PREFIX = "workspace.department.read:"
+DEPARTMENT_UPLOAD_PREFIX = "workspace.department.upload:"
+
+
+def _department_workspace_access(cu: CurrentUser, department_id: str) -> tuple[bool, bool]:
+    """Return explicit role-based read/upload access for one department.
+
+    Department membership is identity, not a permission bundle.  A user's
+    primary department is readable by default; shared writes and cross-
+    department access must be granted by one of the user's roles.
+    """
+    codes = set(getattr(cu, "permission_codes", ()) or ())
+    can_upload = f"{DEPARTMENT_UPLOAD_PREFIX}{department_id}" in codes
+    explicit_read = f"{DEPARTMENT_READ_PREFIX}{department_id}" in codes
+    home_department = department_id == str(getattr(cu, "department_id", None) or "")
+    return home_department or explicit_read or can_upload, can_upload
 
 
 async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) -> dict[str, bool]:
@@ -22,22 +38,20 @@ async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) 
     scope_type = getattr(workspace, "scope_type", "organization")
     scope_id = str(getattr(workspace, "scope_id", None) or "")
     own = scope_type == "user" and scope_id == str(getattr(cu, "id", ""))
-    department_ids = department_scope_ids(cu)
     team_id = getattr(cu, "team_id", None)
-    same_department = scope_type == "department" and scope_id in department_ids
+    department_read, department_upload = _department_workspace_access(cu, scope_id)
+    same_department = scope_type == "department" and department_read
     same_team = scope_type == "team" and bool(team_id) and scope_id == str(team_id)
-    org = scope_type == "organization"
-    # Terminal work is always personal. Department/team/organization
-    # workspaces remain readable as shared reference libraries, but neither a
-    # member, a scope manager nor an administrator may mutate them from the
-    # end-user terminal. Administrative maintenance uses the separate admin
-    # workspace API and its own authorization path.
-    terminal_admin = getattr(cu, "role", "member") == "admin"
-    can_read = terminal_admin or own or same_department or same_team or org
+    # Terminal work is personal by default.  Shared department workspaces are
+    # readable for the home department and for departments explicitly granted
+    # to a role.  Shared writes are never inferred from administrator status or
+    # the legacy role data-scope field.
+    can_read = own or same_department or same_team
+    can_write_department = scope_type == "department" and department_upload
     return {
         "read": can_read,
-        "create": own,
-        "manage": own,
+        "create": own or can_write_department,
+        "manage": own or can_write_department,
         "publish": False,
     }
 
@@ -71,9 +85,10 @@ async def assert_can_publish(db: AsyncSession, workspace: Workspace, cu: Current
 async def assert_publish_target(db: AsyncSession, workspace: Workspace, cu: CurrentUser) -> None:
     if str(workspace.organization_id) != str(cu.organization_id):
         raise HTTPException(status_code=404, detail="Workspace not found")
+    department_id = str(workspace.scope_id or "")
+    _, can_upload_department = _department_workspace_access(cu, department_id)
     valid = (
-        workspace.scope_type == "department"
-        and str(workspace.scope_id or "") in department_scope_ids(cu)
+        workspace.scope_type == "department" and can_upload_department
     ) or (
         workspace.scope_type == "team" and str(workspace.scope_id or "") == str(cu.team_id or "")
     )

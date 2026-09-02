@@ -1653,6 +1653,7 @@ export default function Terminal() {
         resolveHref={resolveHref}
         loadOriginalPreview={terminal.getWsFileOriginalPreview}
         loadOriginalPreviewSource={terminal.getWsFileOriginalPreviewSource}
+        loadDownloadTicket={terminal.getWsFileDownloadTicket}
         loadOriginalFile={terminal.downloadWsFile}
       />
 
@@ -2147,7 +2148,7 @@ function TaskInputBox(props: {
       name: file.name,
       status: file.size > MAX_ATTACHMENT_BYTES ? 'failed' : 'uploading',
       progress: 0,
-      error: file.size > MAX_ATTACHMENT_BYTES ? '文件超过 100MB 上限' : undefined,
+      error: file.size > MAX_ATTACHMENT_BYTES ? '文件超过 5GB 存储上限' : undefined,
     }));
     attachmentsRef.current = [...attachmentsRef.current, ...drafts];
     setAttachments((current) => [...current, ...drafts]);
@@ -2286,7 +2287,7 @@ function TaskInputBox(props: {
 
   const retryAttachment = useCallback(async (item: ComposerAttachment) => {
     if (item.file.size > MAX_ATTACHMENT_BYTES) {
-      message.warning('该文件超过 100MB，请压缩或拆分后重新选择');
+      message.warning('该文件超过 5GB 存储上限，请压缩或拆分后重新选择');
       return;
     }
     if (item.file_id) {
@@ -3760,6 +3761,7 @@ function FilePanel({ workspaceId }: { workspaceId: string | null }) {
         resolveHref={resolveHref}
         loadOriginalPreview={terminal.getWsFileOriginalPreview}
         loadOriginalPreviewSource={terminal.getWsFileOriginalPreviewSource}
+        loadDownloadTicket={terminal.getWsFileDownloadTicket}
         loadOriginalFile={terminal.downloadWsFile}
       />
     </div>

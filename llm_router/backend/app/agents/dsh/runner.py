@@ -35,6 +35,7 @@ from app.agents.runtime_support import (
     user_message_metadata,
 )
 from app.auth.user_auth import CurrentUser
+from app.config import settings
 from app.database import async_session_factory
 from app.models.agent_run import AgentRun
 from app.models.task import TaskMessage
@@ -147,7 +148,7 @@ async def _consume_dsh(
         },
         "memory_context": prepared.get("memory_context") or None,
         "exec_mode": state.get("exec_mode") or "craft", "tools": _tool_specs(prepared["tools"]),
-        "max_steps": 8,
+        "max_steps": settings.agent_max_steps,
     }
     text = ""
     successful_tools = 0

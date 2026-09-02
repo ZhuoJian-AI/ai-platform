@@ -62,12 +62,16 @@ async def parse_one(file_id: str) -> None:
         filename = str(meta.get("name") or file.path.rsplit("/", 1)[-1])
         content_type = str(meta.get("mime") or "application/octet-stream")
         try:
+            if int(file.size or 0) > settings.workspace_ai_parse_max_bytes:
+                raise doc_parser.UnsupportedFileTypeError(
+                    "文件已安全存储，可预览和下载；超过 100MB，暂不进行 AI 解析"
+                )
             if storage_gateway_service.is_object_ref(file.content_ref):
                 with tempfile.TemporaryDirectory(prefix="workspace-parse-") as temp_dir:
                     source = Path(temp_dir) / "source.bin"
                     await asyncio.wait_for(
                         storage_gateway_service.download_to_path(
-                            str(file.content_ref), source, max_bytes=settings.workspace_max_file_bytes,
+                            str(file.content_ref), source, max_bytes=settings.workspace_ai_parse_max_bytes,
                         ),
                         timeout=PARSE_TIMEOUT_SECONDS,
                     )

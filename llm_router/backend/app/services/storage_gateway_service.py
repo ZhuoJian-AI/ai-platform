@@ -16,7 +16,9 @@ import httpx
 from app.config import settings
 
 OSS_REF_PREFIX = "oss://"
-WORKSPACE_MULTIPART_THRESHOLD_BYTES = 8 * 1024 * 1024
+WORKSPACE_MULTIPART_THRESHOLD_BYTES = 100 * 1024 * 1024
+WORKSPACE_MULTIPART_PART_BYTES = 100 * 1024 * 1024
+WORKSPACE_WEAK_NETWORK_PART_BYTES = 1 * 1024 * 1024
 STORAGE_AUTHORIZATION_SUBJECT = "ai-platform-control-plane"
 
 
@@ -54,6 +56,36 @@ def _gateway_url(path: str) -> str:
     return f"{base}{path}"
 
 
+def _rewrite_signed_url(signed_url: str, target_endpoint: str) -> str:
+    """Replace only the configured OSS endpoint while retaining bucket prefix."""
+    public = settings.storage_public_endpoint.strip()
+    target = target_endpoint.strip()
+    if not public or not target:
+        return signed_url
+    source = urlsplit(signed_url)
+    public_host = (urlsplit(public).hostname or "").lower()
+    target_parts = urlsplit(target)
+    target_endpoint_host = (target_parts.hostname or "").lower()
+    source_host = (source.hostname or "").lower()
+    if not public_host or not target_endpoint_host:
+        return signed_url
+    if source_host == public_host:
+        target_host = target_endpoint_host
+    elif source_host.endswith(f".{public_host}"):
+        bucket_prefix = source_host[:-(len(public_host) + 1)]
+        target_host = f"{bucket_prefix}.{target_endpoint_host}"
+    else:
+        return signed_url
+    port = f":{target_parts.port}" if target_parts.port else ""
+    return urlunsplit((
+        target_parts.scheme or source.scheme,
+        f"{target_host}{port}",
+        source.path,
+        source.query,
+        source.fragment,
+    ))
+
+
 def _internal_signed_url(signed_url: str) -> str:
     """Route OSS traffic over the same-region internal endpoint when set.
 
@@ -61,31 +93,15 @@ def _internal_signed_url(signed_url: str) -> str:
     authentication, so replacing only the endpoint host preserves the
     signature.  Both path-style and bucket-prefixed virtual hosts are handled.
     """
-    public = settings.storage_public_endpoint.strip()
-    internal = settings.storage_internal_endpoint.strip()
-    if not public or not internal:
-        return signed_url
-    source = urlsplit(signed_url)
-    public_host = (urlsplit(public).hostname or "").lower()
-    internal_parts = urlsplit(internal)
-    internal_host = (internal_parts.hostname or "").lower()
-    source_host = (source.hostname or "").lower()
-    if not public_host or not internal_host:
-        return signed_url
-    if source_host == public_host:
-        target_host = internal_host
-    elif source_host.endswith(f".{public_host}"):
-        target_host = f"{source_host[:-(len(public_host) + 1)]}.{internal_host}"
-    else:
-        return signed_url
-    port = f":{internal_parts.port}" if internal_parts.port else ""
-    return urlunsplit((
-        internal_parts.scheme or source.scheme,
-        f"{target_host}{port}",
-        source.path,
-        source.query,
-        source.fragment,
-    ))
+    return _rewrite_signed_url(signed_url, settings.storage_internal_endpoint)
+
+
+def _browser_signed_urls(signed_url: str) -> tuple[str, str]:
+    """Return accelerated primary and regional fallback URLs."""
+    fallback = _rewrite_signed_url(signed_url, settings.storage_public_endpoint)
+    accelerate = settings.storage_accelerate_endpoint.strip()
+    primary = _rewrite_signed_url(signed_url, accelerate) if accelerate else fallback
+    return primary, fallback
 
 
 async def upload_bytes(raw: bytes, *, filename: str, content_type: str) -> str:
@@ -131,7 +147,9 @@ async def upload_skill_archive(raw: bytes, *, organization_id: str, package_hash
     )
 
 
-async def sign_browser_upload(*, filename: str, content_type: str, size_bytes: int) -> dict:
+async def sign_browser_upload(
+    *, filename: str, content_type: str, size_bytes: int, weak_network: bool = False,
+) -> dict:
     """Create a browser upload policy or multipart session without exposing credentials."""
     if size_bytes <= 0 or size_bytes > settings.workspace_max_file_bytes:
         raise StorageGatewayError("Object size is outside the configured workspace limit")
@@ -139,7 +157,7 @@ async def sign_browser_upload(*, filename: str, content_type: str, size_bytes: i
         async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
             path = (
                 "/v1/multipart/initiate"
-                if size_bytes >= WORKSPACE_MULTIPART_THRESHOLD_BYTES
+                if size_bytes > WORKSPACE_MULTIPART_THRESHOLD_BYTES
                 else "/v1/uploads/sign"
             )
             response = await client.post(
@@ -150,7 +168,13 @@ async def sign_browser_upload(*, filename: str, content_type: str, size_bytes: i
                     "content_type": content_type,
                     "size_bytes": size_bytes,
                     **(
-                        {"part_size_bytes": 2 * 1024 * 1024, "force_multipart": True}
+                        {
+                            "part_size_bytes": (
+                                WORKSPACE_WEAK_NETWORK_PART_BYTES
+                                if weak_network else WORKSPACE_MULTIPART_PART_BYTES
+                            ),
+                            "force_multipart": True,
+                        }
                         if path == "/v1/multipart/initiate"
                         else {}
                     ),
@@ -167,9 +191,11 @@ async def sign_browser_upload(*, filename: str, content_type: str, size_bytes: i
                     "expected_parts": int(payload["expected_parts"]),
                     "expires_at": str(payload["expires_at"]),
                 }
+            primary_url, fallback_url = _browser_signed_urls(str(payload["url"]))
             return {
                 "method": "PUT",
-                "url": str(payload["url"]),
+                "url": primary_url,
+                "fallback_url": fallback_url,
                 "headers": {str(k): str(v) for k, v in (payload.get("headers") or {}).items()},
                 "object_key": str(payload["object_key"]),
                 "expires_in": int(payload.get("expires_in") or 300),
@@ -187,9 +213,11 @@ async def sign_multipart_part(gateway_session_id: str, part_number: int) -> dict
             )
             response.raise_for_status()
             payload = response.json()
+            primary_url, fallback_url = _browser_signed_urls(str(payload["url"]))
             return {
                 "method": "PUT",
-                "url": str(payload["url"]),
+                "url": primary_url,
+                "fallback_url": fallback_url,
                 "headers": {},
                 "part_number": int(payload["part_number"]),
                 "expires_in": int(payload.get("expires_in") or 120),
@@ -339,7 +367,7 @@ async def get_signed_download(content_ref: str) -> dict:
         raise StorageGatewayError("OSS download signing failed") from exc
 
 
-async def get_browser_signed_download(content_ref: str) -> dict:
+async def get_browser_signed_download(content_ref: str, *, expires_in_seconds: int = 15 * 60) -> dict:
     """Issue a short-lived public URL for an authenticated browser preview.
 
     Internal workers use :func:`get_signed_download`, which rewrites the OSS
@@ -351,13 +379,18 @@ async def get_browser_signed_download(content_ref: str) -> dict:
     try:
         async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
             response = await client.post(
-                _gateway_url("/v1/downloads/sign"), headers=_auth_headers(), json={"object_key": object_key}
+                _gateway_url("/v1/downloads/sign"),
+                headers=_auth_headers(),
+                json={"object_key": object_key, "expires_in_seconds": expires_in_seconds},
             )
             response.raise_for_status()
             payload = response.json()
+            primary_url, fallback_url = _browser_signed_urls(str(payload["url"]))
             return {
-                "url": str(payload["url"]),
+                "url": primary_url,
+                "fallback_url": fallback_url,
                 "headers": {str(k): str(v) for k, v in (payload.get("headers") or {}).items()},
+                "expires_in": int(payload.get("expires_in") or expires_in_seconds),
             }
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise StorageGatewayError("OSS browser preview signing failed") from exc

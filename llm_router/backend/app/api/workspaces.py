@@ -250,6 +250,7 @@ async def initiate_admin_upload_endpoint(
         id=session.id,
         method=str(upload_meta.get("transport") or "put").upper(),
         url=str(session.upload_url) if session.upload_url else None,
+        fallback_url=str(upload_meta.get("fallback_url")) if upload_meta.get("fallback_url") else None,
         headers=dict(upload_meta.get("headers") or {}),
         part_size=upload_meta.get("part_size"),
         expected_parts=upload_meta.get("expected_parts"),
@@ -410,6 +411,7 @@ async def original_preview_source_endpoint(
             return WorkspaceOriginalPreviewSourceRead(
                 mode="url",
                 url=str(signed["url"]),
+                fallback_url=str(signed.get("fallback_url")) if signed.get("fallback_url") else None,
                 headers={str(k): str(v) for k, v in (signed.get("headers") or {}).items()},
                 filename=filename,
                 mime_type=mime_type,

@@ -606,7 +606,7 @@ export default function Workspaces() {
                         if (!fileModalWs) return;
                         const accepted = selected.filter((file) => {
                           if (file.size <= WORKSPACE_MAX_FILE_BYTES) return true;
-                          message.warning(`${file.name} 超过 100MB，未加入上传队列`);
+                          message.warning(`${file.name} 超过 5GB 存储上限，未加入上传队列`);
                           return false;
                         });
                         uploadQueue.enqueue(accepted.map((file) => ({
@@ -622,10 +622,10 @@ export default function Workspaces() {
                     </WorkspaceUploadPicker>
                     <Typography.Text
                       type="secondary"
-                      title="支持 Word、Excel、PPT、PDF、Markdown 等常用文件；1MB 以上自动直传对象存储"
+                      title="支持 Word、Excel、PPT、PDF、Markdown 等常用文件；100MB 内可自动 AI 解析，较大文件仍可存储和下载"
                       style={{ fontSize: 11, whiteSpace: 'nowrap' }}
                     >
-                      单次最多 5 个 · 单文件最大 100MB
+                      单次最多 5 个 · 单文件最大 5GB · AI 解析上限 100MB
                     </Typography.Text>
                     <WorkspaceUploadQueueStatus
                       items={uploadQueue.items}

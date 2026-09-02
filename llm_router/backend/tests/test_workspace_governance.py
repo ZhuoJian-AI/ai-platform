@@ -103,12 +103,49 @@ async def test_member_capabilities_and_cross_tenant_are_consistent(db_session):
         "read": True, "create": False, "manage": False, "publish": False,
     }
     assert await workspace_permission_service.capabilities(db_session, organization_ws, cu) == {
-        "read": True, "create": False, "manage": False, "publish": False,
+        "read": False, "create": False, "manage": False, "publish": False,
     }
     assert not (await workspace_permission_service.capabilities(db_session, foreign_ws, cu))["read"]
     with pytest.raises(HTTPException) as exc:
         await workspace_permission_service.assert_can_read(db_session, foreign_ws, cu)
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_role_codes_grant_cross_department_read_and_upload(db_session):
+    cu, _, _, _, _ = await _tenant(db_session)
+    department = Department(
+        organization_id=cu.organization_id,
+        name="Quality",
+        slug=f"quality-{uuid4().hex[:8]}",
+    )
+    db_session.add(department)
+    await db_session.flush()
+    workspace = Workspace(
+        organization_id=cu.organization_id,
+        name="Quality",
+        slug=f"department-{uuid4().hex[:8]}",
+        scope_type="department",
+        scope_id=str(department.id),
+    )
+    db_session.add(workspace)
+    await db_session.flush()
+
+    assert await workspace_permission_service.capabilities(db_session, workspace, cu) == {
+        "read": False, "create": False, "manage": False, "publish": False,
+    }
+    cu.permission_codes = (
+        f"{workspace_permission_service.DEPARTMENT_READ_PREFIX}{department.id}",
+    )
+    assert await workspace_permission_service.capabilities(db_session, workspace, cu) == {
+        "read": True, "create": False, "manage": False, "publish": False,
+    }
+    cu.permission_codes = (
+        f"{workspace_permission_service.DEPARTMENT_UPLOAD_PREFIX}{department.id}",
+    )
+    assert await workspace_permission_service.capabilities(db_session, workspace, cu) == {
+        "read": True, "create": True, "manage": True, "publish": False,
+    }
 
 
 @pytest.mark.asyncio

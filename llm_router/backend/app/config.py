@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     agent_queue_wait_seconds: int = 300
     agent_lease_seconds: int = 60
     agent_heartbeat_seconds: int = 15
+    # Per-run model-step budget. Admission control remains the concurrency
+    # guard; this budget only prevents a genuinely looping agent from running
+    # forever. Complex office tasks need more than the old hard-coded 8 steps.
+    agent_max_steps: int = 24
     extension_builder_url: str = "http://localhost:8040"
     extension_builder_token: str = "extension-builder-dev-token-change-in-production"
     extension_builder_timeout_seconds: int = 600
@@ -105,11 +109,13 @@ class Settings(BaseSettings):
     storage_project_token: str = ""
     storage_public_endpoint: str = ""
     storage_internal_endpoint: str = ""
+    storage_accelerate_endpoint: str = ""
     storage_gateway_timeout_seconds: int = 60
     # Staging-wide workspace upload policy. It intentionally has no tenant
     # allowlist: every organization follows the same capability and limits.
     workspace_hybrid_upload_enabled: bool = True
-    workspace_max_file_bytes: int = 100 * 1024 * 1024
+    workspace_max_file_bytes: int = 5 * 1024 * 1024 * 1024
+    workspace_ai_parse_max_bytes: int = 100 * 1024 * 1024
     workspace_proxy_upload_max_bytes: int = 1 * 1024 * 1024
     workspace_upload_session_ttl_seconds: int = 15 * 60
     workspace_trash_retention_days: int = 30

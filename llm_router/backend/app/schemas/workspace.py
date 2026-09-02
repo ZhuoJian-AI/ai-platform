@@ -141,9 +141,21 @@ class WorkspaceFilePreviewRead(BaseModel):
 class WorkspaceOriginalPreviewSourceRead(BaseModel):
     mode: str
     url: str | None = None
+    fallback_url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
     filename: str
     mime_type: str
+
+
+class WorkspaceDownloadTicketRead(BaseModel):
+    url: str
+    fallback_url: str | None = None
+    expires_at: datetime
+    filename: str
+    mime_type: str
+    etag: str | None = None
+    size: int
+    headers: dict[str, str] = Field(default_factory=dict)
 
 
 class WorkspaceFolderCreate(BaseModel):
@@ -173,12 +185,14 @@ class WorkspaceUploadInitiate(BaseModel):
     filename: str = Field(..., max_length=512)
     content_type: str = Field("application/octet-stream", max_length=255)
     size: int = Field(..., gt=0)
+    weak_network: bool = False
 
 
 class WorkspaceUploadSessionRead(BaseModel):
     id: UUID
     method: str = "PUT"
     url: str | None = None
+    fallback_url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
     fields: dict[str, str] = Field(default_factory=dict)
     part_size: int | None = None
@@ -201,6 +215,7 @@ class WorkspaceUploadPartSigned(BaseModel):
     part_number: int
     method: str = "PUT"
     url: str
+    fallback_url: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
     expires_in: int
 

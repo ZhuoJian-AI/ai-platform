@@ -22,6 +22,7 @@ def _configure(monkeypatch) -> None:
     monkeypatch.setattr(settings, "storage_project_token", "project-token")
     monkeypatch.setattr(settings, "storage_public_endpoint", "https://oss-cn-hongkong.aliyuncs.com")
     monkeypatch.setattr(settings, "storage_internal_endpoint", "https://oss-cn-hongkong-internal.aliyuncs.com")
+    monkeypatch.setattr(settings, "storage_accelerate_endpoint", "https://oss-accelerate.aliyuncs.com")
 
 
 def test_internal_endpoint_rewrite_preserves_bucket_and_query(monkeypatch):
@@ -91,7 +92,7 @@ async def test_upload_and_download_use_scoped_signed_urls(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_browser_signed_download_keeps_public_endpoint(monkeypatch):
+async def test_browser_signed_download_uses_acceleration_with_public_fallback(monkeypatch):
     _configure(monkeypatch)
 
     class FakeResponse:
@@ -113,13 +114,17 @@ async def test_browser_signed_download_keeps_public_endpoint(monkeypatch):
 
         async def post(self, url, **kwargs):
             assert url.endswith("/v1/downloads/sign")
-            assert kwargs["json"] == {"object_key": "projects/7/assets/deck.pptx"}
+            assert kwargs["json"] == {
+                "object_key": "projects/7/assets/deck.pptx",
+                "expires_in_seconds": 900,
+            }
             return FakeResponse()
 
     monkeypatch.setattr(storage.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
     signed = await storage.get_browser_signed_download("oss://projects/7/assets/deck.pptx")
-    assert signed["url"].startswith("https://bucket.oss-cn-hongkong.aliyuncs.com/")
+    assert signed["url"].startswith("https://bucket.oss-accelerate.aliyuncs.com/")
     assert "-internal" not in signed["url"]
+    assert signed["fallback_url"].startswith("https://bucket.oss-cn-hongkong.aliyuncs.com/")
 
 
 @pytest.mark.asyncio
@@ -135,8 +140,8 @@ async def test_large_browser_upload_requests_parallel_multipart(monkeypatch):
             return {
                 "session_id": "multipart-1",
                 "object_key": "projects/7/assets/deck.pptx",
-                "part_size": 2 * 1024 * 1024,
-                "expected_parts": 16,
+                "part_size": 100 * 1024 * 1024,
+                "expected_parts": 5,
                 "expires_at": "2026-09-01T00:00:00Z",
             }
 
@@ -155,15 +160,55 @@ async def test_large_browser_upload_requests_parallel_multipart(monkeypatch):
     result = await storage.sign_browser_upload(
         filename="deck.pptx",
         content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        size_bytes=32 * 1024 * 1024,
+        size_bytes=500 * 1024 * 1024,
     )
 
     assert captured["url"].endswith("/v1/multipart/initiate")
     assert captured["headers"]["X-Storage-Subject"] == "ai-platform-control-plane"
     assert captured["json"]["force_multipart"] is True
-    assert captured["json"]["part_size_bytes"] == 2 * 1024 * 1024
+    assert captured["json"]["part_size_bytes"] == 100 * 1024 * 1024
     assert result["method"] == "MULTIPART"
-    assert result["expected_parts"] == 16
+    assert result["expected_parts"] == 5
+
+
+@pytest.mark.asyncio
+async def test_large_browser_upload_uses_small_parts_in_weak_network_mode(monkeypatch):
+    _configure(monkeypatch)
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "session_id": "multipart-weak",
+                "object_key": "projects/7/assets/deck.pptx",
+                "part_size": 1024 * 1024,
+                "expected_parts": 101,
+                "expires_at": "2026-09-01T00:00:00Z",
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, **kwargs):
+            captured.update(kwargs["json"])
+            return FakeResponse()
+
+    monkeypatch.setattr(storage.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    result = await storage.sign_browser_upload(
+        filename="deck.pptx",
+        content_type="application/octet-stream",
+        size_bytes=101 * 1024 * 1024,
+        weak_network=True,
+    )
+    assert captured["part_size_bytes"] == 1024 * 1024
+    assert result["part_size"] == 1024 * 1024
 
 
 @pytest.mark.asyncio

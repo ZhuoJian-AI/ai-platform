@@ -779,9 +779,21 @@ export interface WorkspaceFilePreview {
 export interface WorkspaceOriginalPreviewSource {
   mode: 'url' | 'blob';
   url: string | null;
+  fallback_url: string | null;
   headers: Record<string, string>;
   filename: string;
   mime_type: string;
+}
+
+export interface WorkspaceDownloadTicket {
+  url: string;
+  fallback_url: string | null;
+  expires_at: string;
+  filename: string;
+  mime_type: string;
+  etag: string | null;
+  size: number;
+  headers: Record<string, string>;
 }
 
 export interface WorkspacePdfPreviewInfo {
@@ -1526,16 +1538,19 @@ export interface WorkspaceAuditEvent {
 // directly from the browser to OSS, reducing one full network hop and freeing
 // backend workers for metadata validation and parsing.
 const WORKSPACE_PROXY_UPLOAD_BYTES = 1 * 1024 * 1024;
-export const WORKSPACE_MAX_FILE_BYTES = 100 * 1024 * 1024;
+export const WORKSPACE_MAX_FILE_BYTES = 5 * 1024 * 1024 * 1024;
+export const WORKSPACE_AI_PARSE_MAX_FILE_BYTES = 100 * 1024 * 1024;
 
 interface DirectUploadSession {
   id: string; method: 'PUT' | 'MULTIPART'; url: string | null; headers: Record<string, string>;
+  fallback_url: string | null;
   expires_at: string; max_file_bytes: number;
   part_size: number | null; expected_parts: number | null;
 }
 
 interface MultipartPartSigned {
-  part_number: number; method: 'PUT'; url: string; headers: Record<string, string>; expires_in: number;
+  part_number: number; method: 'PUT'; url: string; fallback_url: string | null;
+  headers: Record<string, string>; expires_in: number;
 }
 
 interface MultipartUploadPart {
@@ -1551,16 +1566,41 @@ interface MultipartPartReceipt {
   part_number: number; etag: string;
 }
 
-function putSignedWorkspaceFileAttempt(
-  session: DirectUploadSession, file: File, options?: WorkspaceUploadOptions,
+const OSS_MAX_ACTIVE_REQUESTS = 10;
+let activeOssRequests = 0;
+const ossRequestWaiters: Array<() => void> = [];
+
+async function acquireOssRequestSlot() {
+  if (activeOssRequests >= OSS_MAX_ACTIVE_REQUESTS) {
+    await new Promise<void>((resolve) => ossRequestWaiters.push(resolve));
+  }
+  activeOssRequests += 1;
+  return () => {
+    activeOssRequests = Math.max(0, activeOssRequests - 1);
+    ossRequestWaiters.shift()?.();
+  };
+}
+
+function weakNetworkPreferred() {
+  const connection = (navigator as Navigator & {
+    connection?: { effectiveType?: string; saveData?: boolean };
+  }).connection;
+  return Boolean(connection?.saveData || ['slow-2g', '2g'].includes(connection?.effectiveType ?? ''));
+}
+
+async function putSignedWorkspaceFileAttempt(
+  session: DirectUploadSession, file: File, url: string | null, options?: WorkspaceUploadOptions,
 ): Promise<string | null> {
-  return new Promise((resolve, reject) => {
-    if (!session.url) {
+  const release = await acquireOssRequestSlot();
+  try {
+    return await new Promise((resolve, reject) => {
+    if (!url) {
       reject(new ApiError(500, '对象存储上传地址缺失'));
       return;
     }
     const xhr = new XMLHttpRequest();
-    xhr.open('PUT', session.url);
+    xhr.open('PUT', url);
+    xhr.timeout = 120_000;
     Object.entries(session.headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value));
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && event.total > 0) {
@@ -1579,6 +1619,7 @@ function putSignedWorkspaceFileAttempt(
       reject(new ApiError(xhr.status, detail));
     };
     xhr.onerror = () => reject(new ApiError(0, 'OSS 直传网络错误'));
+    xhr.ontimeout = () => reject(new ApiError(408, 'OSS 直传超时，正在切换线路重试'));
     xhr.onabort = () => reject(new DOMException('上传已取消', 'AbortError'));
     if (options?.signal) {
       if (options.signal.aborted) {
@@ -1588,7 +1629,10 @@ function putSignedWorkspaceFileAttempt(
       options.signal.addEventListener('abort', () => xhr.abort(), { once: true });
     }
     xhr.send(file);
-  });
+    });
+  } finally {
+    release();
+  }
 }
 
 async function putSignedWorkspaceFile(
@@ -1596,13 +1640,18 @@ async function putSignedWorkspaceFile(
 ): Promise<string | null> {
   const maxAttempts = 3;
   let lastError: unknown;
+  let timeoutCount = 0;
+  let useFallback = false;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      return await putSignedWorkspaceFileAttempt(session, file, options);
+      const target = useFallback && session.fallback_url ? session.fallback_url : session.url;
+      return await putSignedWorkspaceFileAttempt(session, file, target, options);
     } catch (error) {
       lastError = error;
       if ((error as Error).name === 'AbortError') throw error;
       const status = error instanceof ApiError ? error.status : 0;
+      if (status === 408) timeoutCount += 1;
+      if (status === 0 || status === 502 || status === 504 || timeoutCount >= 2) useFallback = true;
       const retryable = status === 0 || status === 408 || status === 429 || status >= 500;
       if (!retryable || attempt === maxAttempts) throw error;
       options?.onProgress?.(0);
@@ -1612,18 +1661,21 @@ async function putSignedWorkspaceFile(
   throw lastError;
 }
 
-function putMultipartPartAttempt(
+async function putMultipartPartAttempt(
   signed: MultipartPartSigned,
+  url: string,
   chunk: Blob,
   signal: AbortSignal,
   onProgress: (loaded: number) => void,
 ): Promise<void> {
-  return new Promise((resolve, reject) => {
+  const release = await acquireOssRequestSlot();
+  try {
+    return await new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('PUT', signed.url);
+    xhr.open('PUT', url);
     // A stalled cross-region connection must not occupy one worker forever.
     // Retrying obtains a fresh signed URL and resumes only this part.
-    xhr.timeout = 60_000;
+    xhr.timeout = 120_000;
     Object.entries(signed.headers || {}).forEach(([key, value]) => xhr.setRequestHeader(key, value));
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress(event.loaded);
@@ -1645,7 +1697,10 @@ function putMultipartPartAttempt(
     }
     signal.addEventListener('abort', () => xhr.abort(), { once: true });
     xhr.send(chunk);
-  });
+    });
+  } finally {
+    release();
+  }
 }
 
 async function uploadMultipartWorkspaceFile(
@@ -1674,10 +1729,13 @@ async function uploadMultipartWorkspaceFile(
     const start = (partNumber - 1) * partSize;
     const chunk = file.slice(start, Math.min(start + partSize, file.size));
     let lastError: unknown;
+    let timeoutCount = 0;
+    let useFallback = false;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         const signed = await signPart(partNumber);
-        await putMultipartPartAttempt(signed, chunk, controller.signal, (loaded) => {
+        const target = useFallback && signed.fallback_url ? signed.fallback_url : signed.url;
+        await putMultipartPartAttempt(signed, target, chunk, controller.signal, (loaded) => {
           uploadedBytes.set(partNumber, loaded);
           reportProgress();
         });
@@ -1686,6 +1744,8 @@ async function uploadMultipartWorkspaceFile(
         lastError = error;
         if ((error as Error).name === 'AbortError') throw error;
         const status = error instanceof ApiError ? error.status : 0;
+        if (status === 408) timeoutCount += 1;
+        if (status === 0 || status === 502 || status === 504 || timeoutCount >= 2) useFallback = true;
         const retryable = status === 0 || status === 408 || status === 429 || status >= 500;
         if (!retryable || attempt === 3) throw error;
         uploadedBytes.set(partNumber, 0);
@@ -1705,7 +1765,7 @@ async function uploadMultipartWorkspaceFile(
   };
 
   try {
-    await Promise.all(Array.from({ length: Math.min(6, expectedParts) }, () => worker()));
+    await Promise.all(Array.from({ length: Math.min(4, expectedParts) }, () => worker()));
     const status = await getStatus();
     const uploaded = [...status.uploaded_parts].sort((a, b) => a.part_number - b.part_number);
     if (uploaded.length !== expectedParts) {
@@ -1725,16 +1785,22 @@ async function uploadMultipartWorkspaceFile(
 async function uploadTerminalWorkspaceFile(
   wsId: string, file: File, path: string, options?: WorkspaceUploadOptions,
 ): Promise<WorkspaceFile> {
-  if (file.size > WORKSPACE_MAX_FILE_BYTES) throw new ApiError(413, '文件超过 100MB 上限');
+  if (file.size > WORKSPACE_MAX_FILE_BYTES) throw new ApiError(413, '文件超过 5GB 存储上限');
   if (file.size <= WORKSPACE_PROXY_UPLOAD_BYTES) {
     return uploadWorkspaceFile(
       `/api/v1/terminal/workspaces/${wsId}/files/upload`, file, path, USER_TOKEN_KEY, options,
     );
   }
-  const session = await userRequest<DirectUploadSession>(
-    `/api/v1/terminal/workspaces/${wsId}/uploads/initiate`,
-    { method: 'POST', body: JSON.stringify({ path, filename: file.name, content_type: file.type || 'application/octet-stream', size: file.size }) },
+  const initiate = (weakNetwork: boolean) => userRequest<DirectUploadSession>(
+    `/api/v1/terminal/workspaces/${wsId}/uploads/initiate`, { method: 'POST', body: JSON.stringify({
+      path, filename: file.name, content_type: file.type || 'application/octet-stream',
+      size: file.size, weak_network: weakNetwork,
+    }) },
   );
+  let weakNetwork = weakNetworkPreferred();
+  let session = await initiate(weakNetwork);
+  let retriedInWeakMode = false;
+  while (true) {
   try {
     if (session.method === 'MULTIPART') {
       const parts = await uploadMultipartWorkspaceFile(
@@ -1756,25 +1822,38 @@ async function uploadTerminalWorkspaceFile(
     });
   } catch (error) {
     void userRequest<void>(`/api/v1/terminal/uploads/${session.id}`, { method: 'DELETE' }).catch(() => undefined);
+    const status = error instanceof ApiError ? error.status : 0;
+    if (session.method === 'MULTIPART' && !weakNetwork && !retriedInWeakMode && (status === 0 || status === 408)) {
+      weakNetwork = true;
+      retriedInWeakMode = true;
+      session = await initiate(true);
+      options?.onProgress?.(0);
+      continue;
+    }
     throw error;
+  }
   }
 }
 
 async function uploadAdminWorkspaceFile(
   wsId: string, file: File, path: string, options?: WorkspaceUploadOptions,
 ): Promise<WorkspaceFile> {
-  if (file.size > WORKSPACE_MAX_FILE_BYTES) throw new ApiError(413, '文件超过 100MB 上限');
+  if (file.size > WORKSPACE_MAX_FILE_BYTES) throw new ApiError(413, '文件超过 5GB 存储上限');
   if (file.size <= WORKSPACE_PROXY_UPLOAD_BYTES) {
     return uploadWorkspaceFile(
       `/api/v1/workspaces/${wsId}/files/upload`, file, path, 'ai_infra_token', options,
     );
   }
-  const session = await request<DirectUploadSession>(`/api/v1/workspaces/${wsId}/uploads/initiate`, {
-    method: 'POST',
-    body: JSON.stringify({
-      path, filename: file.name, content_type: file.type || 'application/octet-stream', size: file.size,
+  const initiate = (weakNetwork: boolean) => request<DirectUploadSession>(`/api/v1/workspaces/${wsId}/uploads/initiate`, {
+    method: 'POST', body: JSON.stringify({
+      path, filename: file.name, content_type: file.type || 'application/octet-stream',
+      size: file.size, weak_network: weakNetwork,
     }),
   });
+  let weakNetwork = weakNetworkPreferred();
+  let session = await initiate(weakNetwork);
+  let retriedInWeakMode = false;
+  while (true) {
   try {
     if (session.method === 'MULTIPART') {
       const parts = await uploadMultipartWorkspaceFile(
@@ -1796,7 +1875,16 @@ async function uploadAdminWorkspaceFile(
     });
   } catch (error) {
     void request<void>(`/api/v1/workspace-uploads/${session.id}`, { method: 'DELETE' }).catch(() => undefined);
+    const status = error instanceof ApiError ? error.status : 0;
+    if (session.method === 'MULTIPART' && !weakNetwork && !retriedInWeakMode && (status === 0 || status === 408)) {
+      weakNetwork = true;
+      retriedInWeakMode = true;
+      session = await initiate(true);
+      options?.onProgress?.(0);
+      continue;
+    }
     throw error;
+  }
   }
 }
 
@@ -2284,6 +2372,8 @@ export const terminal = {
   getWsFilePreview: (id: string) => userRequest<WorkspaceFilePreview>(`/api/v1/terminal/files/${id}/preview`),
   getWsFileOriginalPreviewSource: (id: string) =>
     userRequest<WorkspaceOriginalPreviewSource>(`/api/v1/terminal/files/${id}/original-preview-source`),
+  getWsFileDownloadTicket: (id: string) =>
+    userRequest<WorkspaceDownloadTicket>(`/api/v1/terminal/files/${id}/download-ticket`, { method: 'POST' }),
   getWsFilePdfPreviewInfo: (id: string) =>
     userRequest<WorkspacePdfPreviewInfo>(`/api/v1/terminal/files/${id}/pdf-preview/info`),
   getWsFilePdfPreviewPage: (id: string, pageNumber: number) =>

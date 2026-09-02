@@ -26,6 +26,11 @@ import './enterprise-access-control.css';
 type PageAccess = EnterpriseApplicationModuleAccess['page_access'][string];
 type AppDraft = Record<string, EnterpriseApplicationModuleAccess>;
 type DraftByApplication = Record<string, AppDraft>;
+type DepartmentWorkspaceAccess = { read: boolean; upload: boolean };
+type DepartmentWorkspaceDraft = Record<string, DepartmentWorkspaceAccess>;
+
+const DEPARTMENT_READ_PREFIX = 'workspace.department.read:';
+const DEPARTMENT_UPLOAD_PREFIX = 'workspace.department.upload:';
 
 const OPERATION_COLUMNS: Array<{ key: EnterpriseApplicationOperation; label: string }> = [
   { key: 'query', label: '查询' },
@@ -115,6 +120,7 @@ export default function EnterpriseAccessControl() {
   const [systemFilter, setSystemFilter] = useState<string>('all');
   const [onlyGranted, setOnlyGranted] = useState(false);
   const [drafts, setDrafts] = useState<DraftByApplication>({});
+  const [departmentDraft, setDepartmentDraft] = useState<DepartmentWorkspaceDraft>({});
   const [legacyVisible, setLegacyVisible] = useState<Record<string, boolean>>({});
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewUserId, setPreviewUserId] = useState<string>();
@@ -148,6 +154,10 @@ export default function EnterpriseAccessControl() {
     [application.id, integrationQueries[index]?.data as EnterpriseApplicationIntegration | undefined]
   ))), [appList, integrationVersion]);
   const role = roleList.find(item => item.id === selectedRoleId) ?? roleList.find(item => item.is_active);
+  const organizationDepartments = useMemo(() => Array.from(nodeMap.values())
+    .filter(node => node.type === 'department' && node.orgId === orgId)
+    .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN')),
+  [nodeMap, orgId]);
 
   useEffect(() => {
     if (role && role.id !== selectedRoleId) setSelectedRoleId(role.id);
@@ -156,6 +166,7 @@ export default function EnterpriseAccessControl() {
   useEffect(() => {
     if (!role) {
       setDrafts({});
+      setDepartmentDraft({});
       setLegacyVisible({});
       return;
     }
@@ -169,8 +180,14 @@ export default function EnterpriseAccessControl() {
       );
     });
     setDrafts(nextDrafts);
+    const permissions = new Set(role.permission_codes);
+    setDepartmentDraft(Object.fromEntries(organizationDepartments.map(department => [department.id, {
+      read: permissions.has(`${DEPARTMENT_READ_PREFIX}${department.id}`)
+        || permissions.has(`${DEPARTMENT_UPLOAD_PREFIX}${department.id}`),
+      upload: permissions.has(`${DEPARTMENT_UPLOAD_PREFIX}${department.id}`),
+    }])));
     setLegacyVisible(nextLegacy);
-  }, [role?.id, appList, integrationVersion]);
+  }, [role?.id, role?.permission_codes, appList, integrationVersion, organizationDepartments]);
 
   useEffect(() => {
     const requestedUser = searchParams.get('user');
@@ -203,7 +220,14 @@ export default function EnterpriseAccessControl() {
   const save = useMutation({
     mutationFn: async () => {
       if (!role) throw new Error('请先选择角色');
-      await Promise.all(appList.map(application => {
+      const retainedPermissionCodes = role.permission_codes.filter(code => (
+        !code.startsWith(DEPARTMENT_READ_PREFIX) && !code.startsWith(DEPARTMENT_UPLOAD_PREFIX)
+      ));
+      const workspacePermissionCodes = Object.entries(departmentDraft).flatMap(([departmentId, access]) => {
+        if (access.upload) return [`${DEPARTMENT_READ_PREFIX}${departmentId}`, `${DEPARTMENT_UPLOAD_PREFIX}${departmentId}`];
+        return access.read ? [`${DEPARTMENT_READ_PREFIX}${departmentId}`] : [];
+      });
+      await Promise.all([...appList.map(application => {
         const activeRoleIds = new Set(roleList.filter(item => item.is_active).map(item => item.id));
         // 本页是唯一的企业模块授权入口：无论子系统仍报告 2.3 还是已经升级
         // 到 2.4，都只提交角色授权。历史部门/团队/用户授权会在管理员保存时
@@ -228,16 +252,19 @@ export default function EnterpriseAccessControl() {
           module_access: Object.fromEntries(moduleKeys.map(key => [key, applicationDraft[key]])),
         });
         return enterpriseApplications.replaceGrants(application.id, retained);
-      }));
+      }), roles.replacePermissions(role.id, Array.from(new Set([
+        ...retainedPermissionCodes, ...workspacePermissionCodes,
+      ])))]);
     },
     onMutate: () => {
       message.loading({ key: 'role-permission-save', content: `正在保存“${role?.name ?? '当前角色'}”的权限…`, duration: 0 });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['enterprise-applications', orgId] });
+      qc.invalidateQueries({ queryKey: ['roles', orgId] });
       message.success({
         key: 'role-permission-save',
-        content: `已保存“${role?.name}”在全部企业模块中的权限`,
+        content: `已保存“${role?.name}”的企业模块与部门工作空间权限`,
         duration: 3,
       });
     },
@@ -451,6 +478,35 @@ export default function EnterpriseAccessControl() {
         </div>
         <label className="granted-filter"><Switch checked={onlyGranted} onChange={setOnlyGranted} size="small" />只看已授权</label>
         <div className="permission-count"><strong>{grantedPageTotal}</strong><span>个页面已授权</span></div>
+      </section>
+
+      <section className="workspace-permission-card">
+        <header>
+          <div>
+            <strong>部门工作空间</strong>
+            <span>员工自己的个人空间始终可读写；主部门默认只读。这里仅配置角色额外获得的部门查看与上传权限。</span>
+          </div>
+          <Tag color="purple">随角色授权</Tag>
+        </header>
+        <div className="workspace-permission-grid">
+          {organizationDepartments.map(department => {
+            const access = departmentDraft[department.id] ?? { read: false, upload: false };
+            return <div className="workspace-permission-row" key={department.id}>
+              <div><strong>{department.name}</strong><small>{department.slug}</small></div>
+              <Checkbox checked={access.read || access.upload} onChange={event => setDepartmentDraft(current => ({
+                ...current,
+                [department.id]: event.target.checked
+                  ? { read: true, upload: current[department.id]?.upload ?? false }
+                  : { read: false, upload: false },
+              }))}>查看文件</Checkbox>
+              <Checkbox checked={access.upload} onChange={event => setDepartmentDraft(current => ({
+                ...current,
+                [department.id]: { read: event.target.checked || (current[department.id]?.read ?? false), upload: event.target.checked },
+              }))}>上传与修改</Checkbox>
+            </div>;
+          })}
+          {!organizationDepartments.length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无部门" />}
+        </div>
       </section>
 
       <section className="permission-table-card">

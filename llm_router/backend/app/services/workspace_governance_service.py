@@ -88,12 +88,14 @@ async def initiate_direct_upload(
     try:
         signed = await storage_gateway_service.sign_browser_upload(
             filename=data.filename, content_type=data.content_type, size_bytes=data.size,
+            weak_network=data.weak_network,
         )
     except storage_gateway_service.StorageGatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     upload_meta = {
         "transport": str(signed.get("method") or "PUT").lower(),
         "headers": dict(signed.get("headers") or {}),
+        "fallback_url": signed.get("fallback_url"),
         "gateway_session_id": signed.get("gateway_session_id"),
         "part_size": signed.get("part_size"),
         "expected_parts": signed.get("expected_parts"),
@@ -132,12 +134,14 @@ async def initiate_admin_direct_upload(
     try:
         signed = await storage_gateway_service.sign_browser_upload(
             filename=data.filename, content_type=data.content_type, size_bytes=data.size,
+            weak_network=data.weak_network,
         )
     except storage_gateway_service.StorageGatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     upload_meta = {
         "transport": str(signed.get("method") or "PUT").lower(),
         "headers": dict(signed.get("headers") or {}),
+        "fallback_url": signed.get("fallback_url"),
         "gateway_session_id": signed.get("gateway_session_id"),
         "part_size": signed.get("part_size"),
         "expected_parts": signed.get("expected_parts"),

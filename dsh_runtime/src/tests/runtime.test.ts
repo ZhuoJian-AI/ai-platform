@@ -64,7 +64,7 @@ function request(overrides: Partial<RunRequest> = {}): RunRequest {
   return {
     run_id: 'run-1', task_id: 'task-1', run_token: 'opaque-token', messages: [],
     message: '你好', system_prompt: '你是企业助手。', model: { alias: 'default' },
-    exec_mode: 'craft', tools: [], max_steps: 8, ...overrides,
+    exec_mode: 'craft', tools: [], max_steps: 24, ...overrides,
   }
 }
 
@@ -117,7 +117,7 @@ test('executes an authorized platform tool then continues the DSH loop', async (
   assert(events.some(event => event.type === 'done' && event.text === '已找到文件'))
 })
 
-test('enforces the platform eight-step budget inside the model adapter', async () => {
+test('enforces the request step budget inside the model adapter', async () => {
   const backendUrl = await fakeBackend(async incoming => {
     if (incoming.url?.endsWith('/tools/execute')) return { ok: true, content: 'ok', value: { ok: true } }
     await body(incoming)

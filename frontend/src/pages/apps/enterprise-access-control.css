@@ -73,6 +73,60 @@
   box-shadow: 0 8px 28px rgba(15, 23, 42, .04);
 }
 
+.workspace-permission-card {
+  background: #fff;
+  border: 1px solid #e7e9f1;
+  border-radius: 12px;
+  margin-bottom: 16px;
+  overflow: hidden;
+}
+
+.workspace-permission-card > header {
+  align-items: center;
+  border-bottom: 1px solid #eef0f5;
+  display: flex;
+  justify-content: space-between;
+  padding: 14px 18px;
+}
+
+.workspace-permission-card > header div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.workspace-permission-card > header span {
+  color: #7b8192;
+  font-size: 12px;
+}
+
+.workspace-permission-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 12px 12px;
+}
+
+.workspace-permission-row {
+  align-items: center;
+  border-bottom: 1px solid #f0f1f5;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(120px, 1fr) auto auto;
+  min-height: 54px;
+  padding: 6px 10px;
+}
+
+.workspace-permission-row > div {
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-permission-row small {
+  color: #9aa0ae;
+}
+
 .permission-table-scroll {
   flex: 1;
   min-height: 0;

@@ -9,7 +9,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import OriginalFilePreview, { supportsPagedWorkspacePreview } from '../../components/files/OriginalFilePreview';
-import type { WorkspaceOriginalPreviewSource, WorkspacePdfPreviewInfo } from '../../api/client';
+import type { WorkspaceDownloadTicket, WorkspaceOriginalPreviewSource, WorkspacePdfPreviewInfo } from '../../api/client';
 // mammoth 仅在打开 .docx 时按需动态加载（见下方 useEffect），不进主包。
 
 /** WorkBuddy 配色（与 Terminal.tsx 保持一致）。 */
@@ -250,11 +250,13 @@ export interface BrowserDrawerProps {
   loadPdfPreviewPage?: (fileId: string, pageNumber: number) => Promise<Blob>;
   /** 鉴权下载未经转换的原始文件。 */
   loadOriginalFile?: (fileId: string) => Promise<Blob>;
+  /** 获取短时 OSS 直下载地址；下载字节不再经过 SaaS 后端。 */
+  loadDownloadTicket?: (fileId: string) => Promise<WorkspaceDownloadTicket>;
 }
 
 export default function BrowserDrawer({
   open, initialHref, onClose, resolveHref, onReparse, loadOriginalPreview,
-  loadOriginalPreviewSource, loadPdfPreviewInfo, loadPdfPreviewPage, loadOriginalFile,
+  loadOriginalPreviewSource, loadPdfPreviewInfo, loadPdfPreviewPage, loadOriginalFile, loadDownloadTicket,
 }: BrowserDrawerProps) {
   const [history, setHistory] = useState<Source[]>([]);
   const [index, setIndex] = useState(-1);
@@ -308,8 +310,16 @@ export default function BrowserDrawer({
         if (cancelled) return;
         setOriginalPreviewMime(source.mime_type);
         if (source.mode === 'url' && source.url) {
+          const headers = { ...(source.headers || {}), Range: 'bytes=0-0' };
+          let selectedUrl = source.url;
+          try {
+            const probe = await fetch(source.url, { headers });
+            if (!probe.ok && source.fallback_url) selectedUrl = source.fallback_url;
+          } catch {
+            if (source.fallback_url) selectedUrl = source.fallback_url;
+          }
           setOriginalPreviewHeaders(source.headers || {});
-          setOriginalPreviewUrl(source.url);
+          setOriginalPreviewUrl(selectedUrl);
           return;
         }
       }
@@ -514,11 +524,42 @@ export default function BrowserDrawer({
     }
     if (current.kind === 'parsed' || current.kind === 'binary') {
       try {
+        if (loadDownloadTicket) {
+          const ticket = await loadDownloadTicket(current.fileId);
+          let target = ticket.url;
+          try {
+            const probe = await fetch(ticket.url, {
+              headers: { ...ticket.headers, Range: 'bytes=0-0' },
+            });
+            if (!probe.ok && ticket.fallback_url) target = ticket.fallback_url;
+          } catch {
+            if (ticket.fallback_url) target = ticket.fallback_url;
+          }
+          const anchor = document.createElement('a');
+          anchor.href = target;
+          anchor.download = ticket.filename || displayNameFromPath(current.path);
+          anchor.target = '_blank';
+          anchor.rel = 'noopener';
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          return;
+        }
         const blob = loadOriginalFile
           ? await loadOriginalFile(current.fileId)
           : new Blob([b64ToUint8(current.kind === 'parsed' ? current.originalContent : current.content)], { type: current.mime });
         saveBlob(blob, displayNameFromPath(current.path));
       } catch (error) {
+        if (error && (error as { status?: number }).status === 409 && loadOriginalFile) {
+          try {
+            const blob = await loadOriginalFile(current.fileId);
+            saveBlob(blob, displayNameFromPath(current.path));
+            return;
+          } catch (fallbackError) {
+            message.error((fallbackError as Error)?.message || '原文件下载失败');
+            return;
+          }
+        }
         message.error((error as Error)?.message || '原文件下载失败');
       }
     }

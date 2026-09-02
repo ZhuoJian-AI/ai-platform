@@ -62,7 +62,6 @@ from app.utils.workspace_presentation import artifacts_from_traces, enrich_metad
 
 logger = structlog.get_logger()
 
-MAX_STEPS = 8
 RUNNER_INLINE_FILE_BYTES = 10 * 1024 * 1024
 
 

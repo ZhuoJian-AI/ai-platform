@@ -5,6 +5,7 @@
 """
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 from uuid import UUID
 
@@ -90,6 +91,7 @@ from app.schemas.workspace import (
     WorkspaceAuditEventRead,
     WorkspaceBulkDeleteRequest,
     WorkspaceBulkDeleteResult,
+    WorkspaceDownloadTicketRead,
     WorkspaceFileCreate,
     WorkspaceFilePage,
     WorkspaceFilePreviewRead,
@@ -918,6 +920,7 @@ async def initiate_ws_upload_endpoint(
         id=session.id,
         method=str(upload_meta.get("transport") or "put").upper(),
         url=str(session.upload_url) if session.upload_url else None,
+        fallback_url=str(upload_meta.get("fallback_url")) if upload_meta.get("fallback_url") else None,
         headers=dict(upload_meta.get("headers") or {}),
         part_size=upload_meta.get("part_size"),
         expected_parts=upload_meta.get("expected_parts"),
@@ -1072,6 +1075,7 @@ async def original_preview_source_ws_file_endpoint(
             return WorkspaceOriginalPreviewSourceRead(
                 mode="url",
                 url=str(signed["url"]),
+                fallback_url=str(signed.get("fallback_url")) if signed.get("fallback_url") else None,
                 headers={str(k): str(v) for k, v in (signed.get("headers") or {}).items()},
                 filename=filename,
                 mime_type=mime_type,
@@ -1083,6 +1087,48 @@ async def original_preview_source_ws_file_endpoint(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except storage_gateway_service.StorageGatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post(
+    "/terminal/files/{file_id}/download-ticket",
+    response_model=WorkspaceDownloadTicketRead,
+)
+async def download_ticket_ws_file_endpoint(
+    file_id: UUID, response: Response, cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Authorize once, then let the browser download directly from OSS."""
+    response.headers["Cache-Control"] = "private, no-store"
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
+    if not storage_gateway_service.is_object_ref(f.content_ref):
+        raise HTTPException(status_code=409, detail="该历史文件尚未迁移到 OSS，请使用兼容下载")
+    try:
+        filename, mime_type = source_metadata(f)
+        signed = await storage_gateway_service.get_browser_signed_download(
+            str(f.content_ref), expires_in_seconds=15 * 60,
+        )
+    except OriginalPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except storage_gateway_service.StorageGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    metadata = dict(f.metadata_ or {})
+    expires_in = min(15 * 60, int(signed.get("expires_in") or 15 * 60))
+    return WorkspaceDownloadTicketRead(
+        url=str(signed["url"]),
+        fallback_url=str(signed.get("fallback_url")) if signed.get("fallback_url") else None,
+        expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
+        filename=filename,
+        mime_type=mime_type,
+        etag=str(metadata.get("etag") or "") or None,
+        size=int(f.size or 0),
+        headers={str(k): str(v) for k, v in (signed.get("headers") or {}).items()},
+    )
 
 
 @router.get("/terminal/files/{file_id}/pdf-preview/info")

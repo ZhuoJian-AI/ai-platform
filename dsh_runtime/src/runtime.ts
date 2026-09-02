@@ -176,8 +176,8 @@ export class DshRuntime {
       })
       return
     }
-    if (!Number.isInteger(request.max_steps) || request.max_steps < 1 || request.max_steps > 8) {
-      throw new Error('max_steps must be between 1 and 8')
+    if (!Number.isInteger(request.max_steps) || request.max_steps < 1 || request.max_steps > 64) {
+      throw new Error('max_steps must be between 1 and 64')
     }
     if (request.exec_mode !== 'craft' && request.tools.length) {
       throw new Error(`${request.exec_mode} mode cannot expose tools`)
