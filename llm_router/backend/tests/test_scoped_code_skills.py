@@ -145,7 +145,7 @@ Always validate the input workbook before processing.
     )
     assert version2.version_no == 2
     assert version2.id != version1.id
-    assert folder.active_version_id == version2.id
+    assert folder.active_version_id == version1.id
     assert version1.archive != version2.archive
 
     assert await assert_bound_skills_visible(db_session, cu, [str(folder.id)]) == [folder]
@@ -331,6 +331,24 @@ def test_agent_skill_rejects_case_insensitive_duplicate_paths():
             "scripts/Run.py": b"print('first')",
             "scripts/run.py": b"print('second')",
         })
+
+
+def test_standard_agent_skill_requires_root_manifest_and_scripts_directory() -> None:
+    manifest = b"---\nname: Example\ndescription: example\n---\n"
+    with pytest.raises(HTTPException, match="SKILL.md at package root"):
+        skill_import_service._validate_standard_agent_skill_layout(
+            {"nested/SKILL.md": manifest, "nested/scripts/run.py": b"print('ok')"},
+            "nested/SKILL.md",
+        )
+    with pytest.raises(HTTPException, match="must be under scripts"):
+        skill_import_service._validate_standard_agent_skill_layout(
+            {"SKILL.md": manifest, "process_bank_statement.py": b"print('bad')"},
+            "SKILL.md",
+        )
+    skill_import_service._validate_standard_agent_skill_layout(
+        {"SKILL.md": manifest, "scripts/process_bank_statement.py": b"print('ok')"},
+        "SKILL.md",
+    )
 
 
 def test_agent_skill_normalized_archive_respects_compressed_limit(monkeypatch):

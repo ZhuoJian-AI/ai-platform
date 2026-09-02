@@ -103,3 +103,25 @@ def test_bank_skill_repackage_rejects_missing_source_and_target_collision() -> N
         archive.writestr("scripts/process_bank_statement.py", "print('new')\n")
     with pytest.raises(ValueError, match="Target script already exists"):
         repackage_agent_skill(out.getvalue())
+
+
+def test_bank_skill_v2_renames_existing_scripts_process_entrypoint() -> None:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "SKILL.md",
+            "---\nname: Ningbo Bank\ndescription: Process statements\n---\n"
+            "Run `scripts/process.py`.\n",
+        )
+        archive.writestr("scripts/process.py", "print('ok')\n")
+
+    repaired = repackage_agent_skill(
+        out.getvalue(),
+        source_script="scripts/process.py",
+        target_script="scripts/process_bank_statement.py",
+    )
+    _, files, skill_path = skill_import_service._safe_archive(repaired, "bank-v2.zip")
+    skill_import_service._validate_standard_agent_skill_layout(files, skill_path)
+    assert "scripts/process.py" not in files
+    assert "scripts/process_bank_statement.py" in files
+    assert b"scripts/process_bank_statement.py" in files["SKILL.md"]
