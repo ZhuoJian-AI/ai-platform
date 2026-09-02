@@ -1,8 +1,9 @@
 """Organization ORM model."""
 
 from decimal import Decimal
+from uuid import UUID
 
-from sqlalchemy import BigInteger, Boolean, Integer, Numeric, String, Text
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -37,3 +38,12 @@ class Organization(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     providers = relationship("LlmProvider", back_populates="organization", lazy="selectin")
     dlp_rules = relationship("DlpRule", back_populates="organization", lazy="selectin")
     routing_policies = relationship("RoutingPolicy", back_populates="organization", lazy="selectin")
+class OrganizationSlugAlias(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Historical organization slug kept as a permanent login alias."""
+
+    __tablename__ = "organization_slug_aliases"
+
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    slug: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)

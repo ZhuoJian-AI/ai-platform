@@ -23,6 +23,7 @@ from app.models import (  # noqa: F401
     LlmProvider,
     Ontology,
     Organization,
+    OrganizationSlugAlias,
     RagChunk,
     RagCollection,
     RagDocument,

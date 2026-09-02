@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Spin } from 'antd';
 import LoginForm, { LoginBackdrop } from '../components/LoginForm';
 import { auth as authApi, type OrgInfo } from '../api/client';
@@ -13,6 +13,8 @@ export default function OrgLogin() {
   useBrandTitle(BRAND_TITLES.organization);
 
   const { slug = '' } = useParams<{ slug: string }>();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [org, setOrg] = useState<OrgInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
@@ -22,11 +24,21 @@ export default function OrgLogin() {
     setLoading(true);
     setNotFound(false);
     authApi.orgInfo(slug)
-      .then((info) => { if (!cancelled) setOrg(info); })
+      .then((info) => {
+        if (cancelled) return;
+        setOrg(info);
+        if (info.slug !== slug) {
+          navigate({
+            pathname: `/${info.slug}${location.pathname.slice(slug.length + 1)}`,
+            search: location.search,
+            hash: location.hash,
+          }, { replace: true });
+        }
+      })
       .catch(() => { if (!cancelled) setNotFound(true); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [slug]);
+  }, [location.hash, location.pathname, location.search, navigate, slug]);
 
   return (
     <LoginBackdrop>
@@ -42,7 +54,7 @@ export default function OrgLogin() {
           action={<Button type="primary" size="small" href="/login">平台登录</Button>}
         />
       ) : (
-        <LoginForm slug={slug} orgName={org?.name} />
+        <LoginForm slug={org?.slug || slug} orgName={org?.name} />
       )}
     </LoginBackdrop>
   );

@@ -30,7 +30,7 @@ from app.models.memory import Memory
 from app.models.module_deployment import ModuleDeployment, ModuleDeploymentProfile
 from app.models.multimodal import MultimodalJob, VoiceAuthorizationRecord, VoiceProfile, VoiceProfileGrant
 from app.models.ontology import Ontology, OntologyFile, OntologyFolder
-from app.models.organization import Organization
+from app.models.organization import Organization, OrganizationSlugAlias
 from app.models.platform_extension import (
     PlatformExtensionCatalogEntry,
     PlatformExtensionRelease,
@@ -58,6 +58,7 @@ from app.models.workspace import (
 __all__ = [
     "Admin",
     "Organization",
+    "OrganizationSlugAlias",
     "Department",
     "Team",
     "User",

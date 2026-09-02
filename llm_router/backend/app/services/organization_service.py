@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import noload
 
 from app.models.department import Department
-from app.models.organization import Organization
+from app.models.organization import Organization, OrganizationSlugAlias
 from app.models.team import Team
 from app.schemas.organization import (
     DepartmentCreate,
@@ -31,7 +31,36 @@ from app.services.workspace_lifecycle import (
 
 # ── Organization ────────────────────────────────────────────────────────
 
+
+async def _assert_organization_slug_available(
+    db: AsyncSession,
+    slug: str,
+    *,
+    organization_id: UUID | None = None,
+) -> OrganizationSlugAlias | None:
+    """Reject slugs owned by another active organization or permanent alias.
+
+    When an organization renames back to one of its own aliases, return that
+    alias so the caller can promote it back to the canonical slug.
+    """
+    canonical_owner = await db.scalar(
+        select(Organization.id).where(
+            Organization.slug == slug,
+            Organization.deleted_at.is_(None),
+        )
+    )
+    if canonical_owner is not None and canonical_owner != organization_id:
+        raise HTTPException(status_code=409, detail=f"Slug '{slug}' already exists")
+
+    alias = await db.scalar(
+        select(OrganizationSlugAlias).where(OrganizationSlugAlias.slug == slug)
+    )
+    if alias is not None and alias.organization_id != organization_id:
+        raise HTTPException(status_code=409, detail=f"Slug '{slug}' is reserved as an organization alias")
+    return alias
+
 async def create_organization(db: AsyncSession, data: OrganizationCreate) -> Organization:
+    await _assert_organization_slug_available(db, data.slug)
     org = Organization(**data.model_dump())
     db.add(org)
     await db.flush()
@@ -56,6 +85,19 @@ async def get_organization(db: AsyncSession, org_id: UUID) -> Organization | Non
 
 
 async def update_organization(db: AsyncSession, org: Organization, data: OrganizationUpdate) -> Organization:
+    next_slug = data.slug
+    if next_slug is not None and next_slug != org.slug:
+        promoted_alias = await _assert_organization_slug_available(
+            db, next_slug, organization_id=org.id
+        )
+        if promoted_alias is not None:
+            await db.delete(promoted_alias)
+            await db.flush()
+        existing_old_alias = await db.scalar(
+            select(OrganizationSlugAlias).where(OrganizationSlugAlias.slug == org.slug)
+        )
+        if existing_old_alias is None:
+            db.add(OrganizationSlugAlias(organization_id=org.id, slug=org.slug))
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(org, field, value)
     await db.flush()
@@ -100,32 +142,36 @@ async def get_organization_by_slug(db: AsyncSession, slug: str) -> Organization 
             Organization.deleted_at.is_(None),
         )
     )
+    organization = result.scalar_one_or_none()
+    if organization is not None:
+        return organization
+    result = await db.execute(
+        select(Organization)
+        .options(noload("*"))
+        .join(
+            OrganizationSlugAlias,
+            OrganizationSlugAlias.organization_id == Organization.id,
+        )
+        .where(
+            OrganizationSlugAlias.slug == slug,
+            Organization.deleted_at.is_(None),
+        )
+    )
     return result.scalar_one_or_none()
 
 
 async def get_org_id_by_slug(db: AsyncSession, slug: str) -> UUID | None:
     """按 slug 解析组织 id（未软删除）。供组织门户登录解析使用，避免加载整张组织对象
     （及其 selectin 关系）。无则返回 None。"""
-    result = await db.execute(
-        select(Organization.id).where(
-            Organization.slug == slug,
-            Organization.deleted_at.is_(None),
-        )
-    )
-    return result.scalar_one_or_none()
+    organization = await get_organization_by_slug(db, slug)
+    return organization.id if organization is not None else None
 
 
 async def get_org_public_by_slug(db: AsyncSession, slug: str) -> tuple[str, str] | None:
     """按 slug 取组织的 (name, slug)（未软删除），供登录页公开展示组织名。
     仅取两列，不加载组织关系。无则返回 None。"""
-    result = await db.execute(
-        select(Organization.name, Organization.slug).where(
-            Organization.slug == slug,
-            Organization.deleted_at.is_(None),
-        )
-    )
-    row = result.one_or_none()
-    return (row.name, row.slug) if row else None
+    organization = await get_organization_by_slug(db, slug)
+    return (organization.name, organization.slug) if organization is not None else None
 
 
 async def get_org_name_slug_by_id(db: AsyncSession, org_id) -> tuple[str | None, str | None]:
