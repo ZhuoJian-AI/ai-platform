@@ -19,6 +19,9 @@ export default function UsersPage() {
   const qc = useQueryClient();
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<User | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [conflictUser, setConflictUser] = useState<User | null>(null);
+  const [searchText, setSearchText] = useState('');
   const [form] = Form.useForm();
   const watchedDepartmentId = Form.useWatch('department_id', form) as string | undefined;
   const watchedTeamId = Form.useWatch('team_id', form) as string | undefined;
@@ -63,6 +66,15 @@ export default function UsersPage() {
     () => new Set(roleList.filter(role => role.is_active).map(role => role.id)),
     [roleList],
   );
+  const filteredUsers = useMemo(() => {
+    const keyword = searchText.trim().toLocaleLowerCase();
+    if (!keyword) return userList ?? [];
+    return (userList ?? []).filter(user => [
+      user.username,
+      user.display_name ?? '',
+      deptName(user.department_id ?? user.department_ids?.[0] ?? null) ?? '',
+    ].some(value => value.toLocaleLowerCase().includes(keyword)));
+  }, [userList, searchText, nodeMap]);
 
   const managerOptions = useMemo(() => {
     const options: { value: string; label: string }[] = [];
@@ -79,12 +91,19 @@ export default function UsersPage() {
 
   const openCreate = () => {
     setEditing(null);
+    setSubmitError(null);
+    setConflictUser(null);
     form.resetFields();
     const employeeRole = roleList.find(role => role.code === 'employee' && role.is_active);
     form.setFieldsValue({ role_ids: employeeRole ? [employeeRole.id] : [], is_active: true });
     setModalOpen(true);
   };
-  const openEdit = (r: User) => { setEditing(r); setModalOpen(true); };
+  const openEdit = (r: User) => {
+    setEditing(r);
+    setSubmitError(null);
+    setConflictUser(null);
+    setModalOpen(true);
+  };
   const openReset = (r: User) => { setResetTarget(r); setNewPassword(''); setResetModalOpen(true); };
   const closeReset = () => { setResetModalOpen(false); setResetTarget(null); setNewPassword(''); };
 
@@ -104,7 +123,13 @@ export default function UsersPage() {
     }
   }, [modalOpen, editing, form, activeRoleIds]);
 
-  const closeModal = () => { setModalOpen(false); setEditing(null); form.resetFields(); };
+  const closeModal = () => {
+    setModalOpen(false);
+    setEditing(null);
+    setSubmitError(null);
+    setConflictUser(null);
+    form.resetFields();
+  };
 
   const createUser = useMutation({
     mutationFn: (data: {
@@ -117,7 +142,25 @@ export default function UsersPage() {
       return users.create(orgId, data);
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['users'] }); closeModal(); message.success('用户已创建'); },
-    onError: (err: unknown) => { const msg = err instanceof ApiError ? err.message : '创建失败'; message.error(msg); },
+    onError: (err: unknown) => {
+      if (err instanceof ApiError && err.status === 409) {
+        const username = String(form.getFieldValue('username') ?? '').trim();
+        const existing = (userList ?? []).find(user => user.username === username) ?? null;
+        const existingDepartment = existing
+          ? deptName(existing.department_id ?? existing.department_ids?.[0] ?? null)
+          : undefined;
+        const msg = existing
+          ? `用户名“${username}”已由${existingDepartment ? `${existingDepartment}员工` : '现有员工'}“${existing.display_name || existing.username}”使用`
+          : '该用户名已被当前员工使用，请换一个用户名';
+        setConflictUser(existing);
+        setSubmitError(msg);
+        form.setFields([{ name: 'username', errors: [msg] }]);
+        return;
+      }
+      const msg = err instanceof ApiError ? err.message : '创建失败，请稍后重试';
+      setSubmitError(msg);
+      message.error(msg);
+    },
   });
 
   const updateUser = useMutation({
@@ -136,6 +179,8 @@ export default function UsersPage() {
   });
 
   const submit = (v: Record<string, unknown>) => {
+    if (createUser.isPending || updateUser.isPending) return;
+    setSubmitError(null);
     const department_id = (v.department_id as string | undefined) ?? null;
     const team_id = (v.team_id as string | undefined) ?? null;
     const manager_scopes = ((v.manager_scope_keys as string[] | undefined) ?? []).map((key) => {
@@ -179,8 +224,15 @@ export default function UsersPage() {
       />
 
       <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
+        <Input.Search
+          allowClear
+          value={searchText}
+          onChange={event => setSearchText(event.target.value)}
+          placeholder="搜索用户名、显示名或部门"
+          style={{ width: 320, marginBottom: 12 }}
+        />
         <Table
-          dataSource={userList ?? []}
+          dataSource={filteredUsers}
           rowKey="id"
           loading={isLoading}
           pagination={{ pageSize: 20 }}
@@ -250,8 +302,36 @@ export default function UsersPage() {
         width={560}
       >
         <Form form={form} layout="vertical" onFinish={submit}>
+          {submitError && (
+            <Alert
+              type="error"
+              showIcon
+              message="员工保存失败"
+              description={submitError}
+              action={conflictUser ? (
+                <Button
+                  size="small"
+                  onClick={() => {
+                    setSearchText(conflictUser.username);
+                    closeModal();
+                  }}
+                >
+                  查看已有员工
+                </Button>
+              ) : undefined}
+              style={{ marginBottom: 16 }}
+            />
+          )}
           <Form.Item name="username" label="用户名" rules={[{ required: true, min: 2, message: '请输入用户名（至少2位）' }]}>
-            <Input placeholder="用户名（同一组织内不可同名）" autoComplete="off" />
+            <Input
+              placeholder="用户名（同一组织内不可同名）"
+              autoComplete="off"
+              onChange={() => {
+                setSubmitError(null);
+                setConflictUser(null);
+                form.setFields([{ name: 'username', errors: [] }]);
+              }}
+            />
           </Form.Item>
           <Form.Item name="display_name" label="显示名">
             <Input placeholder="张三" />

@@ -52,6 +52,22 @@ async def test_create_user_duplicate_username(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_deleted_username_can_be_reused(client: AsyncClient):
+    org_id = await _make_org(client, slug="reuse-deleted-username-org")
+    payload = {"username": "reusable", "password": "test-pass-123", "role": "member"}
+
+    created = await client.post(f"/api/v1/organizations/{org_id}/users", json=payload)
+    assert created.status_code == 201
+    original_id = created.json()["id"]
+    assert (await client.delete(f"/api/v1/users/{original_id}")).status_code == 204
+
+    recreated = await client.post(f"/api/v1/organizations/{org_id}/users", json=payload)
+    assert recreated.status_code == 201
+    assert recreated.json()["id"] != original_id
+    assert recreated.json()["username"] == "reusable"
+
+
+@pytest.mark.asyncio
 async def test_user_belongs_to_one_department(client: AsyncClient):
     org_id = await _make_org(client, slug="single-dept-org")
     sales_id = await _make_department(client, org_id, "销售部", "sales")

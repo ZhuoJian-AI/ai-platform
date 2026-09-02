@@ -43,6 +43,34 @@ def _user_ws_name(user: User) -> str:
     return user.display_name or user.username
 
 
+def _archived_username(username: str, user_id: UUID) -> str:
+    """Release a soft-deleted login name while keeping the tombstone auditable."""
+    suffix = f"~deleted~{user_id}"
+    return f"{username[: 320 - len(suffix)]}{suffix}"
+
+
+async def _release_legacy_deleted_username(
+    db: AsyncSession,
+    org_id: UUID,
+    username: str,
+) -> None:
+    """Repair legacy tombstones that still occupy an organization's username."""
+    result = await db.execute(
+        select(User)
+        .where(
+            User.organization_id == org_id,
+            User.username == username,
+            User.deleted_at.is_not(None),
+        )
+        .with_for_update()
+    )
+    deleted_user = result.scalar_one_or_none()
+    if deleted_user is None:
+        return
+    deleted_user.username = _archived_username(username, deleted_user.id)
+    await db.flush()
+
+
 def _normalize_department_ids(
     department_ids: list[UUID] | None,
     primary_department_id: UUID | None,
@@ -137,6 +165,9 @@ async def create_user(
     primary_department_id = data.department_id or (department_ids[0] if department_ids else None)
     await validate_user_departments(db, org_id, department_ids, data.team_id)
     await validate_user_membership(db, org_id, primary_department_id, data.team_id)
+    # 历史版本软删员工时没有释放登录名，导致列表中已不存在的用户名仍返回 409。
+    # 创建前仅修复已软删的同名记录；在职员工的唯一约束保持不变。
+    await _release_legacy_deleted_username(db, org_id, data.username)
     user = User(
         organization_id=org_id,
         username=data.username,
@@ -309,6 +340,8 @@ async def login_user(
 
 async def soft_delete_user(db: AsyncSession, user: User) -> None:
     deleted_at = datetime.now(UTC)
+    # 登录名只要求在职员工唯一。软删记录保留 UUID 后缀供审计，同时释放原登录名。
+    user.username = _archived_username(user.username, user.id)
     user.deleted_at = deleted_at
     await db.execute(
         update(EnterpriseApplicationGrant)
