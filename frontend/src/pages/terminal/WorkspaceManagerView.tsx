@@ -151,6 +151,8 @@ export default function WorkspaceManagerView({
   const selectedWs = selectedWsId ? wsById.get(selectedWsId) ?? null : null;
   const canCreate = selectedWs?.capabilities?.create ?? false;
   const canManage = selectedWs?.capabilities?.manage ?? false;
+  const canUpdate = selectedWs?.capabilities?.update ?? canManage;
+  const canDelete = selectedWs?.capabilities?.delete ?? canManage;
 
   const [cwd, setCwd] = useState<string[]>(() => (urlParams.get('path') || '').split('/').filter(Boolean));
   const previousWsRef = useRef<string | null>(selectedWsId);
@@ -338,11 +340,11 @@ export default function WorkspaceManagerView({
   };
   const { data: trash = [], isLoading: trashLoading } = useQuery({
     queryKey: ['ws-mgr-trash', wsId], queryFn: () => terminal.listWsTrash(wsId!),
-    enabled: !!wsId && trashOpen && canManage,
+    enabled: !!wsId && trashOpen && canDelete,
   });
   const { data: auditEvents = [], isLoading: auditLoading } = useQuery({
     queryKey: ['ws-mgr-audit', wsId], queryFn: () => terminal.listWsAudit(wsId!),
-    enabled: !!wsId && auditOpen && canManage,
+    enabled: !!wsId && auditOpen && canUpdate,
   });
   const { data: versions = [], isLoading: versionsLoading } = useQuery({
     queryKey: ['ws-mgr-versions', versionFile?.id], queryFn: () => terminal.listWsFileVersions(versionFile!.id),
@@ -600,7 +602,7 @@ export default function WorkspaceManagerView({
                   <button style={{ ...toolBtnStyle, color: selecting ? WB.primary : '#1d1d1f' }} onClick={() => { setSelecting((value) => !value); setSelectedKeys(new Set()); setMarquee(null); dragSelectionRef.current = null; }}>
                     <CheckSquareOutlined /> {selecting ? '退出多选' : '多选'}
                   </button>
-                  {selecting && canManage && (
+                  {selecting && canDelete && (
                     <>
                       <button style={toolBtnStyle} onClick={() => setSelectedKeys(new Set(resultKeys))}>全选结果</button>
                       <button
@@ -610,9 +612,9 @@ export default function WorkspaceManagerView({
                       ><DeleteOutlined /> 批量删除</button>
                     </>
                   )}
-                  {canManage && <button style={toolBtnStyle} onClick={() => setTrashOpen(true)}><RestOutlined /> 回收站</button>}
-                  {canManage && <button style={toolBtnStyle} onClick={() => setAuditOpen(true)}><AuditOutlined /> 审计</button>}
-                  {cwd.length > 0 && canManage && (
+                  {canDelete && <button style={toolBtnStyle} onClick={() => setTrashOpen(true)}><RestOutlined /> 回收站</button>}
+                  {canUpdate && <button style={toolBtnStyle} onClick={() => setAuditOpen(true)}><AuditOutlined /> 审计</button>}
+                  {cwd.length > 0 && canDelete && (
                     <button
                       style={{ ...toolBtnStyle, color: '#dc2626' }}
                       onClick={() => setConfirm({
@@ -723,7 +725,7 @@ export default function WorkspaceManagerView({
                             <div style={viewMode === 'grid' ? iconNameStyle : listNameStyle} title={it.name}>{it.name}</div>
                             {viewMode === 'grid' && !!search.trim() && <div style={{ ...iconNameStyle, fontSize: 9, color: '#9ca3af', marginTop: 2 }} title={it.name}>{it.name}</div>}
                             {viewMode === 'list' && <><span style={listMetaStyle}>文件夹</span><span style={listMetaStyle}>{it.record?.updated_at ? new Date(it.record.updated_at).toLocaleString() : '路径推导'}</span><span style={listPathStyle}>{it.name}</span></>}
-                            {!selecting && canManage && (
+                            {!selecting && canDelete && (
                               <Dropdown
                                 trigger={['click']}
                                 placement="bottomRight"
@@ -792,12 +794,12 @@ export default function WorkspaceManagerView({
                                 menu={{
                                   items: [
                                     { key: 'open', label: '查看文件', icon: <EyeOutlined /> },
-                                    ...(canManage ? [
+                                    ...(canUpdate ? [
                                       { key: 'versions', label: '版本历史', icon: <HistoryOutlined /> },
                                       { key: 'share', label: '创建限时分享', icon: <ShareAltOutlined /> },
                                     ] : []),
                                     ...(selectedWs.capabilities?.publish ? [{ key: 'publish', label: '发布到部门或团队', icon: <SendOutlined /> }] : []),
-                                    ...(canManage ? [{ key: 'delete', label: '移至回收站', icon: <DeleteOutlined />, danger: true }] : []),
+                                    ...(canDelete ? [{ key: 'delete', label: '移至回收站', icon: <DeleteOutlined />, danger: true }] : []),
                                   ],
                                   onClick: ({ key: action, domEvent }) => {
                                     domEvent.stopPropagation();

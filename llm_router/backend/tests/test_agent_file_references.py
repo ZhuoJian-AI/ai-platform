@@ -20,7 +20,7 @@ from app.models.task import Task, TaskMessage
 from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceFile
 from app.schemas.workspace import WorkspaceFileCreate, WorkspaceFolderCreate
-from app.services import workspace_service
+from app.services import workspace_permission_service, workspace_service
 
 
 async def _make_workspace_with_file(
@@ -57,6 +57,10 @@ def test_workspace_file_tool_schema_exposes_ids_and_paths():
     assert "path" in tools["workspace_read_file"]["parameters"]["properties"]
     assert "offset" in tools["workspace_read_file"]["parameters"]["properties"]
     assert "limit" in tools["workspace_read_file"]["parameters"]["properties"]
+    assert "workspace_id" in tools["workspace_list_files"]["parameters"]["properties"]
+    assert "workspace_id" in tools["workspace_read_file"]["parameters"]["properties"]
+    assert "target_workspace_id" in tools["workspace_write_file"]["parameters"]["properties"]
+    assert "target_workspace_id" in tools["spreadsheet_tool"]["parameters"]["properties"]
     assert "file_id" in tools["workspace_list_files"]["description"]
     assert "普通问答、解释或文件分析不得擅自生成附件" in nodes.OUTPUT_PROTOCOL_PROMPT
 
@@ -172,8 +176,9 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
         _workspace_id,
         _user=None,
         *,
-        exec_mode="craft",
-        application_id=None,
+            exec_mode="craft",
+            application_id=None,
+            page_context=None,
     ):
         return nodes._builtin_tool_defs(), {}
 
@@ -236,8 +241,9 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
         _workspace_id,
         _user=None,
         *,
-        exec_mode="craft",
-        application_id=None,
+            exec_mode="craft",
+            application_id=None,
+            page_context=None,
     ):
         return nodes._builtin_tool_defs(), {}
 
@@ -334,7 +340,7 @@ def test_general_state_and_message_metadata_preserve_attachment_snapshot():
 
 
 @pytest.mark.asyncio
-async def test_attachment_validation_rejects_cross_workspace_and_unready(
+async def test_attachment_validation_accepts_authorized_cross_workspace_and_rejects_unready(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -361,10 +367,10 @@ async def test_attachment_validation_rejects_cross_workspace_and_unready(
         )
 
     monkeypatch.setattr(terminal_api.workspace_service, "get_file", cross_workspace_file)
-    with pytest.raises(HTTPException) as exc_info:
-        await terminal_api._resolve_task_attachments(db_session, cu, str(workspace_id), [file_id])
-    assert exc_info.value.status_code == 400
-    assert "不属于当前任务工作空间" in exc_info.value.detail
+    snapshots = await terminal_api._resolve_task_attachments(
+        db_session, cu, str(workspace_id), [file_id],
+    )
+    assert snapshots[0]["workspace_id"] == str(other_workspace_id)
 
     async def unready_file(_db, _file_id):
         return SimpleNamespace(
@@ -397,6 +403,50 @@ async def test_attachment_validation_rejects_cross_workspace_and_unready(
         db_session, cu, str(workspace_id), [file_id],
     )
     assert snapshots[0]["name"] == "截图.png"
+
+
+def test_workspace_intent_separates_permission_questions_from_file_operations() -> None:
+    personal_id = str(uuid4())
+    finance_id = str(uuid4())
+    access = {
+        "roles": [{"name": "财务经理"}],
+        "workspaces": [
+            {"id": personal_id, "name": "我的空间", "slug": "me", "scope_type": "user",
+             "capabilities": {"read": True, "create": True, "update": True, "delete": True}},
+            {"id": finance_id, "name": "财务部", "slug": "finance-dept", "scope_type": "department",
+             "capabilities": {"read": True, "create": True, "update": True, "delete": False}},
+        ],
+    }
+
+    question = workspace_permission_service.resolve_workspace_intent(
+        access, "我能不能修改财务部文件？",
+    )
+    assert question["permission_question"] is True
+    assert question["read_workspace_ids"] == [personal_id]
+    assert question["write_workspace_ids"] == [personal_id]
+
+    operation = workspace_permission_service.resolve_workspace_intent(
+        access, "请修改财务部文件里的预算表",
+    )
+    assert operation["permission_question"] is False
+    assert finance_id in operation["read_workspace_ids"]
+    assert finance_id in operation["write_workspace_ids"]
+
+    exact_reference = workspace_permission_service.resolve_workspace_intent(
+        access, "请分析附件", referenced_workspace_ids=[finance_id],
+    )
+    assert finance_id not in exact_reference["read_workspace_ids"]
+
+    all_authorized_files = workspace_permission_service.resolve_workspace_intent(
+        access, "请列出所有我有权限的部门文件",
+    )
+    assert all_authorized_files["permission_question"] is False
+    assert finance_id in all_authorized_files["read_workspace_ids"]
+
+    prompt = nodes._workspace_access_prompt(access, question)
+    assert "财务经理" in prompt
+    assert "禁止调用文件列表或读取工具" in prompt
+    assert "预算表" not in prompt
 
 
 @pytest.mark.asyncio

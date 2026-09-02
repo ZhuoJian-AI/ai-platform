@@ -451,9 +451,40 @@ export interface UserCreateInput {
   manager_scopes?: ManagerScopeGrant[];
 }
 
+export interface EffectiveAccessSource {
+  type: 'role' | 'membership' | 'organization' | 'ownership';
+  id: string;
+  name: string;
+}
+
+export interface WorkspaceCapabilities {
+  read: boolean;
+  create: boolean;
+  update: boolean;
+  delete: boolean;
+  manage: boolean;
+  publish: boolean;
+}
+
+export interface EffectiveWorkspaceAccess {
+  id: string;
+  name: string;
+  slug: string;
+  scope_type: 'organization' | 'department' | 'team' | 'user';
+  scope_id: string | null;
+  capabilities: WorkspaceCapabilities;
+  sources: Partial<Record<'read' | 'create' | 'update' | 'delete', EffectiveAccessSource[]>>;
+}
+
+export interface EffectiveAccess {
+  roles: RoleSummary[];
+  workspaces: EffectiveWorkspaceAccess[];
+}
+
 export const users = {
   list: (orgId: string) => request<User[]>(`/api/v1/organizations/${orgId}/users`),
   get: (id: string) => request<User>(`/api/v1/users/${id}`),
+  effectiveAccess: (id: string) => request<EffectiveAccess>(`/api/v1/users/${id}/effective-access`),
   create: (orgId: string, data: UserCreateInput) =>
     request<User>(`/api/v1/organizations/${orgId}/users`, { method: 'POST', body: JSON.stringify(data) }),
   update: (id: string, data: Partial<User>) =>
@@ -737,7 +768,7 @@ export interface Workspace {
   description: string | null; storage_backend: string; root_path: string;
   config: Record<string, unknown>; scope_type: string; scope_id: string | null;
   is_active: boolean; created_at: string; updated_at: string;
-  capabilities?: { read: boolean; create: boolean; manage: boolean; publish: boolean };
+  capabilities?: WorkspaceCapabilities;
 }
 
 export interface WorkspaceFile {
@@ -2217,6 +2248,7 @@ export const terminal = {
     return resp.json() as Promise<{ access_token: string; must_change_password: boolean; user: User }>;
   },
   me: () => userRequest<TerminalUser>('/api/v1/terminal/me'),
+  effectiveAccess: () => userRequest<EffectiveAccess>('/api/v1/terminal/effective-access'),
   resources: () => userRequest<TerminalResources>('/api/v1/terminal/resources'),
   models: () => userRequest<TerminalModels>('/api/v1/terminal/models'),
   agents: () => userRequest<{ agents: TerminalAgent[] }>('/api/v1/terminal/agents'),

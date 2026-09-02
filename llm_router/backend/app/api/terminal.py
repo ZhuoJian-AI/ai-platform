@@ -265,14 +265,12 @@ async def _get_owned_task(db: AsyncSession, task_id: UUID, cu: CurrentUser) -> T
 async def _resolve_task_attachments(
     db: AsyncSession,
     cu: CurrentUser,
-    workspace_id: str | None,
+    _workspace_id: str | None,
     file_ids: list[UUID],
 ) -> list[dict]:
-    """校验本轮结构化附件并生成可安全持久化的显示快照。"""
+    """Authorize each attachment in its real workspace and persist a display snapshot."""
     if not file_ids:
         return []
-    if not workspace_id:
-        raise HTTPException(status_code=400, detail="请先为任务选择工作空间后再添加附件")
 
     snapshots: list[dict] = []
     seen: set[str] = set()
@@ -284,8 +282,6 @@ async def _resolve_task_attachments(
         f = await workspace_service.get_file(db, file_id)
         if f is None:
             raise HTTPException(status_code=404, detail=f"附件不存在或已删除：{fid}")
-        if str(f.workspace_id) != str(workspace_id):
-            raise HTTPException(status_code=400, detail=f"附件不属于当前任务工作空间：{f.path}")
         ws = await workspace_service.get_workspace(db, f.workspace_id)
         if ws is None:
             raise HTTPException(status_code=404, detail=f"附件不存在或无权访问：{fid}")
