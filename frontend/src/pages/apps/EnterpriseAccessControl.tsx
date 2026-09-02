@@ -390,6 +390,50 @@ export default function EnterpriseAccessControl() {
   const grantedPageTotal = Object.values(drafts).reduce((total, appDraft) => (
     total + Object.values(appDraft).reduce((sum, access) => sum + pageCount(access), 0)
   ), 0);
+  const departmentAccesses = organizationDepartments.map(department => (
+    departmentDraft[department.id] ?? { read: false, upload: false }
+  ));
+  const grantedDepartmentCount = departmentAccesses.filter(access => access.read || access.upload).length;
+  const readableDepartmentCount = departmentAccesses.filter(access => access.read || access.upload).length;
+  const writableDepartmentCount = departmentAccesses.filter(access => access.upload).length;
+  const allDepartmentsReadable = organizationDepartments.length > 0
+    && readableDepartmentCount === organizationDepartments.length;
+  const allDepartmentsWritable = organizationDepartments.length > 0
+    && writableDepartmentCount === organizationDepartments.length;
+
+  const applyDepartmentPreset = (preset: DepartmentWorkspaceAccess) => {
+    setDepartmentDraft(Object.fromEntries(organizationDepartments.map(department => [
+      department.id, { ...preset },
+    ])));
+  };
+
+  const updateDepartmentColumn = (column: 'read' | 'upload', enabled: boolean) => {
+    setDepartmentDraft(current => Object.fromEntries(organizationDepartments.map(department => {
+      const access = current[department.id] ?? { read: false, upload: false };
+      if (column === 'upload') {
+        return [department.id, {
+          read: enabled || access.read,
+          upload: enabled,
+        }];
+      }
+      return [department.id, enabled
+        ? { read: true, upload: access.upload }
+        : { read: false, upload: false }];
+    })));
+  };
+
+  const toggleDepartmentRow = (departmentId: string) => {
+    setDepartmentDraft(current => {
+      const access = current[departmentId] ?? { read: false, upload: false };
+      const fullyGranted = access.read && access.upload;
+      return {
+        ...current,
+        [departmentId]: fullyGranted
+          ? { read: false, upload: false }
+          : { read: true, upload: true },
+      };
+    });
+  };
 
   const renderNativeApplication = (application: EnterpriseApplication, integration: EnterpriseApplicationIntegration) => {
     const applicationDraft = drafts[application.id] ?? {};
@@ -513,18 +557,99 @@ export default function EnterpriseAccessControl() {
                     <strong>允许这个角色进入哪些部门工作空间</strong>
                     <span>员工仍只归属一个主部门；这里配置跨部门查看和协作，不改变员工归属。</span>
                   </div>
-                  <span>已授权 {Object.values(departmentDraft).filter(access => access.read || access.upload).length} 个部门</span>
+                  <div className="workspace-bulk-actions">
+                    <span>已授权 {grantedDepartmentCount} / {organizationDepartments.length} 个部门</span>
+                    <Space.Compact>
+                      <Button
+                        size="small"
+                        disabled={!role || !organizationDepartments.length}
+                        onClick={() => applyDepartmentPreset({ read: true, upload: false })}
+                      >全部只读</Button>
+                      <Button
+                        size="small"
+                        disabled={!role || !organizationDepartments.length}
+                        onClick={() => applyDepartmentPreset({ read: true, upload: true })}
+                      >全部协作</Button>
+                      <Button
+                        size="small"
+                        disabled={!role || grantedDepartmentCount === 0}
+                        onClick={() => applyDepartmentPreset({ read: false, upload: false })}
+                      >清空授权</Button>
+                    </Space.Compact>
+                  </div>
                 </div>
                 <div className="workspace-permission-table-scroll">
                   <table className="workspace-permission-table">
-                    <thead><tr><th>部门工作空间</th><th>查看 / 下载</th><th>上传 / 修改</th></tr></thead>
+                    <thead><tr>
+                      <th>
+                        <label className="workspace-header-selector">
+                          <Checkbox
+                            aria-label="全选或取消全部部门协作权限"
+                            checked={allDepartmentsWritable}
+                            indeterminate={writableDepartmentCount > 0 && !allDepartmentsWritable}
+                            disabled={!role || !organizationDepartments.length}
+                            onChange={event => applyDepartmentPreset(event.target.checked
+                              ? { read: true, upload: true }
+                              : { read: false, upload: false })}
+                          />
+                          <span>部门工作空间</span>
+                        </label>
+                      </th>
+                      <th>
+                        <label className="workspace-column-selector">
+                          <Checkbox
+                            aria-label="全选或取消全部部门查看下载权限"
+                            checked={allDepartmentsReadable}
+                            indeterminate={readableDepartmentCount > 0 && !allDepartmentsReadable}
+                            disabled={!role || !organizationDepartments.length}
+                            onChange={event => updateDepartmentColumn('read', event.target.checked)}
+                          />
+                          <span>查看 / 下载</span>
+                        </label>
+                      </th>
+                      <th>
+                        <label className="workspace-column-selector">
+                          <Checkbox
+                            aria-label="全选或取消全部部门上传修改权限"
+                            checked={allDepartmentsWritable}
+                            indeterminate={writableDepartmentCount > 0 && !allDepartmentsWritable}
+                            disabled={!role || !organizationDepartments.length}
+                            onChange={event => updateDepartmentColumn('upload', event.target.checked)}
+                          />
+                          <span>上传 / 修改</span>
+                        </label>
+                      </th>
+                    </tr></thead>
                     <tbody>{organizationDepartments.map(department => {
                       const access = departmentDraft[department.id] ?? { read: false, upload: false };
-                      return <tr key={department.id}>
-                        <td><strong>{department.name}</strong><small>{department.slug}</small></td>
+                      const readable = access.read || access.upload;
+                      return <tr
+                        key={department.id}
+                        className={access.upload ? 'is-collaborating' : readable ? 'is-readable' : undefined}
+                        onClick={() => toggleDepartmentRow(department.id)}
+                        title={access.upload ? '点击取消该部门授权' : '点击授予该部门查看、上传和修改权限'}
+                      >
+                        <td>
+                          <label className="workspace-row-selector" onClick={event => event.stopPropagation()}>
+                            <Checkbox
+                              aria-label={`${department.name} 整行授权`}
+                              checked={access.read && access.upload}
+                              indeterminate={readable && !access.upload}
+                              onChange={() => toggleDepartmentRow(department.id)}
+                            />
+                            <span>
+                              <strong>{department.name}</strong>
+                              <small>{department.slug}</small>
+                            </span>
+                            <Tag color={access.upload ? 'blue' : readable ? 'cyan' : 'default'} bordered={false}>
+                              {access.upload ? '可协作' : readable ? '只读' : '未授权'}
+                            </Tag>
+                          </label>
+                        </td>
                         <td><Checkbox
                           aria-label={`${department.name} 查看下载`}
-                          checked={access.read || access.upload}
+                          checked={readable}
+                          onClick={event => event.stopPropagation()}
                           onChange={event => setDepartmentDraft(current => ({
                             ...current,
                             [department.id]: event.target.checked
@@ -535,6 +660,7 @@ export default function EnterpriseAccessControl() {
                         <td><Checkbox
                           aria-label={`${department.name} 上传修改`}
                           checked={access.upload}
+                          onClick={event => event.stopPropagation()}
                           onChange={event => setDepartmentDraft(current => ({
                             ...current,
                             [department.id]: {
