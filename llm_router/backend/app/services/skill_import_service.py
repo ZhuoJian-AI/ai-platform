@@ -214,6 +214,22 @@ def _agent_skill_metadata(manifest: dict, files: dict[str, bytes], skill_md: str
     }
 
 
+def _validate_standard_agent_skill_layout(files: dict[str, bytes], skill_path: str) -> None:
+    """Reject newly imported executable files outside the standard scripts/ lane."""
+    if PurePosixPath(skill_path) != PurePosixPath("SKILL.md"):
+        raise HTTPException(status_code=422, detail="Standard Agent Skill requires SKILL.md at package root")
+    misplaced = [
+        path for path in sorted(files)
+        if PurePosixPath(path).suffix.lower() in _SCRIPT_LANGUAGES
+        and (not PurePosixPath(path).parts or PurePosixPath(path).parts[0].lower() != "scripts")
+    ]
+    if misplaced:
+        raise HTTPException(
+            status_code=422,
+            detail="Standard Agent Skill executable files must be under scripts/: " + "、".join(misplaced[:10]),
+        )
+
+
 async def _persist_package(
     db: AsyncSession, *, org_id: UUID, scope_type: str, scope_id: str | None,
     archive: bytes, files: dict[str, bytes], skill_path: str, created_by: str | None,
@@ -236,6 +252,7 @@ async def _persist_package(
     if legacy:
         runtime, entrypoint, executable = _resolve_runtime(manifest, files)
     else:
+        _validate_standard_agent_skill_layout(files, skill_path)
         platform = _agent_skill_metadata(manifest, files, skill_md)
         manifest["_platform"] = platform
         runtime, entrypoint = "agent_skill", None
@@ -352,7 +369,7 @@ async def _create_version(
     )
     db.add(version)
     await db.flush()
-    if status == "ready":
+    if status == "ready" and folder.active_version_id is None:
         await activate_version(db, folder, version, skill_md, archive=archive)
     return folder, version
 

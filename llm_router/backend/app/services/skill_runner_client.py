@@ -65,7 +65,7 @@ async def install_version(version_id: UUID | str) -> None:
             version.manifest = manifest
             version.install_status = "ready"
             folder = await db.get(SkillFolder, version.skill_folder_id)
-            if folder is not None:
+            if folder is not None and folder.active_version_id is None:
                 await activate_version(db, folder, version)
         except Exception as exc:  # noqa: BLE001
             version.install_status = "failed"
