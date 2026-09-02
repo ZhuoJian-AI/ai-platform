@@ -63,6 +63,132 @@ async def test_create_department(client: AsyncClient):
     data = resp.json()
     assert data["name"] == "研发部"
     assert data["organization_id"] == org_id
+    assert data["sort_order"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reorder_departments_is_persisted(client: AsyncClient):
+    org_resp = await client.post(
+        "/api/v1/organizations",
+        json={"name": "部门排序测试组织", "slug": "department-order-org"},
+    )
+    org_id = org_resp.json()["id"]
+    created = []
+    for index, name in enumerate(("设计部", "生产部", "总经办")):
+        response = await client.post(
+            f"/api/v1/organizations/{org_id}/departments",
+            json={"name": name, "slug": f"department-{index}"},
+        )
+        assert response.status_code == 201
+        created.append(response.json())
+
+    requested_ids = [created[2]["id"], created[0]["id"], created[1]["id"]]
+    reorder_resp = await client.put(
+        f"/api/v1/organizations/{org_id}/departments/reorder",
+        json={"department_ids": requested_ids},
+    )
+    assert reorder_resp.status_code == 200
+    assert [item["id"] for item in reorder_resp.json()] == requested_ids
+    assert [item["sort_order"] for item in reorder_resp.json()] == [0, 1, 2]
+
+    list_resp = await client.get(f"/api/v1/organizations/{org_id}/departments")
+    assert list_resp.status_code == 200
+    assert [item["id"] for item in list_resp.json()] == requested_ids
+
+
+@pytest.mark.asyncio
+async def test_reorder_departments_rejects_incomplete_order(client: AsyncClient):
+    org_resp = await client.post(
+        "/api/v1/organizations",
+        json={"name": "部门排序校验组织", "slug": "department-order-validation-org"},
+    )
+    org_id = org_resp.json()["id"]
+    first = await client.post(
+        f"/api/v1/organizations/{org_id}/departments",
+        json={"name": "部门一", "slug": "department-one"},
+    )
+    await client.post(
+        f"/api/v1/organizations/{org_id}/departments",
+        json={"name": "部门二", "slug": "department-two"},
+    )
+
+    response = await client.put(
+        f"/api/v1/organizations/{org_id}/departments/reorder",
+        json={"department_ids": [first.json()["id"]]},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Department order must contain every active department exactly once"
+
+
+@pytest.mark.asyncio
+async def test_reorder_departments_rejects_duplicate_and_cross_org_ids(client: AsyncClient):
+    first_org = await client.post(
+        "/api/v1/organizations",
+        json={"name": "部门排序甲组织", "slug": "department-order-org-a"},
+    )
+    second_org = await client.post(
+        "/api/v1/organizations",
+        json={"name": "部门排序乙组织", "slug": "department-order-org-b"},
+    )
+    first = await client.post(
+        f"/api/v1/organizations/{first_org.json()['id']}/departments",
+        json={"name": "甲部门", "slug": "department-a"},
+    )
+    foreign = await client.post(
+        f"/api/v1/organizations/{second_org.json()['id']}/departments",
+        json={"name": "乙部门", "slug": "department-b"},
+    )
+
+    duplicate = await client.put(
+        f"/api/v1/organizations/{first_org.json()['id']}/departments/reorder",
+        json={"department_ids": [first.json()["id"], first.json()["id"]]},
+    )
+    assert duplicate.status_code == 422
+    assert duplicate.json()["detail"] == "Department order contains duplicate ids"
+
+    cross_org = await client.put(
+        f"/api/v1/organizations/{first_org.json()['id']}/departments/reorder",
+        json={"department_ids": [foreign.json()["id"]]},
+    )
+    assert cross_org.status_code == 422
+    assert cross_org.json()["detail"] == "Department order must contain every active department exactly once"
+
+
+@pytest.mark.asyncio
+async def test_department_create_and_delete_preserve_admin_order(client: AsyncClient):
+    org_resp = await client.post(
+        "/api/v1/organizations",
+        json={"name": "部门增删排序组织", "slug": "department-create-delete-order"},
+    )
+    org_id = org_resp.json()["id"]
+    created = []
+    for index, name in enumerate(("一部", "二部", "三部")):
+        response = await client.post(
+            f"/api/v1/organizations/{org_id}/departments",
+            json={"name": name, "slug": f"ordered-department-{index}"},
+        )
+        created.append(response.json())
+
+    requested_ids = [created[2]["id"], created[0]["id"], created[1]["id"]]
+    response = await client.put(
+        f"/api/v1/organizations/{org_id}/departments/reorder",
+        json={"department_ids": requested_ids},
+    )
+    assert response.status_code == 200
+
+    deleted = await client.delete(f"/api/v1/departments/{created[0]['id']}")
+    assert deleted.status_code == 204
+    appended = await client.post(
+        f"/api/v1/organizations/{org_id}/departments",
+        json={"name": "四部", "slug": "ordered-department-3"},
+    )
+    assert appended.status_code == 201
+
+    listed = await client.get(f"/api/v1/organizations/{org_id}/departments")
+    assert listed.status_code == 200
+    assert [department["id"] for department in listed.json()] == [
+        created[2]["id"], created[1]["id"], appended.json()["id"],
+    ]
 
 
 @pytest.mark.asyncio

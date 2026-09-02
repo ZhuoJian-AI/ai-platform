@@ -23,6 +23,7 @@ from app.config import settings
 from app.models.agent import Agent
 from app.models.api_key import ApiKey
 from app.models.data_interface import DataInterface, DataSystem
+from app.models.department import Department
 from app.models.ontology import OntologyFile
 from app.models.organization import Organization
 from app.models.rag import RagCollection
@@ -214,10 +215,23 @@ async def list_workspaces_for_user(db: AsyncSession, cu: CurrentUser) -> list[Wo
         Workspace.is_active.is_(True),
     )
     rows = list((await db.execute(stmt)).scalars().all())
-    return [
+    workspaces = [
         workspace for workspace in rows
         if (await workspace_permission_service.capabilities(db, workspace, cu))["read"]
     ]
+    department_rows = list((await db.execute(select(Department).where(
+        Department.organization_id == cu.organization_id,
+        Department.deleted_at.is_(None),
+    ))).scalars().all())
+    department_order = {str(department.id): department.sort_order for department in department_rows}
+    scope_order = {"organization": 0, "department": 1, "team": 2, "user": 3}
+    return sorted(workspaces, key=lambda workspace: (
+        scope_order.get(workspace.scope_type, 4),
+        department_order.get(str(workspace.scope_id), 0)
+        if workspace.scope_type == "department" else 0,
+        workspace.created_at,
+        str(workspace.id),
+    ))
 
 
 async def list_agents_for_user(db: AsyncSession, cu: CurrentUser) -> list[Agent]:

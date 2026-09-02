@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Alert, Button, Checkbox, Drawer, Empty, Form, Input, Modal, Select, Space,
-  Switch, Tag, message,
+  Switch, Tabs, Tag, message,
 } from 'antd';
 import {
   EyeOutlined, PlusOutlined, SafetyCertificateOutlined, UserOutlined,
@@ -158,7 +158,9 @@ export default function EnterpriseAccessControl() {
   const role = roleList.find(item => item.id === selectedRoleId) ?? roleList.find(item => item.is_active);
   const organizationDepartments = useMemo(() => Array.from(nodeMap.values())
     .filter(node => node.type === 'department' && node.orgId === orgId)
-    .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN')),
+    .sort((left, right) => (
+      (left.sortOrder ?? Number.MAX_SAFE_INTEGER) - (right.sortOrder ?? Number.MAX_SAFE_INTEGER)
+    )),
   [nodeMap, orgId]);
 
   useEffect(() => {
@@ -265,10 +267,15 @@ export default function EnterpriseAccessControl() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['enterprise-applications', orgId] });
       qc.invalidateQueries({ queryKey: ['roles', orgId] });
-      setSaveNotice({ type: 'success', text: `已保存“${role?.name}”的企业模块与部门工作空间权限` });
+      const departmentCount = Object.values(departmentDraft).filter(access => access.read || access.upload).length;
+      const pageCountTotal = Object.values(drafts).reduce((total, appDraft) => (
+        total + Object.values(appDraft).reduce((sum, access) => sum + pageCount(access), 0)
+      ), 0);
+      const successText = `已保存“${role?.name}”：${departmentCount} 个部门工作空间、${pageCountTotal} 个企业页面`;
+      setSaveNotice({ type: 'success', text: successText });
       message.success({
         key: 'role-permission-save',
-        content: `已保存“${role?.name}”的企业模块与部门工作空间权限`,
+        content: successText,
         duration: 3,
       });
     },
@@ -471,7 +478,7 @@ export default function EnterpriseAccessControl() {
       <Alert
         type="info" showIcon
         message="鉴权后聚合：员工只会看到其角色已获授权的系统、业务子模块和页面"
-        description="部门只记录员工属于哪里；一个员工可拥有多个角色，最终权限取角色并集。新接入的页面和 Action 默认无权。"
+        description="员工只归属一个主部门；跨部门工作空间和企业页面都由角色授权，一个员工拥有多个角色时权限取并集。新接入页面和 Action 默认无权。"
       />
 
       <section className="permission-toolbar">
@@ -485,73 +492,113 @@ export default function EnterpriseAccessControl() {
           />
         </div>
         <Button icon={<PlusOutlined />} onClick={() => { roleForm.resetFields(); setRoleModalOpen(true); }}>新建角色</Button>
-        <div className="toolbar-field system-filter">
-          <span>查看系统</span>
-          <Select
-            value={systemFilter}
-            options={[{ value: 'all', label: '全部企业模块' }, ...appList.map(application => ({
-              value: application.id, label: application.name,
-            }))]}
-            onChange={setSystemFilter}
-          />
-        </div>
-        <label className="granted-filter"><Switch checked={onlyGranted} onChange={setOnlyGranted} size="small" />只看已授权</label>
-        <div className="permission-count"><strong>{grantedPageTotal}</strong><span>个页面已授权</span></div>
-      </section>
-
-      <section className="workspace-permission-card">
-        <header>
-          <div>
-            <strong>部门工作空间</strong>
-            <span>员工自己的个人空间始终可读写；主部门默认只读。这里仅配置角色额外获得的部门查看与上传权限。</span>
-          </div>
-          <Tag color="purple">随角色授权</Tag>
-        </header>
-        <div className="workspace-permission-grid">
-          {organizationDepartments.map(department => {
-            const access = departmentDraft[department.id] ?? { read: false, upload: false };
-            return <div className="workspace-permission-row" key={department.id}>
-              <div><strong>{department.name}</strong><small>{department.slug}</small></div>
-              <Checkbox checked={access.read || access.upload} onChange={event => setDepartmentDraft(current => ({
-                ...current,
-                [department.id]: event.target.checked
-                  ? { read: true, upload: current[department.id]?.upload ?? false }
-                  : { read: false, upload: false },
-              }))}>查看文件</Checkbox>
-              <Checkbox checked={access.upload} onChange={event => setDepartmentDraft(current => ({
-                ...current,
-                [department.id]: { read: event.target.checked || (current[department.id]?.read ?? false), upload: event.target.checked },
-              }))}>上传与修改</Checkbox>
-            </div>;
-          })}
-          {!organizationDepartments.length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无部门" />}
+        <div className="toolbar-summary">
+          <span>当前草稿</span>
+          <strong>{Object.values(departmentDraft).filter(access => access.read || access.upload).length} 个部门</strong>
+          <i />
+          <strong>{grantedPageTotal} 个页面</strong>
         </div>
       </section>
 
-      <section className="permission-table-card">
-        <div className="permission-table-scroll">
-          <table className="permission-matrix">
-            <thead><tr>
-              <th>企业模块</th><th>业务子模块</th><th>最小模块页面</th><th>显示</th>
-              {OPERATION_COLUMNS.map(operation => <th key={operation.key}>{operation.label}</th>)}
-              <th>AI 可用</th>
-            </tr></thead>
-            <tbody>{visibleApplications.flatMap(application => {
-              const queryIndex = appList.findIndex(item => item.id === application.id);
-              if (integrationQueries[queryIndex]?.isLoading) return [];
-              const integration = integrationByAppId[application.id];
-              return integration?.modules?.length
-                ? renderNativeApplication(application, integration)
-                : renderLegacyApplication(application);
-            })}</tbody>
-          </table>
-          {!appsLoading && !visibleApplications.length && <Empty description="暂无企业模块" />}
-          {(appsLoading || integrationsLoading) && <div className="matrix-loading">正在读取企业模块目录…</div>}
-        </div>
-        <footer className="permission-footer">
-          <span>“显示”决定能否进入页面；操作列决定页面按钮；“AI 可用”是额外总开关。</span>
-          <strong>当前角色：{role?.name ?? '未选择'}</strong>
-        </footer>
+      <section className="permission-editor-card">
+        <Tabs
+          defaultActiveKey="departments"
+          items={[
+            {
+              key: 'departments',
+              label: '部门工作空间',
+              children: <div className="permission-tab-pane">
+                <div className="tab-guidance">
+                  <div>
+                    <strong>允许这个角色进入哪些部门工作空间</strong>
+                    <span>员工仍只归属一个主部门；这里配置跨部门查看和协作，不改变员工归属。</span>
+                  </div>
+                  <span>已授权 {Object.values(departmentDraft).filter(access => access.read || access.upload).length} 个部门</span>
+                </div>
+                <div className="workspace-permission-table-scroll">
+                  <table className="workspace-permission-table">
+                    <thead><tr><th>部门工作空间</th><th>查看 / 下载</th><th>上传 / 修改</th></tr></thead>
+                    <tbody>{organizationDepartments.map(department => {
+                      const access = departmentDraft[department.id] ?? { read: false, upload: false };
+                      return <tr key={department.id}>
+                        <td><strong>{department.name}</strong><small>{department.slug}</small></td>
+                        <td><Checkbox
+                          aria-label={`${department.name} 查看下载`}
+                          checked={access.read || access.upload}
+                          onChange={event => setDepartmentDraft(current => ({
+                            ...current,
+                            [department.id]: event.target.checked
+                              ? { read: true, upload: current[department.id]?.upload ?? false }
+                              : { read: false, upload: false },
+                          }))}
+                        /></td>
+                        <td><Checkbox
+                          aria-label={`${department.name} 上传修改`}
+                          checked={access.upload}
+                          onChange={event => setDepartmentDraft(current => ({
+                            ...current,
+                            [department.id]: {
+                              read: event.target.checked || (current[department.id]?.read ?? false),
+                              upload: event.target.checked,
+                            },
+                          }))}
+                        /></td>
+                      </tr>;
+                    })}</tbody>
+                  </table>
+                  {!organizationDepartments.length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无部门" />}
+                </div>
+                <footer className="permission-footer">
+                  <span>个人工作空间始终由本人使用；主部门默认只读，额外权限随角色叠加。</span>
+                  <strong>当前角色：{role?.name ?? '未选择'}</strong>
+                </footer>
+              </div>,
+            },
+            {
+              key: 'applications',
+              label: '企业模块与页面',
+              children: <div className="permission-tab-pane">
+                <div className="module-filter-bar">
+                  <div className="toolbar-field system-filter">
+                    <span>查看系统</span>
+                    <Select
+                      value={systemFilter}
+                      options={[{ value: 'all', label: '全部企业模块' }, ...appList.map(application => ({
+                        value: application.id, label: application.name,
+                      }))]}
+                      onChange={setSystemFilter}
+                    />
+                  </div>
+                  <label className="granted-filter"><Switch checked={onlyGranted} onChange={setOnlyGranted} size="small" />只看已授权</label>
+                  <div className="permission-count"><strong>{grantedPageTotal}</strong><span>个页面已授权</span></div>
+                </div>
+                <div className="permission-table-scroll">
+                  <table className="permission-matrix">
+                    <thead><tr>
+                      <th>企业模块</th><th>业务子模块</th><th>最小模块页面</th><th>显示</th>
+                      {OPERATION_COLUMNS.map(operation => <th key={operation.key}>{operation.label}</th>)}
+                      <th>AI 可用</th>
+                    </tr></thead>
+                    <tbody>{visibleApplications.flatMap(application => {
+                      const queryIndex = appList.findIndex(item => item.id === application.id);
+                      if (integrationQueries[queryIndex]?.isLoading) return [];
+                      const integration = integrationByAppId[application.id];
+                      return integration?.modules?.length
+                        ? renderNativeApplication(application, integration)
+                        : renderLegacyApplication(application);
+                    })}</tbody>
+                  </table>
+                  {!appsLoading && !visibleApplications.length && <Empty description="暂无企业模块" />}
+                  {(appsLoading || integrationsLoading) && <div className="matrix-loading">正在读取企业模块目录…</div>}
+                </div>
+                <footer className="permission-footer">
+                  <span>“显示”决定能否进入页面；操作列决定页面按钮；“AI 可用”是额外总开关。</span>
+                  <strong>当前角色：{role?.name ?? '未选择'}</strong>
+                </footer>
+              </div>,
+            },
+          ]}
+        />
       </section>
     </div>
 

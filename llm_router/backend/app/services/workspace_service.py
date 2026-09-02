@@ -923,7 +923,7 @@ async def build_workspace_tree(db: AsyncSession, org_ids: list[UUID]) -> list[di
                 org_direct_users.append(unode)
 
         # 按部门组装（团队归其部门）
-        depts_sorted = sorted(depts, key=lambda d: d.name)
+        depts_sorted = sorted(depts, key=lambda d: (d.sort_order, d.created_at, str(d.id)))
         dept_nodes: list[dict] = []
         for dept in depts_sorted:
             dept_ws = await ensure_node_workspace(db, org.id, "department", str(dept.id), dept.name, dept.slug)

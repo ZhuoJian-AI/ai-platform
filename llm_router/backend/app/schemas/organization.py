@@ -82,10 +82,15 @@ class DepartmentRead(BaseModel):
     rate_limit_tpm: int | None
     budget_cap_usd: Decimal | None
     budget_cap_tokens: int | None
+    sort_order: int
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class DepartmentReorder(BaseModel):
+    department_ids: list[UUID] = Field(..., min_length=1)
 
 
 class TeamCreate(BaseModel):

@@ -98,6 +98,7 @@ export interface Department {
   rate_limit_tpm: number | null;
   budget_cap_usd: string | null;
   budget_cap_tokens: number | null;
+  sort_order: number;
   created_at: string;
   updated_at: string;
 }
@@ -376,6 +377,10 @@ export const departments = {
     request<Department>(`/api/v1/organizations/${orgId}/departments`, { method: 'POST', body: JSON.stringify(data) }),
   update: (id: string, data: Partial<Department>) =>
     request<Department>(`/api/v1/departments/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  reorder: (orgId: string, departmentIds: string[]) =>
+    request<Department[]>(`/api/v1/organizations/${orgId}/departments/reorder`, {
+      method: 'PUT', body: JSON.stringify({ department_ids: departmentIds }),
+    }),
   delete: (id: string) =>
     request<void>(`/api/v1/departments/${id}`, { method: 'DELETE' }),
 };

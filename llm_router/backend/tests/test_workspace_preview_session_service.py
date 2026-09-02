@@ -20,7 +20,11 @@ def _file(name: str, size: int, *, object_storage: bool = True):
         path=name,
         size=size,
         content_ref="oss://projects/7/assets/file" if object_storage else "legacy/file",
-        metadata_={"name": name, "mime": "application/pdf" if name.endswith(".pdf") else "application/octet-stream", "binary": True},
+        metadata_={
+            "name": name,
+            "mime": "application/pdf" if name.endswith(".pdf") else "application/octet-stream",
+            "binary": True,
+        },
         current_version_id="version-1",
     )
 
@@ -34,7 +38,9 @@ async def test_small_pdf_uses_signed_pdfjs_range_source(monkeypatch):
         return {"url": "https://oss.example/manual.pdf", "fallback_url": None, "headers": {}}
 
     monkeypatch.setattr(preview.storage_gateway_service, "get_browser_signed_download", signed)
-    result = await preview.create_preview_session(object(), _file("manual.pdf", 10 * 1024 * 1024), weboffice_user_id="user123")
+    result = await preview.create_preview_session(
+        object(), _file("manual.pdf", 10 * 1024 * 1024), weboffice_user_id="user123",
+    )
 
     assert result["mode"] == "pdfjs"
     assert result["url"].startswith("https://oss.example/")
@@ -52,7 +58,9 @@ async def test_large_pdf_keeps_immediate_pdfjs_fallback_with_weboffice(monkeypat
 
     monkeypatch.setattr(preview.storage_gateway_service, "generate_weboffice_token", token)
     monkeypatch.setattr(preview.storage_gateway_service, "get_browser_signed_download", signed)
-    result = await preview.create_preview_session(object(), _file("large.pdf", 80 * 1024 * 1024), weboffice_user_id="user123")
+    result = await preview.create_preview_session(
+        object(), _file("large.pdf", 80 * 1024 * 1024), weboffice_user_id="user123",
+    )
 
     assert result["mode"] == "weboffice"
     assert result["url"] == "https://oss.example/large.pdf"
@@ -67,7 +75,9 @@ async def test_office_without_weboffice_enqueues_durable_fallback(monkeypatch):
         queued.append(file.id)
 
     monkeypatch.setattr(preview, "enqueue_fallback", enqueue)
-    result = await preview.create_preview_session(object(), _file("deck.pptx", 90 * 1024 * 1024), weboffice_user_id="user123")
+    result = await preview.create_preview_session(
+        object(), _file("deck.pptx", 90 * 1024 * 1024), weboffice_user_id="user123",
+    )
 
     assert result["mode"] == "fallback"
     assert queued == ["file-1"]
@@ -76,7 +86,9 @@ async def test_office_without_weboffice_enqueues_durable_fallback(monkeypatch):
 @pytest.mark.asyncio
 async def test_over_200_mib_is_download_only(monkeypatch):
     monkeypatch.setattr(settings, "workspace_weboffice_enabled", True)
-    result = await preview.create_preview_session(object(), _file("deck.pptx", 201 * 1024 * 1024), weboffice_user_id="user123")
+    result = await preview.create_preview_session(
+        object(), _file("deck.pptx", 201 * 1024 * 1024), weboffice_user_id="user123",
+    )
 
     assert result["mode"] == "download_only"
     assert "200MB" in result["reason"]

@@ -14,7 +14,6 @@ from app.models.workspace import WorkspaceFile, WorkspaceFileVersion, WorkspaceP
 from app.services import storage_gateway_service
 from app.services.workspace_preview_service import OriginalPreviewError, source_metadata
 
-
 WEBOFFICE_SUFFIXES = {
     ".doc", ".docx", ".txt", ".dot", ".wps", ".wpt", ".dotx", ".docm", ".dotm",
     ".rtf", ".ppt", ".pptx", ".pptm", ".ppsx", ".ppsm", ".pps", ".potx",

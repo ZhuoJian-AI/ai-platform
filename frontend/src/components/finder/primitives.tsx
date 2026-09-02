@@ -204,11 +204,19 @@ export function IconCard({ onClick, children, actions }: {
   );
 }
 
-export function IconActionButton({ icon, variant = 'default', onClick, title }: {
-  icon: ReactNode; variant?: 'default' | 'danger'; onClick?: (e: React.MouseEvent) => void; title?: string;
+export function IconActionButton({ icon, variant = 'default', onClick, title, disabled = false }: {
+  icon: ReactNode; variant?: 'default' | 'danger'; onClick?: (e: React.MouseEvent) => void; title?: string; disabled?: boolean;
 }) {
   return (
-    <button style={iconActionBtnStyle(variant)} onClick={onClick} title={title}>{icon}</button>
+    <button
+      type="button"
+      style={{ ...iconActionBtnStyle(variant), opacity: disabled ? 0.35 : 1, cursor: disabled ? 'not-allowed' : 'pointer' }}
+      onClick={onClick}
+      title={title}
+      disabled={disabled}
+    >
+      {icon}
+    </button>
   );
 }
 

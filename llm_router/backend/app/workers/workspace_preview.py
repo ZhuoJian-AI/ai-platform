@@ -17,7 +17,6 @@ from app.database import async_session_factory, engine
 from app.models.workspace import WorkspaceFileVersion, WorkspacePreviewJob
 from app.services import storage_gateway_service
 
-
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 CONVERSION_TIMEOUT_SECONDS = 10 * 60
 MAX_OUTPUT_BYTES = 500 * 1024 * 1024
