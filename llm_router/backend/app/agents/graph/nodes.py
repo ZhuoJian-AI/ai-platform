@@ -1353,7 +1353,9 @@ async def _build_tools(
         )
         if isinstance(platform, dict) and platform.get("package_format") == "agent_skill":
             organization = await db.get(Organization, folder.organization_id)
-            if organization is None or not settings.agent_skills_enabled_for(organization.slug):
+            if organization is None or not settings.agent_skills_enabled_for(
+                organization.slug, organization_id=organization.id
+            ):
                 continue
             try:
                 skill_path = next(
@@ -1556,7 +1558,9 @@ async def _execute_code_skill(
         return json.dumps({"status": "error", "error": "Skill version is not executable"})
     if version.runtime == "agent_skill":
         organization = await db.get(Organization, folder.organization_id)
-        if organization is None or not settings.agent_skills_enabled_for(organization.slug):
+        if organization is None or not settings.agent_skills_enabled_for(
+            organization.slug, organization_id=organization.id
+        ):
             return json.dumps({"status": "error", "error": "Agent Skills are not enabled for this organization"})
     if state.get("exec_mode") != "craft":
         return json.dumps({"status": "error", "error": "请切换到 Craft 模式执行代码 Skill"}, ensure_ascii=False)
@@ -1717,7 +1721,9 @@ async def _resolve_agent_skill(state: AgentState, entry: dict, params: dict) -> 
     if version.install_status != "ready":
         return None, "Skill version is not ready"
     organization = await db.get(Organization, folder.organization_id)
-    if organization is None or not settings.agent_skills_enabled_for(organization.slug):
+    if organization is None or not settings.agent_skills_enabled_for(
+        organization.slug, organization_id=organization.id
+    ):
         return None, "Agent Skills are not enabled for this organization"
     return selected, None
 

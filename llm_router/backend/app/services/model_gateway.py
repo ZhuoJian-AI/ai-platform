@@ -417,7 +417,10 @@ async def candidate_deployments(
     rows = list((await db.execute(statement)).all())
     organization = await db.get(Organization, org_id)
     allow_new_gateway = bool(
-        organization and settings.model_gateway_enabled_for(organization.slug)
+        organization
+        and settings.model_gateway_enabled_for(
+            organization.slug, organization_id=organization.id
+        )
     )
     candidates = [
         (provider, deployment)

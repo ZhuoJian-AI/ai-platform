@@ -307,7 +307,10 @@ async def list_available_models_for_user(
     )
     organization = await db.get(Organization, cu.organization_id)
     allow_new_gateway = bool(
-        organization and settings.model_gateway_enabled_for(organization.slug)
+        organization
+        and settings.model_gateway_enabled_for(
+            organization.slug, organization_id=organization.id
+        )
     )
     provider_models: list[str] = []
     for p in providers:

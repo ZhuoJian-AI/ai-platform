@@ -156,7 +156,12 @@ class Settings(BaseSettings):
         }
         return not allowed or organization_slug.lower() in allowed
 
-    def agent_skills_enabled_for(self, organization_slug: str) -> bool:
+    def agent_skills_enabled_for(
+        self,
+        organization_slug: str,
+        *,
+        organization_id: object | None = None,
+    ) -> bool:
         """Gate the new Agent Skill host independently per staging tenant."""
         if not self.code_skills_enabled:
             return False
@@ -165,33 +170,65 @@ class Settings(BaseSettings):
             for value in self.agent_skills_org_allowlist.split(",")
             if value.strip()
         }
-        return not allowed or organization_slug.lower() in allowed
+        identities = {organization_slug.lower()}
+        if organization_id is not None:
+            identities.add(str(organization_id).lower())
+        return not allowed or bool(allowed & identities)
 
     @staticmethod
-    def _org_feature_enabled(enabled: bool, allowlist: str, organization_slug: str) -> bool:
+    def _org_feature_enabled(
+        enabled: bool,
+        allowlist: str,
+        organization_slug: str,
+        *,
+        organization_id: object | None = None,
+    ) -> bool:
         if not enabled:
             return False
         allowed = {value.strip().lower() for value in allowlist.split(",") if value.strip()}
-        return not allowed or organization_slug.lower() in allowed
+        identities = {organization_slug.lower()}
+        if organization_id is not None:
+            identities.add(str(organization_id).lower())
+        return not allowed or bool(allowed & identities)
 
-    def multimodal_vision_enabled_for(self, organization_slug: str) -> bool:
+    def multimodal_vision_enabled_for(
+        self, organization_slug: str, *, organization_id: object | None = None
+    ) -> bool:
         return self._org_feature_enabled(
-            self.multimodal_vision_enabled, self.multimodal_vision_org_allowlist, organization_slug,
+            self.multimodal_vision_enabled,
+            self.multimodal_vision_org_allowlist,
+            organization_slug,
+            organization_id=organization_id,
         )
 
-    def image_generation_enabled_for(self, organization_slug: str) -> bool:
+    def image_generation_enabled_for(
+        self, organization_slug: str, *, organization_id: object | None = None
+    ) -> bool:
         return self._org_feature_enabled(
-            self.image_generation_enabled, self.image_generation_org_allowlist, organization_slug,
+            self.image_generation_enabled,
+            self.image_generation_org_allowlist,
+            organization_slug,
+            organization_id=organization_id,
         )
 
-    def model_gateway_enabled_for(self, organization_slug: str) -> bool:
+    def model_gateway_enabled_for(
+        self, organization_slug: str, *, organization_id: object | None = None
+    ) -> bool:
         return self._org_feature_enabled(
-            self.model_gateway_enabled, self.model_gateway_org_allowlist, organization_slug,
+            self.model_gateway_enabled,
+            self.model_gateway_org_allowlist,
+            organization_slug,
+            organization_id=organization_id,
         )
 
-    def multimodal_audio_enabled_for(self, organization_slug: str) -> bool:
+    def multimodal_audio_enabled_for(
+        self, organization_slug: str, *, organization_id: object | None = None
+    ) -> bool:
         return self._org_feature_enabled(
-            self.multimodal_audio_enabled, self.multimodal_audio_org_allowlist, organization_slug,
+            self.multimodal_audio_enabled,
+            self.multimodal_audio_org_allowlist,
+            organization_slug,
+            organization_id=organization_id,
         )
 
     # API Key cache

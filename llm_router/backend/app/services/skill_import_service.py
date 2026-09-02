@@ -317,7 +317,12 @@ async def _create_version(
     agent_package = manifest.get("_platform", {}).get("package_format") == "agent_skill"
     enabled = settings.code_skills_enabled
     if agent_package:
-        enabled = bool(organization and settings.agent_skills_enabled_for(organization.slug))
+        enabled = bool(
+            organization
+            and settings.agent_skills_enabled_for(
+                organization.slug, organization_id=organization.id
+            )
+        )
     status = "pending" if executable and enabled else "ready"
     archive_ref: str | None = None
     inline_archive: bytes | None = archive

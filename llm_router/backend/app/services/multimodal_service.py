@@ -147,8 +147,12 @@ async def organization_feature_flags(db: AsyncSession, org_id: UUID) -> tuple[bo
     if organization is None:
         return False, False
     return (
-        settings.multimodal_vision_enabled_for(organization.slug),
-        settings.image_generation_enabled_for(organization.slug),
+        settings.multimodal_vision_enabled_for(
+            organization.slug, organization_id=organization.id
+        ),
+        settings.image_generation_enabled_for(
+            organization.slug, organization_id=organization.id
+        ),
     )
 
 

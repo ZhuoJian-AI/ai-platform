@@ -48,7 +48,9 @@ def require_permission(cu: CurrentUser, code: str) -> None:
 
 async def require_multimodal_enabled(db: AsyncSession, organization_id: UUID) -> None:
     organization = await db.get(Organization, organization_id)
-    if organization is None or not settings.multimodal_audio_enabled_for(organization.slug):
+    if organization is None or not settings.multimodal_audio_enabled_for(
+        organization.slug, organization_id=organization.id
+    ):
         raise HTTPException(status_code=404, detail="Multimodal audio is not enabled for this organization")
 
 
