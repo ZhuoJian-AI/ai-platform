@@ -253,6 +253,11 @@ services:
       WORKSPACE_AI_PARSE_MAX_BYTES: "${WORKSPACE_AI_PARSE_MAX_BYTES:-104857600}"
       WORKSPACE_PROXY_UPLOAD_MAX_BYTES: "${WORKSPACE_PROXY_UPLOAD_MAX_BYTES:-1048576}"
       WORKSPACE_UPLOAD_SESSION_TTL_SECONDS: "${WORKSPACE_UPLOAD_SESSION_TTL_SECONDS:-900}"
+      WORKSPACE_WEBOFFICE_ENABLED: "${WORKSPACE_WEBOFFICE_ENABLED:-true}"
+      WORKSPACE_WEBOFFICE_MAX_BYTES: "${WORKSPACE_WEBOFFICE_MAX_BYTES:-209715200}"
+      WORKSPACE_PDF_DIRECT_PREVIEW_MAX_BYTES: "${WORKSPACE_PDF_DIRECT_PREVIEW_MAX_BYTES:-20971520}"
+      WORKSPACE_PREVIEW_JOB_POLL_SECONDS: "${WORKSPACE_PREVIEW_JOB_POLL_SECONDS:-1}"
+      WORKSPACE_PREVIEW_JOB_LEASE_SECONDS: "${WORKSPACE_PREVIEW_JOB_LEASE_SECONDS:-900}"
       WORKSPACE_TRASH_RETENTION_DAYS: "${WORKSPACE_TRASH_RETENTION_DAYS:-30}"
     expose:
       - "8000"
@@ -345,6 +350,57 @@ services:
     deploy:
       resources:
         limits: { cpus: "0.75", memory: 1536M }
+
+  workspace-preview:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-workspace-preview-app:source-pending
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?}
+      DATABASE_URL: ${DATABASE_URL:?}
+      REDIS_URL: ${REDIS_URL:?}
+      WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-true}"
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
+      STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
+      STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-https://oss-cn-hongkong.aliyuncs.com}"
+      STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
+      STORAGE_ACCELERATE_ENDPOINT: "${STORAGE_ACCELERATE_ENDPOINT:-https://oss-accelerate.aliyuncs.com}"
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      WORKSPACE_WEBOFFICE_MAX_BYTES: "${WORKSPACE_WEBOFFICE_MAX_BYTES:-209715200}"
+      WORKSPACE_PREVIEW_JOB_POLL_SECONDS: "${WORKSPACE_PREVIEW_JOB_POLL_SECONDS:-1}"
+      WORKSPACE_PREVIEW_JOB_LEASE_SECONDS: "${WORKSPACE_PREVIEW_JOB_LEASE_SECONDS:-900}"
+    command: ["python", "-m", "app.workers.workspace_preview"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import pathlib,sys;
+          sys.exit(0 if b'app.workers.workspace_preview' in
+          pathlib.Path('/proc/1/cmdline').read_bytes() else 1)"
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    extra_hosts:
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.10}.11"
+    depends_on:
+      backend:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:size=1073741824,mode=1777
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks:
+      default:
+      data_plane:
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.24
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 2G, pids: 256 }
 
   storage-lifecycle:
     image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:02416411c2f732c61fdcba2bd43978697734c2f1794647600ce6bed2b93c6f2d

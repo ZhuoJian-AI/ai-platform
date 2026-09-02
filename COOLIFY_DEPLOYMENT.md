@@ -47,6 +47,11 @@ Path 留空。不要给 PostgreSQL、Redis、Mock 或 backend 配置公网域名
 - `STORAGE_PUBLIC_ENDPOINT=https://oss-cn-hongkong.aliyuncs.com`
 - `STORAGE_INTERNAL_ENDPOINT=https://oss-cn-hongkong-internal.aliyuncs.com`
 - `STORAGE_GATEWAY_TIMEOUT_SECONDS=60`
+- `WORKSPACE_WEBOFFICE_ENABLED=true`
+- `WORKSPACE_WEBOFFICE_MAX_BYTES=209715200`
+- `WORKSPACE_PDF_DIRECT_PREVIEW_MAX_BYTES=20971520`
+- `WORKSPACE_PREVIEW_JOB_POLL_SECONDS=1`
+- `WORKSPACE_PREVIEW_JOB_LEASE_SECONDS=900`
 
 工作空间二进制原文件通过 Storage Gateway 写入项目隔离前缀，AI Platform 不持有 OSS
 AccessKey。ECS 与香港 OSS 之间使用 internal endpoint；浏览器下载仍先经过后端鉴权，
@@ -67,7 +72,9 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 验收要求：
 
-1. `postgres`、`redis`、`mock`、`skill-runner`、`backend`、`frontend` 均健康；
+1. `postgres`、`redis`、`mock`、`skill-runner`、`dsh-runtime`、`extension-builder`、
+   `backend`、`workspace-parser`、`workspace-preview`、`storage-lifecycle`、
+   `multimodal-worker`、`frontend` 均健康；
 2. `https://ai-platform.staging.zhuojianai.com/health` 返回 HTTP 200；
 3. 管理员入口 `/login` 可以打开并登录；
 4. Coolify 运行版本对应 GitHub `main` 的 SHA；
