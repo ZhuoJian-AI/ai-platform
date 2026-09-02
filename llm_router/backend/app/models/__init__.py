@@ -51,6 +51,7 @@ from app.models.workspace import (
     WorkspaceFile,
     WorkspaceFileVersion,
     WorkspaceFolder,
+    WorkspacePreviewJob,
     WorkspaceShareLink,
     WorkspaceUploadSession,
 )
@@ -95,6 +96,7 @@ __all__ = [
     "WorkspaceFile",
     "WorkspaceFolder",
     "WorkspaceFileVersion",
+    "WorkspacePreviewJob",
     "WorkspaceUploadSession",
     "WorkspaceAuditEvent",
     "WorkspaceShareLink",

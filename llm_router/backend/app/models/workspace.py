@@ -1,6 +1,6 @@
 """Workspace ORM models — governed tenant file storage and immutable versions."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     BigInteger,
@@ -144,6 +144,36 @@ class WorkspaceFileVersion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     created_by_admin_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), nullable=True)
 
     file = relationship("WorkspaceFile", foreign_keys=[workspace_file_id], back_populates="versions")
+
+
+class WorkspacePreviewJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Crash-recoverable, version-pinned Office fallback conversion."""
+
+    __tablename__ = "workspace_preview_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "file_version_id", "conversion_type", name="uq_workspace_preview_version_type"
+        ),
+    )
+
+    workspace_file_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_files.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    file_version_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_file_versions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    conversion_type: Mapped[str] = mapped_column(String(32), nullable=False, default="pdf")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC), index=True
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    locked_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    output_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class WorkspaceUploadSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):

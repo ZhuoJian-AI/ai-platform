@@ -196,7 +196,7 @@ async def test_large_browser_upload_requests_parallel_multipart(monkeypatch):
     assert captured["url"].endswith("/v1/multipart/initiate")
     assert captured["headers"]["X-Storage-Subject"] == "ai-platform-control-plane"
     assert captured["json"]["force_multipart"] is True
-    assert captured["json"]["part_size_bytes"] == 100 * 1024 * 1024
+    assert captured["json"]["part_size_bytes"] == 8 * 1024 * 1024
     assert result["method"] == "MULTIPART"
     assert result["expected_parts"] == 5
 
@@ -237,7 +237,7 @@ async def test_large_browser_upload_uses_small_parts_in_weak_network_mode(monkey
         size_bytes=101 * 1024 * 1024,
         weak_network=True,
     )
-    assert captured["part_size_bytes"] == 1024 * 1024
+    assert captured["part_size_bytes"] == 2 * 1024 * 1024
     assert result["part_size"] == 1024 * 1024
 
 

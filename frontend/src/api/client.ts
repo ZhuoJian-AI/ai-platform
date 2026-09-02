@@ -796,6 +796,32 @@ export interface WorkspaceDownloadTicket {
   headers: Record<string, string>;
 }
 
+export interface WorkspacePreviewSession {
+  mode: 'weboffice' | 'pdfjs' | 'native' | 'blob' | 'fallback' | 'download_only';
+  filename: string;
+  mime_type: string;
+  size: number;
+  url: string | null;
+  fallback_url: string | null;
+  headers: Record<string, string>;
+  weboffice_url: string | null;
+  access_token: string | null;
+  refresh_token: string | null;
+  access_token_expired_time: string | null;
+  refresh_token_expired_time: string | null;
+  refresh_context: string | null;
+  reason: string | null;
+}
+
+export interface WorkspaceFallbackPreview {
+  status: 'queued' | 'processing' | 'ready' | 'failed';
+  attempt_count: number;
+  url: string | null;
+  fallback_url: string | null;
+  expires_at: string | null;
+  error: string | null;
+}
+
 export interface WorkspacePdfPreviewInfo {
   page_count: number;
   width: number;
@@ -905,6 +931,18 @@ export const workspaces = {
   getFilePreview: (id: string) => request<WorkspaceFilePreview>(`/api/v1/files/${id}/preview`),
   getFileOriginalPreviewSource: (id: string) =>
     request<WorkspaceOriginalPreviewSource>(`/api/v1/files/${id}/original-preview-source`),
+  createFilePreviewSession: (id: string) =>
+    request<WorkspacePreviewSession>(`/api/v1/files/${id}/preview-session`, { method: 'POST' }),
+  refreshFilePreviewSession: (id: string, accessToken: string, refreshToken: string, refreshContext: string) =>
+    request<WorkspacePreviewSession>(`/api/v1/files/${id}/preview-session/refresh`, {
+      method: 'POST', body: JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, refresh_context: refreshContext }),
+    }),
+  startFileFallbackPreview: (id: string) =>
+    request<WorkspaceFallbackPreview>(`/api/v1/files/${id}/fallback-preview`, { method: 'POST' }),
+  getFileFallbackPreview: (id: string) =>
+    request<WorkspaceFallbackPreview>(`/api/v1/files/${id}/fallback-preview`),
+  getFileDownloadTicket: (id: string) =>
+    request<WorkspaceDownloadTicket>(`/api/v1/files/${id}/download-ticket`, { method: 'POST' }),
   getFilePdfPreviewInfo: (id: string) =>
     request<WorkspacePdfPreviewInfo>(`/api/v1/files/${id}/pdf-preview/info`),
   getFilePdfPreviewPage: (id: string, pageNumber: number) =>
@@ -1566,9 +1604,78 @@ interface MultipartPartReceipt {
   part_number: number; etag: string;
 }
 
-const OSS_MAX_ACTIVE_REQUESTS = 10;
+interface ResumableUploadRecord {
+  key: string;
+  session_id: string;
+  method: 'MULTIPART';
+  part_size: number;
+  expected_parts: number;
+  expires_at: string;
+  completed_parts: MultipartUploadPart[];
+  updated_at: number;
+}
+
+const OSS_MAX_ACTIVE_REQUESTS = 4;
+const UPLOAD_RESUME_DB = 'zhuojian-workspace-uploads';
+const UPLOAD_RESUME_STORE = 'sessions';
 let activeOssRequests = 0;
 const ossRequestWaiters: Array<() => void> = [];
+
+function uploadResumeKey(kind: 'admin' | 'user', wsId: string, path: string, file: File) {
+  return [kind, wsId, path, file.name, file.size, file.lastModified].map(encodeURIComponent).join('|');
+}
+
+function openUploadResumeDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(UPLOAD_RESUME_DB, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(UPLOAD_RESUME_STORE)) {
+        request.result.createObjectStore(UPLOAD_RESUME_STORE, { keyPath: 'key' });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function readUploadResume(key: string): Promise<ResumableUploadRecord | null> {
+  try {
+    const db = await openUploadResumeDb();
+    return await new Promise<ResumableUploadRecord | null>((resolve, reject) => {
+      const request = db.transaction(UPLOAD_RESUME_STORE, 'readonly').objectStore(UPLOAD_RESUME_STORE).get(key);
+      request.onsuccess = () => resolve((request.result as ResumableUploadRecord | undefined) ?? null);
+      request.onerror = () => reject(request.error);
+    }).finally(() => db.close());
+  } catch {
+    return null;
+  }
+}
+
+async function writeUploadResume(record: ResumableUploadRecord): Promise<void> {
+  try {
+    const db = await openUploadResumeDb();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(UPLOAD_RESUME_STORE, 'readwrite');
+      transaction.objectStore(UPLOAD_RESUME_STORE).put(record);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+    db.close();
+  } catch { /* IndexedDB is an optional recovery aid. */ }
+}
+
+async function deleteUploadResume(key: string): Promise<void> {
+  try {
+    const db = await openUploadResumeDb();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(UPLOAD_RESUME_STORE, 'readwrite');
+      transaction.objectStore(UPLOAD_RESUME_STORE).delete(key);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+    db.close();
+  } catch { /* Session expiry remains the server-side cleanup fallback. */ }
+}
 
 async function acquireOssRequestSlot() {
   if (activeOssRequests >= OSS_MAX_ACTIVE_REQUESTS) {
@@ -1667,7 +1774,7 @@ async function putMultipartPartAttempt(
   chunk: Blob,
   signal: AbortSignal,
   onProgress: (loaded: number) => void,
-): Promise<void> {
+): Promise<string> {
   const release = await acquireOssRequestSlot();
   try {
     return await new Promise((resolve, reject) => {
@@ -1683,7 +1790,7 @@ async function putMultipartPartAttempt(
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress(chunk.size);
-        resolve();
+        resolve(xhr.getResponseHeader('ETag') || 'uploaded');
         return;
       }
       reject(new ApiError(xhr.status, `分片 ${signed.part_number} 上传失败（HTTP ${xhr.status || '未知'}）`));
@@ -1708,6 +1815,8 @@ async function uploadMultipartWorkspaceFile(
   file: File,
   signPart: (partNumber: number) => Promise<MultipartPartSigned>,
   getStatus: () => Promise<MultipartUploadStatus>,
+  initialParts: MultipartUploadPart[],
+  onPartComplete: (part: MultipartUploadPart) => Promise<void>,
   options?: WorkspaceUploadOptions,
 ): Promise<MultipartPartReceipt[]> {
   const partSize = session.part_size || 0;
@@ -1719,13 +1828,17 @@ async function uploadMultipartWorkspaceFile(
   options?.signal?.addEventListener('abort', abortFromCaller, { once: true });
   if (options?.signal?.aborted) controller.abort();
 
-  const uploadedBytes = new Map<number, number>();
+  const uploadedBytes = new Map<number, number>(
+    initialParts.map((part) => [part.part_number, part.size]),
+  );
+  const alreadyUploaded = new Set(initialParts.map((part) => part.part_number));
   const reportProgress = () => {
     const loaded = Array.from(uploadedBytes.values()).reduce((sum, bytes) => sum + bytes, 0);
     options?.onProgress?.(Math.min(99, Math.round((loaded / file.size) * 100)));
   };
   let nextPart = 1;
   const uploadOne = async (partNumber: number) => {
+    if (alreadyUploaded.has(partNumber)) return;
     const start = (partNumber - 1) * partSize;
     const chunk = file.slice(start, Math.min(start + partSize, file.size));
     let lastError: unknown;
@@ -1735,10 +1848,11 @@ async function uploadMultipartWorkspaceFile(
       try {
         const signed = await signPart(partNumber);
         const target = useFallback && signed.fallback_url ? signed.fallback_url : signed.url;
-        await putMultipartPartAttempt(signed, target, chunk, controller.signal, (loaded) => {
+        const etag = await putMultipartPartAttempt(signed, target, chunk, controller.signal, (loaded) => {
           uploadedBytes.set(partNumber, loaded);
           reportProgress();
         });
+        await onPartComplete({ part_number: partNumber, etag, size: chunk.size });
         return;
       } catch (error) {
         lastError = error;
@@ -1765,7 +1879,8 @@ async function uploadMultipartWorkspaceFile(
   };
 
   try {
-    await Promise.all(Array.from({ length: Math.min(4, expectedParts) }, () => worker()));
+    reportProgress();
+    await Promise.all(Array.from({ length: Math.min(2, expectedParts) }, () => worker()));
     const status = await getStatus();
     const uploaded = [...status.uploaded_parts].sort((a, b) => a.part_number - b.part_number);
     if (uploaded.length !== expectedParts) {
@@ -1797,10 +1912,35 @@ async function uploadTerminalWorkspaceFile(
       size: file.size, weak_network: weakNetwork,
     }) },
   );
-  let weakNetwork = weakNetworkPreferred();
-  let session = await initiate(weakNetwork);
-  let retriedInWeakMode = false;
-  while (true) {
+  const resumeKey = uploadResumeKey('user', wsId, path, file);
+  let record = await readUploadResume(resumeKey);
+  let session: DirectUploadSession | null = null;
+  let initialParts: MultipartUploadPart[] = [];
+  if (record && Date.parse(record.expires_at) > Date.now()) {
+    try {
+      const status = await userRequest<MultipartUploadStatus>(`/api/v1/terminal/uploads/${record.session_id}`);
+      if (status.status === 'pending' && status.part_size === record.part_size && status.expected_parts === record.expected_parts) {
+        session = {
+          id: record.session_id, method: 'MULTIPART', url: null, fallback_url: null, headers: {},
+          expires_at: record.expires_at, max_file_bytes: WORKSPACE_MAX_FILE_BYTES,
+          part_size: record.part_size, expected_parts: record.expected_parts,
+        };
+        initialParts = status.uploaded_parts;
+      }
+    } catch { /* Expired or revoked sessions are replaced below. */ }
+  }
+  if (!session) {
+    await deleteUploadResume(resumeKey);
+    session = await initiate(weakNetworkPreferred());
+    if (session.method === 'MULTIPART') {
+      record = {
+        key: resumeKey, session_id: session.id, method: 'MULTIPART',
+        part_size: session.part_size || 0, expected_parts: session.expected_parts || 0,
+        expires_at: session.expires_at, completed_parts: [], updated_at: Date.now(),
+      };
+      await writeUploadResume(record);
+    }
+  }
   try {
     if (session.method === 'MULTIPART') {
       const parts = await uploadMultipartWorkspaceFile(
@@ -1810,28 +1950,27 @@ async function uploadTerminalWorkspaceFile(
           `/api/v1/terminal/uploads/${session.id}/parts/${partNumber}/sign`, { method: 'POST' },
         ),
         () => userRequest<MultipartUploadStatus>(`/api/v1/terminal/uploads/${session.id}`),
+        initialParts,
+        async (part) => {
+          if (!record) return;
+          record.completed_parts = [...record.completed_parts.filter((item) => item.part_number !== part.part_number), part];
+          record.updated_at = Date.now();
+          await writeUploadResume(record);
+        },
         options,
       );
-      return await userRequest<WorkspaceFile>(`/api/v1/terminal/uploads/${session.id}/complete`, {
+      const result = await userRequest<WorkspaceFile>(`/api/v1/terminal/uploads/${session.id}/complete`, {
         method: 'POST', body: JSON.stringify({ parts }),
       });
+      await deleteUploadResume(resumeKey);
+      return result;
     }
     const etag = await putSignedWorkspaceFile(session, file, options);
     return await userRequest<WorkspaceFile>(`/api/v1/terminal/uploads/${session.id}/complete`, {
       method: 'POST', body: JSON.stringify({ etag }),
     });
   } catch (error) {
-    void userRequest<void>(`/api/v1/terminal/uploads/${session.id}`, { method: 'DELETE' }).catch(() => undefined);
-    const status = error instanceof ApiError ? error.status : 0;
-    if (session.method === 'MULTIPART' && !weakNetwork && !retriedInWeakMode && (status === 0 || status === 408)) {
-      weakNetwork = true;
-      retriedInWeakMode = true;
-      session = await initiate(true);
-      options?.onProgress?.(0);
-      continue;
-    }
     throw error;
-  }
   }
 }
 
@@ -1850,10 +1989,35 @@ async function uploadAdminWorkspaceFile(
       size: file.size, weak_network: weakNetwork,
     }),
   });
-  let weakNetwork = weakNetworkPreferred();
-  let session = await initiate(weakNetwork);
-  let retriedInWeakMode = false;
-  while (true) {
+  const resumeKey = uploadResumeKey('admin', wsId, path, file);
+  let record = await readUploadResume(resumeKey);
+  let session: DirectUploadSession | null = null;
+  let initialParts: MultipartUploadPart[] = [];
+  if (record && Date.parse(record.expires_at) > Date.now()) {
+    try {
+      const status = await request<MultipartUploadStatus>(`/api/v1/workspace-uploads/${record.session_id}`);
+      if (status.status === 'pending' && status.part_size === record.part_size && status.expected_parts === record.expected_parts) {
+        session = {
+          id: record.session_id, method: 'MULTIPART', url: null, fallback_url: null, headers: {},
+          expires_at: record.expires_at, max_file_bytes: WORKSPACE_MAX_FILE_BYTES,
+          part_size: record.part_size, expected_parts: record.expected_parts,
+        };
+        initialParts = status.uploaded_parts;
+      }
+    } catch { /* Expired or revoked sessions are replaced below. */ }
+  }
+  if (!session) {
+    await deleteUploadResume(resumeKey);
+    session = await initiate(weakNetworkPreferred());
+    if (session.method === 'MULTIPART') {
+      record = {
+        key: resumeKey, session_id: session.id, method: 'MULTIPART',
+        part_size: session.part_size || 0, expected_parts: session.expected_parts || 0,
+        expires_at: session.expires_at, completed_parts: [], updated_at: Date.now(),
+      };
+      await writeUploadResume(record);
+    }
+  }
   try {
     if (session.method === 'MULTIPART') {
       const parts = await uploadMultipartWorkspaceFile(
@@ -1863,28 +2027,27 @@ async function uploadAdminWorkspaceFile(
           `/api/v1/workspace-uploads/${session.id}/parts/${partNumber}/sign`, { method: 'POST' },
         ),
         () => request<MultipartUploadStatus>(`/api/v1/workspace-uploads/${session.id}`),
+        initialParts,
+        async (part) => {
+          if (!record) return;
+          record.completed_parts = [...record.completed_parts.filter((item) => item.part_number !== part.part_number), part];
+          record.updated_at = Date.now();
+          await writeUploadResume(record);
+        },
         options,
       );
-      return await request<WorkspaceFile>(`/api/v1/workspace-uploads/${session.id}/complete`, {
+      const result = await request<WorkspaceFile>(`/api/v1/workspace-uploads/${session.id}/complete`, {
         method: 'POST', body: JSON.stringify({ parts }),
       });
+      await deleteUploadResume(resumeKey);
+      return result;
     }
     const etag = await putSignedWorkspaceFile(session, file, options);
     return await request<WorkspaceFile>(`/api/v1/workspace-uploads/${session.id}/complete`, {
       method: 'POST', body: JSON.stringify({ etag }),
     });
   } catch (error) {
-    void request<void>(`/api/v1/workspace-uploads/${session.id}`, { method: 'DELETE' }).catch(() => undefined);
-    const status = error instanceof ApiError ? error.status : 0;
-    if (session.method === 'MULTIPART' && !weakNetwork && !retriedInWeakMode && (status === 0 || status === 408)) {
-      weakNetwork = true;
-      retriedInWeakMode = true;
-      session = await initiate(true);
-      options?.onProgress?.(0);
-      continue;
-    }
     throw error;
-  }
   }
 }
 
@@ -2372,6 +2535,16 @@ export const terminal = {
   getWsFilePreview: (id: string) => userRequest<WorkspaceFilePreview>(`/api/v1/terminal/files/${id}/preview`),
   getWsFileOriginalPreviewSource: (id: string) =>
     userRequest<WorkspaceOriginalPreviewSource>(`/api/v1/terminal/files/${id}/original-preview-source`),
+  createWsFilePreviewSession: (id: string) =>
+    userRequest<WorkspacePreviewSession>(`/api/v1/terminal/files/${id}/preview-session`, { method: 'POST' }),
+  refreshWsFilePreviewSession: (id: string, accessToken: string, refreshToken: string, refreshContext: string) =>
+    userRequest<WorkspacePreviewSession>(`/api/v1/terminal/files/${id}/preview-session/refresh`, {
+      method: 'POST', body: JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, refresh_context: refreshContext }),
+    }),
+  startWsFileFallbackPreview: (id: string) =>
+    userRequest<WorkspaceFallbackPreview>(`/api/v1/terminal/files/${id}/fallback-preview`, { method: 'POST' }),
+  getWsFileFallbackPreview: (id: string) =>
+    userRequest<WorkspaceFallbackPreview>(`/api/v1/terminal/files/${id}/fallback-preview`),
   getWsFileDownloadTicket: (id: string) =>
     userRequest<WorkspaceDownloadTicket>(`/api/v1/terminal/files/${id}/download-ticket`, { method: 'POST' }),
   getWsFilePdfPreviewInfo: (id: string) =>

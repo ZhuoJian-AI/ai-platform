@@ -111,7 +111,7 @@ function BrowserPdfPreview({ file, url, filename, onDownload }: PdfFilePreviewPr
         <Typography.Text ellipsis title={filename} style={{ maxWidth: 360 }}>{filename}</Typography.Text>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {documentProxy ? `共 ${documentProxy.numPages} 页 · 连续原页预览` : '正在读取原文件'}
+            {documentProxy ? `共 ${documentProxy.numPages} 页 · 连续原页预览` : '正在按需读取原文件'}
           </Typography.Text>
           <Button size="small" icon={<ZoomOutOutlined />} disabled={zoom <= 0.6} onClick={() => setZoom((value) => Math.max(0.6, value - 0.2))} />
           <Typography.Text style={{ minWidth: 42, textAlign: 'center', fontSize: 12 }}>{Math.round(zoom * 100)}%</Typography.Text>
@@ -121,12 +121,12 @@ function BrowserPdfPreview({ file, url, filename, onDownload }: PdfFilePreviewPr
       </div>
       {!documentProxy && (
         <div style={{ padding: '8px 18px 0', background: '#fff' }}>
-          <Progress percent={loadProgress} size="small" status="active" format={(value) => `读取原文件 ${value || 0}%`} />
+          <Progress percent={loadProgress} size="small" status="active" format={(value) => `按需读取 ${value || 0}%`} />
         </div>
       )}
       <div ref={stageRef} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '20px 18px 40px' }}>
         {!documentProxy ? (
-          <div style={centerStyle}><Spin /><Typography.Text type="secondary">正在读取完整 PDF…</Typography.Text></div>
+          <div style={centerStyle}><Spin /><Typography.Text type="secondary">正在按需读取 PDF…</Typography.Text></div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 18 }}>
             {Array.from({ length: documentProxy.numPages }, (_, index) => (

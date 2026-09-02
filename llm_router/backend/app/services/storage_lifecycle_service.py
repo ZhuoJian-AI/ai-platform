@@ -26,6 +26,7 @@ from app.models.workspace import (
     WorkspaceFile,
     WorkspaceFileVersion,
     WorkspaceFolder,
+    WorkspacePreviewJob,
     WorkspaceUploadSession,
 )
 from app.services import storage_gateway_service
@@ -354,6 +355,7 @@ async def _referenced_object_keys(db: AsyncSession) -> set[str]:
         WorkspaceFile.content_ref,
         WorkspaceFileVersion.content_ref,
         WorkspaceUploadSession.content_ref,
+        WorkspacePreviewJob.output_ref,
         SkillVersion.archive_ref,
         PlatformExtensionSource.artifact_ref,
     )

@@ -158,6 +158,38 @@ class WorkspaceDownloadTicketRead(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
+class WorkspacePreviewSessionRead(BaseModel):
+    mode: str
+    filename: str
+    mime_type: str
+    size: int
+    url: str | None = None
+    fallback_url: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    weboffice_url: str | None = None
+    access_token: str | None = None
+    refresh_token: str | None = None
+    access_token_expired_time: str | None = None
+    refresh_token_expired_time: str | None = None
+    refresh_context: str | None = None
+    reason: str | None = None
+
+
+class WorkspacePreviewSessionRefresh(BaseModel):
+    access_token: str = Field(..., min_length=16, max_length=4096)
+    refresh_token: str = Field(..., min_length=16, max_length=4096)
+    refresh_context: str = Field(..., min_length=32, max_length=4096)
+
+
+class WorkspaceFallbackPreviewRead(BaseModel):
+    status: str
+    attempt_count: int
+    url: str | None = None
+    fallback_url: str | None = None
+    expires_at: datetime | None = None
+    error: str | None = None
+
+
 class WorkspaceFolderCreate(BaseModel):
     path: str = Field(..., max_length=1024)
 
