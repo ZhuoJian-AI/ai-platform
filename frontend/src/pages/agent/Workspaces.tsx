@@ -959,15 +959,19 @@ function FileViewer({ file, onDownload, onReparse, reparsing }: {
           {view === 'original' && (
             <OriginalFilePreview
               key={file.id}
+              previewKey={file.id}
               blob={null}
               filename={workspaceDisplayName(file)}
               onDownload={onDownload}
               loadPdfInfo={() => workspaces.getFilePdfPreviewInfo(file.id)}
               loadPdfPage={(pageNumber) => workspaces.getFilePdfPreviewPage(file.id, pageNumber)}
-              loadPreviewSession={() => workspaces.createFilePreviewSession(file.id)}
+              loadPreviewSession={(clientOpenId, preferredMode) => workspaces.createFilePreviewSession(file.id, clientOpenId, preferredMode)}
               refreshPreviewSession={(accessToken, refreshToken, refreshContext) => workspaces.refreshFilePreviewSession(file.id, accessToken, refreshToken, refreshContext)}
               startFallbackPreview={() => workspaces.startFileFallbackPreview(file.id)}
               getFallbackPreview={() => workspaces.getFileFallbackPreview(file.id)}
+              startSpreadsheetPreview={() => workspaces.startFileSpreadsheetPreview(file.id)}
+              getSpreadsheetPreview={() => workspaces.getFileSpreadsheetPreview(file.id)}
+              getSpreadsheetPage={(sheet, page) => workspaces.getFileSpreadsheetPage(file.id, sheet, page)}
             />
           )}
           {view === 'ai' && hasAiContent && (

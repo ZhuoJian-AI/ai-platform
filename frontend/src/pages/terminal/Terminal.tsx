@@ -1702,6 +1702,15 @@ export default function Terminal() {
         resolveHref={resolveHref}
         loadOriginalPreview={terminal.getWsFileOriginalPreview}
         loadOriginalPreviewSource={terminal.getWsFileOriginalPreviewSource}
+        loadPdfPreviewInfo={terminal.getWsFilePdfPreviewInfo}
+        loadPdfPreviewPage={terminal.getWsFilePdfPreviewPage}
+        loadPreviewSession={terminal.createWsFilePreviewSession}
+        refreshPreviewSession={terminal.refreshWsFilePreviewSession}
+        startFallbackPreview={terminal.startWsFileFallbackPreview}
+        getFallbackPreview={terminal.getWsFileFallbackPreview}
+        startSpreadsheetPreview={terminal.startWsFileSpreadsheetPreview}
+        getSpreadsheetPreview={terminal.getWsFileSpreadsheetPreview}
+        getSpreadsheetPage={terminal.getWsFileSpreadsheetPage}
         loadDownloadTicket={terminal.getWsFileDownloadTicket}
         loadOriginalFile={terminal.downloadWsFile}
       />
@@ -3834,6 +3843,15 @@ function FilePanel({ workspaceId }: { workspaceId: string | null }) {
         resolveHref={resolveHref}
         loadOriginalPreview={terminal.getWsFileOriginalPreview}
         loadOriginalPreviewSource={terminal.getWsFileOriginalPreviewSource}
+        loadPdfPreviewInfo={terminal.getWsFilePdfPreviewInfo}
+        loadPdfPreviewPage={terminal.getWsFilePdfPreviewPage}
+        loadPreviewSession={terminal.createWsFilePreviewSession}
+        refreshPreviewSession={terminal.refreshWsFilePreviewSession}
+        startFallbackPreview={terminal.startWsFileFallbackPreview}
+        getFallbackPreview={terminal.getWsFileFallbackPreview}
+        startSpreadsheetPreview={terminal.startWsFileSpreadsheetPreview}
+        getSpreadsheetPreview={terminal.getWsFileSpreadsheetPreview}
+        getSpreadsheetPage={terminal.getWsFileSpreadsheetPage}
         loadDownloadTicket={terminal.getWsFileDownloadTicket}
         loadOriginalFile={terminal.downloadWsFile}
       />

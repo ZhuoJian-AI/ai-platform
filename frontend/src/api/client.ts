@@ -833,7 +833,7 @@ export interface WorkspaceDownloadTicket {
 }
 
 export interface WorkspacePreviewSession {
-  mode: 'weboffice' | 'pdfjs' | 'native' | 'blob' | 'fallback' | 'download_only';
+  mode: 'weboffice' | 'pdfjs' | 'browser_office' | 'text' | 'spreadsheet_preview' | 'native' | 'blob' | 'fallback' | 'download_only';
   filename: string;
   mime_type: string;
   size: number;
@@ -847,15 +847,30 @@ export interface WorkspacePreviewSession {
   refresh_token_expired_time: string | null;
   refresh_context: string | null;
   reason: string | null;
+  strict_range: boolean;
 }
 
 export interface WorkspaceFallbackPreview {
-  status: 'queued' | 'processing' | 'ready' | 'failed';
+  status: 'missing' | 'queued' | 'processing' | 'ready' | 'failed';
   attempt_count: number;
   url: string | null;
   fallback_url: string | null;
   expires_at: string | null;
   error: string | null;
+}
+
+export type WorkspacePreviewPreferredMode = 'default' | 'fast_layout' | 'interactive_ppt';
+
+export interface WorkspaceSpreadsheetPreview {
+  status: 'missing' | 'queued' | 'processing' | 'ready' | 'failed';
+  attempt_count: number;
+  sheets: Array<{ name: string; rows: number; columns: number; pages: number; truncated: boolean }>;
+  error: string | null;
+}
+
+export interface WorkspaceSpreadsheetPage {
+  sheet: string; page: number; page_size: number; total_rows: number; truncated: boolean;
+  rows: Array<Array<string | number | boolean | null>>;
 }
 
 export interface WorkspacePdfPreviewInfo {
@@ -967,8 +982,10 @@ export const workspaces = {
   getFilePreview: (id: string) => request<WorkspaceFilePreview>(`/api/v1/files/${id}/preview`),
   getFileOriginalPreviewSource: (id: string) =>
     request<WorkspaceOriginalPreviewSource>(`/api/v1/files/${id}/original-preview-source`),
-  createFilePreviewSession: (id: string) =>
-    request<WorkspacePreviewSession>(`/api/v1/files/${id}/preview-session`, { method: 'POST' }),
+  createFilePreviewSession: (id: string, clientOpenId: string, preferredMode: WorkspacePreviewPreferredMode = 'default') =>
+    request<WorkspacePreviewSession>(`/api/v1/files/${id}/preview-session`, {
+      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId, preferred_mode: preferredMode }),
+    }),
   refreshFilePreviewSession: (id: string, accessToken: string, refreshToken: string, refreshContext: string) =>
     request<WorkspacePreviewSession>(`/api/v1/files/${id}/preview-session/refresh`, {
       method: 'POST', body: JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, refresh_context: refreshContext }),
@@ -977,6 +994,12 @@ export const workspaces = {
     request<WorkspaceFallbackPreview>(`/api/v1/files/${id}/fallback-preview`, { method: 'POST' }),
   getFileFallbackPreview: (id: string) =>
     request<WorkspaceFallbackPreview>(`/api/v1/files/${id}/fallback-preview`),
+  startFileSpreadsheetPreview: (id: string) =>
+    request<WorkspaceSpreadsheetPreview>(`/api/v1/files/${id}/spreadsheet-preview`, { method: 'POST' }),
+  getFileSpreadsheetPreview: (id: string) =>
+    request<WorkspaceSpreadsheetPreview>(`/api/v1/files/${id}/spreadsheet-preview`),
+  getFileSpreadsheetPage: (id: string, sheet: string, page: number) =>
+    request<WorkspaceSpreadsheetPage>(`/api/v1/files/${id}/spreadsheet-preview/sheets/${encodeURIComponent(sheet)}/pages/${page}`),
   getFileDownloadTicket: (id: string) =>
     request<WorkspaceDownloadTicket>(`/api/v1/files/${id}/download-ticket`, { method: 'POST' }),
   getFilePdfPreviewInfo: (id: string) =>
@@ -2572,8 +2595,10 @@ export const terminal = {
   getWsFilePreview: (id: string) => userRequest<WorkspaceFilePreview>(`/api/v1/terminal/files/${id}/preview`),
   getWsFileOriginalPreviewSource: (id: string) =>
     userRequest<WorkspaceOriginalPreviewSource>(`/api/v1/terminal/files/${id}/original-preview-source`),
-  createWsFilePreviewSession: (id: string) =>
-    userRequest<WorkspacePreviewSession>(`/api/v1/terminal/files/${id}/preview-session`, { method: 'POST' }),
+  createWsFilePreviewSession: (id: string, clientOpenId: string, preferredMode: WorkspacePreviewPreferredMode = 'default') =>
+    userRequest<WorkspacePreviewSession>(`/api/v1/terminal/files/${id}/preview-session`, {
+      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId, preferred_mode: preferredMode }),
+    }),
   refreshWsFilePreviewSession: (id: string, accessToken: string, refreshToken: string, refreshContext: string) =>
     userRequest<WorkspacePreviewSession>(`/api/v1/terminal/files/${id}/preview-session/refresh`, {
       method: 'POST', body: JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, refresh_context: refreshContext }),
@@ -2582,6 +2607,12 @@ export const terminal = {
     userRequest<WorkspaceFallbackPreview>(`/api/v1/terminal/files/${id}/fallback-preview`, { method: 'POST' }),
   getWsFileFallbackPreview: (id: string) =>
     userRequest<WorkspaceFallbackPreview>(`/api/v1/terminal/files/${id}/fallback-preview`),
+  startWsFileSpreadsheetPreview: (id: string) =>
+    userRequest<WorkspaceSpreadsheetPreview>(`/api/v1/terminal/files/${id}/spreadsheet-preview`, { method: 'POST' }),
+  getWsFileSpreadsheetPreview: (id: string) =>
+    userRequest<WorkspaceSpreadsheetPreview>(`/api/v1/terminal/files/${id}/spreadsheet-preview`),
+  getWsFileSpreadsheetPage: (id: string, sheet: string, page: number) =>
+    userRequest<WorkspaceSpreadsheetPage>(`/api/v1/terminal/files/${id}/spreadsheet-preview/sheets/${encodeURIComponent(sheet)}/pages/${page}`),
   getWsFileDownloadTicket: (id: string) =>
     userRequest<WorkspaceDownloadTicket>(`/api/v1/terminal/files/${id}/download-ticket`, { method: 'POST' }),
   getWsFilePdfPreviewInfo: (id: string) =>

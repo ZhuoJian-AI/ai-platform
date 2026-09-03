@@ -854,6 +854,9 @@ export default function WorkspaceManagerView({
         refreshPreviewSession={terminal.refreshWsFilePreviewSession}
         startFallbackPreview={terminal.startWsFileFallbackPreview}
         getFallbackPreview={terminal.getWsFileFallbackPreview}
+        startSpreadsheetPreview={terminal.startWsFileSpreadsheetPreview}
+        getSpreadsheetPreview={terminal.getWsFileSpreadsheetPreview}
+        getSpreadsheetPage={terminal.getWsFileSpreadsheetPage}
       />
 
       {/* 新建文件夹 */}

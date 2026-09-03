@@ -11,7 +11,8 @@ import remarkGfm from 'remark-gfm';
 import OriginalFilePreview, { supportsPagedWorkspacePreview } from '../../components/files/OriginalFilePreview';
 import type {
   WorkspaceDownloadTicket, WorkspaceFallbackPreview, WorkspaceOriginalPreviewSource,
-  WorkspacePdfPreviewInfo, WorkspacePreviewSession,
+  WorkspacePdfPreviewInfo, WorkspacePreviewPreferredMode, WorkspacePreviewSession,
+  WorkspaceSpreadsheetPage, WorkspaceSpreadsheetPreview,
 } from '../../api/client';
 // mammoth 仅在打开 .docx 时按需动态加载（见下方 useEffect），不进主包。
 
@@ -255,16 +256,20 @@ export interface BrowserDrawerProps {
   loadOriginalFile?: (fileId: string) => Promise<Blob>;
   /** 获取短时 OSS 直下载地址；下载字节不再经过 SaaS 后端。 */
   loadDownloadTicket?: (fileId: string) => Promise<WorkspaceDownloadTicket>;
-  loadPreviewSession?: (fileId: string) => Promise<WorkspacePreviewSession>;
+  loadPreviewSession?: (fileId: string, clientOpenId: string, preferredMode?: WorkspacePreviewPreferredMode) => Promise<WorkspacePreviewSession>;
   refreshPreviewSession?: (fileId: string, accessToken: string, refreshToken: string, refreshContext: string) => Promise<WorkspacePreviewSession>;
   startFallbackPreview?: (fileId: string) => Promise<WorkspaceFallbackPreview>;
   getFallbackPreview?: (fileId: string) => Promise<WorkspaceFallbackPreview>;
+  startSpreadsheetPreview?: (fileId: string) => Promise<WorkspaceSpreadsheetPreview>;
+  getSpreadsheetPreview?: (fileId: string) => Promise<WorkspaceSpreadsheetPreview>;
+  getSpreadsheetPage?: (fileId: string, sheet: string, page: number) => Promise<WorkspaceSpreadsheetPage>;
 }
 
 export default function BrowserDrawer({
   open, initialHref, onClose, resolveHref, onReparse, loadOriginalPreview,
   loadOriginalPreviewSource, loadPdfPreviewInfo, loadPdfPreviewPage, loadOriginalFile, loadDownloadTicket,
   loadPreviewSession, refreshPreviewSession, startFallbackPreview, getFallbackPreview,
+  startSpreadsheetPreview, getSpreadsheetPreview, getSpreadsheetPage,
 }: BrowserDrawerProps) {
   const [history, setHistory] = useState<Source[]>([]);
   const [index, setIndex] = useState(-1);
@@ -720,6 +725,7 @@ export default function BrowserDrawer({
               {binaryView === 'original' && (
                 <OriginalFilePreview
                   key={current.fileId}
+                  previewKey={current.fileId}
                   blob={originalPreviewBlob}
                   sourceUrl={originalPreviewUrl}
                   sourceHeaders={originalPreviewHeaders}
@@ -730,10 +736,13 @@ export default function BrowserDrawer({
                   onDownload={download}
                   loadPdfInfo={loadPdfPreviewInfo ? () => loadPdfPreviewInfo(current.fileId) : undefined}
                   loadPdfPage={loadPdfPreviewPage ? (pageNumber) => loadPdfPreviewPage(current.fileId, pageNumber) : undefined}
-                  loadPreviewSession={loadPreviewSession ? () => loadPreviewSession(current.fileId) : undefined}
+                  loadPreviewSession={loadPreviewSession ? (clientOpenId, preferredMode) => loadPreviewSession(current.fileId, clientOpenId, preferredMode) : undefined}
                   refreshPreviewSession={refreshPreviewSession ? (accessToken, refreshToken, refreshContext) => refreshPreviewSession(current.fileId, accessToken, refreshToken, refreshContext) : undefined}
                   startFallbackPreview={startFallbackPreview ? () => startFallbackPreview(current.fileId) : undefined}
                   getFallbackPreview={getFallbackPreview ? () => getFallbackPreview(current.fileId) : undefined}
+                  startSpreadsheetPreview={startSpreadsheetPreview ? () => startSpreadsheetPreview(current.fileId) : undefined}
+                  getSpreadsheetPreview={getSpreadsheetPreview ? () => getSpreadsheetPreview(current.fileId) : undefined}
+                  getSpreadsheetPage={getSpreadsheetPage ? (sheet, page) => getSpreadsheetPage(current.fileId, sheet, page) : undefined}
                 />
               )}
               {binaryView === 'ai' && current.kind === 'parsed' && (

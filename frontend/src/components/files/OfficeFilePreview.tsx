@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Typography, message } from 'antd';
 import { CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import FileViewer from '@file-viewer/react';
@@ -11,23 +11,35 @@ const SPREADSHEET_EXTENSIONS = new Set([
 export interface OfficeFilePreviewProps {
   file?: File;
   url?: string;
+  fallbackUrl?: string;
   filename: string;
   extension: string;
+  size?: number;
   onDownload: () => void;
 }
 
 /** Lazily loaded so normal pages and native PDF/image previews stay lightweight. */
-export default function OfficeFilePreview({ file, url, filename, extension, onDownload }: OfficeFilePreviewProps) {
+export default function OfficeFilePreview({ file, url, fallbackUrl, filename, extension, size = 0, onDownload }: OfficeFilePreviewProps) {
   const isSpreadsheet = SPREADSHEET_EXTENSIONS.has(extension);
+  const [activeUrl, setActiveUrl] = useState(url);
+  useEffect(() => {
+    setActiveUrl(url);
+    if (!url || !fallbackUrl || url === fallbackUrl) return;
+    const controller = new AbortController();
+    fetch(url, { headers: { Range: 'bytes=0-0' }, signal: controller.signal })
+      .then((response) => { if (!response.ok) setActiveUrl(fallbackUrl); })
+      .catch(() => { if (!controller.signal.aborted) setActiveUrl(fallbackUrl); });
+    return () => controller.abort();
+  }, [fallbackUrl, url]);
   // The preview-source query periodically renews the OSS signature.  The
   // object path stays the same, but replacing only the query string makes
   // FileViewer treat it as a different document and restart a long PDF/PPT
   // parse.  Freeze the first usable signature for this object; selecting a
   // different object path still switches immediately.
-  const urlIdentity = url?.split('?', 1)[0] || '';
-  const stableUrlRef = useRef<{ identity: string; url?: string }>({ identity: urlIdentity, url });
-  if (stableUrlRef.current.identity !== urlIdentity || (!stableUrlRef.current.url && url)) {
-    stableUrlRef.current = { identity: urlIdentity, url };
+  const urlIdentity = activeUrl?.split('?', 1)[0] || '';
+  const stableUrlRef = useRef<{ identity: string; url?: string }>({ identity: urlIdentity, url: activeUrl });
+  if (stableUrlRef.current.identity !== urlIdentity || (!stableUrlRef.current.url && activeUrl)) {
+    stableUrlRef.current = { identity: urlIdentity, url: activeUrl };
   }
   const stableUrl = stableUrlRef.current.url;
   // FileViewer treats a new options object as a new document configuration and
@@ -64,8 +76,10 @@ export default function OfficeFilePreview({ file, url, filename, extension, onDo
       resizableColumns: true,
       resizableRows: true,
     },
-    docx: { visualPagination: true },
-  }), [isSpreadsheet]);
+    // Pagination layout is expensive for multi-megabyte Word packages. Above
+    // 5MiB, continuous rendering gets readable content on screen sooner.
+    docx: { visualPagination: size <= 5 * 1024 * 1024 },
+  }), [isSpreadsheet, size]);
   // Selection is owned by the canvas renderer. Keeping this flag in a ref is
   // deliberate: a React state update here recreates FileViewer and discards
   // the range the user just selected.

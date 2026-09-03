@@ -42,7 +42,7 @@ def _validate_direct_upload_size(size: int) -> None:
     when their configured thresholds differ from the server.
     """
     if size > settings.workspace_max_file_bytes:
-        raise HTTPException(status_code=413, detail="文件超过 100MB 上限")
+        raise HTTPException(status_code=413, detail="文件超过 5GB 上传上限")
 
 
 async def audit(
@@ -236,6 +236,35 @@ async def complete_direct_upload(
     file.parse_kind = None
     file.parse_error = None
     await workspace_service.sync_current_version(db, file)
+    # Warm only durable, version-pinned preview artifacts. Small Word/Excel
+    # files are parsed locally in the browser and never consume IMM calls.
+    if int(file.size or 0) <= settings.workspace_weboffice_max_bytes:
+        from app.services import workspace_preview_session_service
+
+        suffix = PurePosixPath(session.original_filename).suffix.lower()
+        if suffix in workspace_preview_session_service.PRESENTATION_SUFFIXES:
+            await workspace_preview_session_service.enqueue_fallback(db, file)
+        elif (
+            suffix in workspace_preview_session_service.LEGACY_WORD_SUFFIXES
+            or (
+                suffix in workspace_preview_session_service.MODERN_WORD_SUFFIXES
+                and int(file.size or 0) > workspace_preview_session_service.LOCAL_OFFICE_MAX_BYTES
+            )
+        ):
+            await workspace_preview_session_service.enqueue_fallback(db, file)
+        elif (
+            (
+                suffix in workspace_preview_session_service.SPREADSHEET_SUFFIXES
+                and int(file.size or 0) > workspace_preview_session_service.LOCAL_OFFICE_MAX_BYTES
+            )
+            or (
+                suffix in workspace_preview_session_service.TABULAR_TEXT_SUFFIXES
+                and int(file.size or 0) > workspace_preview_session_service.TABULAR_TEXT_LOCAL_MAX_BYTES
+            )
+        ):
+            await workspace_preview_session_service.enqueue_preview_job(
+                db, file, conversion_type="spreadsheet_rows",
+            )
     session.status = "completed"
     session.completed_at = datetime.now(UTC)
     session.workspace_file_id = file.id

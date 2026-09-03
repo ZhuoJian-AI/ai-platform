@@ -1,6 +1,7 @@
 """Workspace Pydantic schemas."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
@@ -173,6 +174,12 @@ class WorkspacePreviewSessionRead(BaseModel):
     refresh_token_expired_time: str | None = None
     refresh_context: str | None = None
     reason: str | None = None
+    strict_range: bool = False
+
+
+class WorkspacePreviewSessionCreate(BaseModel):
+    client_open_id: str = Field(..., min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    preferred_mode: Literal["default", "fast_layout", "interactive_ppt"] = "default"
 
 
 class WorkspacePreviewSessionRefresh(BaseModel):
@@ -188,6 +195,22 @@ class WorkspaceFallbackPreviewRead(BaseModel):
     fallback_url: str | None = None
     expires_at: datetime | None = None
     error: str | None = None
+
+
+class WorkspaceSpreadsheetPreviewRead(BaseModel):
+    status: str
+    attempt_count: int
+    sheets: list[dict] = Field(default_factory=list)
+    error: str | None = None
+
+
+class WorkspaceSpreadsheetPageRead(BaseModel):
+    sheet: str
+    page: int
+    page_size: int
+    total_rows: int
+    truncated: bool = False
+    rows: list[list[str | int | float | bool | None]] = Field(default_factory=list)
 
 
 class WorkspaceFolderCreate(BaseModel):

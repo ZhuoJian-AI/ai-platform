@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import base64
 import io
 from types import SimpleNamespace
 
 import pytest
 from PIL import Image
 
-from app.services import workspace_pdf_preview_service
 from app.services.workspace_pdf_preview_service import (
+    WorkspacePdfPreviewError,
     _document_info,
-    _office_preview_ref,
     _original_jpeg,
+    _preview_pdf_ref,
     _render_page,
 )
 
@@ -74,7 +73,7 @@ def test_generated_image_pdf_returns_real_original_page(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_office_preview_is_converted_once_and_persisted(monkeypatch) -> None:
+async def test_office_preview_is_rejected_on_synchronous_pdf_path() -> None:
     file = SimpleNamespace(
         id="file-1",
         path="brief.pptx",
@@ -85,35 +84,5 @@ async def test_office_preview_is_converted_once_and_persisted(monkeypatch) -> No
         metadata_={"name": "brief.pptx"},
     )
 
-    class FakeDb:
-        commits = 0
-
-        async def refresh(self, _file):
-            return None
-
-        async def commit(self):
-            self.commits += 1
-
-    db = FakeDb()
-    conversions = 0
-
-    async def fake_signed(_content_ref):
-        return {"url": "https://internal.example/source", "headers": {}}
-
-    async def fake_execute(**_kwargs):
-        nonlocal conversions
-        conversions += 1
-        raw = b"%PDF-1.7\npreview"
-        return {"outputs": [{"content_base64": base64.b64encode(raw).decode("ascii")}]}, 5
-
-    async def fake_upload(_raw, **_kwargs):
-        return "oss://preview.pdf"
-
-    monkeypatch.setattr(workspace_pdf_preview_service.storage_gateway_service, "get_signed_download", fake_signed)
-    monkeypatch.setattr(workspace_pdf_preview_service.skill_runner_client, "execute_builtin", fake_execute)
-    monkeypatch.setattr(workspace_pdf_preview_service.storage_gateway_service, "upload_bytes", fake_upload)
-
-    assert await _office_preview_ref(db, file) == "oss://preview.pdf"
-    assert await _office_preview_ref(db, file) == "oss://preview.pdf"
-    assert conversions == 1
-    assert db.commits == 1
+    with pytest.raises(WorkspacePdfPreviewError, match="background preview job"):
+        await _preview_pdf_ref(object(), file)

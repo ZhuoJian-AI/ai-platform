@@ -13,11 +13,13 @@ GlobalWorkerOptions.workerSrc = `${pdfWorkerUrl}?loader=2`;
 export interface PdfFilePreviewProps {
   file?: File;
   url?: string;
+  fallbackUrl?: string;
   filename: string;
   onDownload: () => void;
   loadInfo?: () => Promise<WorkspacePdfPreviewInfo>;
   loadPage?: (pageNumber: number) => Promise<Blob>;
   previewLabel?: string;
+  strictRange?: boolean;
 }
 
 export default function PdfFilePreview(props: PdfFilePreviewProps) {
@@ -28,13 +30,15 @@ export default function PdfFilePreview(props: PdfFilePreviewProps) {
 }
 
 /** Browser fallback for a local PDF that has no server-side preview source. */
-function BrowserPdfPreview({ file, url, filename, onDownload }: PdfFilePreviewProps) {
+function BrowserPdfPreview({ file, url, fallbackUrl, filename, onDownload, strictRange = false }: PdfFilePreviewProps) {
   const urlIdentity = url?.split('?', 1)[0] || '';
   const stableUrlRef = useRef<{ identity: string; url?: string }>({ identity: urlIdentity, url });
   if (stableUrlRef.current.identity !== urlIdentity || (!stableUrlRef.current.url && url)) {
     stableUrlRef.current = { identity: urlIdentity, url };
   }
   const stableUrl = stableUrlRef.current.url;
+  const [activeUrl, setActiveUrl] = useState(stableUrl);
+  const [controlledPrefetch, setControlledPrefetch] = useState(false);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [documentProxy, setDocumentProxy] = useState<PDFDocumentProxy | null>(null);
   const [stageWidth, setStageWidth] = useState(900);
@@ -52,6 +56,8 @@ function BrowserPdfPreview({ file, url, filename, onDownload }: PdfFilePreviewPr
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => { setActiveUrl(stableUrl); setControlledPrefetch(false); }, [stableUrl]);
+
   useEffect(() => {
     let disposed = false;
     let loadedDocument: PDFDocumentProxy | null = null;
@@ -59,17 +65,18 @@ function BrowserPdfPreview({ file, url, filename, onDownload }: PdfFilePreviewPr
     setZoom(1);
     setLoadProgress(0);
     setError(null);
-    if (!stableUrl && !file) return;
+    if (!activeUrl && !file) return;
 
     const load = async () => {
-      const source = stableUrl
+      const source = activeUrl
         ? {
-          url: stableUrl,
-          rangeChunkSize: 1024 * 1024,
-          // A page tree may live near EOF. Auto-fetch must stay enabled or a
-          // valid large PDF can stop at 100% network progress before opening.
-          disableStream: false,
-          disableAutoFetch: false,
+          url: activeUrl,
+          rangeChunkSize: strictRange ? 4 * 1024 * 1024 : 1024 * 1024,
+          // Large PDFs must not start a full 200 response while PDF.js also
+          // issues range requests. Special files can still fail explicitly and
+          // offer download instead of silently consuming the whole object.
+          disableStream: strictRange && !controlledPrefetch,
+          disableAutoFetch: strictRange && !controlledPrefetch,
         }
         : { data: await file!.arrayBuffer() };
       if (disposed) return;
@@ -86,7 +93,13 @@ function BrowserPdfPreview({ file, url, filename, onDownload }: PdfFilePreviewPr
         setDocumentProxy(loadedDocument);
         setLoadProgress(100);
       } catch (reason) {
-        if (!disposed) setError((reason as Error)?.message || 'PDF 读取失败');
+        if (!disposed && fallbackUrl && activeUrl !== fallbackUrl) {
+          setActiveUrl(fallbackUrl);
+        } else if (!disposed && strictRange && !controlledPrefetch) {
+          setControlledPrefetch(true);
+        } else if (!disposed) {
+          setError((reason as Error)?.message || 'PDF 读取失败');
+        }
       }
     };
     void load();
@@ -94,7 +107,7 @@ function BrowserPdfPreview({ file, url, filename, onDownload }: PdfFilePreviewPr
       disposed = true;
       if (loadedDocument) void loadedDocument.destroy();
     };
-  }, [file, stableUrl]);
+  }, [activeUrl, controlledPrefetch, fallbackUrl, file, strictRange]);
 
   if (error) {
     return (

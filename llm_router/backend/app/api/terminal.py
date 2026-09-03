@@ -101,12 +101,15 @@ from app.schemas.workspace import (
     WorkspaceFolderCreate,
     WorkspaceFolderRead,
     WorkspaceOriginalPreviewSourceRead,
+    WorkspacePreviewSessionCreate,
     WorkspacePreviewSessionRead,
     WorkspacePreviewSessionRefresh,
     WorkspacePublishRequest,
     WorkspaceRead,
     WorkspaceShareCreate,
     WorkspaceShareRead,
+    WorkspaceSpreadsheetPageRead,
+    WorkspaceSpreadsheetPreviewRead,
     WorkspaceUploadComplete,
     WorkspaceUploadInitiate,
     WorkspaceUploadMultipartStatus,
@@ -1144,7 +1147,8 @@ async def download_ticket_ws_file_endpoint(
     "/terminal/files/{file_id}/preview-session", response_model=WorkspacePreviewSessionRead,
 )
 async def preview_session_ws_file_endpoint(
-    file_id: UUID, response: Response, cu: CurrentUser = Depends(require_user),
+    file_id: UUID, data: WorkspacePreviewSessionCreate, response: Response,
+    cu: CurrentUser = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
     response.headers["Cache-Control"] = "private, no-store"
@@ -1158,7 +1162,8 @@ async def preview_session_ws_file_endpoint(
     try:
         actor = hashlib.sha256(f"user:{cu.id}".encode()).hexdigest()[:15]
         result = await workspace_preview_session_service.create_preview_session(
-            db, f, weboffice_user_id=actor,
+            db, f, weboffice_user_id=actor, client_open_id=data.client_open_id,
+            preferred_mode=data.preferred_mode,
         )
         await db.commit()
         return WorkspacePreviewSessionRead(**result)
@@ -1201,15 +1206,8 @@ async def refresh_preview_session_ws_file_endpoint(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.post(
-    "/terminal/files/{file_id}/fallback-preview", response_model=WorkspaceFallbackPreviewRead,
-)
-@router.get(
-    "/terminal/files/{file_id}/fallback-preview", response_model=WorkspaceFallbackPreviewRead,
-)
-async def fallback_preview_ws_file_endpoint(
-    file_id: UUID, response: Response, cu: CurrentUser = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
+async def _fallback_preview_ws_file(
+    file_id: UUID, response: Response, cu: CurrentUser, db: AsyncSession, *, create: bool,
 ):
     response.headers["Cache-Control"] = "private, no-store"
     f = await workspace_service.get_file(db, file_id)
@@ -1220,13 +1218,98 @@ async def fallback_preview_ws_file_endpoint(
         raise HTTPException(status_code=404, detail="File not found")
     await workspace_permission_service.assert_can_read(db, ws, cu)
     try:
-        result = await workspace_preview_session_service.fallback_status(db, f)
-        await db.commit()
+        result = await workspace_preview_session_service.fallback_status(db, f, create=create)
+        if create:
+            await db.commit()
         return WorkspaceFallbackPreviewRead(**result)
     except OriginalPreviewError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except storage_gateway_service.StorageGatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post(
+    "/terminal/files/{file_id}/fallback-preview", response_model=WorkspaceFallbackPreviewRead,
+)
+async def start_fallback_preview_ws_file_endpoint(
+    file_id: UUID, response: Response, cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _fallback_preview_ws_file(file_id, response, cu, db, create=True)
+
+
+@router.get(
+    "/terminal/files/{file_id}/fallback-preview", response_model=WorkspaceFallbackPreviewRead,
+)
+async def get_fallback_preview_ws_file_endpoint(
+    file_id: UUID, response: Response, cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _fallback_preview_ws_file(file_id, response, cu, db, create=False)
+
+
+async def _spreadsheet_preview_ws_file(
+    file_id: UUID, response: Response, cu: CurrentUser, db: AsyncSession, *, create: bool,
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
+    try:
+        result = await workspace_preview_session_service.spreadsheet_status(db, f, create=create)
+        if create:
+            await db.commit()
+        return WorkspaceSpreadsheetPreviewRead(**result)
+    except OriginalPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/terminal/files/{file_id}/spreadsheet-preview", response_model=WorkspaceSpreadsheetPreviewRead,
+)
+async def start_spreadsheet_preview_ws_file_endpoint(
+    file_id: UUID, response: Response, cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _spreadsheet_preview_ws_file(file_id, response, cu, db, create=True)
+
+
+@router.get(
+    "/terminal/files/{file_id}/spreadsheet-preview", response_model=WorkspaceSpreadsheetPreviewRead,
+)
+async def get_spreadsheet_preview_ws_file_endpoint(
+    file_id: UUID, response: Response, cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _spreadsheet_preview_ws_file(file_id, response, cu, db, create=False)
+
+
+@router.get(
+    "/terminal/files/{file_id}/spreadsheet-preview/sheets/{sheet}/pages/{page}",
+    response_model=WorkspaceSpreadsheetPageRead,
+)
+async def spreadsheet_preview_page_ws_file_endpoint(
+    file_id: UUID, sheet: str, page: int, response: Response,
+    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    f = await workspace_service.get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await workspace_service.get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    await workspace_permission_service.assert_can_read(db, ws, cu)
+    try:
+        return WorkspaceSpreadsheetPageRead(**await workspace_preview_session_service.spreadsheet_page(
+            db, f, sheet_name=sheet, page=page,
+        ))
+    except OriginalPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/terminal/files/{file_id}/pdf-preview/info")

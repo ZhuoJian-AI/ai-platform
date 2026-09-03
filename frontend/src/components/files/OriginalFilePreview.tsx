@@ -1,7 +1,10 @@
 import { lazy, Suspense, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { Button, Empty, Spin, Typography } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
-import type { WorkspaceFallbackPreview, WorkspacePdfPreviewInfo, WorkspacePreviewSession } from '../../api/client';
+import type {
+  WorkspaceFallbackPreview, WorkspacePdfPreviewInfo, WorkspacePreviewPreferredMode,
+  WorkspacePreviewSession, WorkspaceSpreadsheetPage, WorkspaceSpreadsheetPreview,
+} from '../../api/client';
 import WorkspacePreviewSessionView from './WorkspacePreviewSessionView';
 
 const OfficeFilePreview = lazy(() => import('./OfficeFilePreview'));
@@ -42,10 +45,14 @@ export interface OriginalFilePreviewProps {
   onDownload: () => void;
   loadPdfInfo?: () => Promise<WorkspacePdfPreviewInfo>;
   loadPdfPage?: (pageNumber: number) => Promise<Blob>;
-  loadPreviewSession?: () => Promise<WorkspacePreviewSession>;
+  loadPreviewSession?: (clientOpenId: string, preferredMode?: WorkspacePreviewPreferredMode) => Promise<WorkspacePreviewSession>;
   refreshPreviewSession?: (accessToken: string, refreshToken: string, refreshContext: string) => Promise<WorkspacePreviewSession>;
   startFallbackPreview?: () => Promise<WorkspaceFallbackPreview>;
   getFallbackPreview?: () => Promise<WorkspaceFallbackPreview>;
+  startSpreadsheetPreview?: () => Promise<WorkspaceSpreadsheetPreview>;
+  getSpreadsheetPreview?: () => Promise<WorkspaceSpreadsheetPreview>;
+  getSpreadsheetPage?: (sheet: string, page: number) => Promise<WorkspaceSpreadsheetPage>;
+  previewKey?: string;
 }
 
 /**
@@ -55,17 +62,22 @@ export interface OriginalFilePreviewProps {
  * the complete Office package on every open.
  */
 export default function OriginalFilePreview({
-  loadPreviewSession, refreshPreviewSession, startFallbackPreview, getFallbackPreview, ...legacyProps
+  loadPreviewSession, refreshPreviewSession, startFallbackPreview, getFallbackPreview,
+  startSpreadsheetPreview, getSpreadsheetPreview, getSpreadsheetPage, previewKey, ...legacyProps
 }: OriginalFilePreviewProps) {
   if (loadPreviewSession && refreshPreviewSession && startFallbackPreview && getFallbackPreview) {
     return (
       <WorkspacePreviewSessionView
         filename={legacyProps.filename}
+        previewKey={previewKey || legacyProps.filename}
         onDownload={legacyProps.onDownload}
         loadSession={loadPreviewSession}
         refreshSession={refreshPreviewSession}
         startFallback={startFallbackPreview}
         getFallback={getFallbackPreview}
+        startSpreadsheet={startSpreadsheetPreview}
+        getSpreadsheet={getSpreadsheetPreview}
+        getSpreadsheetPage={getSpreadsheetPage}
       />
     );
   }
@@ -75,7 +87,7 @@ export default function OriginalFilePreview({
 function LegacyOriginalFilePreview({
   blob, sourceUrl, sourceHeaders = EMPTY_HEADERS, mimeType, filename, loading = false, error, onDownload,
   loadPdfInfo, loadPdfPage,
-}: Omit<OriginalFilePreviewProps, 'loadPreviewSession' | 'refreshPreviewSession' | 'startFallbackPreview' | 'getFallbackPreview'>) {
+}: Omit<OriginalFilePreviewProps, 'loadPreviewSession' | 'refreshPreviewSession' | 'startFallbackPreview' | 'getFallbackPreview' | 'startSpreadsheetPreview' | 'getSpreadsheetPreview' | 'getSpreadsheetPage' | 'previewKey'>) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [remoteBlob, setRemoteBlob] = useState<Blob | null>(null);
   const [remoteLoading, setRemoteLoading] = useState(false);
