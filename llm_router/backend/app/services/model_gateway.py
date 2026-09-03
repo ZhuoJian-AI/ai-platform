@@ -36,7 +36,7 @@ _TEST_IMAGE_DATA_URL = (
     "data:image/png;base64,"
     "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR4nGNQqLhAU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULAEuXoEzmj87AAAAAAElFTkSuQmCC"
 )
-_MIMO_AUDIO_LIMIT_BYTES = 10 * 1024 * 1024
+_AUDIO_INPUT_LIMIT_BYTES = 10 * 1024 * 1024
 
 
 class GatewayError(RuntimeError):
@@ -113,7 +113,7 @@ async def transcribe_audio(
     normalized_format = audio_format.lower().removeprefix("audio/")
     if normalized_format not in {"mp3", "mpeg", "wav", "wave", "x-wav"}:
         raise GatewayError("unsupported_audio_format")
-    if len(audio) > _MIMO_AUDIO_LIMIT_BYTES:
+    if len(audio) > _AUDIO_INPUT_LIMIT_BYTES:
         raise GatewayError("audio_segment_too_large")
     resolved = await resolve_deployment(
         db, org_id, model_alias, "speech_to_text", dept_id=dept_id, team_id=team_id,
@@ -259,7 +259,7 @@ async def synthesize_audio(
     if speed != 1.0:
         instructions.append(f"请以 {speed:.2f} 倍的相对语速朗读。")
     if clone_audio is not None:
-        if clone_format not in {"mp3", "wav"} or len(clone_audio) > _MIMO_AUDIO_LIMIT_BYTES:
+        if clone_format not in {"mp3", "wav"} or len(clone_audio) > _AUDIO_INPUT_LIMIT_BYTES:
             raise GatewayError("invalid_voice_clone_sample")
         encoded = base64.b64encode(clone_audio).decode("ascii")
         mime_type = "audio/mpeg" if clone_format == "mp3" else "audio/wav"
@@ -477,7 +477,9 @@ async def _assert_legacy_fallback_allowed(
         include_unverified=True,
     )
     if declared:
-        raise RuntimeError("模型部署尚未完成全部能力验证，或该组织尚未启用新模型网关")
+        if any(deployment.verification_status in _ROUTABLE_STATES for _, deployment in declared):
+            raise GatewayError("model_gateway_not_enabled")
+        raise GatewayError("deployment_not_verified")
 
 
 async def resolve_provider_model(
@@ -1031,18 +1033,24 @@ async def test_deployment(
     """Perform an explicit billable-capability test. The caller owns transaction state."""
     effective = effective_provider(provider, deployment)
     if capability in {"chat", "vision"}:
-        content: Any = "Reply with OK only."
+        content: Any = "Do not explain. Reply exactly with OK."
         if capability == "vision":
             content = [
-                {"type": "text", "text": "Reply with OK only."},
+                {"type": "text", "text": "Do not explain. Reply exactly with OK."},
                 {"type": "image_url", "image_url": {"url": _TEST_IMAGE_DATA_URL}},
             ]
         result = await _chat_with_deployment(
             db, provider.organization_id, provider, deployment,
             [{"role": "user", "content": content}], system_prompt="",
-            temperature=0, max_tokens=8, tools=None,
+            # Reasoning models can spend a tiny output budget entirely on
+            # hidden reasoning.  Leave enough room for the requested final
+            # token, then require an actual final answer before verification.
+            temperature=0, max_tokens=128, tools=None,
         )
-        return {"output": result.content[:200], "provider_id": result.provider_id}
+        output = (result.content or "").strip()
+        if not output:
+            raise GatewayError("invalid_provider_response")
+        return {"output": output[:200], "provider_id": result.provider_id}
     if capability == "embedding":
         vectors = await _embed_with_deployment(effective, deployment, ["gateway health check"])
         return {"dimensions": len(vectors[0]) if vectors else 0}

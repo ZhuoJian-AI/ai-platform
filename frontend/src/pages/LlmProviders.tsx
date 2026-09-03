@@ -31,7 +31,6 @@ const TYPE_LABELS: Record<string, string> = {
 const VENDOR_LABELS: Record<string, string> = {
   aliyun_bailian: '阿里云百炼',
   volcengine_ark: '火山方舟',
-  xiaomi_mimo: '小米 MiMo',
   openai: 'OpenAI',
   anthropic: 'Anthropic',
   azure_openai: 'Azure OpenAI',
@@ -46,8 +45,8 @@ const CAPABILITY_LABELS: Record<ModelCapability, string> = {
 
 const ADAPTER_OPTIONS = [
   { value: 'openai_chat_completions', label: 'OpenAI Chat Completions' },
-  { value: 'openai_audio_transcription_chat', label: 'MiMo ASR（Chat Completions）' },
-  { value: 'openai_audio_synthesis_chat', label: 'MiMo TTS / 音色（Chat Completions）' },
+  { value: 'openai_audio_transcription_chat', label: 'OpenAI 兼容 ASR（Chat Completions）' },
+  { value: 'openai_audio_synthesis_chat', label: 'OpenAI 兼容 TTS / 音色（Chat Completions）' },
   { value: 'openai_responses', label: 'OpenAI Responses（方舟等）' },
   { value: 'anthropic_messages', label: 'Anthropic Messages' },
   { value: 'openai_embeddings', label: 'OpenAI Embeddings' },
@@ -473,21 +472,19 @@ export default function LlmProviders() {
                 <Select disabled={isEdit} options={[
                   { value: 'aliyun_bailian', label: '阿里云百炼' },
                   { value: 'volcengine_ark', label: '火山方舟' },
-                  { value: 'xiaomi_mimo', label: '小米 MiMo' },
-                  { value: 'openai', label: 'OpenAI' },
-                  { value: 'anthropic', label: 'Anthropic' },
+                  { value: 'openai', label: 'OpenAI（含兼容服务）' },
+                  { value: 'anthropic', label: 'Anthropic（含兼容服务）' },
                   { value: 'custom', label: '自定义兼容服务' },
                 ]} onChange={(value) => {
                   if (value === 'anthropic') form.setFieldValue('provider_type', 'anthropic');
                   else form.setFieldValue('provider_type', 'openai');
                   if (value === 'aliyun_bailian' || value === 'volcengine_ark') form.setFieldValue('region', 'cn-beijing');
-                  if (value === 'xiaomi_mimo' && !form.getFieldValue('access_mode')) form.setFieldValue('access_mode', 'payg');
                 }} />
               </Form.Item>
             </Col>
             <Col span={12}>
               <Form.Item name="provider_type" label="默认通信协议" rules={[{ required: true }]}>
-                <Select disabled={isEdit || vendor === 'openai' || vendor === 'anthropic' || vendor === 'volcengine_ark' || vendor === 'xiaomi_mimo'} options={[
+                <Select disabled={isEdit || vendor === 'openai' || vendor === 'anthropic' || vendor === 'volcengine_ark'} options={[
                   { value: 'openai', label: 'OpenAI 兼容协议' },
                   { value: 'anthropic', label: 'Anthropic Messages 协议' },
                   { value: 'azure_openai', label: 'Azure OpenAI' },
@@ -522,19 +519,17 @@ export default function LlmProviders() {
               )}
             </Row>
           )}
-          {vendor === 'xiaomi_mimo' && (
-            <Form.Item name="access_mode" label="接入方式" rules={[{ required: true }]}>
-              <Select options={[
-                { value: 'payg', label: '按量付费 API Key（sk-...）' },
-                { value: 'token_plan', label: 'Token Plan（tp-...）' },
-              ]} />
-            </Form.Item>
-          )}
           <Form.Item
             name="base_url"
             label="Base URL"
             rules={(vendor === 'custom' || vendor === 'azure_openai') ? [{ required: true }] : []}
-            extra={(vendor === 'aliyun_bailian' || vendor === 'volcengine_ark' || vendor === 'xiaomi_mimo' || vendor === 'openai' || vendor === 'anthropic') ? '可留空，由平台根据供应商、地域和协议自动生成' : undefined}
+            extra={vendor === 'openai'
+              ? '留空使用 OpenAI 官方端点；其他 OpenAI 兼容服务请填写其专属 Base URL'
+              : vendor === 'anthropic'
+                ? '留空使用 Anthropic 官方端点；其他 Anthropic 兼容服务请填写其专属 Base URL'
+                : (vendor === 'aliyun_bailian' || vendor === 'volcengine_ark')
+                  ? '可留空，由平台根据供应商、地域和协议自动生成'
+                  : undefined}
           >
             <Input placeholder="留空使用官方端点；自定义服务必须填写 https:// 地址" />
           </Form.Item>
@@ -544,18 +539,20 @@ export default function LlmProviders() {
             rules={isEdit ? [] : [{ required: true }]}
             extra={isEdit ? '留空则保持原 Key 不变' : undefined}
           >
-            <Input.Password placeholder={vendor === 'xiaomi_mimo' ? 'sk-... 或 tp-...' : 'sk-...'} />
+            <Input.Password placeholder="填写该端点签发的 API Key（前缀不限）" />
           </Form.Item>
           <Alert
             type="info" showIcon style={{ marginBottom: 16 }}
             message="供应商账号与模型能力分开配置"
             description={vendor === 'aliyun_bailian'
               ? '请使用按量付费 API Key。Coding Plan / Token Plan 不适用于 SaaS 后端。Key、地域和 Base URL 必须属于同一地域。'
-              : vendor === 'xiaomi_mimo'
-                ? '支持按量付费 sk-... 和 Token Plan tp-... 凭证。ASR、TTS、音色设计和克隆仍需分别声明实际能力。'
               : vendor === 'volcengine_ark'
                 ? '聊天/视觉、Embedding 和图片生成需要按实际模型选择不同适配器；图片生成不会被当作聊天接口调用。'
-                : '模型必须明确填写能力和适配器，平台不再根据模型名称猜测。'}
+                : vendor === 'openai'
+                  ? 'OpenAI 兼容服务请填写它提供的 Base URL 与 API Key；平台按 OpenAI 协议调用，不按品牌或 Key 前缀另建供应商。'
+                  : vendor === 'anthropic'
+                    ? 'Anthropic 兼容服务请填写它提供的 Base URL 与 API Key；平台按 Anthropic Messages 协议调用。'
+                    : '模型必须明确填写能力和适配器，平台不再根据模型名称猜测。'}
           />
           {!isEdit ? (
             <Form.List name="model_deployments" rules={[{ validator: async (_rule, value) => { if (!value?.length) throw new Error('至少配置一个模型部署'); } }]}>

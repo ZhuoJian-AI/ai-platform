@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.services.multimodal_service import validate_provider_config
 
-VENDORS = {"openai", "anthropic", "azure_openai", "aliyun_bailian", "volcengine_ark", "xiaomi_mimo", "custom"}
+VENDORS = {"openai", "anthropic", "azure_openai", "aliyun_bailian", "volcengine_ark", "custom"}
 PROVIDER_TYPES = {"anthropic", "openai", "azure_openai", "custom"}
 CAPABILITIES = {
     "chat", "vision", "embedding", "image_generation", "audio_understanding",
@@ -145,8 +145,6 @@ class LlmProviderCreate(BaseModel):
             raise ValueError("SaaS backend providers must use pay-as-you-go API credentials")
         if self.vendor in {"aliyun_bailian", "volcengine_ark"} and not self.region:
             self.region = "cn-beijing"
-        if self.vendor == "xiaomi_mimo":
-            self.region = self.region or "cn"
         return self
 
     @field_validator("config")

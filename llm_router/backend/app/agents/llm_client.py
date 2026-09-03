@@ -460,7 +460,8 @@ async def stream_chat(
     if tool_calls:
         yield ("tool_calls", tool_calls, None)
     if reasoning_parts:
-        # MiMo requires the assistant's reasoning_content to be carried into
+        # Some reasoning-capable OpenAI-compatible models require the
+        # assistant's reasoning_content to be carried into
         # the next tool-result turn.  It is intentionally not rendered to the
         # end user; the DSH bridge stores it as assistant-message metadata.
         yield ("reasoning_content", "".join(reasoning_parts), None)

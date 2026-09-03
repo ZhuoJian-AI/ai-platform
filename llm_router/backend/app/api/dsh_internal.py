@@ -36,6 +36,17 @@ class ToolBridgeRequest(BaseModel):
 
 
 _IDENTICAL_TOOL_FAILURE_LIMIT = 2
+_MODEL_BRIDGE_ERROR_DETAILS = {
+    "deployment_not_verified": "当前模型尚未完成全部能力验证，请管理员在“模型提供商”中完成该模型声明的全部能力测试。",
+    "model_gateway_not_enabled": "当前组织尚未启用已验证模型网关，请管理员检查模型网关开关。",
+    "invalid_credentials_or_permission": "模型凭证无效，或该 Key 没有模型访问权限。",
+    "model_not_found": "模型 ID 不存在，或当前端点不提供该模型。",
+    "quota_or_rate_limit": "模型服务余额或配额不足，或请求被限流。",
+    "network_timeout": "模型服务响应超时，请稍后重试。",
+    "network_failure": "无法连接模型服务，请管理员检查 Base URL 和网络。",
+    "provider_service_unavailable": "模型服务暂时不可用，请稍后重试。",
+    "invalid_provider_response": "模型服务没有返回有效的最终响应。",
+}
 
 
 def _tool_call_fingerprint(name: str, arguments: dict[str, Any]) -> str:
@@ -70,6 +81,16 @@ def _require_service(authorization: str | None) -> None:
     expected = f"Bearer {settings.dsh_runtime_token}"
     if not authorization or authorization != expected:
         raise HTTPException(status_code=401, detail="invalid DSH service token")
+
+
+def _model_bridge_http_exception(exc: Exception) -> HTTPException:
+    """Translate gateway failures before response headers without leaking provider payloads."""
+    category = llm_client.classify_gateway_error(exc)
+    status_code = 409 if category in {"deployment_not_verified", "model_gateway_not_enabled"} else 502
+    return HTTPException(
+        status_code=status_code,
+        detail=_MODEL_BRIDGE_ERROR_DETAILS.get(category, "模型服务调用失败，请稍后重试。"),
+    )
 
 
 def _text(blocks: list[dict[str, Any]]) -> str:
@@ -225,6 +246,11 @@ async def model_stream(
                     yield json.dumps({
                         "type": "text-delta", "index": next_index, "text": text,
                     }, ensure_ascii=False) + "\n"
+            if not text and not tool_calls:
+                # A reasoning trace is not a final answer.  Treat a second empty
+                # response as an upstream protocol failure so DSH cannot report
+                # a successful run with no user-visible result.
+                raise llm_client.GatewayError("invalid_provider_response")
         if text_started:
             yield json.dumps({
                 "type": "block-end", "index": next_index,
@@ -266,7 +292,23 @@ async def model_stream(
             "type": "finish", "reason": {"kind": "tool-calls" if tool_calls else "stop"},
         }) + "\n"
 
-    return StreamingResponse(events(), media_type="application/x-ndjson")
+    # StreamingResponse sends HTTP 200 before iterating its body.  Pull one
+    # bridge event first so routing, credentials and an initially-empty provider
+    # response become a structured HTTP error that DSH can surface accurately.
+    event_stream = events()
+    try:
+        first_event = await anext(event_stream)
+    except StopAsyncIteration as exc:
+        raise HTTPException(status_code=502, detail="模型服务没有返回有效的最终响应。") from exc
+    except Exception as exc:
+        raise _model_bridge_http_exception(exc) from exc
+
+    async def response_events():
+        yield first_event
+        async for event in event_stream:
+            yield event
+
+    return StreamingResponse(response_events(), media_type="application/x-ndjson")
 
 
 @router.post("/tools/execute")

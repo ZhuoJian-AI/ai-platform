@@ -1,4 +1,4 @@
-"""Contract regression tests for hybrid RBAC and MiMo audio phase one."""
+"""Contract regression tests for hybrid RBAC and multimodal audio."""
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -13,6 +13,12 @@ from app.schemas.user import UserCreate
 from app.services.model_gateway import GatewayError, _test_wav_bytes, is_retryable_gateway_error
 from app.services.scope_service import department_scope_ids, has_unrestricted_data_scope
 from app.workers.multimodal_worker import _merge_transcripts, _pcm16_to_wav
+
+
+@pytest.fixture(autouse=True)
+def db_engine():
+    """These contract tests are pure and do not require PostgreSQL."""
+    yield
 
 
 def test_user_has_one_department_but_many_roles() -> None:
@@ -53,23 +59,26 @@ def test_role_data_scope_expands_queries_without_changing_membership() -> None:
     assert current_user.department_ids == (str(primary),)
 
 
-def test_mimo_token_plan_is_supported_and_audio_adapters_are_strict() -> None:
-    token_plan = LlmProviderCreate(
-        name="mimo-token-plan",
-        vendor="xiaomi_mimo",
+def test_compatible_models_use_protocol_vendor_and_audio_adapters_are_strict() -> None:
+    compatible = LlmProviderCreate(
+        name="openai-compatible",
+        vendor="openai",
+        provider_type="openai",
         access_mode="token_plan",
-        api_key="tp-test",
+        base_url="https://compatible.example.com/v1",
+        api_key="provider-specific-prefix-test",
     )
-    assert token_plan.access_mode == "token_plan"
-    assert token_plan.region == "cn"
+    assert compatible.vendor == "openai"
+    assert compatible.provider_type == "openai"
+    assert compatible.access_mode == "token_plan"
 
-    provider = LlmProviderCreate(
-        name="mimo-payg",
-        vendor="xiaomi_mimo",
-        access_mode="payg",
-        api_key="sk-test",
-    )
-    assert provider.region == "cn"
+    with pytest.raises(ValidationError, match="unsupported vendor"):
+        LlmProviderCreate(
+            name="obsolete-pseudo-vendor",
+            vendor="xiaomi_mimo",
+            provider_type="openai",
+            api_key="test-key",
+        )
 
     asr = ModelDeploymentCreate(
         model_id="mimo-v2.5-asr",
@@ -114,7 +123,7 @@ def test_audio_helpers_produce_wav_and_remove_chunk_overlap() -> None:
     assert pcm_wav[8:12] == b"WAVE"
 
 
-def test_mimo_retry_policy_only_retries_transient_failures() -> None:
+def test_model_gateway_retry_policy_only_retries_transient_failures() -> None:
     assert is_retryable_gateway_error(GatewayError("quota_or_rate_limit"))
     assert is_retryable_gateway_error(GatewayError("provider_service_unavailable"))
     assert not is_retryable_gateway_error(GatewayError("invalid_credentials_or_permission"))

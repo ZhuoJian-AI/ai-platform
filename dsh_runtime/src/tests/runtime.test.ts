@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { afterEach, test } from 'node:test'
 import { DshRuntime } from '../runtime.js'
 import type { RunRequest, RuntimeEvent } from '../contracts.js'
+import { parseNdjson } from '../platform.js'
 
 const servers: Server[] = []
 
@@ -67,6 +68,20 @@ function request(overrides: Partial<RunRequest> = {}): RunRequest {
     exec_mode: 'craft', tools: [], max_steps: 24, ...overrides,
   }
 }
+
+test('preserves the backend model bridge error detail', async () => {
+  const response = new Response(JSON.stringify({
+    detail: '当前模型尚未完成全部能力验证，请管理员完成能力测试。',
+  }), {
+    status: 409,
+    headers: { 'content-type': 'application/json' },
+  })
+
+  await assert.rejects(
+    () => parseNdjson(response),
+    /当前模型尚未完成全部能力验证/,
+  )
+})
 
 test('runs a direct DSH answer through the platform model adapter', async () => {
   const backendUrl = await fakeBackend(async incoming => {

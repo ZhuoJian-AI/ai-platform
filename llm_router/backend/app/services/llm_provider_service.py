@@ -82,8 +82,6 @@ def provider_base_url(
                 "Volcengine Ark currently supports the cn-beijing preset; provide Base URL for another region"
             )
         return "https://ark.cn-beijing.volces.com/api/v3"
-    if vendor == "xiaomi_mimo":
-        return "https://api.xiaomimimo.com/v1"
     if vendor == "aliyun_bailian":
         selected = region or "cn-beijing"
         workspace_id = normalize_bailian_workspace_id(workspace_id, selected)

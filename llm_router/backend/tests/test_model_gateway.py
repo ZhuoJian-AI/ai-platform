@@ -33,6 +33,14 @@ def test_bailian_and_ark_endpoint_presets():
         "volcengine_ark", region="cn-beijing", workspace_id=None,
         provider_type="openai", explicit=None,
     ) == "https://ark.cn-beijing.volces.com/api/v3"
+    assert provider_base_url(
+        "openai", region=None, workspace_id=None, provider_type="openai",
+        explicit="https://compatible.example.com/v1/",
+    ) == "https://compatible.example.com/v1"
+    assert provider_base_url(
+        "anthropic", region=None, workspace_id=None, provider_type="anthropic",
+        explicit="https://anthropic-compatible.example.com/anthropic/",
+    ) == "https://anthropic-compatible.example.com/anthropic"
     with pytest.raises(ValueError, match="credentials"):  # URL credentials are never accepted.
         provider_base_url(
             "custom", region=None, workspace_id=None, provider_type="openai",
@@ -248,6 +256,7 @@ async def test_mock_gateway_chat_vision_embedding_image_and_stream(monkeypatch, 
     assert image_result["bytes"] == len(b"fake-png")
     vision_bodies = [body for url, body in _FakeClient.calls if url.endswith("/responses")]
     assert any("input_image" in str(body) for body in vision_bodies)
+    assert all(body["max_output_tokens"] == 128 for body in vision_bodies)
     embedding_body = next(body for url, body in _FakeClient.calls if url.endswith("/embeddings"))
     assert embedding_body["dimensions"] == 4
 

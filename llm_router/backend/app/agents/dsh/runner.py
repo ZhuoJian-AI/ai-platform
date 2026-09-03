@@ -72,6 +72,12 @@ class DshRunError(RuntimeError):
 def _public_failure_message(exc: Exception) -> str:
     if isinstance(exc, DshRunError) and exc.code == "MAX_STEPS_EXCEEDED":
         return "达到最大步数，未产生最终回答。"
+    if isinstance(exc, DshRunError):
+        message = str(exc)
+        if "尚未完成全部能力验证" in message:
+            return "当前模型尚未完成全部能力验证，请联系管理员完成该模型声明的全部能力测试。"
+        if "尚未启用已验证模型网关" in message:
+            return "当前组织尚未启用已验证模型网关，请联系管理员检查模型配置。"
     return "智能体暂时无法完成本次请求，请稍后重试。"
 
 
