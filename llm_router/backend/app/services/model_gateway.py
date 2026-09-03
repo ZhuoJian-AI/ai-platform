@@ -1039,13 +1039,15 @@ async def test_deployment(
                 {"type": "text", "text": "Do not explain. Reply exactly with OK."},
                 {"type": "image_url", "image_url": {"url": _TEST_IMAGE_DATA_URL}},
             ]
+        # Vision-capable reasoning models can spend the small verification
+        # budget entirely on hidden reasoning and return no final text.  Keep
+        # ordinary chat checks cheap while leaving vision enough room to emit
+        # the requested answer.
+        verification_max_tokens = 512 if capability == "vision" else 128
         result = await _chat_with_deployment(
             db, provider.organization_id, provider, deployment,
             [{"role": "user", "content": content}], system_prompt="",
-            # Reasoning models can spend a tiny output budget entirely on
-            # hidden reasoning.  Leave enough room for the requested final
-            # token, then require an actual final answer before verification.
-            temperature=0, max_tokens=128, tools=None,
+            temperature=0, max_tokens=verification_max_tokens, tools=None,
         )
         output = (result.content or "").strip()
         if not output:

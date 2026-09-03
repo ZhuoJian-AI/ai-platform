@@ -256,7 +256,14 @@ async def test_mock_gateway_chat_vision_embedding_image_and_stream(monkeypatch, 
     assert image_result["bytes"] == len(b"fake-png")
     vision_bodies = [body for url, body in _FakeClient.calls if url.endswith("/responses")]
     assert any("input_image" in str(body) for body in vision_bodies)
-    assert all(body["max_output_tokens"] == 128 for body in vision_bodies)
+    assert any(
+        "input_image" in str(body) and body["max_output_tokens"] == 512
+        for body in vision_bodies
+    )
+    assert any(
+        "input_image" not in str(body) and body["max_output_tokens"] == 128
+        for body in vision_bodies
+    )
     embedding_body = next(body for url, body in _FakeClient.calls if url.endswith("/embeddings"))
     assert embedding_body["dimensions"] == 4
 
