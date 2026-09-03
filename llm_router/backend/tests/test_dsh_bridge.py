@@ -1,16 +1,26 @@
 """Unit contracts for the private Python ↔ DSH bridge."""
 
+import asyncio
+from contextvars import Context
+from types import SimpleNamespace
+from uuid import uuid4
+
 import pytest
+from fastapi import HTTPException
 
 from app.agents.dsh import client as dsh_client
 from app.agents.dsh import runner
 from app.agents.graph.nodes import _skill_catalog_prompt
+from app.api import dsh_internal
 from app.api.dsh_internal import (
+    ModelBridgeRequest,
     _identical_failure_blocked,
     _record_tool_outcome,
     _to_platform_messages,
     _to_platform_tools,
 )
+from app.config import settings
+from app.services.model_gateway import GatewayError
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +59,96 @@ def test_dsh_messages_preserve_tool_protocol_and_current_images():
     assert converted[0]["content"][1]["image_url"]["url"].startswith("data:image/png")
     assert converted[1]["tool_calls"][0]["function"]["name"] == "image_tool"
     assert converted[2] == {"role": "tool", "tool_call_id": "c1", "content": "完成"}
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_returns_verification_error_before_stream_headers(monkeypatch):
+    async def unavailable_model(*_args, **_kwargs):
+        raise GatewayError("deployment_not_verified")
+        yield  # pragma: no cover - keeps this an async generator
+
+    context = SimpleNamespace(
+        db=object(),
+        deps={},
+        state={"org_id": str(uuid4()), "model_alias": "mimo-v2.5"},
+        image_inputs=[],
+        provider_override=None,
+        model_override=None,
+    )
+    monkeypatch.setattr(dsh_internal.run_registry, "get", lambda _token: context)
+    monkeypatch.setattr(dsh_internal.llm_client, "stream_chat", unavailable_model)
+
+    with pytest.raises(HTTPException) as raised:
+        await dsh_internal.model_stream(
+            ModelBridgeRequest(run_token="run-token"),
+            authorization=f"Bearer {settings.dsh_runtime_token}",
+        )
+
+    assert raised.value.status_code == 409
+    assert "尚未完成全部能力验证" in raised.value.detail
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_prefetch_keeps_the_first_stream_event(monkeypatch):
+    async def available_model(*_args, **_kwargs):
+        yield "text", "OK", None
+        yield "usage", None, {"input_tokens": 2, "output_tokens": 1}
+
+    context = SimpleNamespace(
+        db=object(),
+        deps={},
+        state={"org_id": str(uuid4()), "model_alias": "compatible-model"},
+        image_inputs=[],
+        provider_override=None,
+        model_override=None,
+    )
+    monkeypatch.setattr(dsh_internal.run_registry, "get", lambda _token: context)
+    monkeypatch.setattr(dsh_internal.llm_client, "stream_chat", available_model)
+
+    response = await dsh_internal.model_stream(
+        ModelBridgeRequest(run_token="run-token"),
+        authorization=f"Bearer {settings.dsh_runtime_token}",
+    )
+    chunks = [chunk async for chunk in response.body_iterator]
+    body = "".join(chunk.decode() if isinstance(chunk, bytes) else chunk for chunk in chunks)
+
+    assert '"type": "block-start"' in body
+    assert '"text": "OK"' in body
+    assert '"type": "finish"' in body
+
+
+@pytest.mark.asyncio
+async def test_model_bridge_prefetch_can_continue_in_streaming_response_context(monkeypatch):
+    async def available_model(*_args, **_kwargs):
+        yield "text", "OK", None
+        yield "usage", None, {"input_tokens": 2, "output_tokens": 1}
+
+    context = SimpleNamespace(
+        db=object(),
+        deps={},
+        state={"org_id": str(uuid4()), "model_alias": "compatible-model"},
+        image_inputs=[],
+        provider_override=None,
+        model_override=None,
+    )
+    monkeypatch.setattr(dsh_internal.run_registry, "get", lambda _token: context)
+    monkeypatch.setattr(dsh_internal.llm_client, "stream_chat", available_model)
+
+    response = await dsh_internal.model_stream(
+        ModelBridgeRequest(run_token="run-token"),
+        authorization=f"Bearer {settings.dsh_runtime_token}",
+    )
+
+    async def consume_body():
+        return [chunk async for chunk in response.body_iterator]
+
+    # Starlette may consume the StreamingResponse body in a fresh task/context
+    # after the bridge prefetches its first event in the request task.
+    chunks = await asyncio.create_task(consume_body(), context=Context())
+    body = "".join(chunk.decode() if isinstance(chunk, bytes) else chunk for chunk in chunks)
+
+    assert '"text": "OK"' in body
+    assert '"type": "finish"' in body
 
 
 def test_dsh_tools_convert_to_existing_gateway_schema():
@@ -381,8 +481,9 @@ async def test_model_stream_ends_with_error_finish_when_upstream_raises(monkeypa
     last = events[-1]
     assert last["type"] == "finish"
     assert last["reason"]["kind"] == "error"
-    assert last["reason"]["failure"]["message"] == "provider exploded"
-    assert last["reason"]["error"]["message"] == "provider exploded"
+    assert last["reason"]["failure"]["message"]
+    assert last["reason"]["failure"]["code"]
+    assert last["reason"]["error"]["message"] == last["reason"]["failure"]["message"]
 
 
 def test_publish_failure_reply_retracts_partial_text_and_ends_stream():
@@ -438,3 +539,11 @@ async def test_finalize_bg_error_publishes_error_event_before_done(monkeypatch):
     assert payloads[1]["type"] == "final"
     assert handle.done is True
     assert handle.error == "RuntimeError: boom"
+
+
+def test_unverified_model_error_has_an_actionable_public_message():
+    error = runner.DshRunError(
+        "当前模型尚未完成全部能力验证，请管理员在“模型提供商”中完成该模型声明的全部能力测试。"
+    )
+
+    assert "完成该模型声明的全部能力测试" in runner._public_failure_message(error)

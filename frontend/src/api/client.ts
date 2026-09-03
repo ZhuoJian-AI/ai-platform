@@ -123,7 +123,7 @@ export interface LlmProvider {
   id: string;
   organization_id: string;
   name: string;
-  vendor: 'openai' | 'anthropic' | 'azure_openai' | 'aliyun_bailian' | 'volcengine_ark' | 'xiaomi_mimo' | 'custom';
+  vendor: 'openai' | 'anthropic' | 'azure_openai' | 'aliyun_bailian' | 'volcengine_ark' | 'custom';
   provider_type: string;
   region: string | null;
   workspace_id: string | null;
@@ -169,7 +169,7 @@ export interface ModelDeployment {
   embedding_dimensions: number | null;
   routing_priority: number;
   is_active: boolean;
-  verification_status: 'unverified' | 'verified' | 'failed' | 'legacy';
+  verification_status: 'unverified' | 'partially_verified' | 'verified' | 'failed' | 'legacy';
   last_error: string | null;
   config: Record<string, unknown>;
   created_at: string;

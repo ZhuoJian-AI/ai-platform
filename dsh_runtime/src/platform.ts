@@ -10,12 +10,21 @@ export interface PlatformAdapterOptions {
   consumeModelStep(sessionId: string): void
 }
 
-async function parseNdjson(response: Response, signal?: AbortSignal): Promise<AsyncGenerator<unknown>> {
-  async function* iterate(): AsyncGenerator<unknown> {
-    if (!response.ok || !response.body) {
-      throw new Error(`AI Platform model bridge failed (${response.status})`)
+export async function parseNdjson(response: Response, signal?: AbortSignal): Promise<AsyncGenerator<unknown>> {
+  if (!response.ok) {
+    let message = `AI Platform model bridge failed (${response.status})`
+    try {
+      const payload = await response.json() as { detail?: unknown }
+      if (typeof payload.detail === 'string' && payload.detail.trim()) message = payload.detail.trim()
+    } catch {
+      // Keep the credential-safe status fallback for non-JSON proxy responses.
     }
-    const reader = response.body.getReader()
+    throw new Error(message)
+  }
+  if (!response.body) throw new Error('AI Platform model bridge returned an empty response body')
+
+  async function* iterate(): AsyncGenerator<unknown> {
+    const reader = response.body!.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
     try {

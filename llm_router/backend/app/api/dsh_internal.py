@@ -38,6 +38,17 @@ class ToolBridgeRequest(BaseModel):
 
 
 _IDENTICAL_TOOL_FAILURE_LIMIT = 2
+_MODEL_BRIDGE_ERROR_DETAILS = {
+    "deployment_not_verified": "当前模型尚未完成全部能力验证，请管理员在“模型提供商”中完成该模型声明的全部能力测试。",
+    "model_gateway_not_enabled": "当前组织尚未启用已验证模型网关，请管理员检查模型网关开关。",
+    "invalid_credentials_or_permission": "模型凭证无效，或该 Key 没有模型访问权限。",
+    "model_not_found": "模型 ID 不存在，或当前端点不提供该模型。",
+    "quota_or_rate_limit": "模型服务余额或配额不足，或请求被限流。",
+    "network_timeout": "模型服务响应超时，请稍后重试。",
+    "network_failure": "无法连接模型服务，请管理员检查 Base URL 和网络。",
+    "provider_service_unavailable": "模型服务暂时不可用，请稍后重试。",
+    "invalid_provider_response": "模型服务没有返回有效的最终响应。",
+}
 
 
 def _tool_call_fingerprint(name: str, arguments: dict[str, Any]) -> str:
@@ -72,6 +83,16 @@ def _require_service(authorization: str | None) -> None:
     expected = f"Bearer {settings.dsh_runtime_token}"
     if not authorization or authorization != expected:
         raise HTTPException(status_code=401, detail="invalid DSH service token")
+
+
+def _model_bridge_http_exception(exc: Exception) -> HTTPException:
+    """Translate gateway failures before response headers without leaking provider payloads."""
+    category = llm_client.classify_gateway_error(exc)
+    status_code = 409 if category in {"deployment_not_verified", "model_gateway_not_enabled"} else 502
+    return HTTPException(
+        status_code=status_code,
+        detail=_MODEL_BRIDGE_ERROR_DETAILS.get(category, "模型服务调用失败，请稍后重试。"),
+    )
 
 
 def _text(blocks: list[dict[str, Any]]) -> str:
@@ -150,6 +171,29 @@ def _to_platform_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     } for tool in tools]
 
 
+async def _iterate_with_runtime(source: Any, deps: Any):
+    """Advance a model stream with runtime context bound to the current task.
+
+    The bridge prefetches one event before returning ``StreamingResponse``.
+    Starlette can consume the remaining body in a different task/context, so a
+    ContextVar token must never stay open across an outward ``yield``.
+    """
+    iterator = aiter(source)
+    try:
+        while True:
+            try:
+                with bind_runtime(deps):
+                    item = await anext(iterator)
+            except StopAsyncIteration:
+                return
+            yield item
+    finally:
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            with bind_runtime(deps):
+                await close()
+
+
 @router.post("/model/stream")
 async def model_stream(
     body: ModelBridgeRequest, authorization: str | None = Header(default=None),
@@ -161,23 +205,30 @@ async def model_stream(
 
     async def events():
         # 上游 stream_chat 中途抛错时，NDJSON 流不能只是静默断掉——DSH runtime 会当成
-        # 「无效流」而无法给用户任何解释。这里统一兜底成 dsh-llm 的终止事件
+        # 「无效流」而无法给用户任何解释。首个事件之前的异常原样抛出，交给下方的预取逻辑
+        # 转成结构化 HTTP 错误；已经开始输出后才兜底成 dsh-llm 的终止事件
         # ``{"type":"finish","reason":{"kind":"error","failure":{message, code}}}``。
+        started = False
         try:
             async for line in _produce():
+                started = True
                 yield line
         except Exception as exc:  # noqa: BLE001
+            if not started:
+                raise
+            category = llm_client.classify_gateway_error(exc)
+            message = _MODEL_BRIDGE_ERROR_DETAILS.get(category, "模型服务调用失败，请稍后重试。")
             logger.error(
                 "dsh_model_stream_failed", run_token=body.run_token[:12],
-                error=str(exc), exc_info=True,
+                category=category, error=str(exc), exc_info=True,
             )
             yield json.dumps({
                 "type": "finish",
                 "reason": {
                     "kind": "error",
-                    "failure": {"message": str(exc), "code": type(exc).__name__},
+                    "failure": {"message": message, "code": category},
                     # 兼容只读 ``reason.error.message`` 的消费者
-                    "error": {"message": str(exc)},
+                    "error": {"message": message},
                 },
             }, ensure_ascii=False) + "\n"
 
@@ -190,40 +241,41 @@ async def model_stream(
         usage = {"input_tokens": 0, "output_tokens": 0}
         tool_calls: list[dict[str, Any]] = []
         reasoning_content = ""
-        with bind_runtime(context.deps):
-            async for kind, payload, extra in llm_client.stream_chat(
-                context.db, UUID(context.state["org_id"]),
-                context.state.get("model_alias", "default"), messages,
-                system_prompt=body.system_prompt or "",
-                temperature=body.temperature,
-                max_tokens=body.max_tokens,
-                tools=tools or None,
-                dept_id=context.state.get("department_id"),
-                team_id=context.state.get("team_id"),
-                provider_override=context.provider_override,
-                model_override=context.model_override,
-            ):
-                if kind == "text":
-                    if not text_started:
-                        text_started = True
-                        yield json.dumps({"type": "block-start", "index": next_index, "blockType": "text"}) + "\n"
-                    text += str(payload)
-                    yield json.dumps(
-                        {"type": "text-delta", "index": next_index, "text": str(payload)},
-                        ensure_ascii=False,
-                    ) + "\n"
-                elif kind == "tool_calls":
-                    tool_calls = list(payload or [])
-                elif kind == "reasoning_content":
-                    reasoning_content += str(payload or "")
-                elif kind == "usage" and extra:
-                    usage["input_tokens"] += int(extra.get("input_tokens") or 0)
-                    usage["output_tokens"] += int(extra.get("output_tokens") or 0)
-            # A few OpenAI-compatible providers omit tool calls from their SSE
-            # stream even though the same response is present in non-streaming
-            # mode.  Keep the existing platform fallback so switching the
-            # coordinator to DSH does not silently remove tool capability.
-            if not text and not tool_calls:
+        model_events = llm_client.stream_chat(
+            context.db, UUID(context.state["org_id"]),
+            context.state.get("model_alias", "default"), messages,
+            system_prompt=body.system_prompt or "",
+            temperature=body.temperature,
+            max_tokens=body.max_tokens,
+            tools=tools or None,
+            dept_id=context.state.get("department_id"),
+            team_id=context.state.get("team_id"),
+            provider_override=context.provider_override,
+            model_override=context.model_override,
+        )
+        async for kind, payload, extra in _iterate_with_runtime(model_events, context.deps):
+            if kind == "text":
+                if not text_started:
+                    text_started = True
+                    yield json.dumps({"type": "block-start", "index": next_index, "blockType": "text"}) + "\n"
+                text += str(payload)
+                yield json.dumps(
+                    {"type": "text-delta", "index": next_index, "text": str(payload)},
+                    ensure_ascii=False,
+                ) + "\n"
+            elif kind == "tool_calls":
+                tool_calls = list(payload or [])
+            elif kind == "reasoning_content":
+                reasoning_content += str(payload or "")
+            elif kind == "usage" and extra:
+                usage["input_tokens"] += int(extra.get("input_tokens") or 0)
+                usage["output_tokens"] += int(extra.get("output_tokens") or 0)
+        # A few OpenAI-compatible providers omit tool calls from their SSE
+        # stream even though the same response is present in non-streaming
+        # mode.  Keep the existing platform fallback so switching the
+        # coordinator to DSH does not silently remove tool capability.
+        if not text and not tool_calls:
+            with bind_runtime(context.deps):
                 result = await llm_client.chat(
                     context.db, UUID(context.state["org_id"]),
                     context.state.get("model_alias", "default"), messages,
@@ -236,19 +288,24 @@ async def model_stream(
                     provider_override=context.provider_override,
                     model_override=context.model_override,
                 )
-                text = result.content or ""
-                tool_calls = list(result.tool_calls or [])
-                reasoning_content = result.reasoning_content or ""
-                usage["input_tokens"] += int(result.usage.get("input_tokens") or 0)
-                usage["output_tokens"] += int(result.usage.get("output_tokens") or 0)
-                if text:
-                    text_started = True
-                    yield json.dumps({
-                        "type": "block-start", "index": next_index, "blockType": "text",
-                    }) + "\n"
-                    yield json.dumps({
-                        "type": "text-delta", "index": next_index, "text": text,
-                    }, ensure_ascii=False) + "\n"
+            text = result.content or ""
+            tool_calls = list(result.tool_calls or [])
+            reasoning_content = result.reasoning_content or ""
+            usage["input_tokens"] += int(result.usage.get("input_tokens") or 0)
+            usage["output_tokens"] += int(result.usage.get("output_tokens") or 0)
+            if text:
+                text_started = True
+                yield json.dumps({
+                    "type": "block-start", "index": next_index, "blockType": "text",
+                }) + "\n"
+                yield json.dumps({
+                    "type": "text-delta", "index": next_index, "text": text,
+                }, ensure_ascii=False) + "\n"
+        if not text and not tool_calls:
+            # A reasoning trace is not a final answer.  Treat a second empty
+            # response as an upstream protocol failure so DSH cannot report
+            # a successful run with no user-visible result.
+            raise llm_client.GatewayError("invalid_provider_response")
         if text_started:
             yield json.dumps({
                 "type": "block-end", "index": next_index,
@@ -290,7 +347,23 @@ async def model_stream(
             "type": "finish", "reason": {"kind": "tool-calls" if tool_calls else "stop"},
         }) + "\n"
 
-    return StreamingResponse(events(), media_type="application/x-ndjson")
+    # StreamingResponse sends HTTP 200 before iterating its body.  Pull one
+    # bridge event first so routing, credentials and an initially-empty provider
+    # response become a structured HTTP error that DSH can surface accurately.
+    event_stream = events()
+    try:
+        first_event = await anext(event_stream)
+    except StopAsyncIteration as exc:
+        raise HTTPException(status_code=502, detail="模型服务没有返回有效的最终响应。") from exc
+    except Exception as exc:
+        raise _model_bridge_http_exception(exc) from exc
+
+    async def response_events():
+        yield first_event
+        async for event in event_stream:
+            yield event
+
+    return StreamingResponse(response_events(), media_type="application/x-ndjson")
 
 
 @router.post("/tools/execute")

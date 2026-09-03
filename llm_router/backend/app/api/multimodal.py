@@ -70,7 +70,7 @@ async def understand_audio(
                     body = {"content": str(payload)}
                     yield f"event: delta\ndata: {json.dumps(body, ensure_ascii=False)}\n\n"
                 elif event == "reasoning_content" and payload and not emitted_text:
-                    # MiMo audio understanding may place its user-facing answer
+                    # OpenAI-compatible audio understanding may place its user-facing answer
                     # in reasoning_content while leaving content empty.
                     body = {"content": str(payload)}
                     yield f"event: delta\ndata: {json.dumps(body, ensure_ascii=False)}\n\n"

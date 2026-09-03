@@ -335,16 +335,24 @@ async def list_available_models_for_user(
     )
     provider_models: list[str] = []
     for p in providers:
+        configured_deployments = [
+            deployment for deployment in (p.model_deployments or [])
+            if deployment.deleted_at is None
+        ]
         declared = [
-            deployment.model_id for deployment in (p.model_deployments or [])
-            if deployment.is_active and deployment.deleted_at is None
+            deployment.model_id for deployment in configured_deployments
+            if deployment.is_active
             and (
                 deployment.verification_status == "legacy"
                 or (allow_new_gateway and deployment.verification_status == "verified")
             )
             and "chat" in (deployment.capabilities or [])
         ]
-        if declared:
+        if configured_deployments:
+            # An explicit deployment is the routing source of truth.  Do not
+            # expose its legacy ``supported_models`` shadow while verification
+            # is pending or failed: the task picker must never offer a model
+            # that the gateway will reject at run time.
             provider_models.extend(declared)
         else:
             # Pre-gateway providers retain the old conservative name filter.

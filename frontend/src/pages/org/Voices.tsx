@@ -191,7 +191,7 @@ export default function VoicesPage() {
         <Form.Item name="voice_type" hidden><Input /></Form.Item>
         <Form.Item name="name" label="音色名称" rules={[{ required: true }]}><Input /></Form.Item>
         {!editing && kind === 'builtin' && <Form.Item
-          name="provider_voice_id" label="MiMo Voice ID" rules={[{ required: true }]}
+          name="provider_voice_id" label="供应商 Voice ID" rules={[{ required: true }]}
         ><Input /></Form.Item>}
         {!editing && kind === 'designed' && <Form.Item
           name="design_prompt" label="音色描述" rules={[{ required: true, min: 5 }]}

@@ -977,10 +977,17 @@ function NewFolderModal(props: {
           <Input
             autoFocus
             placeholder="文件夹名"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
+            defaultValue={value}
+            onChange={(e) => {
+              const nativeEvent = e.nativeEvent as InputEvent & { isComposing?: boolean };
+              if (composingRef.current || nativeEvent.isComposing) return;
+              setValue(e.target.value);
+            }}
             onCompositionStart={() => { composingRef.current = true; }}
-            onCompositionEnd={(e) => { composingRef.current = false; setValue((e.target as HTMLInputElement).value); }}
+            onCompositionEnd={(e) => {
+              composingRef.current = false;
+              setValue(e.currentTarget.value);
+            }}
             onPressEnter={(e) => {
               if (composingRef.current || (e.nativeEvent as KeyboardEvent & { isComposing?: boolean }).isComposing) return;
               onOk();
