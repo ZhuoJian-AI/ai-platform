@@ -141,6 +141,12 @@ async def finalize_bg_error(
             await db.commit()
     except Exception:  # noqa: BLE001
         logger.warning("dsh_finalize_persist_failed", task_id=str(task.id), exc_info=True)
+    # 之前只把 err_evt 写进 agent_run_events、没投递到 live SSE 队列：正在看流的用户
+    # 只会看到流静默结束。先 publish 再 mark_done（mark_done 之后队列就封口了）。
+    # 用户主动 Stop 的 "cancelled" 不推：前端点击停止时已把状态置为「已停止」，
+    # 再推一条 error 会弹成红色报错；回放路径（agent_run_events）保持不变。
+    if not handle.done and msg != "cancelled":
+        run_registry.publish(handle, err_evt)
     run_registry.mark_done(handle, final_evt, error=run_error)
 
 

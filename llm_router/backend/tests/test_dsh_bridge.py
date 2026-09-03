@@ -306,3 +306,135 @@ async def test_max_steps_requires_the_runtime_error_code(monkeypatch):
 
     assert raised.value.code == "MAX_STEPS_EXCEEDED"
     assert runner._public_failure_message(raised.value) == "达到最大步数，未产生最终回答。"
+
+
+# ── 审计修复（2026-09-03）──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_returns_full_content_not_truncated_preview(monkeypatch):
+    """H2：喂给模型的 tool result 必须是完整内容，不能是 4000 字预览。"""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from app.api import dsh_internal
+    from app.config import settings
+
+    full = "x" * 12_000
+    preview = full[:4000] + "\n[工具结果预览已截断，模型已收到完整分页结果]"
+
+    async def fake_execute(_state, _call, _registry):
+        return ({"role": "tool", "tool_call_id": "dsh-list_files", "content": full}, preview, True)
+
+    context = SimpleNamespace(state={}, deps={}, tool_registry={})
+    monkeypatch.setattr(dsh_internal.run_registry, "get", lambda _token: context)
+    monkeypatch.setattr(dsh_internal, "bind_runtime", lambda _deps: nullcontext())
+    monkeypatch.setattr(dsh_internal, "_execute_tool_call", fake_execute)
+
+    result = await dsh_internal.execute_tool(
+        dsh_internal.ToolBridgeRequest(run_token="t", name="list_files", arguments={}),
+        authorization=f"Bearer {settings.dsh_runtime_token}",
+    )
+
+    assert result["ok"] is True
+    assert result["content"] == full
+    assert result["value"]["content"] == full
+    assert len(result["content"]) == 12_000
+    assert "已截断" not in result["content"]
+    assert result["preview"] == preview
+
+
+@pytest.mark.asyncio
+async def test_model_stream_ends_with_error_finish_when_upstream_raises(monkeypatch):
+    """H11：上游 stream_chat 中途抛错，NDJSON 必须以 finish(kind=error) 收口而不是断流。"""
+    import json
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from app.api import dsh_internal
+    from app.config import settings
+
+    async def broken_stream_chat(*_args, **_kwargs):
+        yield ("text", "前半", None)
+        raise RuntimeError("provider exploded")
+
+    context = SimpleNamespace(
+        state={"org_id": str(uuid4()), "model_alias": "default"}, deps={}, db=None,
+        image_inputs=[], provider_override=None, model_override=None,
+    )
+    monkeypatch.setattr(dsh_internal.run_registry, "get", lambda _token: context)
+    monkeypatch.setattr(dsh_internal, "bind_runtime", lambda _deps: nullcontext())
+    monkeypatch.setattr(dsh_internal.llm_client, "stream_chat", broken_stream_chat)
+
+    response = await dsh_internal.model_stream(
+        dsh_internal.ModelBridgeRequest(run_token="t", messages=[]),
+        authorization=f"Bearer {settings.dsh_runtime_token}",
+    )
+    lines = []
+    async for chunk in response.body_iterator:
+        lines.extend(line for line in str(chunk).splitlines() if line.strip())
+    events = [json.loads(line) for line in lines]
+
+    assert events[0]["type"] == "block-start"
+    assert events[1] == {"type": "text-delta", "index": 0, "text": "前半"}
+    last = events[-1]
+    assert last["type"] == "finish"
+    assert last["reason"]["kind"] == "error"
+    assert last["reason"]["failure"]["message"] == "provider exploded"
+    assert last["reason"]["error"]["message"] == "provider exploded"
+
+
+def test_publish_failure_reply_retracts_partial_text_and_ends_stream():
+    """H7：后台流失败时，撤回半截文本、推公开错误文案 + done。"""
+    from app.agents.graph import run_registry
+
+    handle = run_registry.RunHandle(task_id="task-h7")
+    staged: list[dict] = [
+        {"type": "text", "delta": "我先"},
+        {"type": "text", "delta": "读取文件"},
+    ]
+    runner._publish_failure_reply(handle, staged, {"usage": {"input_tokens": 1}}, RuntimeError("boom"))
+
+    assert staged[2] == {"type": "text_retract", "chars": 6}
+    assert staged[3] == {"type": "text", "delta": runner._public_failure_message(RuntimeError("boom"))}
+    assert staged[4] == {"type": "done", "usage": {"input_tokens": 1}}
+    assert len(handle.buffer) == 3  # 三条新事件都进了 live 缓冲
+
+
+@pytest.mark.asyncio
+async def test_finalize_bg_error_publishes_error_event_before_done(monkeypatch):
+    """H7：finalize_bg_error 必须把 error 事件投到 live SSE，而不只是写库。"""
+    import json
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from app.agents import runtime_support
+    from app.agents.graph import run_registry
+
+    class FakeDb:
+        async def get(self, *_args):
+            return None
+
+        def add(self, _row):
+            return None
+
+        async def commit(self):
+            return None
+
+    @asynccontextmanager
+    async def fake_session_factory():
+        yield FakeDb()
+
+    monkeypatch.setattr(runtime_support, "async_session_factory", fake_session_factory)
+    handle = run_registry.RunHandle(task_id="task-h7-final")
+
+    await runtime_support.finalize_bg_error(
+        handle, SimpleNamespace(id="task-h7-final"), 42, "boom", "RuntimeError: boom", "sess", 0.0,
+    )
+
+    payloads = [json.loads(item) for item in handle.buffer]
+    assert payloads[0] == {"type": "error", "message": "boom"}
+    assert payloads[1]["type"] == "final"
+    assert handle.done is True
+    assert handle.error == "RuntimeError: boom"

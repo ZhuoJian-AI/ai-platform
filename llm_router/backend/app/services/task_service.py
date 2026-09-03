@@ -258,13 +258,30 @@ async def soft_delete_task_turn(
     user_msg = (await db.execute(stmt)).scalar_one_or_none()
     if user_msg is None:
         return {"deleted_messages": 0, "deleted_files": 0}
-    stmt_asst = (
+    # 本轮 assistant 消息必须落在「本条 user 消息」与「下一条 user 消息」之间。
+    # 若本轮没有 assistant（运行被取消/失败），只有下界的查询会抓到下一轮的 assistant，
+    # 连同它的产物文件一起误删——所以先找下一条 user 消息做上界。
+    stmt_next_user = (
         select(TaskMessage)
         .where(
             TaskMessage.task_id == task.id,
-            TaskMessage.role == "assistant",
-            TaskMessage.created_at >= user_msg.created_at,
+            TaskMessage.role == "user",
+            TaskMessage.created_at > user_msg.created_at,
         )
+        .order_by(TaskMessage.created_at.asc())
+        .limit(1)
+    )
+    next_user_msg = (await db.execute(stmt_next_user)).scalar_one_or_none()
+    asst_filters = [
+        TaskMessage.task_id == task.id,
+        TaskMessage.role == "assistant",
+        TaskMessage.created_at >= user_msg.created_at,
+    ]
+    if next_user_msg is not None:
+        asst_filters.append(TaskMessage.created_at < next_user_msg.created_at)
+    stmt_asst = (
+        select(TaskMessage)
+        .where(*asst_filters)
         .order_by(TaskMessage.created_at.asc())
         .limit(1)
     )

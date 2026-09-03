@@ -208,7 +208,15 @@ def resolve_workspace_intent(
         any(marker in text for marker in DIRECT_FILE_ACTION_MARKERS)
         and any(marker in text for marker in ("文件", "表格", "文档", "附件", "目录", "工作空间"))
     )
-    leading_permission_question = any(marker in text for marker in ("能不能", "能否", "是否", "可不可以"))
+    # 「我能不能修改财务部文件」是在问权限；「读取 销售表.xlsx 检查是否有重复行」是在下达
+    # 文件操作。区分点是情态词是否出现在文件动作动词**之前**：只有领先于动词时才算权限
+    # 提问；没有动词时照旧算。"是否" 在普通指令里过于常见（检查是否…），不再作为标记。
+    verb_positions = [text.find(marker) for marker in DIRECT_FILE_ACTION_MARKERS if marker in text]
+    first_verb = min(verb_positions) if verb_positions else len(text)
+    leading_permission_question = any(
+        marker in text and text.find(marker) < first_verb
+        for marker in ("能不能", "能否", "可不可以")
+    )
     permission_question = leading_permission_question or (
         any(marker in text for marker in PERMISSION_QUESTION_MARKERS) and not direct_file_operation
     )

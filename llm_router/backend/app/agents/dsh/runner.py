@@ -336,6 +336,25 @@ async def _finish(state: dict, deps: dict) -> None:
         await deps["db"].commit()
 
 
+def _publish_failure_reply(
+    handle: run_registry.RunHandle | None, staged: list[dict], state: dict, exc: Exception,
+) -> None:
+    """流式失败时把「公开错误回复」推到 SSE：撤回已流出的半截文本，再推错误文案 + done。
+
+    推的文案与 ``_finish_failed_run`` 落库的 assistant 消息一致，保证刷新前后看到的是同一句话。
+    """
+    streamed = 0
+    for event in staged:
+        if event.get("type") == "text":
+            streamed += len(str(event.get("delta") or ""))
+        elif event.get("type") == "text_retract":
+            streamed -= int(event.get("chars") or 0)
+    if streamed > 0:
+        _publish(handle, staged, {"type": "text_retract", "chars": streamed})
+    _publish(handle, staged, {"type": "text", "delta": _public_failure_message(exc)})
+    _publish(handle, staged, {"type": "done", "usage": state.get("usage") or {}})
+
+
 async def _finish_failed_run(state: dict, deps: dict, exc: Exception) -> None:
     """Preserve the public graceful-error contract when the coordinator is unavailable."""
     message = f"DSH runtime failed: {exc}"
@@ -503,14 +522,27 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
 
             prepared, run_token = await _prepare(state, deps, writer)
             handle.run_id = int(state["run_id"])
-            await _admitted_run(state, deps, prepared, run_token, handle, staged, str(user.id))
-            await _finish(state, deps)
+            try:
+                await _admitted_run(state, deps, prepared, run_token, handle, staged, str(user.id))
+                await _finish(state, deps)
+            except asyncio.CancelledError:
+                # 用户 Stop / 进程关停：不走「失败回复」，交给外层 CancelledError 分支
+                # （finalize_bg_error 会以 "cancelled" 收口，前端按「已停止」展示）。
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # 与 run_general_agent 一致：把失败落成一条 assistant TaskMessage + done 事件，
+                # 让流式用户看到明确的错误回复，而不是流悄悄结束、刷新后本轮没有任何回复。
+                logger.warning(
+                    "dsh_general_bg_run_failed", task_id=str(task.id), error=str(exc), exc_info=True,
+                )
+                _publish_failure_reply(handle, staged, state, exc)
+                await _finish_failed_run(state, deps, exc)
             final = json.dumps({
                 "type": "final", "session_id": state["session_id"], "run_id": state.get("run_id"),
                 "latency_ms": int((time.monotonic() - start) * 1000),
             }, ensure_ascii=False)
             await persist_run_events(state.get("run_id"), str(task.id), staged, final)
-            run_registry.mark_done(handle, final)
+            run_registry.mark_done(handle, final, error=str(state.get("error") or "") or None)
     except asyncio.CancelledError:
         if state.get("run_id") is not None:
             await client.cancel_run(str(state["run_id"]))

@@ -165,6 +165,11 @@ async function fetchFullTree(): Promise<{
   return { treeData, nodeMap };
 }
 
+// 加载中 / 出错时的稳定空值：不能每次 render 都 new 一个，否则下游 useMemo/useEffect
+// 依赖引用会每轮变化，触发 setState 渲染循环。
+const EMPTY_TREE_DATA: TreeNode[] = [];
+const EMPTY_NODE_MAP: Map<string, OrgNodeInfo> = new Map();
+
 export function useOrgTree() {
   const { data, isLoading } = useQuery({
     queryKey: ['orgTree'],
@@ -173,8 +178,8 @@ export function useOrgTree() {
   });
 
   return {
-    treeData: data?.treeData ?? [],
-    nodeMap: data?.nodeMap ?? new Map<string, OrgNodeInfo>(),
+    treeData: data?.treeData ?? EMPTY_TREE_DATA,
+    nodeMap: data?.nodeMap ?? EMPTY_NODE_MAP,
     isLoading,
   };
 }

@@ -187,6 +187,11 @@ async def upsert_file(
         f.content = content
         if content_ref is not None:
             f.content_ref = content_ref
+        else:
+            # 内联写入（文本 / base64）覆盖既有记录：content_ref 必须与 INSERT 分支一致指回
+            # 本行路径，否则覆盖一个 OSS 直传文件后 content_ref 仍指向旧对象，下载 / 预览 /
+            # 版本 / 发布全都继续拿旧字节。
+            f.content_ref = path
         f.size = size
         f.content_hash = content_hash
         f.extracted_text = None
@@ -200,9 +205,13 @@ async def upsert_file(
         f.deleted_by_admin_id = None
         # 合并而非覆盖：保留既有元数据（如 task_id 归属标记），仅用新值更新同名字段。
         f.metadata_ = {**(f.metadata_ or {}), **meta}
+        if content_ref is None:
+            # 旧对象的 etag 随内联覆盖失效（storage_backend 由 binary 分支决定，见下）。
+            f.metadata_.pop("etag", None)
         if not meta.get("binary"):
             f.metadata_.pop("binary", None)
             f.metadata_.pop("mime", None)
+            f.metadata_.pop("storage_backend", None)
     await db.flush()
     await create_file_version(
         db, f, created_by_user_id=created_by_user_id, created_by_admin_id=created_by_admin_id,
@@ -644,19 +653,26 @@ def paginate_file_content(
 # ── WorkspaceFolder ────────────────────────────────────────────────────
 
 async def create_folder(db: AsyncSession, ws: Workspace, data: WorkspaceFolderCreate) -> WorkspaceFolder:
-    """新建文件夹（幂等）：path 经规范化后按 (workspace_id, path) 去重，已存在则原样返回。"""
+    """新建文件夹（幂等）：path 经规范化后按 (workspace_id, path) 去重，已存在则原样返回；
+    同路径记录若已软删则复活（理由同 ``upsert_file``）。"""
     path = _normalize_path(data.path)
+    # 注意：此处**不**按 ``deleted_at IS NULL`` 过滤。唯一约束 ``uq_wsfolder_path`` 是
+    # ``(workspace_id, path)`` 且**不含** deleted_at——软删记录仍占用槽位，若过滤掉会走
+    # INSERT → UniqueViolation → 500（回收站保留期内重建同名文件夹必现）。
     result = await db.execute(
         select(WorkspaceFolder).where(
             WorkspaceFolder.workspace_id == ws.id,
             WorkspaceFolder.path == path,
-            WorkspaceFolder.deleted_at.is_(None),
         )
     )
     folder = result.scalar_one_or_none()
     if folder is None:
         folder = WorkspaceFolder(workspace_id=ws.id, path=path)
         db.add(folder)
+        await db.flush()
+        await db.refresh(folder)
+    elif folder.deleted_at is not None:
+        restore(folder)
         await db.flush()
         await db.refresh(folder)
     return folder

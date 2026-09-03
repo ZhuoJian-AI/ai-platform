@@ -627,3 +627,84 @@ async def test_history_restores_available_and_unavailable_attachment_refs(
     assert '"status": "unavailable"' in history_content
     assert "历史文件正文" not in history_content
     assert result["messages"][-1]["content"] == "继续分析刚才的文件"
+
+
+def test_workspace_intent_treats_check_whether_as_file_operation() -> None:
+    """「读取…检查是否有重复行」是文件操作，不是权限提问（H6 回归）。"""
+    personal_id = str(uuid4())
+    access = {
+        "roles": [{"name": "销售"}],
+        "workspaces": [
+            {"id": personal_id, "name": "我的空间", "slug": "me", "scope_type": "user",
+             "capabilities": {"read": True, "create": True, "update": True, "delete": True}},
+        ],
+    }
+    operation = workspace_permission_service.resolve_workspace_intent(
+        access, "读取 销售表.xlsx 文件，检查是否有重复行",
+    )
+    assert operation["file_operation"] is True
+    assert operation["permission_question"] is False
+    assert operation["read_workspace_ids"] == [personal_id]
+
+    # 情态词领先于动词才是权限提问。
+    question = workspace_permission_service.resolve_workspace_intent(
+        access, "我能否查看财务部的文件？",
+    )
+    assert question["permission_question"] is True
+    assert question["file_operation"] is False
+
+    # "是否" 单独出现不再触发权限提问。
+    plain = workspace_permission_service.resolve_workspace_intent(access, "分析文件里是否有异常数据")
+    assert plain["permission_question"] is False
+    assert plain["file_operation"] is True
+
+
+@pytest.mark.asyncio
+async def test_permission_question_does_not_block_personal_workspace_tools(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """权限提问只封共享空间：用户自己的个人空间照常可用（H6 回归）。"""
+    suffix = uuid4().hex[:10]
+    org = Organization(name=f"权限提问组织-{suffix}", slug=f"pq-{suffix}")
+    db_session.add(org)
+    await db_session.flush()
+    user_id = str(uuid4())
+    personal = Workspace(
+        organization_id=org.id, name="我的空间", slug=f"me-{suffix}",
+        scope_type="user", scope_id=user_id,
+    )
+    shared = Workspace(
+        organization_id=org.id, name="财务部", slug=f"finance-{suffix}",
+        scope_type="department", scope_id=str(uuid4()),
+    )
+    db_session.add_all([personal, shared])
+    await db_session.flush()
+
+    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session})
+
+    async def _allow(*_args, **_kwargs):
+        return {"read": True, "create": True, "update": True, "delete": True}
+
+    monkeypatch.setattr(workspace_permission_service, "capabilities", _allow)
+    principal = SimpleNamespace(id=user_id, user=None)
+    state = {
+        "workspace_id": str(personal.id),
+        "workspace_intent": {
+            "permission_question": True,
+            "read_workspace_ids": [str(personal.id)],
+            "write_workspace_ids": [str(personal.id)],
+        },
+    }
+
+    ws, _, error = await nodes._resolve_tool_workspace(
+        state, {}, principal, capability="read", parameter="workspace_id",
+    )
+    assert error is None
+    assert ws is not None and ws.id == personal.id
+
+    ws, _, error = await nodes._resolve_tool_workspace(
+        state, {"workspace_id": str(shared.id)}, principal, capability="read", parameter="workspace_id",
+    )
+    assert ws is None
+    assert error

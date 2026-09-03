@@ -77,10 +77,32 @@ export class PlatformLlmAdapter extends LlmAdapter {
       signal: options.signal,
     })
     const events = await parseNdjson(response, options.signal)
+    let finished = false
     for await (const event of events) {
       if (!isStreamChunk(event)) throw new Error('invalid model stream event from AI Platform')
+      if (event.type === 'finish') {
+        finished = true
+        const reason = event.reason as { kind?: string; failure?: unknown; message?: unknown; code?: unknown; error?: unknown }
+        if (reason.kind === 'error' || reason.kind === 'aborted') {
+          // The agent loop reads `reason.failure.message`; the backend may only send a
+          // flat `{kind, message, code}` – normalise so the real cause reaches the user.
+          const failure = reason.failure as { message?: unknown; code?: unknown } | undefined
+          const message = typeof failure?.message === 'string' ? failure.message
+            : typeof reason.message === 'string' ? reason.message
+            : typeof reason.error === 'string' ? reason.error
+            : 'AI Platform model stream reported an error'
+          const code = typeof failure?.code === 'string' ? failure.code
+            : typeof reason.code === 'string' ? reason.code
+            : reason.kind === 'aborted' ? 'ABORTED' : 'MODEL_ERROR'
+          yield { type: 'finish', reason: { kind: reason.kind, failure: { message, code } } }
+          continue
+        }
+      }
       yield event
     }
+    // A bridge that dies mid-response terminates the NDJSON body without a finish line;
+    // without this the assembler defaults to `stop` and the run "completes" with nothing.
+    if (!finished) throw new Error('AI Platform model stream ended without a finish event')
   }
 }
 

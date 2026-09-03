@@ -181,3 +181,49 @@ test('tracks agent disposal without holding the completed run open', async () =>
   await new Promise<void>(resolve => setImmediate(resolve))
   assert.equal(runtime.health().pending_disposals, 0)
 })
+
+test('surfaces a model stream that finishes with an error reason instead of an empty done', async () => {
+  const backendUrl = await fakeBackend(async incoming => {
+    await body(incoming)
+    return JSON.stringify({ type: 'finish', reason: { kind: 'error', message: '上游模型超时', code: 'UPSTREAM_TIMEOUT' } }) + '\n'
+  })
+  const runtime = new DshRuntime({ backendUrl, serviceToken: 'secret' })
+  await runtime.start()
+  const events: RuntimeEvent[] = []
+  await runtime.run(request(), event => events.push(event))
+  const error = events.find(event => event.type === 'error')
+  assert.deepEqual(error, { type: 'error', message: '上游模型超时', code: 'UPSTREAM_TIMEOUT' })
+  assert(!events.some(event => event.type === 'done'), JSON.stringify(events))
+  assert(!events.some(event => event.type === 'status' && event.status === 'completed'))
+  assert.equal(runtime.health().active_runs, 0)
+})
+
+test('surfaces a failed model bridge response as an error event', async () => {
+  const backendUrl = await fakeBackend(async () => { throw new Error('bridge down') })
+  const runtime = new DshRuntime({ backendUrl, serviceToken: 'secret' })
+  await runtime.start()
+  const events: RuntimeEvent[] = []
+  await runtime.run(request(), event => events.push(event))
+  const error = events.find(event => event.type === 'error')
+  assert(error && error.type === 'error', JSON.stringify(events))
+  assert.match(error.message, /model bridge failed \(500\)/)
+  assert(!events.some(event => event.type === 'done'))
+})
+
+test('treats a model stream that terminates without a finish line as an error', async () => {
+  const backendUrl = await fakeBackend(async incoming => {
+    await body(incoming)
+    return [
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: '半截' },
+    ].map(event => JSON.stringify(event)).join('\n') + '\n'
+  })
+  const runtime = new DshRuntime({ backendUrl, serviceToken: 'secret' })
+  await runtime.start()
+  const events: RuntimeEvent[] = []
+  await runtime.run(request(), event => events.push(event))
+  const error = events.find(event => event.type === 'error')
+  assert(error && error.type === 'error', JSON.stringify(events))
+  assert.match(error.message, /ended without a finish event/)
+  assert(!events.some(event => event.type === 'done'))
+})

@@ -6,14 +6,20 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
 
 from app.auth.user_auth import CurrentUser
 from app.config import settings
 from app.models.department import Department
 from app.models.organization import Organization
 from app.models.user import User
-from app.models.workspace import Workspace
-from app.schemas.workspace import WorkspaceFileCreate, WorkspaceFileRead, WorkspaceUploadInitiate
+from app.models.workspace import Workspace, WorkspaceFileVersion, WorkspaceFolder
+from app.schemas.workspace import (
+    WorkspaceFileCreate,
+    WorkspaceFileRead,
+    WorkspaceFolderCreate,
+    WorkspaceUploadInitiate,
+)
 from app.services import (
     workspace_governance_service,
     workspace_permission_service,
@@ -269,3 +275,64 @@ async def test_direct_upload_rejects_authoritative_size_mismatch(db_session, mon
         await workspace_governance_service.complete_direct_upload(db_session, session, cu)
     assert exc.value.status_code == 409
     assert session.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_create_folder_revives_soft_deleted_same_path(db_session):
+    """回收站保留期内重建同名文件夹：复活旧行而非 INSERT 撞 uq_wsfolder_path（H5 回归）。"""
+    _, personal, _, _, _ = await _tenant(db_session)
+    folder = await workspace_service.create_folder(
+        db_session, personal, WorkspaceFolderCreate(path="reports"),
+    )
+    await workspace_service.soft_delete_folder(db_session, folder)
+    await db_session.flush()
+    assert folder.deleted_at is not None
+
+    revived = await workspace_service.create_folder(
+        db_session, personal, WorkspaceFolderCreate(path="reports"),
+    )
+    assert revived.id == folder.id
+    assert revived.deleted_at is None
+    assert revived.purge_after is None
+    rows = (await db_session.execute(select(WorkspaceFolder).where(
+        WorkspaceFolder.workspace_id == personal.id, WorkspaceFolder.path == "reports",
+    ))).scalars().all()
+    assert len(rows) == 1
+    assert [item.id for item in await workspace_service.list_folders(db_session, personal.id)] == [folder.id]
+
+
+@pytest.mark.asyncio
+async def test_inline_text_overwrite_drops_stale_oss_reference(db_session):
+    """内联文本覆盖 OSS 直传文件后，content_ref / 版本快照不得再指向旧对象（H12 回归）。"""
+    cu, personal, _, _, _ = await _tenant(db_session)
+    path = "reports/summary.txt"
+    saved = await workspace_service.upsert_file(
+        db_session, personal,
+        WorkspaceFileCreate(path=path, content="", metadata={
+            "binary": True, "mime": "application/pdf", "name": "summary.pdf",
+            "storage_backend": "oss_gateway", "etag": "etag-old",
+        }),
+        content_ref="oss://projects/test/workspace/summary.pdf",
+        raw_size=1234, raw_content_hash="old-hash",
+        created_by_user_id=cu.id,
+    )
+    assert saved.content_ref.startswith("oss://")
+
+    updated = await workspace_service.upsert_file(
+        db_session, personal,
+        WorkspaceFileCreate(path=path, content="新的文本内容"),
+        created_by_user_id=cu.id,
+    )
+    assert updated.id == saved.id
+    assert updated.content == "新的文本内容"
+    assert updated.content_ref == path
+    assert updated.size == len("新的文本内容".encode("utf-8"))
+    assert updated.parse_status == "ready"
+    assert "etag" not in updated.metadata_
+    assert "storage_backend" not in updated.metadata_
+    assert "binary" not in updated.metadata_
+
+    version = await db_session.get(WorkspaceFileVersion, updated.current_version_id)
+    assert version is not None
+    assert version.content_ref == path
+    assert version.content == "新的文本内容"

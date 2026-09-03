@@ -9,6 +9,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import OriginalFilePreview, { supportsPagedWorkspacePreview } from '../../components/files/OriginalFilePreview';
+import { terminal } from '../../api/client';
 import type {
   WorkspaceDownloadTicket, WorkspaceFallbackPreview, WorkspaceOriginalPreviewSource,
   WorkspacePdfPreviewInfo, WorkspacePreviewPreferredMode, WorkspacePreviewSession,
@@ -579,13 +580,20 @@ export default function BrowserDrawer({
     }
   };
 
-  // 分享：仅对 HTML 工作空间文件，生成免登录永久公开访问链接并复制到剪贴板
+  // 分享：仅对 HTML 工作空间文件，创建限时（7 天）分享链接并复制到剪贴板。
+  // 旧的 /api/v1/terminal/public/files/{id} 永久链接已下线（后端返回 410）。
   const share = async () => {
     if (!current || current.kind !== 'html' || !current.fileId) return;
-    const url = `${window.location.origin}/api/v1/terminal/public/files/${current.fileId}`;
+    let url: string;
+    try {
+      ({ url } = await terminal.createWsShare(current.fileId));
+    } catch (error) {
+      message.error((error as Error)?.message || '创建分享链接失败');
+      return;
+    }
     try {
       await navigator.clipboard.writeText(url);
-      message.success('分享链接已复制到剪贴板');
+      message.success('7 天有效的限时分享链接已复制到剪贴板');
     } catch {
       // 剪贴板被拒（如非 https）：降级弹窗展示链接供手动复制
       message.info(url, 0);

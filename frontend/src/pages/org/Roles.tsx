@@ -40,14 +40,29 @@ export default function RolesPage() {
       name: string; code: string; description?: string; permission_codes?: string[]; is_active: boolean;
     }) => {
       if (!orgId) throw new Error('请先选择企业');
-      const role = editing
-        ? await roles.update(editing.id, {
-            name: values.name, description: values.description, is_active: values.is_active,
-          })
-        : await roles.create(orgId, {
-            name: values.name, code: values.code, description: values.description, is_active: values.is_active,
-          });
-      await roles.replacePermissions(role.id, values.permission_codes ?? []);
+      // 表单里的 Checkbox.Group 只认识平台通用能力；角色上其它权限码
+      // （如 workspace.department.*:<id>、管理员通配 `*`）不在选项里，antd 会把它们从表单值里丢掉。
+      // 保存时把这些非平台权限码原样合并回去，只用表单值覆盖平台能力这一段。
+      const isPlatformCode = (code: string) => PLATFORM_PERMISSIONS.some(item => item.value === code);
+      const nonPlatformCodes = (editing?.permission_codes ?? []).filter(code => !isPlatformCode(code));
+      const nextPermissionCodes = Array.from(new Set([
+        ...nonPlatformCodes, ...(values.permission_codes ?? []).filter(isPlatformCode),
+      ]));
+      const currentPermissionCodes = editing?.permission_codes ?? [];
+      const permissionsChanged = !editing
+        || nextPermissionCodes.length !== currentPermissionCodes.length
+        || nextPermissionCodes.some(code => !currentPermissionCodes.includes(code));
+      if (editing) {
+        // 先写权限再改名：权限写失败时不会留下"改名成功但权限被清"的半成品。
+        if (permissionsChanged) await roles.replacePermissions(editing.id, nextPermissionCodes);
+        return roles.update(editing.id, {
+          name: values.name, description: values.description, is_active: values.is_active,
+        });
+      }
+      const role = await roles.create(orgId, {
+        name: values.name, code: values.code, description: values.description, is_active: values.is_active,
+      });
+      if (nextPermissionCodes.length) await roles.replacePermissions(role.id, nextPermissionCodes);
       return role;
     },
     onSuccess: () => {

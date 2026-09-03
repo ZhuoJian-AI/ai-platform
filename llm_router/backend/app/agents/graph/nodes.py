@@ -419,8 +419,7 @@ async def _resolve_tool_workspace(
     requested_id = str(params.get(parameter) or default_id).strip()
     if not requested_id:
         return None, user, "no workspace bound to this task"
-    if (state.get("workspace_intent") or {}).get("permission_question"):
-        return None, user, "权限问题只能依据权限摘要回答，不能扫描或读取文件"
+    permission_question = bool((state.get("workspace_intent") or {}).get("permission_question"))
     allowed_key = "write_workspace_ids" if capability in {"create", "update", "delete"} else "read_workspace_ids"
     allowed_ids = set((state.get("workspace_intent") or {}).get(allowed_key) or [])
     if not state.get("workspace_intent") and requested_id == default_id:
@@ -435,6 +434,14 @@ async def _resolve_tool_workspace(
         workspace = None
     if workspace is None:
         return None, user, "工作空间不存在或无权访问"
+    # 权限提问只限制共享空间：用户自己的个人空间不受影响，否则一句「检查是否…」会把
+    # 全部文件工具封死。
+    own_personal = (
+        workspace.scope_type == "user"
+        and str(workspace.scope_id or "") == str(getattr(user, "id", "") or "")
+    )
+    if permission_question and not own_personal:
+        return None, user, "权限问题只能依据权限摘要回答，不能扫描或读取文件"
     principal = await _fresh_user_principal(db, user)
     if principal is not None and not (
         await workspace_permission_service.capabilities(db, workspace, principal)
