@@ -1,5 +1,5 @@
 diff --git a/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js b/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
-index 283ae3e..35e4db1 100644
+index 283ae3e..f28e228 100644
 --- a/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
 +++ b/node_modules/@file-viewer/renderer-spreadsheet/dist/spreadsheet.js
 @@ -472,7 +472,71 @@ const serializeSpreadsheetCopyData = (data) => {
@@ -132,22 +132,37 @@ index 283ae3e..35e4db1 100644
  };
  const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
      var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
-@@ -972,7 +1059,8 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+@@ -970,18 +1057,189 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+         });
+         (_d = table === null || table === void 0 ? void 0 : (_c = table.ctx).emit) === null || _d === void 0 ? void 0 : _d.call(_c, 'draw');
      };
-     const copySpreadsheetSelection = (params) => {
+-    const copySpreadsheetSelection = (params) => {
++    const copySpreadsheetSelection = (params, complete) => {
          const text = serializeSpreadsheetCopyData(params.data);
 -        void writeSpreadsheetClipboard(documentRef, text).then((copied) => {
 +        const html = serializeSpreadsheetCopyHtml(params, virtualState);
 +        void writeSpreadsheetClipboard(documentRef, text, html).then((copied) => {
              if (copied) {
                  markCopiedSelection(params);
-                 return;
-@@ -982,6 +1070,122 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+-                return;
+             }
+-            console.error('Spreadsheet copy failed: clipboard fallback returned false.');
++            else {
++                console.error('Spreadsheet copy failed: clipboard fallback returned false.');
++            }
++            complete === null || complete === void 0 ? void 0 : complete(copied);
+         }).catch((error) => {
++            complete === null || complete === void 0 ? void 0 : complete(false);
              console.error('Spreadsheet copy failed:', error);
          });
      };
-+    const copySpreadsheetSelectionFromToolbar = () => {
++    const copySpreadsheetSelectionFromToolbar = (event) => {
++        var _a, _b;
++        const complete = typeof ((_a = event === null || event === void 0 ? void 0 : event.detail) === null || _a === void 0 ? void 0 : _a.complete) === 'function'
++            ? (_b = event.detail) === null || _b === void 0 ? void 0 : _b.complete
++            : undefined;
 +        if (!table) {
++            complete === null || complete === void 0 ? void 0 : complete(false);
 +            return;
 +        }
 +        let selected = table.ctx.getSelectedData();
@@ -155,6 +170,7 @@ index 283ae3e..35e4db1 100644
 +            const focusCell = table.ctx.focusCell;
 +            const hoverCell = table.ctx.hoverCell || focusCell;
 +            if (!focusCell || !hoverCell) {
++                complete === null || complete === void 0 ? void 0 : complete(false);
 +                return;
 +            }
 +            table.ctx.selector.xArr = [
@@ -173,7 +189,7 @@ index 283ae3e..35e4db1 100644
 +            xArr: selected.xArr,
 +            yArr: selected.yArr,
 +            focusCell: table.ctx.focusCell,
-+        });
++        }, complete);
 +    };
 +    tableHost.addEventListener('zhuojian:copy-spreadsheet-selection', copySpreadsheetSelectionFromToolbar);
 +    const keepSpreadsheetMousedownInsideShadowRoot = (event) => {
@@ -184,6 +200,7 @@ index 283ae3e..35e4db1 100644
 +    let toolbarSelectionCurrent;
 +    let toolbarSelectionDragging = false;
 +    let toolbarSelectionStage;
++    let toolbarSelectionPointerId;
 +    const getToolbarSelectionCell = (event) => {
 +        if (!table) {
 +            return undefined;
@@ -210,6 +227,9 @@ index 283ae3e..35e4db1 100644
 +            Math.min(toolbarSelectionAnchor.rowIndex, toolbarSelectionCurrent.rowIndex),
 +            Math.max(toolbarSelectionAnchor.rowIndex, toolbarSelectionCurrent.rowIndex),
 +        ];
++        if (toolbarSelectionStage) {
++            toolbarSelectionStage.dataset.zhuojianSpreadsheetSelection = `${table.ctx.selector.xArr[0]}:${table.ctx.selector.yArr[0]}:${table.ctx.selector.xArr[1]}:${table.ctx.selector.yArr[1]}`;
++        }
 +        table.ctx.emit('draw');
 +    };
 +    const handleToolbarSelectionStart = (event) => {
@@ -223,10 +243,22 @@ index 283ae3e..35e4db1 100644
 +        toolbarSelectionAnchor = cell;
 +        toolbarSelectionCurrent = cell;
 +        toolbarSelectionDragging = true;
++        if (event.pointerId !== undefined && toolbarSelectionStage) {
++            toolbarSelectionPointerId = event.pointerId;
++            try {
++                toolbarSelectionStage.setPointerCapture(event.pointerId);
++            }
++            catch {
++                // Pointer capture can be unavailable for synthetic events.
++            }
++        }
 +        syncToolbarSelection();
 +    };
 +    const handleToolbarSelectionMove = (event) => {
 +        if (!toolbarSelectionDragging) {
++            return;
++        }
++        if (toolbarSelectionPointerId !== undefined && event.pointerId !== toolbarSelectionPointerId) {
 +            return;
 +        }
 +        const cell = getToolbarSelectionCell(event);
@@ -237,7 +269,7 @@ index 283ae3e..35e4db1 100644
 +        syncToolbarSelection();
 +    };
 +    const handleToolbarSelectionEnd = (event) => {
-+        if (!toolbarSelectionDragging || event.button !== 0) {
++        if (!toolbarSelectionDragging || (event.type !== 'pointercancel' && event.type !== 'lostpointercapture' && event.button !== 0)) {
 +            return;
 +        }
 +        const cell = getToolbarSelectionCell(event);
@@ -246,9 +278,28 @@ index 283ae3e..35e4db1 100644
 +            syncToolbarSelection();
 +        }
 +        toolbarSelectionDragging = false;
++        if (toolbarSelectionStage && toolbarSelectionPointerId !== undefined) {
++            try {
++                if (toolbarSelectionStage.hasPointerCapture(toolbarSelectionPointerId)) {
++                    toolbarSelectionStage.releasePointerCapture(toolbarSelectionPointerId);
++                }
++            }
++            catch {
++                // The pointer may already have been released by the browser.
++            }
++        }
++        toolbarSelectionPointerId = undefined;
 +    };
 +    const bindToolbarSelectionStage = (stageElement) => {
 +        toolbarSelectionStage = stageElement;
++        if (documentRef.defaultView && documentRef.defaultView.PointerEvent) {
++            stageElement.addEventListener('pointerdown', handleToolbarSelectionStart);
++            stageElement.addEventListener('pointermove', handleToolbarSelectionMove);
++            stageElement.addEventListener('pointerup', handleToolbarSelectionEnd);
++            stageElement.addEventListener('pointercancel', handleToolbarSelectionEnd);
++            stageElement.addEventListener('lostpointercapture', handleToolbarSelectionEnd);
++            return;
++        }
 +        stageElement.addEventListener('mousedown', handleToolbarSelectionStart);
 +        stageElement.addEventListener('mousemove', handleToolbarSelectionMove);
 +        stageElement.addEventListener('mouseup', handleToolbarSelectionEnd);
@@ -257,15 +308,25 @@ index 283ae3e..35e4db1 100644
 +        if (!toolbarSelectionStage) {
 +            return;
 +        }
-+        toolbarSelectionStage.removeEventListener('mousedown', handleToolbarSelectionStart);
-+        toolbarSelectionStage.removeEventListener('mousemove', handleToolbarSelectionMove);
-+        toolbarSelectionStage.removeEventListener('mouseup', handleToolbarSelectionEnd);
++        if (documentRef.defaultView && documentRef.defaultView.PointerEvent) {
++            toolbarSelectionStage.removeEventListener('pointerdown', handleToolbarSelectionStart);
++            toolbarSelectionStage.removeEventListener('pointermove', handleToolbarSelectionMove);
++            toolbarSelectionStage.removeEventListener('pointerup', handleToolbarSelectionEnd);
++            toolbarSelectionStage.removeEventListener('pointercancel', handleToolbarSelectionEnd);
++            toolbarSelectionStage.removeEventListener('lostpointercapture', handleToolbarSelectionEnd);
++        }
++        else {
++            toolbarSelectionStage.removeEventListener('mousedown', handleToolbarSelectionStart);
++            toolbarSelectionStage.removeEventListener('mousemove', handleToolbarSelectionMove);
++            toolbarSelectionStage.removeEventListener('mouseup', handleToolbarSelectionEnd);
++        }
++        delete toolbarSelectionStage.dataset.zhuojianSpreadsheetSelection;
 +        toolbarSelectionStage = undefined;
 +    };
      const buildTableView = () => ({
          config: createTableConfig({
              hostHeight: getHostHeight(),
-@@ -1051,6 +1255,16 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+@@ -1051,6 +1309,16 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
                  zoomScale: zoom,
              }),
          });
@@ -282,7 +343,7 @@ index 283ae3e..35e4db1 100644
          table.on('onScrollX', scheduleViewportLoad);
          table.on('onScrollY', scheduleViewportLoad);
          table.on('resize', scheduleViewportLoad);
-@@ -1624,6 +1838,9 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
+@@ -1624,6 +1892,9 @@ const renderFileViewerSpreadsheet = async (buffer, target, type, context) => {
              clearScheduledLayoutRefresh();
              resizeObserver === null || resizeObserver === void 0 ? void 0 : resizeObserver.disconnect();
              resizeObserver = null;
