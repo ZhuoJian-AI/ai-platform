@@ -13,6 +13,7 @@ const WEB_OFFICE_SDK_URL = 'https://g.alicdn.com/IMM/office-js/1.1.19/aliyun-web
 const WEB_OFFICE_REFRESH_MS = 25 * 60 * 1000;
 const WEB_OFFICE_SLOW_MS = 15_000;
 const WEB_OFFICE_FALLBACK_MS = 30_000;
+const WORD_CACHE_PREFERENCE_BYTES = 256 * 1024;
 
 interface AliyunOfficeInstance {
   setToken: (value: { token: string; timeout: number }) => void;
@@ -109,7 +110,9 @@ export default function WorkspacePreviewSessionView({
   const startFallbackRef = useRef(startFallback);
   const getFallbackRef = useRef(getFallback);
   const openIdRef = useRef(clientOpenId(previewKey));
-  const isPresentation = ['ppt', 'pptx', 'pptm', 'pps', 'ppsx', 'ppsm', 'pot', 'potx', 'potm', 'odp'].includes(extensionOf(filename));
+  const extension = extensionOf(filename);
+  const isPresentation = ['ppt', 'pptx', 'pptm', 'pps', 'ppsx', 'ppsm', 'pot', 'potx', 'potm', 'odp'].includes(extension);
+  const isModernWord = ['docx', 'docm', 'dotx', 'dotm'].includes(extension);
   loadSessionRef.current = loadSession;
   startFallbackRef.current = startFallback;
   getFallbackRef.current = getFallback;
@@ -132,10 +135,29 @@ export default function WorkspacePreviewSessionView({
       `${previewKey}:${openIdRef.current}:${selectedMode}`,
       () => loadSessionRef.current(openIdRef.current, selectedMode),
     ))
-      .then(setSession)
+      .then(async (value) => {
+        // Complex Word documents can take much longer to paginate in the
+        // browser even when the package itself is small.  Reuse a durable,
+        // versioned PDF when one already exists; tiny Word files still open
+        // locally without this extra lookup or any IMM call.
+        if (
+          preferredMode === 'default'
+          && isModernWord
+          && value.mode === 'browser_office'
+          && value.size >= WORD_CACHE_PREFERENCE_BYTES
+        ) {
+          const cachedFallback = await getFallbackRef.current().catch(() => null);
+          if (cachedFallback?.status === 'ready') {
+            setFallback(cachedFallback);
+            setSession({ ...value, mode: 'fallback', reason: '已加载版本化版式缓存' });
+            return;
+          }
+        }
+        setSession(value);
+      })
       .catch((reason) => setError((reason as Error)?.message || '预览会话创建失败'))
       .finally(() => setLoading(false));
-  }, [isPresentation, previewKey]);
+  }, [isModernWord, isPresentation, previewKey]);
 
   useEffect(() => open(), [filename, open]);
 
