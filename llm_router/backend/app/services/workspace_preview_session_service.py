@@ -67,7 +67,11 @@ async def create_preview_session(
             "reason": "历史文件尚未迁移到对象存储，仅支持下载",
         }
 
-    if suffix == ".pdf" and size <= settings.workspace_pdf_direct_preview_max_bytes:
+    # PDFs already support byte-range loading in PDF.js. Sending larger PDFs
+    # through WebOffice adds a paid session and an extra readiness handshake,
+    # while the browser can render the first page directly from OSS instead.
+    # Keep WebOffice for actual Office formats only.
+    if suffix == ".pdf":
         source = await _browser_source(file, filename=filename)
         return {**base, **source, "mode": "pdfjs" if source["mode"] != "blob" else "blob"}
 
@@ -77,25 +81,9 @@ async def create_preview_session(
                 token = await storage_gateway_service.generate_weboffice_token(
                     str(file.content_ref), filename=filename, user_id=weboffice_user_id,
                 )
-                # Keep a signed PDF source in the same response so the browser
-                # can downgrade immediately after a 15-second WebOffice stall.
-                pdf_source = (
-                    await _browser_source(file, filename=filename)
-                    if suffix == ".pdf" else {}
-                )
-                return {**base, **pdf_source, "mode": "weboffice", **token}
+                return {**base, "mode": "weboffice", **token}
             except storage_gateway_service.StorageGatewayError:
-                if suffix == ".pdf":
-                    source = await _browser_source(file, filename=filename)
-                    return {
-                        **base,
-                        **source,
-                        "mode": "pdfjs",
-                        "reason": "WebOffice 暂不可用，已切换 PDF 预览",
-                    }
-        if suffix == ".pdf":
-            source = await _browser_source(file, filename=filename)
-            return {**base, **source, "mode": "pdfjs"}
+                pass
         await enqueue_fallback(db, file)
         return {**base, "mode": "fallback", "reason": "正在生成备用预览"}
 

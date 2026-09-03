@@ -719,6 +719,7 @@ export default function BrowserDrawer({
             <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
               {binaryView === 'original' && (
                 <OriginalFilePreview
+                  key={current.fileId}
                   blob={originalPreviewBlob}
                   sourceUrl={originalPreviewUrl}
                   sourceHeaders={originalPreviewHeaders}

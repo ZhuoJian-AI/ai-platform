@@ -958,6 +958,7 @@ function FileViewer({ file, onDownload, onReparse, reparsing }: {
         <div style={{ flex: 1, minHeight: 0 }}>
           {view === 'original' && (
             <OriginalFilePreview
+              key={file.id}
               blob={null}
               filename={workspaceDisplayName(file)}
               onDownload={onDownload}

@@ -73,39 +73,45 @@ export default function WorkspacePreviewSessionView({
   const [fallback, setFallback] = useState<WorkspaceFallbackPreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const loadSessionRef = useRef(loadSession);
+  const startFallbackRef = useRef(startFallback);
+  const getFallbackRef = useRef(getFallback);
+  loadSessionRef.current = loadSession;
+  startFallbackRef.current = startFallback;
+  getFallbackRef.current = getFallback;
 
   const open = useCallback(() => {
     setLoading(true);
     setError(null);
     setFallback(null);
-    loadSession()
+    loadSessionRef.current()
       .then(setSession)
       .catch((reason) => setError((reason as Error)?.message || '预览会话创建失败'))
       .finally(() => setLoading(false));
-  }, [loadSession]);
+  }, []);
 
-  useEffect(() => open(), [open]);
+  useEffect(() => open(), [filename, open]);
 
   const beginFallback = useCallback(async () => {
     setError(null);
     try {
-      const value = await startFallback();
+      const value = await startFallbackRef.current();
       setFallback(value);
       setSession((current) => current ? { ...current, mode: 'fallback', reason: '正在生成备用预览' } : current);
     } catch (reason) {
       setError((reason as Error)?.message || '备用预览启动失败');
     }
-  }, [startFallback]);
+  }, []);
 
   useEffect(() => {
     if (session?.mode !== 'fallback') return;
     if (!fallback) void beginFallback();
     if (fallback?.status === 'ready' || fallback?.status === 'failed') return;
     const timer = window.setInterval(() => {
-      getFallback().then(setFallback).catch(() => undefined);
+      getFallbackRef.current().then(setFallback).catch(() => undefined);
     }, 2_000);
     return () => window.clearInterval(timer);
-  }, [beginFallback, fallback, getFallback, session?.mode]);
+  }, [beginFallback, fallback, session?.mode]);
 
   if (loading) return <State label="正在建立安全预览会话…" />;
   if (error) return <Failure message={error} onRetry={open} onDownload={onDownload} />;
@@ -177,15 +183,19 @@ function WebOfficeFrame({ session, refreshSession, onUnavailable, onDownload }: 
   const mountRef = useRef<HTMLDivElement | null>(null);
   const tokenRef = useRef(session);
   const unavailableRef = useRef(onUnavailable);
+  const refreshSessionRef = useRef(refreshSession);
   const readableRef = useRef(false);
   const [readable, setReadable] = useState(false);
   tokenRef.current = session;
   unavailableRef.current = onUnavailable;
+  refreshSessionRef.current = refreshSession;
 
   useEffect(() => {
     let disposed = false;
     let unavailableTriggered = false;
     let instance: AliyunOfficeInstance | undefined;
+    readableRef.current = false;
+    setReadable(false);
     const failOnce = () => {
       if (disposed || unavailableTriggered) return;
       unavailableTriggered = true;
@@ -218,7 +228,7 @@ function WebOfficeFrame({ session, refreshSession, onUnavailable, onDownload }: 
               reject(new Error('WebOffice 刷新凭证缺失'));
               return;
             }
-            refreshSession(current.access_token, current.refresh_token, current.refresh_context)
+            refreshSessionRef.current(current.access_token, current.refresh_token, current.refresh_context)
               .then((next) => {
                 tokenRef.current = { ...current, ...next };
                 resolve({ token: next.access_token || '', timeout: WEB_OFFICE_REFRESH_MS });
@@ -260,7 +270,7 @@ function WebOfficeFrame({ session, refreshSession, onUnavailable, onDownload }: 
       instance?.destroy?.();
       if (mountRef.current) mountRef.current.replaceChildren();
     };
-  }, [refreshSession, session.access_token, session.weboffice_url]);
+  }, [session.access_token, session.weboffice_url]);
 
   return (
     <div style={{ width: '100%', height: '100%', minHeight: 0, position: 'relative', background: '#f5f6f8' }}>

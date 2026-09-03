@@ -47,10 +47,12 @@ async def test_small_pdf_uses_signed_pdfjs_range_source(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_large_pdf_keeps_immediate_pdfjs_fallback_with_weboffice(monkeypatch):
+async def test_large_pdf_uses_signed_pdfjs_range_source_without_weboffice(monkeypatch):
     monkeypatch.setattr(settings, "workspace_weboffice_enabled", True)
+    token_calls: list[str] = []
 
     async def token(*_args, **_kwargs):
+        token_calls.append("called")
         return {"weboffice_url": "https://office.example/view", "access_token": "access", "refresh_token": "refresh"}
 
     async def signed(*_args, **_kwargs):
@@ -62,8 +64,9 @@ async def test_large_pdf_keeps_immediate_pdfjs_fallback_with_weboffice(monkeypat
         object(), _file("large.pdf", 80 * 1024 * 1024), weboffice_user_id="user123",
     )
 
-    assert result["mode"] == "weboffice"
+    assert result["mode"] == "pdfjs"
     assert result["url"] == "https://oss.example/large.pdf"
+    assert token_calls == []
 
 
 @pytest.mark.asyncio
