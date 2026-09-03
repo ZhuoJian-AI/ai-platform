@@ -2375,7 +2375,7 @@ export interface TerminalTaskMessage {
   created_at: string;
   updated_at: string;
   execution_verification: {
-    status: 'verified' | 'partial' | 'failed' | 'legacy_unverified';
+    status: 'verified' | 'recovered' | 'partial' | 'failed' | 'legacy_unverified';
     tool_calls: number;
     succeeded: number;
     failed: number;

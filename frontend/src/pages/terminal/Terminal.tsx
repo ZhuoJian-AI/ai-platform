@@ -2960,8 +2960,13 @@ function verificationFromBlocks(blocks?: Block[]): ExecutionVerification | null 
   if (!calls.length) return null;
   const succeeded = calls.filter((call) => call.result?.ok !== false).length;
   const failed = calls.length - succeeded;
+  let lastFailedIndex = -1;
+  calls.forEach((call, index) => { if (call.result?.ok === false) lastFailedIndex = index; });
+  const recovered = failed > 0
+    && extractArtifacts(blocks).length > 0
+    && calls.slice(lastFailedIndex + 1).some((call) => call.result?.ok !== false);
   return {
-    status: failed === 0 ? 'verified' : succeeded ? 'partial' : 'failed',
+    status: failed === 0 ? 'verified' : recovered ? 'recovered' : succeeded ? 'partial' : 'failed',
     tool_calls: calls.length,
     succeeded,
     failed,
@@ -2973,6 +2978,7 @@ function ExecutionStatus({ verification, streaming }: { verification: ExecutionV
   if (!verification) return null;
   const display = {
     verified: { color: '#16a34a', label: '已验证执行', icon: <CheckCircleOutlined /> },
+    recovered: { color: '#16a34a', label: '已完成（有重试）', icon: <CheckCircleOutlined /> },
     partial: { color: '#d97706', label: '部分完成', icon: <CheckCircleOutlined /> },
     failed: { color: '#dc2626', label: '执行失败', icon: <CloseOutlined /> },
     legacy_unverified: { color: '#d97706', label: '历史结果未验证', icon: <CloseOutlined /> },
@@ -3189,8 +3195,16 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
 function extractArtifacts(blocks?: Block[]): ArtifactOutput[] {
   if (!blocks) return [];
   const ordered: ArtifactOutput[] = [];
+  const deletedPaths = new Set<string>();
   for (const block of blocks) {
     if (block.kind !== 'tool_call' || block.running || block.result?.ok === false) continue;
+    if (block.name === 'workspace_delete_file') {
+      try {
+        const args = JSON.parse(block.arguments || '{}') as { path?: unknown };
+        if (typeof args.path === 'string' && args.path) deletedPaths.add(args.path);
+      } catch { /* invalid tool arguments are already visible in the trace */ }
+      continue;
+    }
     if (!FILE_WRITE_TOOLS.has(block.name)) continue;
     const rawOutputs = artifactRecords(block.result?.content || '');
     for (const raw of rawOutputs) {
@@ -3232,7 +3246,7 @@ function extractArtifacts(blocks?: Block[]): ArtifactOutput[] {
     seen.add(key);
     deduped.unshift(artifact);
   }
-  return deduped;
+  return deduped.filter((artifact) => !artifact.path || !deletedPaths.has(artifact.path));
 }
 
 /** DSH、旧 Runtime 与平台工具的结果包装层略有不同。这里仅在文件写工具内
@@ -3466,9 +3480,17 @@ const FILE_WRITE_TOOLS = new Set([
 function extractFileChanges(blocks?: Block[]): { path: string; generated: boolean }[] {
   if (!blocks) return [];
   const ordered: { path: string; generated: boolean }[] = [];
+  const deletedPaths = new Set<string>();
   for (const b of blocks) {
     if (b.kind !== 'tool_call') continue;
     if (b.running || b.result?.ok === false) continue;
+    if (b.name === 'workspace_delete_file') {
+      try {
+        const args = JSON.parse(b.arguments || '{}') as { path?: unknown };
+        if (typeof args.path === 'string' && args.path) deletedPaths.add(args.path);
+      } catch { /* invalid tool arguments are already visible in the trace */ }
+      continue;
+    }
     if (!FILE_WRITE_TOOLS.has(b.name)) continue;
     try {
       const result = JSON.parse(b.result?.content || '{}') as { outputs?: { path?: string }[] };
@@ -3493,7 +3515,7 @@ function extractFileChanges(blocks?: Block[]): { path: string; generated: boolea
     seen.add(ordered[i].path);
     dedup.unshift(ordered[i]);
   }
-  return dedup;
+  return dedup.filter((file) => !deletedPaths.has(file.path));
 }
 
 function ChangesBox({ files, onLink }: { files: { path: string; generated: boolean }[]; onLink: (href: string) => void }) {

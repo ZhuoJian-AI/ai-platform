@@ -10,6 +10,8 @@ import json
 import os
 import time
 import zipfile
+from datetime import date, datetime, time as datetime_time
+from decimal import Decimal
 from pathlib import Path
 
 import app as runner
@@ -578,6 +580,41 @@ async def test_builtin_spreadsheet_inspects_original_input():
     assert result["outputs"] == []
     assert result["summary"]["sheets"][0]["name"] == "明细"
     assert result["summary"]["sheets"][0]["rows"][1] == ["张三", 88]
+
+
+def test_builtin_spreadsheet_values_are_json_safe():
+    assert builtin._value(datetime(2026, 9, 1, 9, 6, 7)) == "2026-09-01T09:06:07"
+    assert builtin._value(date(2026, 9, 1)) == "2026-09-01"
+    assert builtin._value(datetime_time(9, 6, 7)) == "09:06:07"
+    assert builtin._value(Decimal("13142.7400")) == "13142.7400"
+
+
+@pytest.mark.asyncio
+async def test_builtin_spreadsheet_inspects_datetime_cells():
+    from openpyxl import Workbook
+
+    stream = io.BytesIO()
+    book = Workbook()
+    book.active.append(["交易时间", "金额"])
+    book.active.append([datetime(2026, 9, 1, 9, 6, 7), 13142.74])
+    book.save(stream)
+
+    result = await runner.execute_builtin_tool(
+        runner.BuiltinExecuteRequest(
+            tool_kind="spreadsheet",
+            action="inspect",
+            inputs=[runner.InputFile(
+                file_id="file-with-date",
+                name="日期明细.xlsx",
+                content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+            )],
+            execution_id="builtin-inspect-date",
+        ),
+        runner.RUNNER_TOKEN,
+    )
+
+    assert result["status"] == "success"
+    assert result["summary"]["sheets"][0]["rows"][1] == ["2026-09-01T09:06:07", 13142.74]
 
 
 @pytest.mark.asyncio

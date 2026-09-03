@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 from uuid import UUID
@@ -32,6 +33,37 @@ class ToolBridgeRequest(BaseModel):
     run_token: str
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+_IDENTICAL_TOOL_FAILURE_LIMIT = 2
+
+
+def _tool_call_fingerprint(name: str, arguments: dict[str, Any]) -> str:
+    normalized = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(f"{name}\0{normalized}".encode()).hexdigest()
+
+
+def _identical_failure_blocked(state: dict[str, Any], name: str, arguments: dict[str, Any]) -> bool:
+    fingerprint = _tool_call_fingerprint(name, arguments)
+    return (
+        state.get("_dsh_last_failed_tool_fingerprint") == fingerprint
+        and int(state.get("_dsh_consecutive_tool_failures") or 0) >= _IDENTICAL_TOOL_FAILURE_LIMIT
+    )
+
+
+def _record_tool_outcome(
+    state: dict[str, Any], name: str, arguments: dict[str, Any], *, ok: bool,
+) -> None:
+    if ok:
+        state.pop("_dsh_last_failed_tool_fingerprint", None)
+        state.pop("_dsh_consecutive_tool_failures", None)
+        return
+    fingerprint = _tool_call_fingerprint(name, arguments)
+    previous = int(state.get("_dsh_consecutive_tool_failures") or 0)
+    state["_dsh_consecutive_tool_failures"] = (
+        previous + 1 if state.get("_dsh_last_failed_tool_fingerprint") == fingerprint else 1
+    )
+    state["_dsh_last_failed_tool_fingerprint"] = fingerprint
 
 
 def _require_service(authorization: str | None) -> None:
@@ -245,7 +277,15 @@ async def execute_tool(
     context = run_registry.get(body.run_token)
     if context is None:
         raise HTTPException(status_code=401, detail="expired run token")
+    if _identical_failure_blocked(context.state, body.name, body.arguments):
+        preview = json.dumps({
+            "status": "error",
+            "error": "相同工具和参数已连续失败两次，请改用其他验证方式或如实说明失败。",
+            "retryable": False,
+        }, ensure_ascii=False)
+        return {"ok": False, "content": preview, "value": {"content": preview, "ok": False}}
     call = {"id": f"dsh-{body.name}", "name": body.name, "arguments": body.arguments}
     with bind_runtime(context.deps):
         _message, preview, ok = await _execute_tool_call(context.state, call, context.tool_registry)
+    _record_tool_outcome(context.state, body.name, body.arguments, ok=ok)
     return {"ok": ok, "content": preview, "value": {"content": preview, "ok": ok}}

@@ -2481,12 +2481,13 @@ async def save_memory(state: AgentState) -> dict:
             task_title=task.title if task is not None else None,
             executed_skills=executed_skills,
         )
+        active_artifacts: list[dict[str, Any]] = []
         for artifact in artifacts:
             try:
                 workspace_file = await db.get(WorkspaceFile, UUID(str(artifact.get("file_id"))))
             except (TypeError, ValueError):
                 workspace_file = None
-            if workspace_file is None:
+            if workspace_file is None or workspace_file.deleted_at is not None:
                 continue
             presentation = presentation_dict(
                 workspace_file.path,
@@ -2508,6 +2509,8 @@ async def save_memory(state: AgentState) -> dict:
                     "skill_version": presentation["skill_version"],
                 },
             })
+            active_artifacts.append(artifact)
+        artifacts = active_artifacts
         db.add(TaskMessage(task_id=UUID(task_id), role="assistant",
                            content=state.get("assistant_final", ""),
                            metadata_={

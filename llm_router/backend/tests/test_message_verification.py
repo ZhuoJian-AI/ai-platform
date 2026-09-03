@@ -10,6 +10,12 @@ from app.services.message_verification import classify_execution_verification
 from app.services.task_service import make_task_title
 
 
+@pytest.fixture(autouse=True)
+def db_engine():
+    """These tests are pure and do not require the PostgreSQL fixture."""
+    yield
+
+
 @pytest.mark.parametrize(
     ("traces", "expected"),
     [
@@ -22,6 +28,39 @@ def test_execution_verification_uses_real_tool_traces(traces, expected):
     result = classify_execution_verification("完成", {"traces": traces})
     assert result is not None
     assert result["status"] == expected
+
+
+def test_execution_verification_marks_a_delivered_fallback_as_recovered():
+    result = classify_execution_verification(
+        "处理完成",
+        {
+            "traces": [
+                {"name": "spreadsheet_tool", "ok": False},
+                {"name": "spreadsheet_tool", "ok": True},
+                {"name": "workspace_read_file", "ok": True},
+            ],
+            "artifacts": [{"file_id": "01234567-89ab-4cde-8fab-0123456789ab"}],
+        },
+    )
+
+    assert result is not None
+    assert result == {"status": "recovered", "tool_calls": 3, "succeeded": 2, "failed": 1}
+
+
+def test_execution_verification_keeps_a_terminal_failure_partial():
+    result = classify_execution_verification(
+        "仅完成了一部分",
+        {
+            "traces": [
+                {"name": "run_skill_script", "ok": True},
+                {"name": "spreadsheet_tool", "ok": False},
+            ],
+            "artifacts": [{"file_id": "01234567-89ab-4cde-8fab-0123456789ab"}],
+        },
+    )
+
+    assert result is not None
+    assert result["status"] == "partial"
 
 
 def test_execution_verification_distinguishes_plain_and_legacy_claims():

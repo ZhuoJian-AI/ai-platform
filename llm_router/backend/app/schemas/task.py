@@ -130,7 +130,7 @@ class TaskRunRequest(BaseModel):
 
 
 class ExecutionVerification(BaseModel):
-    status: Literal["verified", "partial", "failed", "legacy_unverified"]
+    status: Literal["verified", "recovered", "partial", "failed", "legacy_unverified"]
     tool_calls: int
     succeeded: int
     failed: int

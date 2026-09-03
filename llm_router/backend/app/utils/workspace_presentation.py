@@ -171,4 +171,18 @@ def artifacts_from_traces(
         if not isinstance(trace, dict) or trace.get("ok") is False:
             continue
         visit(trace.get("result"), trace)
-    return records
+
+    deleted_paths: set[str] = set()
+    for trace in traces or []:
+        if (
+            not isinstance(trace, dict)
+            or trace.get("ok") is not True
+            or trace.get("name") != "workspace_delete_file"
+        ):
+            continue
+        arguments = _decode_json(trace.get("arguments"))
+        if isinstance(arguments, dict):
+            deleted_path = str(arguments.get("path") or "").strip()
+            if deleted_path:
+                deleted_paths.add(deleted_path)
+    return [record for record in records if record.get("workspace_path") not in deleted_paths]

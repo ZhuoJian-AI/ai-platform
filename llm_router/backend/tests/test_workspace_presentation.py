@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
@@ -114,6 +115,34 @@ def test_structured_artifacts_hide_internal_path_from_display_name() -> None:
         },
         "workspace_path": None,
     }]
+
+
+def test_structured_artifacts_exclude_files_deleted_during_the_same_run() -> None:
+    output_id = "01234567-89ab-4cde-8fab-0123456789ab"
+    csv_id = "11111111-1111-4111-8111-111111111111"
+    csv_path = "平台工具输出/task/复核.csv"
+    traces = [
+        {
+            "name": "run_skill_script",
+            "ok": True,
+            "result": {"outputs": [{"file_id": output_id, "path": "技能输出/task/结果.xlsx"}]},
+        },
+        {
+            "name": "spreadsheet_tool",
+            "ok": True,
+            "result": {"outputs": [{"file_id": csv_id, "path": csv_path}]},
+        },
+        {
+            "name": "workspace_delete_file",
+            "ok": True,
+            "arguments": json.dumps({"path": csv_path}, ensure_ascii=False),
+            "result": f"deleted {csv_path}",
+        },
+    ]
+
+    artifacts = artifacts_from_traces(traces, task_id="task")
+
+    assert [artifact["file_id"] for artifact in artifacts] == [output_id]
 
 
 def test_task_title_and_search_excerpt_are_user_facing() -> None:

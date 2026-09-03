@@ -22,6 +22,8 @@ import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
+from datetime import date, datetime, time
+from decimal import Decimal
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
@@ -51,7 +53,13 @@ Image.MAX_IMAGE_PIXELS = 40_000_000
 def _value(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
-    return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    # Excel may contain library-specific scalar values. Inspection must never
+    # turn an otherwise readable workbook into a Runner 500 response.
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 def _safe_output_name(value: str | None, default: str, suffix: str) -> str:

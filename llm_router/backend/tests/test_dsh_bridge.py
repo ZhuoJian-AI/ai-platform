@@ -5,7 +5,18 @@ import pytest
 from app.agents.dsh import client as dsh_client
 from app.agents.dsh import runner
 from app.agents.graph.nodes import _skill_catalog_prompt
-from app.api.dsh_internal import _to_platform_messages, _to_platform_tools
+from app.api.dsh_internal import (
+    _identical_failure_blocked,
+    _record_tool_outcome,
+    _to_platform_messages,
+    _to_platform_tools,
+)
+
+
+@pytest.fixture(autouse=True)
+def db_engine():
+    """These bridge tests are pure and do not require the PostgreSQL fixture."""
+    yield
 
 
 def test_dsh_messages_preserve_tool_protocol_and_current_images():
@@ -54,6 +65,25 @@ def test_dsh_tools_convert_to_existing_gateway_schema():
             "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
         },
     }]
+
+
+def test_dsh_identical_tool_failure_guard_allows_one_retry_then_blocks():
+    state: dict = {}
+    arguments = {"input_file_ids": ["file-1"], "action": "inspect"}
+
+    assert _identical_failure_blocked(state, "spreadsheet_tool", arguments) is False
+    _record_tool_outcome(state, "spreadsheet_tool", arguments, ok=False)
+    assert _identical_failure_blocked(state, "spreadsheet_tool", arguments) is False
+    _record_tool_outcome(
+        state,
+        "spreadsheet_tool",
+        {"action": "inspect", "input_file_ids": ["file-1"]},
+        ok=False,
+    )
+    assert _identical_failure_blocked(state, "spreadsheet_tool", arguments) is True
+
+    _record_tool_outcome(state, "spreadsheet_tool", arguments, ok=True)
+    assert _identical_failure_blocked(state, "spreadsheet_tool", arguments) is False
 
 
 def test_skill_catalog_never_advertises_an_unavailable_load_tool():
