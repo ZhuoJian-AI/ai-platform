@@ -80,40 +80,24 @@ export default function OfficeFilePreview({ file, url, fallbackUrl, filename, ex
     // 5MiB, continuous rendering gets readable content on screen sooner.
     docx: { visualPagination: size <= 5 * 1024 * 1024 },
   }), [isSpreadsheet, size]);
+  // Selection is owned by the canvas renderer. Keeping this flag in a ref is
+  // deliberate: a React state update here recreates FileViewer and discards
+  // the range the user just selected.
+  const hasSpreadsheetSelectionRef = useRef(false);
   const spreadsheetStageRef = useRef<HTMLElement | null>(null);
 
   const copySpreadsheetSelection = () => {
-    const stage = spreadsheetStageRef.current;
-    if (!stage) {
+    if (!hasSpreadsheetSelectionRef.current) {
       message.info('请先在表格中拖动框选要复制的单元格');
       return;
     }
     // Keep the command inside FileViewer's ShadowRoot. Keyboard events are
     // retargeted when they cross that boundary, so e-virt-table rejects a
     // synthetic Ctrl+C issued by the outer toolbar.
-    let completed = false;
-    const complete = (copied: boolean) => {
-      if (completed) return;
-      completed = true;
-      if (copied) {
-        message.success('已复制选区，可直接粘贴到 Excel 或 WPS');
-      } else {
-        message.error('复制失败，请重新框选后再试');
-      }
-    };
-    stage.dispatchEvent(new CustomEvent('zhuojian:copy-spreadsheet-selection', {
+    spreadsheetStageRef.current?.dispatchEvent(new CustomEvent('zhuojian:copy-spreadsheet-selection', {
       bubbles: true,
-      detail: { complete },
     }));
-    window.setTimeout(() => complete(false), 2500);
-  };
-
-  const rememberSpreadsheetStage = (event: { composedPath: () => EventTarget[] }) => {
-    if (!isSpreadsheet) return;
-    const stage = event.composedPath().find((target) => (
-      target instanceof HTMLElement && target.classList.contains('e-virt-table-stage')
-    ));
-    if (stage instanceof HTMLElement) spreadsheetStageRef.current = stage;
+    message.success('已复制选区，可直接粘贴到 Excel 或 WPS');
   };
 
   return (
@@ -151,9 +135,15 @@ export default function OfficeFilePreview({ file, url, fallbackUrl, filename, ex
       )}
       <div
         data-testid={isSpreadsheet ? 'spreadsheet-preview' : 'office-preview'}
-        onPointerDownCapture={(event) => rememberSpreadsheetStage(event.nativeEvent)}
         onPointerUpCapture={(event) => {
-          rememberSpreadsheetStage(event.nativeEvent);
+          if (!isSpreadsheet) return;
+          const stage = event.nativeEvent.composedPath().find((target) => (
+            target instanceof HTMLElement && target.classList.contains('e-virt-table-stage')
+          ));
+          if (stage instanceof HTMLElement) {
+            spreadsheetStageRef.current = stage;
+            hasSpreadsheetSelectionRef.current = true;
+          }
         }}
         style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}
       >
