@@ -10,6 +10,14 @@ import BrandLogoSlot, { BRAND_LOGO_SLOTS, type BrandLogoSlotId } from '../brandi
 import { BRAND_TITLES } from '../branding/brand';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+const RETURN_TO_KEY = 'zhuojian_return_to';
+
+function postLoginPath(fallback: string): string {
+  const pending = sessionStorage.getItem(RETURN_TO_KEY) || '';
+  if (!/^\/f\/[0-9a-f-]{36}(?:\?version=[^#\s]+)?$/i.test(pending)) return fallback;
+  sessionStorage.removeItem(RETURN_TO_KEY);
+  return pending;
+}
 
 interface LoginFormProps {
   /** 组织门户登录时传入 slug；平台登录不传。 */
@@ -57,7 +65,7 @@ export default function LoginForm({ slug, orgName }: LoginFormProps) {
       }
 
       login(data.access_token, data.admin as AdminUser);
-      navigate('/monitor/router');
+      navigate(postLoginPath('/monitor/router'));
     } catch (err) {
       setError(err instanceof Error ? err.message : '未知错误');
     } finally {
@@ -87,7 +95,7 @@ export default function LoginForm({ slug, orgName }: LoginFormProps) {
       if (loggedInAdmin) {
         login(loggedInToken, { ...loggedInAdmin, must_change_password: false });
       }
-      navigate('/monitor/router');
+      navigate(postLoginPath('/monitor/router'));
     } catch (err) {
       setError(err instanceof Error ? err.message : '未知错误');
     }

@@ -3,7 +3,7 @@ import { Alert, Button, Empty, Spin, Typography } from 'antd';
 import { DownloadOutlined, ReloadOutlined } from '@ant-design/icons';
 import type {
   WorkspaceFallbackPreview, WorkspacePreviewPreferredMode, WorkspacePreviewSession,
-  WorkspaceSpreadsheetPage, WorkspaceSpreadsheetPreview,
+  WorkspaceSpreadsheetPage, WorkspaceSpreadsheetPreview, WorkspaceOfficeEditStatus,
 } from '../../api/client';
 
 const PdfFilePreview = lazy(() => import('./PdfFilePreview'));
@@ -288,7 +288,109 @@ export default function WorkspacePreviewSessionView({
   return <Failure message={session.reason || '该文件暂不支持在线预览'} onRetry={() => open()} onDownload={onDownload} />;
 }
 
-function WebOfficeFrame({ session, refreshSession, onSlow, onUseFallback, onUnavailable, fallbackReady, onDownload }: {
+export function WorkspaceEditSessionView({
+  fileId, filename, loadSession, refreshSession, closeSession, onExit,
+}: {
+  fileId: string;
+  filename: string;
+  loadSession: (clientOpenId: string) => Promise<WorkspacePreviewSession>;
+  refreshSession: (roomId: string, accessToken: string, refreshToken: string, refreshContext: string) => Promise<WorkspacePreviewSession>;
+  closeSession?: (clientOpenId: string) => Promise<WorkspaceOfficeEditStatus>;
+  onExit: (result?: { roomId: string; status: WorkspaceOfficeEditStatus | null }) => void;
+}) {
+  const openIdRef = useRef(`edit-${crypto.randomUUID().replace(/-/g, '')}`);
+  const [session, setSession] = useState<WorkspacePreviewSession | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  const [closing, setClosing] = useState(false);
+  const loadSessionRef = useRef(loadSession);
+  const closeSessionRef = useRef(closeSession);
+  const closePromiseRef = useRef<Promise<WorkspaceOfficeEditStatus | null> | null>(null);
+  const closedResultRef = useRef<WorkspaceOfficeEditStatus | null>(null);
+  loadSessionRef.current = loadSession;
+  closeSessionRef.current = closeSession;
+
+  useEffect(() => {
+    let disposed = false;
+    setSession(null);
+    setError(null);
+    loadSessionRef.current(openIdRef.current)
+      .then((value) => {
+        if (disposed) return;
+        if (value.mode !== 'edit' || !value.weboffice_url || !value.access_token || !value.room_id) {
+          throw new Error(value.reason || '服务端未提供可编辑会话');
+        }
+        setSession(value);
+      })
+      .catch((reason) => { if (!disposed) setError((reason as Error)?.message || '在线编辑暂不可用'); });
+    return () => { disposed = true; };
+  }, [fileId, retry]);
+
+  const closeOnce = useCallback((): Promise<WorkspaceOfficeEditStatus | null> => {
+    if (closedResultRef.current) return Promise.resolve(closedResultRef.current);
+    if (closePromiseRef.current) return closePromiseRef.current;
+    if (!closeSessionRef.current) return Promise.resolve(null);
+    const pending = closeSessionRef.current(openIdRef.current).then((value) => {
+      closedResultRef.current = value;
+      return value;
+    }).finally(() => {
+      closePromiseRef.current = null;
+    });
+    closePromiseRef.current = pending;
+    return pending;
+  }, []);
+
+  useEffect(() => () => {
+    void closeOnce().catch(() => { /* 页面卸载时由 MNS 保存通知继续完成对账。 */ });
+  }, [closeOnce, fileId]);
+
+  const finish = async () => {
+    setClosing(true);
+    try {
+      const status = await closeOnce();
+      onExit(session?.room_id ? { roomId: session.room_id, status } : undefined);
+    } catch (reason) {
+      setError((reason as Error)?.message || '结束编辑失败，请重试');
+    } finally {
+      setClosing(false);
+    }
+  };
+
+  if (error) {
+    return (
+      <div style={center}>
+        <Alert type="error" showIcon message="在线编辑暂不可用" description={error} />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Button icon={<ReloadOutlined />} onClick={() => setRetry((value) => value + 1)}>重试编辑</Button>
+          <Button loading={closing} onClick={() => { if (session) void finish(); else onExit(); }}>返回预览</Button>
+        </div>
+      </div>
+    );
+  }
+  if (!session) return <State label="正在申请独立编辑会话…" />;
+  return (
+    <div style={previewColumn}>
+      <div style={{ flex: '0 0 auto', padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 8, borderBottom: '1px solid #e5e7eb', background: '#fffbe6' }}>
+        <Typography.Text style={{ flex: 1, fontSize: 12 }} ellipsis={{ tooltip: filename }}>
+          编辑中 · Office 会自动同步；最终版本以平台保存对账结果为准
+        </Typography.Text>
+        <Button size="small" loading={closing} onClick={() => { void finish(); }}>结束编辑并对账</Button>
+      </div>
+      <WebOfficeFrame
+        session={session}
+        refreshSession={(accessToken, refreshToken, refreshContext) => refreshSession(session.room_id!, accessToken, refreshToken, refreshContext)}
+        onSlow={() => { /* 编辑会话保持原模式等待，不静默降级为预览。 */ }}
+        onUseFallback={() => setError('编辑会话加载失败，请重试；未切换到只读预览')}
+        onUnavailable={() => setError('编辑会话不可用，请重试；未切换到只读预览')}
+        fallbackReady={false}
+        onDownload={() => { /* 编辑模式不以下载假装保存。 */ }}
+        editing
+      />
+    </div>
+  );
+}
+
+function WebOfficeFrame({ session, refreshSession, onSlow, onUseFallback, onUnavailable, fallbackReady, onDownload, editing = false }: {
   session: WorkspacePreviewSession;
   refreshSession: Props['refreshSession'];
   onSlow: () => void;
@@ -296,6 +398,7 @@ function WebOfficeFrame({ session, refreshSession, onSlow, onUseFallback, onUnav
   onUnavailable: () => void;
   fallbackReady: boolean;
   onDownload: () => void;
+  editing?: boolean;
 }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const tokenRef = useRef(session);
@@ -406,10 +509,10 @@ function WebOfficeFrame({ session, refreshSession, onSlow, onUseFallback, onUnav
         <div style={{ position: 'absolute', inset: 0, zIndex: 1 }}>
           <div style={center}>
             <Spin />
-            <Typography.Text type="secondary">WebOffice 正在打开；需要动画或播放模式请继续等待。</Typography.Text>
+            <Typography.Text type="secondary">{editing ? 'WebOffice 正在打开编辑会话，请继续等待。' : 'WebOffice 正在打开；需要动画或播放模式请继续等待。'}</Typography.Text>
             <div style={{ display: 'flex', gap: 8 }}>
-              <Button icon={<ReloadOutlined />} onClick={onUseFallback}>{fallbackReady ? '免费快速版式预览' : '生成免费版式预览'}</Button>
-              <Button type="primary" icon={<DownloadOutlined />} onClick={onDownload}>下载原文件</Button>
+              <Button icon={<ReloadOutlined />} onClick={onUseFallback}>{editing ? '重试编辑' : (fallbackReady ? '免费快速版式预览' : '生成免费版式预览')}</Button>
+              {!editing && <Button type="primary" icon={<DownloadOutlined />} onClick={onDownload}>下载原文件</Button>}
             </div>
           </div>
         </div>
@@ -418,15 +521,15 @@ function WebOfficeFrame({ session, refreshSession, onSlow, onUseFallback, onUnav
         <div style={{ position: 'absolute', inset: 0, zIndex: 1 }}>
           <div style={center}>
             <Spin />
-            <Typography.Text type="secondary">WebOffice 仍在加载，后台已准备免费版式预览；最迟 30 秒自动切换。</Typography.Text>
+            <Typography.Text type="secondary">{editing ? '编辑会话仍在加载；不会自动降级成只读预览。' : 'WebOffice 仍在加载，后台已准备免费版式预览；最迟 30 秒自动切换。'}</Typography.Text>
             <div style={{ display: 'flex', gap: 8 }}>
-              <Button icon={<ReloadOutlined />} onClick={onUseFallback}>{fallbackReady ? '打开快速版式预览' : '查看备用预览进度'}</Button>
-              <Button type="primary" icon={<DownloadOutlined />} onClick={onDownload}>下载原文件</Button>
+              <Button icon={<ReloadOutlined />} onClick={onUseFallback}>{editing ? '重试编辑' : (fallbackReady ? '打开快速版式预览' : '查看备用预览进度')}</Button>
+              {!editing && <Button type="primary" icon={<DownloadOutlined />} onClick={onDownload}>下载原文件</Button>}
             </div>
           </div>
         </div>
       )}
-      <div ref={mountRef} data-testid="weboffice-preview" style={{ width: '100%', height: '100%' }} />
+      <div ref={mountRef} data-testid={editing ? 'weboffice-edit' : 'weboffice-preview'} style={{ width: '100%', height: '100%' }} />
     </div>
   );
 }

@@ -20,6 +20,7 @@ import Login from './pages/Login';
 import OrgLogin from './pages/OrgLogin';
 import UserLoginPage from './pages/terminal/UserLoginPage';
 import Terminal from './pages/terminal/Terminal';
+import FileDeepLinkPage from './pages/terminal/FileDeepLinkPage';
 import Organizations from './pages/Organizations';
 import ContactInfo from './pages/ContactInfo';
 import EnterpriseProfile from './pages/org/EnterpriseProfile';
@@ -356,6 +357,9 @@ export default function App() {
         } />
         <Route path="/terminal/tasks/:taskId" element={
           <UserAuthProvider><UserRequireAuth><Terminal /></UserRequireAuth></UserAuthProvider>
+        } />
+        <Route path="/f/:fileId" element={
+          <UserAuthProvider><FileDeepLinkPage /></UserAuthProvider>
         } />
         <Route path="/*" element={
           <RequireAuth>

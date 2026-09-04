@@ -68,7 +68,13 @@ export default function UserLoginPage() {
         team_id: data.user.team_id,
       };
       login(data.access_token, userState);
-      navigate(`/${canonicalSlug}/terminal`);
+      const pending = sessionStorage.getItem('zhuojian_return_to') || '';
+      if (/^\/f\/[0-9a-f-]{36}(?:\?version=[^#\s]+)?$/i.test(pending)) {
+        sessionStorage.removeItem('zhuojian_return_to');
+        navigate(pending);
+      } else {
+        navigate(`/${canonicalSlug}/terminal`);
+      }
     } catch (err) {
       message.error(err instanceof Error ? err.message : '登录失败');
     } finally {

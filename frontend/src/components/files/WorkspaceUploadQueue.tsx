@@ -56,6 +56,10 @@ export interface WorkspaceUploadRequest {
   workspaceId: string;
   path: string;
   file: File;
+  /** Set only after an explicit user confirmation to create a version in place. */
+  targetFileId?: string;
+  baseVersionId?: string;
+  idempotencyKey?: string;
 }
 
 export type WorkspaceUploadQueueStatus = 'queued' | 'uploading' | 'validating' | 'success' | 'error';
@@ -65,6 +69,32 @@ export interface WorkspaceUploadQueueItem extends WorkspaceUploadRequest {
   progress: number;
   status: WorkspaceUploadQueueStatus;
   error?: string;
+}
+
+export function workspaceUploadErrorText(error: unknown): string {
+  const candidate = error as { status?: unknown; message?: unknown; body?: unknown };
+  const status = typeof candidate?.status === 'number' ? candidate.status : 0;
+  const message = typeof candidate?.message === 'string' ? candidate.message : '';
+  const detail = candidate?.body && typeof candidate.body === 'object'
+    ? (candidate.body as { detail?: unknown }).detail
+    : null;
+  const code = detail && typeof detail === 'object'
+    ? (detail as { code?: unknown }).code
+    : null;
+  if (status === 409 && code === 'workspace_file_version_conflict') {
+    return '原文件刚被其他人更新，未覆盖对方版本；请刷新后重新确认';
+  }
+  if (status === 409 && code === 'workspace_file_active_edit_conflict') {
+    return '该文件正在 WebOffice 协同编辑，未覆盖活动编辑内容；请稍后再试';
+  }
+  if (status === 409 && code === 'workspace_file_idempotency_conflict') {
+    return '本次上传标识与先前操作冲突，未写入文件；请重新选择文件再试';
+  }
+  if (status === 409 && (code === 'workspace_file_path_conflict' || !message.includes('分片上传'))) {
+    return '同路径文件已存在，未覆盖原文件；请刷新后确认作为新版本上传，或改名上传';
+  }
+  if (status === 403) return '权限已变更，当前无法上传或更新此文件';
+  return message || '上传失败';
 }
 
 interface UseWorkspaceUploadQueueOptions<T> {
@@ -112,7 +142,7 @@ export function useWorkspaceUploadQueue<T>({
       .catch((error: unknown) => {
         updateItem(item.id, {
           status: 'error',
-          error: error instanceof Error ? error.message : '上传失败',
+          error: workspaceUploadErrorText(error),
         });
         errorRef.current?.(error, item);
       })

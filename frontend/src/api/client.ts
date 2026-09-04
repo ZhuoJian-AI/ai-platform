@@ -1,8 +1,25 @@
 /**
  * API 客户端 — 统一封装所有后端 HTTP 请求
  */
+import { buildTaskRunFilePayload } from '../utils/workspaceFileLinks';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+
+function responseErrorMessage(body: unknown, fallback: string): string {
+  if (!body || typeof body !== 'object') return fallback;
+  const detail = (body as { detail?: unknown }).detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (detail && typeof detail === 'object') {
+    const message = (detail as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message;
+  }
+  return fallback;
+}
+
+function withWorkspaceVersion(path: string, versionId?: string | null): string {
+  if (!versionId) return path;
+  return `${path}${path.includes('?') ? '&' : '?'}version_id=${encodeURIComponent(versionId)}`;
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const token = localStorage.getItem('ai_infra_token');
@@ -19,6 +36,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   // 401 时自动跳转登录
   if (resp.status === 401) {
     const stored = localStorage.getItem('ai_infra_admin');
+    if (window.location.pathname.startsWith('/f/')) {
+      sessionStorage.setItem('zhuojian_return_to', `${window.location.pathname}${window.location.search}`);
+    }
     localStorage.removeItem('ai_infra_token');
     localStorage.removeItem('ai_infra_admin');
     // 组织级账号回跳 /{slug}/login，平台级账号回跳 /login
@@ -30,7 +50,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    throw new ApiError(resp.status, body.detail || resp.statusText, body);
+    throw new ApiError(resp.status, responseErrorMessage(body, resp.statusText), body);
   }
   // 204 No Content — 无响应体，不能调用 resp.json()
   if (resp.status === 204) return undefined as T;
@@ -53,7 +73,7 @@ async function requestText(path: string, options?: RequestInit): Promise<string>
   }
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    throw new ApiError(resp.status, body.detail || resp.statusText, body);
+    throw new ApiError(resp.status, responseErrorMessage(body, resp.statusText), body);
   }
   return resp.text();
 }
@@ -433,7 +453,7 @@ async function requestBlob(path: string, tokenKey: string, signal?: AbortSignal)
   });
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    throw new ApiError(resp.status, body.detail || resp.statusText, body);
+    throw new ApiError(resp.status, responseErrorMessage(body, resp.statusText), body);
   }
   return resp.blob();
 }
@@ -469,6 +489,14 @@ export interface WorkspaceCapabilities {
   delete: boolean;
   manage: boolean;
   publish: boolean;
+}
+
+/** 文件级最小能力集。旧服务未返回时由所属工作空间能力回退。 */
+export interface WorkspaceFileCapabilities {
+  read: boolean;
+  create: boolean;
+  update: boolean;
+  delete: boolean;
 }
 
 export interface EffectiveWorkspaceAccess {
@@ -783,6 +811,12 @@ export interface WorkspaceFile {
   parse_kind: string | null; parse_error: string | null;
   created_at: string; updated_at: string;
   presentation?: WorkspaceFilePresentation;
+  workspace_name?: string; workspace_slug?: string; canonical_path?: string;
+  current_version_id?: string | null; previous_version_id?: string | null; current_version_no?: number | null;
+  resolved_version_id?: string | null; resolved_version_no?: number | null; is_historical?: boolean;
+  capabilities?: WorkspaceFileCapabilities; effective_capabilities?: WorkspaceFileCapabilities; internal_url?: string;
+  /** Server-side feature availability; absent/false must fail closed in the UI. */
+  office_edit_enabled?: boolean;
 }
 
 export interface WorkspaceFilePresentation {
@@ -798,6 +832,10 @@ export interface WorkspaceFileListItem {
   parse_kind: string | null; parse_error: string | null;
   created_at: string; updated_at: string;
   presentation: WorkspaceFilePresentation;
+  workspace_name?: string; workspace_slug?: string; canonical_path?: string;
+  current_version_id?: string | null; current_version_no?: number | null;
+  capabilities?: WorkspaceFileCapabilities; effective_capabilities?: WorkspaceFileCapabilities; internal_url?: string;
+  office_edit_enabled?: boolean;
 }
 
 export interface WorkspaceFilePage {
@@ -833,7 +871,7 @@ export interface WorkspaceDownloadTicket {
 }
 
 export interface WorkspacePreviewSession {
-  mode: 'weboffice' | 'pdfjs' | 'browser_office' | 'text' | 'spreadsheet_preview' | 'native' | 'blob' | 'fallback' | 'download_only';
+  mode: 'edit' | 'weboffice' | 'pdfjs' | 'browser_office' | 'text' | 'spreadsheet_preview' | 'native' | 'blob' | 'fallback' | 'download_only';
   filename: string;
   mime_type: string;
   size: number;
@@ -848,6 +886,20 @@ export interface WorkspacePreviewSession {
   refresh_context: string | null;
   reason: string | null;
   strict_range: boolean;
+  file_id?: string | null;
+  source_version_id?: string | null;
+  room_id?: string | null;
+  save_status?: string | null;
+}
+
+export interface WorkspaceOfficeEditStatus {
+  room_id: string;
+  status: string;
+  save_status?: string | null;
+  source_file_version_id?: string | null;
+  final_file_version_id: string | null;
+  current_version_id: string | null;
+  error: string | null;
 }
 
 export interface WorkspaceFallbackPreview {
@@ -883,6 +935,10 @@ export interface WorkspaceUploadOptions {
   signal?: AbortSignal;
   onProgress?: (percent: number) => void;
   onUploadComplete?: () => void;
+  /** Present only after the user explicitly confirms replacing this logical file. */
+  targetFileId?: string;
+  baseVersionId?: string;
+  idempotencyKey?: string;
 }
 
 async function loadAllWorkspaceFilePages(
@@ -904,6 +960,7 @@ function uploadWorkspaceFile(
     const fd = new FormData();
     fd.append('file', file);
     fd.append('path', path);
+    Object.entries(uploadMutationPayload(options)).forEach(([key, value]) => fd.append(key, value || ''));
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${BASE_URL}${url}`);
     const token = localStorage.getItem(tokenKey);
@@ -916,9 +973,9 @@ function uploadWorkspaceFile(
     xhr.upload.onload = () => options?.onUploadComplete?.();
     xhr.onload = () => {
       if (xhr.status < 200 || xhr.status >= 300) {
-        let detail = xhr.statusText;
-        try { detail = JSON.parse(xhr.responseText)?.detail || detail; } catch { /* keep statusText */ }
-        reject(new ApiError(xhr.status, detail));
+        let body: unknown = null;
+        try { body = JSON.parse(xhr.responseText); } catch { /* keep statusText */ }
+        reject(new ApiError(xhr.status, responseErrorMessage(body, xhr.statusText), body));
         return;
       }
       try { resolve(JSON.parse(xhr.responseText) as WorkspaceFile); }
@@ -980,41 +1037,65 @@ export const workspaces = {
     uploadAdminWorkspaceFile(wsId, file, path, options),
   getFile: (id: string) => request<WorkspaceFile>(`/api/v1/files/${id}`),
   getFilePreview: (id: string) => request<WorkspaceFilePreview>(`/api/v1/files/${id}/preview`),
-  getFileOriginalPreviewSource: (id: string) =>
-    request<WorkspaceOriginalPreviewSource>(`/api/v1/files/${id}/original-preview-source`),
-  createFilePreviewSession: (id: string, clientOpenId: string, preferredMode: WorkspacePreviewPreferredMode = 'default') =>
+  getFileOriginalPreviewSource: (id: string, versionId?: string) =>
+    request<WorkspaceOriginalPreviewSource>(withWorkspaceVersion(`/api/v1/files/${id}/original-preview-source`, versionId)),
+  createFilePreviewSession: (id: string, clientOpenId: string, preferredMode: WorkspacePreviewPreferredMode = 'default', versionId?: string) =>
     request<WorkspacePreviewSession>(`/api/v1/files/${id}/preview-session`, {
-      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId, preferred_mode: preferredMode }),
+      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId, preferred_mode: preferredMode, version_id: versionId }),
     }),
   refreshFilePreviewSession: (id: string, accessToken: string, refreshToken: string, refreshContext: string) =>
     request<WorkspacePreviewSession>(`/api/v1/files/${id}/preview-session/refresh`, {
       method: 'POST', body: JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, refresh_context: refreshContext }),
     }),
-  startFileFallbackPreview: (id: string) =>
-    request<WorkspaceFallbackPreview>(`/api/v1/files/${id}/fallback-preview`, { method: 'POST' }),
-  getFileFallbackPreview: (id: string) =>
-    request<WorkspaceFallbackPreview>(`/api/v1/files/${id}/fallback-preview`),
-  startFileSpreadsheetPreview: (id: string) =>
-    request<WorkspaceSpreadsheetPreview>(`/api/v1/files/${id}/spreadsheet-preview`, { method: 'POST' }),
-  getFileSpreadsheetPreview: (id: string) =>
-    request<WorkspaceSpreadsheetPreview>(`/api/v1/files/${id}/spreadsheet-preview`),
-  getFileSpreadsheetPage: (id: string, sheet: string, page: number) =>
-    request<WorkspaceSpreadsheetPage>(`/api/v1/files/${id}/spreadsheet-preview/sheets/${encodeURIComponent(sheet)}/pages/${page}`),
-  getFileDownloadTicket: (id: string) =>
-    request<WorkspaceDownloadTicket>(`/api/v1/files/${id}/download-ticket`, { method: 'POST' }),
-  getFilePdfPreviewInfo: (id: string) =>
-    request<WorkspacePdfPreviewInfo>(`/api/v1/files/${id}/pdf-preview/info`),
-  getFilePdfPreviewPage: (id: string, pageNumber: number) =>
-    requestBlob(`/api/v1/files/${id}/pdf-preview/pages/${pageNumber}`, 'ai_infra_token'),
-  getFileOriginalPreview: (id: string) => requestBlob(`/api/v1/files/${id}/original-preview`, 'ai_infra_token'),
-  downloadFile: (id: string) => requestBlob(`/api/v1/files/${id}/download`, 'ai_infra_token'),
+  createFileEditSession: (id: string, clientOpenId: string) =>
+    request<WorkspacePreviewSession>(`/api/v1/files/${id}/edit-session`, {
+      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId }),
+    }),
+  refreshFileEditSession: (id: string, roomId: string, accessToken: string, refreshToken: string, refreshContext: string) =>
+    request<WorkspacePreviewSession>(`/api/v1/files/${id}/edit-session/refresh`, {
+      method: 'POST', body: JSON.stringify({ room_id: roomId, access_token: accessToken, refresh_token: refreshToken, refresh_context: refreshContext }),
+    }),
+  closeFileEditSession: (id: string, clientOpenId: string) =>
+    request<WorkspaceOfficeEditStatus>(`/api/v1/files/${id}/edit-session/close`, {
+      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId }),
+    }),
+  getFileEditSessionStatus: (id: string, roomId: string) =>
+    request<WorkspaceOfficeEditStatus>(`/api/v1/files/${id}/edit-session/${roomId}`),
+  startFileFallbackPreview: (id: string, versionId?: string) =>
+    request<WorkspaceFallbackPreview>(withWorkspaceVersion(`/api/v1/files/${id}/fallback-preview`, versionId), { method: 'POST' }),
+  getFileFallbackPreview: (id: string, versionId?: string) =>
+    request<WorkspaceFallbackPreview>(withWorkspaceVersion(`/api/v1/files/${id}/fallback-preview`, versionId)),
+  startFileSpreadsheetPreview: (id: string, versionId?: string) =>
+    request<WorkspaceSpreadsheetPreview>(withWorkspaceVersion(`/api/v1/files/${id}/spreadsheet-preview`, versionId), { method: 'POST' }),
+  getFileSpreadsheetPreview: (id: string, versionId?: string) =>
+    request<WorkspaceSpreadsheetPreview>(withWorkspaceVersion(`/api/v1/files/${id}/spreadsheet-preview`, versionId)),
+  getFileSpreadsheetPage: (id: string, sheet: string, page: number, versionId?: string) =>
+    request<WorkspaceSpreadsheetPage>(withWorkspaceVersion(`/api/v1/files/${id}/spreadsheet-preview/sheets/${encodeURIComponent(sheet)}/pages/${page}`, versionId)),
+  getFileDownloadTicket: (id: string, versionId?: string) =>
+    request<WorkspaceDownloadTicket>(withWorkspaceVersion(`/api/v1/files/${id}/download-ticket`, versionId), { method: 'POST' }),
+  getFilePdfPreviewInfo: (id: string, versionId?: string) =>
+    request<WorkspacePdfPreviewInfo>(withWorkspaceVersion(`/api/v1/files/${id}/pdf-preview/info`, versionId)),
+  getFilePdfPreviewPage: (id: string, pageNumber: number, versionId?: string) =>
+    requestBlob(withWorkspaceVersion(`/api/v1/files/${id}/pdf-preview/pages/${pageNumber}`, versionId), 'ai_infra_token'),
+  getFileOriginalPreview: (id: string, versionId?: string) => requestBlob(withWorkspaceVersion(`/api/v1/files/${id}/original-preview`, versionId), 'ai_infra_token'),
+  downloadFile: (id: string, versionId?: string) => requestBlob(withWorkspaceVersion(`/api/v1/files/${id}/download`, versionId), 'ai_infra_token'),
   reparseFile: (id: string) => request<WorkspaceFile>(`/api/v1/files/${id}/reparse`, { method: 'POST' }),
-  updateFile: (id: string, data: { content?: string; metadata?: Record<string, unknown> }) =>
+  updateFile: (id: string, data: {
+    content?: string; metadata?: Record<string, unknown>;
+    base_version_id?: string | null; idempotency_key?: string;
+  }) =>
     request<WorkspaceFile>(`/api/v1/files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteFile: (id: string) => request<void>(`/api/v1/files/${id}`, { method: 'DELETE' }),
+  deleteFile: (id: string, data: { base_version_id: string; idempotency_key: string }) =>
+    request<void>(`/api/v1/files/${id}`, {
+      method: 'DELETE', body: JSON.stringify(data),
+    }),
   listFileVersions: (id: string) => request<WorkspaceFileVersion[]>(`/api/v1/files/${id}/versions`),
-  restoreFileVersion: (id: string, versionId: string) =>
-    request<WorkspaceFile>(`/api/v1/files/${id}/versions/${versionId}/restore`, { method: 'POST' }),
+  getFileVersion: (id: string, versionId: string) =>
+    request<WorkspaceFile>(`/api/v1/files/${id}/versions/${versionId}`),
+  restoreFileVersion: (id: string, versionId: string, options: { base_version_id: string; idempotency_key: string }) =>
+    request<WorkspaceFile>(`/api/v1/files/${id}/versions/${versionId}/restore`, {
+      method: 'POST', body: JSON.stringify(options),
+    }),
   listFolders: (wsId: string) => request<WorkspaceFolder[]>(`/api/v1/workspaces/${wsId}/folders`),
   createFolder: (wsId: string, data: { path: string }) =>
     request<WorkspaceFolder>(`/api/v1/workspaces/${wsId}/folders`, { method: 'POST', body: JSON.stringify(data) }),
@@ -1024,8 +1105,10 @@ export const workspaces = {
   bulkDeleteItems: (wsId: string, data: { file_ids: string[]; folder_paths: string[] }) =>
     request<{ deleted_files: number; deleted_folders: number }>(`/api/v1/workspaces/${wsId}/items/bulk-delete`, { method: 'POST', body: JSON.stringify(data) }),
   listTrash: (wsId: string) => request<WorkspaceFile[]>(`/api/v1/workspaces/${wsId}/trash`),
-  restoreTrash: (wsId: string, fileId: string) =>
-    request<WorkspaceFile>(`/api/v1/workspaces/${wsId}/trash/${fileId}/restore`, { method: 'POST' }),
+  restoreTrash: (wsId: string, fileId: string, options: { base_version_id: string; idempotency_key: string }) =>
+    request<WorkspaceFile>(`/api/v1/workspaces/${wsId}/trash/${fileId}/restore`, {
+      method: 'POST', body: JSON.stringify(options),
+    }),
   listAudit: (wsId: string, limit = 200) =>
     request<WorkspaceAuditEvent[]>(`/api/v1/workspaces/${wsId}/audit?limit=${limit}`),
 };
@@ -1357,6 +1440,23 @@ export interface WorkspaceFileSummary {
   id: string; workspace_id: string; workspace_name: string;
   path: string; original_filename: string; presentation: WorkspaceFilePresentation;
   scope_type: string; is_binary: boolean;
+  workspace_slug?: string; canonical_path?: string;
+  current_version_id?: string | null; current_version_no?: number | null;
+  capabilities?: WorkspaceFileCapabilities; effective_capabilities?: WorkspaceFileCapabilities; internal_url?: string;
+}
+
+export interface WorkspaceFileRefV1 {
+  file_id: string;
+  scope: 'turn' | 'task';
+  version_id?: string;
+  follow_latest?: boolean;
+}
+
+export interface WorkspaceFileEvent {
+  id: number;
+  file_id: string;
+  version_id: string | null;
+  event_type: string;
 }
 
 const SKILL_ARCHIVE_MAX_BYTES = 100 * 1024 * 1024;
@@ -1583,17 +1683,23 @@ function userRequest<T>(path: string, options?: RequestInit): Promise<T> {
   })
     .then(async (resp) => {
       if (resp.status === 401) {
+        const stored = localStorage.getItem('ai_infra_user');
+        if (window.location.pathname.startsWith('/f/')) {
+          sessionStorage.setItem('zhuojian_return_to', `${window.location.pathname}${window.location.search}`);
+        }
         localStorage.removeItem(USER_TOKEN_KEY);
         localStorage.removeItem('ai_infra_user');
         // 回跳到当前 slug 的用户登录页（或平台 /login 兜底）
         const m = window.location.pathname.match(/^\/([^/]+)\/terminal/);
-        const slug = m ? m[1] : null;
+        let storedSlug: string | null = null;
+        try { storedSlug = stored ? JSON.parse(stored)?.organization_slug ?? null : null; } catch { storedSlug = null; }
+        const slug = m ? m[1] : storedSlug;
         window.location.href = slug ? `/${slug}/terminal/login` : '/login';
         throw new ApiError(401, 'Session expired');
       }
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
-        throw new ApiError(resp.status, body.detail || resp.statusText, body);
+        throw new ApiError(resp.status, responseErrorMessage(body, resp.statusText), body);
       }
       if (resp.status === 204) return undefined as T;
       return resp.json();
@@ -1680,8 +1786,26 @@ const UPLOAD_RESUME_STORE = 'sessions';
 let activeOssRequests = 0;
 const ossRequestWaiters: Array<() => void> = [];
 
-function uploadResumeKey(kind: 'admin' | 'user', wsId: string, path: string, file: File) {
-  return [kind, wsId, path, file.name, file.size, file.lastModified].map(encodeURIComponent).join('|');
+function uploadMutationPayload(options?: WorkspaceUploadOptions) {
+  const values = [options?.targetFileId, options?.baseVersionId, options?.idempotencyKey];
+  if (values.every(Boolean)) {
+    return {
+      target_file_id: options!.targetFileId,
+      base_version_id: options!.baseVersionId,
+      idempotency_key: options!.idempotencyKey,
+    };
+  }
+  if (values.some(Boolean)) throw new ApiError(400, '作为新版本上传时缺少文件版本信息，请刷新后重试');
+  return {};
+}
+
+function uploadResumeKey(
+  kind: 'admin' | 'user', wsId: string, path: string, file: File, options?: WorkspaceUploadOptions,
+) {
+  return [
+    kind, wsId, path, file.name, file.size, file.lastModified,
+    options?.targetFileId || '', options?.baseVersionId || '',
+  ].map(encodeURIComponent).join('|');
 }
 
 function openUploadResumeDb(): Promise<IDBDatabase> {
@@ -1968,10 +2092,10 @@ async function uploadTerminalWorkspaceFile(
   const initiate = (weakNetwork: boolean) => userRequest<DirectUploadSession>(
     `/api/v1/terminal/workspaces/${wsId}/uploads/initiate`, { method: 'POST', body: JSON.stringify({
       path, filename: file.name, content_type: file.type || 'application/octet-stream',
-      size: file.size, weak_network: weakNetwork,
+      size: file.size, weak_network: weakNetwork, ...uploadMutationPayload(options),
     }) },
   );
-  const resumeKey = uploadResumeKey('user', wsId, path, file);
+  const resumeKey = uploadResumeKey('user', wsId, path, file, options);
   let record = await readUploadResume(resumeKey);
   let session: DirectUploadSession | null = null;
   let initialParts: MultipartUploadPart[] = [];
@@ -2045,10 +2169,10 @@ async function uploadAdminWorkspaceFile(
   const initiate = (weakNetwork: boolean) => request<DirectUploadSession>(`/api/v1/workspaces/${wsId}/uploads/initiate`, {
     method: 'POST', body: JSON.stringify({
       path, filename: file.name, content_type: file.type || 'application/octet-stream',
-      size: file.size, weak_network: weakNetwork,
+      size: file.size, weak_network: weakNetwork, ...uploadMutationPayload(options),
     }),
   });
-  const resumeKey = uploadResumeKey('admin', wsId, path, file);
+  const resumeKey = uploadResumeKey('admin', wsId, path, file, options);
   let record = await readUploadResume(resumeKey);
   let session: DirectUploadSession | null = null;
   let initialParts: MultipartUploadPart[] = [];
@@ -2434,7 +2558,7 @@ export const terminal = {
     });
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}));
-      throw new ApiError(resp.status, body.detail || resp.statusText, body);
+      throw new ApiError(resp.status, responseErrorMessage(body, resp.statusText), body);
     }
     return resp.json() as Promise<{ access_token: string; must_change_password: boolean; user: User }>;
   },
@@ -2525,7 +2649,7 @@ export const terminal = {
     }
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}));
-      throw new ApiError(resp.status, body.detail || resp.statusText, body);
+      throw new ApiError(resp.status, responseErrorMessage(body, resp.statusText), body);
     }
     const blob = await resp.blob();
     if (!blob.size) return;
@@ -2552,10 +2676,11 @@ export const terminal = {
     id: string, message: string, template_agent_id?: string | null,
     attachment_file_ids: string[] = [], invoked_skill_ids: string[] = [],
     application_id?: string | null, page_context: Record<string, unknown> = {},
+    file_refs_v1: WorkspaceFileRefV1[] = [],
   ) =>
     userRequest<{ assistant: string; steps: unknown[]; usage: Record<string, number>; run_id: number; latency_ms: number }>(
       `/api/v1/terminal/tasks/${id}/run`,
-      { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null, attachment_file_ids, invoked_skill_ids, application_id: application_id ?? null, page_context }) },
+      { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null, invoked_skill_ids, application_id: application_id ?? null, page_context, ...buildTaskRunFilePayload(attachment_file_ids, file_refs_v1) }) },
     ),
   /** 流式执行：返回原始 Response，由调用方解析 SSE（仿 AgentPlayground）。
    *  template_agent_id 逐次覆盖（不落库）：undefined=沿用 task.config；null=通用；UUID=该次用此智能体。 */
@@ -2564,11 +2689,12 @@ export const terminal = {
     template_agent_id?: string | null, attachment_file_ids: string[] = [],
     invoked_skill_ids: string[] = [], application_id?: string | null,
     page_context: Record<string, unknown> = {},
+    file_refs_v1: WorkspaceFileRefV1[] = [],
   ) =>
     fetch(`${BASE_URL}/api/v1/terminal/tasks/${id}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem(USER_TOKEN_KEY) || ''}` },
-      body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null, attachment_file_ids, invoked_skill_ids, application_id: application_id ?? null, page_context }),
+      body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null, invoked_skill_ids, application_id: application_id ?? null, page_context, ...buildTaskRunFilePayload(attachment_file_ids, file_refs_v1) }),
       signal,
     }),
   /** resume：重连/回放一个运行中或已完成的 run（后台 detach 执行，刷新不丢）。 */
@@ -2576,6 +2702,16 @@ export const terminal = {
     fetch(`${BASE_URL}/api/v1/terminal/tasks/${id}/stream`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${localStorage.getItem(USER_TOKEN_KEY) || ''}` },
+      signal,
+    }),
+  streamWorkspaceFileEvents: (after: number, signal: AbortSignal) =>
+    fetch(`${BASE_URL}/api/v1/terminal/file-events/stream?after=${Math.max(0, Math.trunc(after))}`, {
+      method: 'GET',
+      headers: {
+        Accept: 'text/event-stream',
+        Authorization: `Bearer ${localStorage.getItem(USER_TOKEN_KEY) || ''}`,
+      },
+      cache: 'no-store',
       signal,
     }),
   /** 取消运行中的 run（真停后台 asyncio.Task，非仅断读端）。 */
@@ -2593,50 +2729,84 @@ export const terminal = {
     uploadTerminalWorkspaceFile(wsId, file, path, options),
   getWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}`),
   getWsFilePreview: (id: string) => userRequest<WorkspaceFilePreview>(`/api/v1/terminal/files/${id}/preview`),
-  getWsFileOriginalPreviewSource: (id: string) =>
-    userRequest<WorkspaceOriginalPreviewSource>(`/api/v1/terminal/files/${id}/original-preview-source`),
-  createWsFilePreviewSession: (id: string, clientOpenId: string, preferredMode: WorkspacePreviewPreferredMode = 'default') =>
+  getWsFileOriginalPreviewSource: (id: string, versionId?: string) =>
+    userRequest<WorkspaceOriginalPreviewSource>(withWorkspaceVersion(`/api/v1/terminal/files/${id}/original-preview-source`, versionId)),
+  createWsFilePreviewSession: (id: string, clientOpenId: string, preferredMode: WorkspacePreviewPreferredMode = 'default', versionId?: string) =>
     userRequest<WorkspacePreviewSession>(`/api/v1/terminal/files/${id}/preview-session`, {
-      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId, preferred_mode: preferredMode }),
+      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId, preferred_mode: preferredMode, version_id: versionId }),
     }),
   refreshWsFilePreviewSession: (id: string, accessToken: string, refreshToken: string, refreshContext: string) =>
     userRequest<WorkspacePreviewSession>(`/api/v1/terminal/files/${id}/preview-session/refresh`, {
       method: 'POST', body: JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, refresh_context: refreshContext }),
     }),
-  startWsFileFallbackPreview: (id: string) =>
-    userRequest<WorkspaceFallbackPreview>(`/api/v1/terminal/files/${id}/fallback-preview`, { method: 'POST' }),
-  getWsFileFallbackPreview: (id: string) =>
-    userRequest<WorkspaceFallbackPreview>(`/api/v1/terminal/files/${id}/fallback-preview`),
-  startWsFileSpreadsheetPreview: (id: string) =>
-    userRequest<WorkspaceSpreadsheetPreview>(`/api/v1/terminal/files/${id}/spreadsheet-preview`, { method: 'POST' }),
-  getWsFileSpreadsheetPreview: (id: string) =>
-    userRequest<WorkspaceSpreadsheetPreview>(`/api/v1/terminal/files/${id}/spreadsheet-preview`),
-  getWsFileSpreadsheetPage: (id: string, sheet: string, page: number) =>
-    userRequest<WorkspaceSpreadsheetPage>(`/api/v1/terminal/files/${id}/spreadsheet-preview/sheets/${encodeURIComponent(sheet)}/pages/${page}`),
-  getWsFileDownloadTicket: (id: string) =>
-    userRequest<WorkspaceDownloadTicket>(`/api/v1/terminal/files/${id}/download-ticket`, { method: 'POST' }),
-  getWsFilePdfPreviewInfo: (id: string) =>
-    userRequest<WorkspacePdfPreviewInfo>(`/api/v1/terminal/files/${id}/pdf-preview/info`),
-  getWsFilePdfPreviewPage: (id: string, pageNumber: number) =>
-    requestBlob(`/api/v1/terminal/files/${id}/pdf-preview/pages/${pageNumber}`, USER_TOKEN_KEY),
-  getWsFileOriginalPreview: (id: string, signal?: AbortSignal) => requestBlob(`/api/v1/terminal/files/${id}/original-preview`, USER_TOKEN_KEY, signal),
-  downloadWsFile: (id: string, signal?: AbortSignal) => requestBlob(`/api/v1/terminal/files/${id}/download`, USER_TOKEN_KEY, signal),
+  createWsFileEditSession: (id: string, clientOpenId: string) =>
+    userRequest<WorkspacePreviewSession>(`/api/v1/terminal/files/${id}/edit-session`, {
+      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId }),
+    }),
+  refreshWsFileEditSession: (id: string, roomId: string, accessToken: string, refreshToken: string, refreshContext: string) =>
+    userRequest<WorkspacePreviewSession>(`/api/v1/terminal/files/${id}/edit-session/refresh`, {
+      method: 'POST', body: JSON.stringify({ room_id: roomId, access_token: accessToken, refresh_token: refreshToken, refresh_context: refreshContext }),
+    }),
+  closeWsFileEditSession: (id: string, clientOpenId: string) =>
+    userRequest<WorkspaceOfficeEditStatus>(`/api/v1/terminal/files/${id}/edit-session/close`, {
+      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId }),
+    }),
+  getWsFileEditSessionStatus: (id: string, roomId: string) =>
+    userRequest<WorkspaceOfficeEditStatus>(`/api/v1/terminal/files/${id}/edit-session/${roomId}`),
+  startWsFileFallbackPreview: (id: string, versionId?: string) =>
+    userRequest<WorkspaceFallbackPreview>(withWorkspaceVersion(`/api/v1/terminal/files/${id}/fallback-preview`, versionId), { method: 'POST' }),
+  getWsFileFallbackPreview: (id: string, versionId?: string) =>
+    userRequest<WorkspaceFallbackPreview>(withWorkspaceVersion(`/api/v1/terminal/files/${id}/fallback-preview`, versionId)),
+  startWsFileSpreadsheetPreview: (id: string, versionId?: string) =>
+    userRequest<WorkspaceSpreadsheetPreview>(withWorkspaceVersion(`/api/v1/terminal/files/${id}/spreadsheet-preview`, versionId), { method: 'POST' }),
+  getWsFileSpreadsheetPreview: (id: string, versionId?: string) =>
+    userRequest<WorkspaceSpreadsheetPreview>(withWorkspaceVersion(`/api/v1/terminal/files/${id}/spreadsheet-preview`, versionId)),
+  getWsFileSpreadsheetPage: (id: string, sheet: string, page: number, versionId?: string) =>
+    userRequest<WorkspaceSpreadsheetPage>(withWorkspaceVersion(`/api/v1/terminal/files/${id}/spreadsheet-preview/sheets/${encodeURIComponent(sheet)}/pages/${page}`, versionId)),
+  getWsFileDownloadTicket: (id: string, versionId?: string) =>
+    userRequest<WorkspaceDownloadTicket>(withWorkspaceVersion(`/api/v1/terminal/files/${id}/download-ticket`, versionId), { method: 'POST' }),
+  getWsFilePdfPreviewInfo: (id: string, versionId?: string) =>
+    userRequest<WorkspacePdfPreviewInfo>(withWorkspaceVersion(`/api/v1/terminal/files/${id}/pdf-preview/info`, versionId)),
+  getWsFilePdfPreviewPage: (id: string, pageNumber: number, versionId?: string) =>
+    requestBlob(withWorkspaceVersion(`/api/v1/terminal/files/${id}/pdf-preview/pages/${pageNumber}`, versionId), USER_TOKEN_KEY),
+  getWsFileOriginalPreview: (id: string, signalOrVersion?: AbortSignal | string, versionId?: string) => {
+    const signal = typeof signalOrVersion === 'string' ? undefined : signalOrVersion;
+    const selectedVersion = typeof signalOrVersion === 'string' ? signalOrVersion : versionId;
+    return requestBlob(withWorkspaceVersion(`/api/v1/terminal/files/${id}/original-preview`, selectedVersion), USER_TOKEN_KEY, signal);
+  },
+  downloadWsFile: (id: string, signalOrVersion?: AbortSignal | string, versionId?: string) => {
+    const signal = typeof signalOrVersion === 'string' ? undefined : signalOrVersion;
+    const selectedVersion = typeof signalOrVersion === 'string' ? signalOrVersion : versionId;
+    return requestBlob(withWorkspaceVersion(`/api/v1/terminal/files/${id}/download`, selectedVersion), USER_TOKEN_KEY, signal);
+  },
   reparseWsFile: (id: string) => userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}/reparse`, { method: 'POST' }),
-  updateWsFile: (id: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>
+  updateWsFile: (id: string, data: {
+    path: string; content: string; metadata?: Record<string, unknown>;
+    base_version_id?: string | null; idempotency_key?: string;
+  }) =>
     userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteWsFile: (id: string) => userRequest<void>(`/api/v1/terminal/files/${id}`, { method: 'DELETE' }),
+  deleteWsFile: (id: string, data: { base_version_id: string; idempotency_key: string }) =>
+    userRequest<void>(`/api/v1/terminal/files/${id}`, {
+      method: 'DELETE', body: JSON.stringify(data),
+    }),
   listWsFileVersions: (id: string) => userRequest<Array<{
     id: string; workspace_file_id: string; version_no: number; size: number;
     content_hash: string | null; parse_status: string; parse_kind: string | null;
     parse_error: string | null; created_at: string;
   }>>(`/api/v1/terminal/files/${id}/versions`),
-  restoreWsFileVersion: (id: string, versionId: string) =>
-    userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}/versions/${versionId}/restore`, { method: 'POST' }),
+  getWsFileVersion: (id: string, versionId: string) =>
+    userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}/versions/${versionId}`),
+  restoreWsFileVersion: (id: string, versionId: string, options: { base_version_id: string; idempotency_key: string }) =>
+    userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}/versions/${versionId}/restore`, {
+      method: 'POST', body: JSON.stringify(options),
+    }),
   listWsTrash: (wsId: string) => userRequest<WorkspaceFile[]>(`/api/v1/terminal/workspaces/${wsId}/trash`),
   listWsAudit: (wsId: string, limit = 200) =>
     userRequest<WorkspaceAuditEvent[]>(`/api/v1/terminal/workspaces/${wsId}/audit?limit=${limit}`),
-  restoreWsTrash: (wsId: string, fileId: string) =>
-    userRequest<WorkspaceFile>(`/api/v1/terminal/workspaces/${wsId}/trash/${fileId}/restore`, { method: 'POST' }),
+  restoreWsTrash: (wsId: string, fileId: string, options: { base_version_id: string; idempotency_key: string }) =>
+    userRequest<WorkspaceFile>(`/api/v1/terminal/workspaces/${wsId}/trash/${fileId}/restore`, {
+      method: 'POST', body: JSON.stringify(options),
+    }),
   publishWsFile: (id: string, targetWorkspaceId: string, targetPath?: string) =>
     userRequest<WorkspaceFile>(`/api/v1/terminal/files/${id}/publish`, {
       method: 'POST', body: JSON.stringify({ target_workspace_id: targetWorkspaceId, target_path: targetPath || null }),
