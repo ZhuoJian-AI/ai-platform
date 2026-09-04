@@ -17,7 +17,8 @@
 - 正式测试域名：`https://ai-platform.staging.zhuojianai.com`
 
 Coolify 中选择 `Root Team` → `项目应用` → `舞台 / staging`，部署目标选择“酷乐”，
-GitHub App Source 选择“卓建-github”，保持 Auto Deploy 开启。
+GitHub App Source 选择“卓建-github”。当前应用使用手动部署；更新 `main` 后由管理员点击
+`Deploy`，不要假定 push 会自动上线。
 
 域名表单选择 `https`，Domain 填 `ai-platform.staging.zhuojianai.com`，Port 填 `80`，
 Path 留空。不要给 PostgreSQL、Redis、Mock 或 backend 配置公网域名或宿主机端口。
@@ -35,11 +36,14 @@ Path 留空。不要给 PostgreSQL、Redis、Mock 或 backend 配置公网域名
 - `REDIS_PASSWORD=<随机强密码>`
 - `REDIS_URL=redis://:<URL编码后的Redis密码>@redis:6379/0`
 - `SECRET_KEY=<随机长字符串>`
+- `OAUTH_SIGNING_KEY=<独立的随机长字符串>`
 - `MASTER_ENCRYPTION_KEY=<Fernet key>`
 - `MES_API_KEY=<随机长字符串>`
 - `CRM_API_KEY=<随机长字符串>`
 - `CODE_SKILLS_ENABLED=true`
 - `SKILL_RUNNER_TOKEN=<随机长字符串>`
+- `DSH_RUNTIME_TOKEN=<随机长字符串>`
+- `EXTENSION_BUILDER_TOKEN=<随机长字符串>`
 - `SKILL_RUNNER_TIMEOUT_SECONDS=120`
 - `WORKSPACE_OBJECT_STORAGE_ENABLED=true`
 - `STORAGE_GATEWAY_URL=https://storage.staging.zhuojianai.com`
@@ -67,15 +71,16 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 ## 首次登录与验收
 
-空数据库首次启动会自动创建平台超级管理员 `root / root`。部署成功后应立即登录并修改
-默认密码。
+空数据库不会自动创建默认管理员，也不存在 `root / root` 默认密码。首次部署时由服务器管理员
+在 backend 容器中交互运行 `python scripts/bootstrap_platform_admin.py` 创建首个平台超级管理员；
+不要把管理员密码写入命令、Compose 或 Git。
 
 验收要求：
 
 1. `postgres`、`redis`、`mock`、`skill-runner`、`dsh-runtime`、`extension-builder`、
-   `backend`、`workspace-parser`、`workspace-preview`、`storage-lifecycle`、
+   `backend`、`workspace-parser`、`workspace-preview`、`office-edit-reconcile`、`storage-lifecycle`、
    `multimodal-worker`、`frontend` 均健康；
 2. `https://ai-platform.staging.zhuojianai.com/health` 返回 HTTP 200；
 3. 管理员入口 `/login` 可以打开并登录；
 4. Coolify 运行版本对应 GitHub `main` 的 SHA；
-5. 首次绑定后再 push 一次 `main`，确认 Webhook 自动部署成功。
+5. 手动部署记录显示成功，并且运行镜像的 `SOURCE_COMMIT` 对应本次源代码 SHA。
