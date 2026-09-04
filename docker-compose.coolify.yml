@@ -254,6 +254,8 @@ services:
       WORKSPACE_PROXY_UPLOAD_MAX_BYTES: "${WORKSPACE_PROXY_UPLOAD_MAX_BYTES:-1048576}"
       WORKSPACE_UPLOAD_SESSION_TTL_SECONDS: "${WORKSPACE_UPLOAD_SESSION_TTL_SECONDS:-86400}"
       WORKSPACE_WEBOFFICE_ENABLED: "${WORKSPACE_WEBOFFICE_ENABLED:-true}"
+      WORKSPACE_WEBOFFICE_EDIT_ENABLED: "${WORKSPACE_WEBOFFICE_EDIT_ENABLED:-false}"
+      WORKSPACE_OFFICE_EVENT_CALLBACK_SECRET: "${WORKSPACE_OFFICE_EVENT_CALLBACK_SECRET:-}"
       WORKSPACE_WEBOFFICE_MAX_BYTES: "${WORKSPACE_WEBOFFICE_MAX_BYTES:-209715200}"
       WORKSPACE_PDF_DIRECT_PREVIEW_MAX_BYTES: "${WORKSPACE_PDF_DIRECT_PREVIEW_MAX_BYTES:-20971520}"
       WORKSPACE_PREVIEW_JOB_POLL_SECONDS: "${WORKSPACE_PREVIEW_JOB_POLL_SECONDS:-1}"
@@ -401,6 +403,56 @@ services:
     deploy:
       resources:
         limits: { cpus: "1.00", memory: 2G, pids: 256 }
+
+  office-edit-reconcile:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:1bf6ee54d03169588fabecc2b34cdac15700096884e73ce0d2e7a2879f609c6d
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?}
+      DATABASE_URL: ${DATABASE_URL:?}
+      REDIS_URL: ${REDIS_URL:?}
+      WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-true}"
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
+      STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
+      STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-https://oss-cn-hongkong.aliyuncs.com}"
+      STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
+      STORAGE_ACCELERATE_ENDPOINT: "${STORAGE_ACCELERATE_ENDPOINT:-https://oss-accelerate.aliyuncs.com}"
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      WORKSPACE_WEBOFFICE_EDIT_ENABLED: "${WORKSPACE_WEBOFFICE_EDIT_ENABLED:-false}"
+      WORKSPACE_OFFICE_EVENT_CALLBACK_SECRET: "${WORKSPACE_OFFICE_EVENT_CALLBACK_SECRET:-}"
+      WORKSPACE_OFFICE_RECONCILE_POLL_SECONDS: "${WORKSPACE_OFFICE_RECONCILE_POLL_SECONDS:-1}"
+      WORKSPACE_OFFICE_RECONCILE_LEASE_SECONDS: "${WORKSPACE_OFFICE_RECONCILE_LEASE_SECONDS:-300}"
+    command: ["python", "-m", "app.workers.office_edit_reconcile"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import pathlib,sys;
+          sys.exit(0 if b'app.workers.office_edit_reconcile' in
+          pathlib.Path('/proc/1/cmdline').read_bytes() else 1)"
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    extra_hosts:
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.10}.11"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks:
+      default:
+      data_plane:
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.25
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   storage-lifecycle:
     image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:53dd3cbb079f6f235c0b8bf06f943cbf48339cd6e0da2bbaebc8e0905cdd1d8b
