@@ -46,7 +46,12 @@ async def _preview_pdf_ref(db: AsyncSession, file: WorkspaceFile) -> str:
 async def _cached_pdf(file: WorkspaceFile, content_ref: str) -> Path:
     if not storage_gateway_service.is_object_ref(content_ref):
         raise WorkspacePdfPreviewError("PDF page preview requires object storage")
-    key = hashlib.sha256(content_ref.encode("utf-8")).hexdigest()[:32]
+    storage_version_id = str((file.metadata_ or {}).get("storage_version_id") or "") or None
+    # One logical OSS key can contain many immutable object generations.  The
+    # cache key and download must both pin VersionId or historical previews can
+    # accidentally display a later edit.
+    key_material = f"{content_ref}\0{storage_version_id or 'current'}"
+    key = hashlib.sha256(key_material.encode("utf-8")).hexdigest()[:32]
     target = _CACHE_ROOT / f"{key}.pdf"
     if target.exists() and target.stat().st_size > 0:
         return target
@@ -57,7 +62,10 @@ async def _cached_pdf(file: WorkspaceFile, content_ref: str) -> Path:
         _CACHE_ROOT.mkdir(parents=True, exist_ok=True)
         temporary = _CACHE_ROOT / f"{key}.part"
         await storage_gateway_service.download_to_path(
-            content_ref, temporary, max_bytes=settings.workspace_max_file_bytes,
+            content_ref,
+            temporary,
+            max_bytes=settings.workspace_max_file_bytes,
+            version_id=storage_version_id,
         )
         temporary.replace(target)
     return target

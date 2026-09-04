@@ -10,7 +10,8 @@ import json
 import os
 import time
 import zipfile
-from datetime import date, datetime, time as datetime_time
+from datetime import date, datetime
+from datetime import time as datetime_time
 from decimal import Decimal
 from pathlib import Path
 
@@ -582,8 +583,155 @@ async def test_builtin_spreadsheet_inspects_original_input():
     assert result["summary"]["sheets"][0]["rows"][1] == ["张三", 88]
 
 
+@pytest.mark.asyncio
+async def test_builtin_spreadsheet_inspect_supports_sheet_paging_and_range():
+    from openpyxl import Workbook
+
+    stream = io.BytesIO()
+    book = Workbook()
+    book.active.title = "首页"
+    detail = book.create_sheet("明细")
+    for number in range(1, 8):
+        detail.append([f"row-{number}", number, number * 10])
+    book.save(stream)
+    source = runner.InputFile(
+        file_id="file-page",
+        name="分页.xlsx",
+        content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+    )
+
+    paged = await runner.execute_builtin_tool(
+        runner.BuiltinExecuteRequest(
+            tool_kind="spreadsheet",
+            action="inspect",
+            inputs=[source],
+            params={"sheet": "明细", "offset": 2, "limit": 2},
+            execution_id="builtin-inspect-page",
+        ),
+        runner.RUNNER_TOKEN,
+    )
+    sheet = paged["summary"]["sheets"][0]
+    assert sheet["rows"] == [["row-3", 3, 30], ["row-4", 4, 40]]
+    assert sheet["has_more"] is True
+    assert sheet["next_offset"] == 4
+
+    ranged = await runner.execute_builtin_tool(
+        runner.BuiltinExecuteRequest(
+            tool_kind="spreadsheet",
+            action="inspect",
+            inputs=[source],
+            params={"sheet": "明细", "range": "B2:C3"},
+            execution_id="builtin-inspect-range",
+        ),
+        runner.RUNNER_TOKEN,
+    )
+    assert ranged["summary"]["sheets"][0]["rows"] == [[2, 20], [3, 30]]
+    assert ranged["summary"]["has_more"] is False
+
+
+@pytest.mark.asyncio
+async def test_builtin_spreadsheet_edit_preserves_existing_styles_and_widths():
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.drawing.image import Image as SpreadsheetImage
+    from openpyxl.styles import Font, PatternFill
+
+    stream = io.BytesIO()
+    book = Workbook()
+    sheet = book.active
+    sheet["A1"] = "原表头"
+    sheet["A1"].font = Font(italic=True, bold=False, color="FF112233")
+    sheet["A1"].fill = PatternFill("solid", fgColor="FFABCDEF")
+    sheet.column_dimensions["A"].width = 55
+    sheet["C1"] = "合并标题"
+    sheet.merge_cells("C1:D1")
+    sheet["A3"] = 2
+    sheet["B3"] = "=A3*5"
+    pixel = Image.new("RGB", (2, 2), "red")
+    pixel_bytes = io.BytesIO()
+    pixel.save(pixel_bytes, format="PNG")
+    pixel_bytes.seek(0)
+    sheet.add_image(SpreadsheetImage(pixel_bytes), "E2")
+    book.save(stream)
+
+    result = await runner.execute_builtin_tool(
+        runner.BuiltinExecuteRequest(
+            tool_kind="spreadsheet",
+            action="edit",
+            inputs=[runner.InputFile(
+                file_id="file-style",
+                name="原样式.xlsx",
+                content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+            )],
+            params={"operations": [{"type": "set_cell", "sheet": "Sheet", "cell": "B2", "value": "新增"}]},
+            execution_id="builtin-edit-style",
+        ),
+        runner.RUNNER_TOKEN,
+    )
+    edited = load_workbook(io.BytesIO(base64.b64decode(result["outputs"][0]["content_base64"])))
+    edited_sheet = edited["Sheet"]
+    assert edited_sheet["B2"].value == "新增"
+    assert edited_sheet["A1"].font.italic is True
+    assert edited_sheet["A1"].font.bold is False
+    assert edited_sheet["A1"].fill.fgColor.rgb == "FFABCDEF"
+    assert edited_sheet.column_dimensions["A"].width == 55
+    assert edited_sheet["B3"].value == "=A3*5"
+    assert "C1:D1" in {str(item) for item in edited_sheet.merged_cells.ranges}
+    assert len(edited_sheet._images) == 1
+
+
+@pytest.mark.asyncio
+async def test_builtin_spreadsheet_edit_preserves_xlsm_vba_and_extension():
+    from openpyxl import Workbook
+
+    plain = io.BytesIO()
+    book = Workbook()
+    book.active["A1"] = "before"
+    book.save(plain)
+    source = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(plain.getvalue()), "r") as original, zipfile.ZipFile(
+        source, "w", zipfile.ZIP_DEFLATED,
+    ) as macro_book:
+        for member in original.infolist():
+            payload = original.read(member.filename)
+            if member.filename == "[Content_Types].xml":
+                payload = payload.replace(
+                    b"</Types>",
+                    b'<Override PartName="/xl/vbaProject.bin" '
+                    b'ContentType="application/vnd.ms-office.vbaProject"/></Types>',
+                )
+            elif member.filename == "xl/_rels/workbook.xml.rels":
+                payload = payload.replace(
+                    b"</Relationships>",
+                    b'<Relationship Id="rIdVba" '
+                    b'Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" '
+                    b'Target="vbaProject.bin"/></Relationships>',
+                )
+            macro_book.writestr(member, payload)
+        macro_book.writestr("xl/vbaProject.bin", b"test-vba-payload")
+
+    result = await runner.execute_builtin_tool(
+        runner.BuiltinExecuteRequest(
+            tool_kind="spreadsheet",
+            action="edit",
+            inputs=[runner.InputFile(
+                file_id="macro-file",
+                name="含宏表格.xlsm",
+                content_base64=base64.b64encode(source.getvalue()).decode("ascii"),
+            )],
+            params={"operations": [{"type": "set_cell", "cell": "B2", "value": "after"}]},
+            execution_id="builtin-edit-xlsm",
+        ),
+        runner.RUNNER_TOKEN,
+    )
+    output = result["outputs"][0]
+    assert output["name"] == "含宏表格.xlsm"
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(output["content_base64"]))) as edited:
+        assert edited.read("xl/vbaProject.bin") == b"test-vba-payload"
+
+
 def test_builtin_spreadsheet_values_are_json_safe():
-    assert builtin._value(datetime(2026, 9, 1, 9, 6, 7)) == "2026-09-01T09:06:07"
+    # Excel stores calendar datetimes without a timezone.
+    assert builtin._value(datetime(2026, 9, 1, 9, 6, 7)) == "2026-09-01T09:06:07"  # noqa: DTZ001
     assert builtin._value(date(2026, 9, 1)) == "2026-09-01"
     assert builtin._value(datetime_time(9, 6, 7)) == "09:06:07"
     assert builtin._value(Decimal("13142.7400")) == "13142.7400"
@@ -596,7 +744,7 @@ async def test_builtin_spreadsheet_inspects_datetime_cells():
     stream = io.BytesIO()
     book = Workbook()
     book.active.append(["交易时间", "金额"])
-    book.active.append([datetime(2026, 9, 1, 9, 6, 7), 13142.74])
+    book.active.append([datetime(2026, 9, 1, 9, 6, 7), 13142.74])  # noqa: DTZ001
     book.save(stream)
 
     result = await runner.execute_builtin_tool(

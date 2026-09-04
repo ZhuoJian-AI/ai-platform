@@ -1,12 +1,16 @@
 """LLM Router — FastAPI application entry point."""
 
 import asyncio
+import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.router import api_router
 from app.config import settings
@@ -103,6 +107,41 @@ app = FastAPI(
     docs_url="/docs" if settings.is_development else None,
     redoc_url="/redoc" if settings.is_development else None,
 )
+
+
+def _redacted_validation_errors(exc: RequestValidationError) -> list[dict]:
+    """Keep actionable validation locations without echoing request secrets."""
+    return [
+        {key: error[key] for key in ("type", "loc", "msg") if key in error}
+        for error in exc.errors()
+    ]
+
+
+_STABLE_FILE_PATH_RE = re.compile(
+    r"/(?:terminal/)?files/[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}(?:/|$)"
+)
+
+
+@app.exception_handler(HTTPException)
+async def conceal_stable_file_forbidden(
+    request: Request,
+    exc: HTTPException,
+):
+    """Do not reveal whether an opaque stable file id exists."""
+    if exc.status_code == 403 and _STABLE_FILE_PATH_RE.search(request.url.path):
+        return JSONResponse(status_code=404, content={"detail": "File not found"})
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(
+    _request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    # Pydantic's default error representation includes ``input`` and sometimes
+    # ``ctx``.  Tokens or signed URLs in malformed bodies must not be reflected
+    # to clients, access logs or observability collectors.
+    return JSONResponse(status_code=422, content={"detail": _redacted_validation_errors(exc)})
 
 # CORS — 允许前端本地开发
 app.add_middleware(

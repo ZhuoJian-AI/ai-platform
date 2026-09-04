@@ -105,7 +105,7 @@ async def test_member_capabilities_and_cross_tenant_are_consistent(db_session):
         "manage": False, "publish": False,
     }
     assert await workspace_permission_service.capabilities(db_session, organization_ws, cu) == {
-        "read": True, "create": False, "update": False, "delete": False,
+        "read": False, "create": False, "update": False, "delete": False,
         "manage": False, "publish": False,
     }
     assert not (await workspace_permission_service.capabilities(db_session, foreign_ws, cu))["read"]
@@ -188,7 +188,16 @@ async def test_direct_upload_verifies_oss_and_can_restore_from_trash(db_session,
         }
 
     async def fake_inspect(_content_ref):
-        return {"size": expected_size, "etag": "etag-1", "content_type": "application/pdf"}
+        return {
+            "size": expected_size, "etag": "etag-1", "content_type": "application/pdf",
+            "version_id": None, "integrity_algorithm": "crc64ecma", "integrity_value": "12345",
+        }
+
+    async def fake_finalize(_object_key):
+        return {
+            "status": "completed", "size": expected_size, "etag": "etag-1",
+            "version_id": None, "integrity_algorithm": "crc64ecma", "integrity_value": "12345",
+        }
 
     monkeypatch.setattr(settings, "workspace_object_storage_enabled", True)
     monkeypatch.setattr(settings, "storage_gateway_url", "https://storage.example.test")
@@ -202,6 +211,11 @@ async def test_direct_upload_verifies_oss_and_can_restore_from_trash(db_session,
         workspace_governance_service.storage_gateway_service,
         "inspect_object",
         fake_inspect,
+    )
+    monkeypatch.setattr(
+        workspace_governance_service.storage_gateway_service,
+        "finalize_policy_upload",
+        fake_finalize,
     )
 
     session = await workspace_governance_service.initiate_direct_upload(
@@ -229,7 +243,12 @@ async def test_direct_upload_verifies_oss_and_can_restore_from_trash(db_session,
 
     await workspace_service.soft_delete_file(db_session, saved, user_id=cu.id)
     restored = await workspace_governance_service.restore_from_trash(
-        db_session, personal, saved.id, cu,
+        db_session,
+        personal,
+        saved.id,
+        cu,
+        base_version_id=saved.current_version_id,
+        idempotency_key="restore-trash-test-0001",
     )
     assert restored.deleted_at is None
     assert restored.purge_after is None
@@ -245,7 +264,16 @@ async def test_direct_upload_rejects_authoritative_size_mismatch(db_session, mon
         return {"url": "https://oss.example.test/put", "headers": {}, "object_key": "x/file.bin"}
 
     async def fake_inspect(_content_ref):
-        return {"size": expected_size - 1, "etag": "etag", "content_type": "application/octet-stream"}
+        return {
+            "size": expected_size - 1, "etag": "etag", "content_type": "application/octet-stream",
+            "version_id": None, "integrity_algorithm": "crc64ecma", "integrity_value": "999",
+        }
+
+    async def fake_finalize(_object_key):
+        return {
+            "status": "completed", "size": expected_size, "etag": "etag",
+            "version_id": None, "integrity_algorithm": "crc64ecma", "integrity_value": "999",
+        }
 
     monkeypatch.setattr(settings, "workspace_object_storage_enabled", True)
     monkeypatch.setattr(settings, "storage_gateway_url", "https://storage.example.test")
@@ -255,6 +283,11 @@ async def test_direct_upload_rejects_authoritative_size_mismatch(db_session, mon
     )
     monkeypatch.setattr(
         workspace_governance_service.storage_gateway_service, "inspect_object", fake_inspect,
+    )
+    monkeypatch.setattr(
+        workspace_governance_service.storage_gateway_service,
+        "finalize_policy_upload",
+        fake_finalize,
     )
     session = await workspace_governance_service.initiate_direct_upload(
         db_session,
@@ -269,3 +302,69 @@ async def test_direct_upload_rejects_authoritative_size_mismatch(db_session, mon
         await workspace_governance_service.complete_direct_upload(db_session, session, cu)
     assert exc.value.status_code == 409
     assert session.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_explicit_same_path_upload_creates_version_without_changing_file_id(
+    db_session, monkeypatch,
+):
+    cu, personal, _, _, _ = await _tenant(db_session)
+    size = 1024
+    sequence = iter(("first", "second"))
+
+    async def fake_sign(**_kwargs):
+        key = next(sequence)
+        return {"url": f"https://oss.example/{key}", "headers": {}, "object_key": f"p/{key}.xlsx"}
+
+    async def fake_finalize(object_key):
+        value = "101" if object_key.endswith("first.xlsx") else "202"
+        return {
+            "status": "completed", "size": size, "etag": f"etag-{value}",
+            "version_id": None, "integrity_algorithm": "crc64ecma", "integrity_value": value,
+        }
+
+    async def fake_inspect(content_ref):
+        value = "101" if content_ref.endswith("first.xlsx") else "202"
+        return {
+            "size": size,
+            "etag": f"etag-{value}",
+            "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "version_id": None, "integrity_algorithm": "crc64ecma", "integrity_value": value,
+            "content_hash": "",
+        }
+
+    monkeypatch.setattr(settings, "workspace_object_storage_enabled", True)
+    monkeypatch.setattr(settings, "storage_gateway_url", "https://storage.example.test")
+    monkeypatch.setattr(settings, "storage_project_token", "test-token")
+    monkeypatch.setattr(workspace_governance_service.storage_gateway_service, "sign_browser_upload", fake_sign)
+    monkeypatch.setattr(workspace_governance_service.storage_gateway_service, "finalize_policy_upload", fake_finalize)
+    monkeypatch.setattr(workspace_governance_service.storage_gateway_service, "inspect_object", fake_inspect)
+
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    created_session = await workspace_governance_service.initiate_direct_upload(
+        db_session, personal, cu,
+        WorkspaceUploadInitiate(path="共享/明细.xlsx", filename="明细.xlsx", content_type=mime, size=size),
+    )
+    created = await workspace_governance_service.complete_direct_upload(
+        db_session, created_session, cu, client_etag="etag-101",
+    )
+    original_id = created.id
+    original_version = created.current_version_id
+
+    replacement_session = await workspace_governance_service.initiate_direct_upload(
+        db_session, personal, cu,
+        WorkspaceUploadInitiate(
+            path="共享/明细.xlsx", filename="明细.xlsx", content_type=mime, size=size,
+            target_file_id=created.id, base_version_id=original_version,
+            idempotency_key="upload-version-0001",
+        ),
+    )
+    replaced = await workspace_governance_service.complete_direct_upload(
+        db_session, replacement_session, cu, client_etag="etag-202",
+    )
+    assert replaced.id == original_id
+    assert replaced.current_version_id != original_version
+    assert replaced.content_ref == "oss://p/second.xlsx"
+    assert replaced.metadata_["integrity_algorithm"] == "crc64ecma"
+    assert replaced.metadata_["integrity_value"] == "202"
+    assert replaced.content_hash is None

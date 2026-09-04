@@ -41,14 +41,18 @@ from app.models.rag import RagChunk, RagCollection, RagDocument, RagFolder
 from app.models.role import Role, RoleDataDepartment, RolePermission, UserRole
 from app.models.routing_policy import RoutingPolicy
 from app.models.skill import ScopeManagerAssignment, Skill, SkillExecution, SkillFile, SkillFolder, SkillVersion
-from app.models.task import Task, TaskMessage
+from app.models.task import Task, TaskFileRef, TaskMessage
 from app.models.team import Team
 from app.models.tool_call_log import ToolCallLog
 from app.models.user import User, user_department_memberships
 from app.models.workspace import (
+    OfficeEditRoom,
+    OfficeSaveEvent,
     Workspace,
     WorkspaceAuditEvent,
     WorkspaceFile,
+    WorkspaceFileEventOutbox,
+    WorkspaceFileMutation,
     WorkspaceFileVersion,
     WorkspaceFolder,
     WorkspacePreviewJob,
@@ -93,13 +97,17 @@ __all__ = [
     "PlatformExtensionReleaseEvent",
     # 智能体平台
     "Workspace",
+    "OfficeEditRoom",
+    "OfficeSaveEvent",
     "WorkspaceFile",
+    "WorkspaceFileMutation",
     "WorkspaceFolder",
     "WorkspaceFileVersion",
     "WorkspacePreviewJob",
     "WorkspaceUploadSession",
     "WorkspaceAuditEvent",
     "WorkspaceShareLink",
+    "WorkspaceFileEventOutbox",
     "Agent",
     "AgentRun",
     "AgentRunEvent",
@@ -126,6 +134,7 @@ __all__ = [
     "ToolCallLog",
     # 终端用户端
     "Task",
+    "TaskFileRef",
     "TaskMessage",
     "Memory",
     "ModuleDeployment",

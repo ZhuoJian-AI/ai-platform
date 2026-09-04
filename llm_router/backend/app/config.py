@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Backend directory (where .env lives)
@@ -106,7 +107,7 @@ class Settings(BaseSettings):
     # gateway when enabled.  No OSS AccessKey is held by this application.
     workspace_object_storage_enabled: bool = False
     storage_gateway_url: str = ""
-    storage_project_token: str = ""
+    storage_project_token: SecretStr = SecretStr("")
     storage_public_endpoint: str = ""
     storage_internal_endpoint: str = ""
     storage_accelerate_endpoint: str = ""
@@ -119,6 +120,13 @@ class Settings(BaseSettings):
     workspace_proxy_upload_max_bytes: int = 1 * 1024 * 1024
     workspace_upload_session_ttl_seconds: int = 24 * 60 * 60
     workspace_weboffice_enabled: bool = False
+    # Human-triggered Office editing is a separate fail-closed feature.  It is
+    # never inferred from preview enablement: the Storage Gateway additionally
+    # verifies IMM/MNS configuration and OSS versioning before issuing a token.
+    workspace_weboffice_edit_enabled: bool = False
+    workspace_office_event_callback_secret: SecretStr = SecretStr("")
+    workspace_office_reconcile_poll_seconds: float = 1.0
+    workspace_office_reconcile_lease_seconds: int = 5 * 60
     workspace_weboffice_max_bytes: int = 200 * 1024 * 1024
     workspace_pdf_direct_preview_max_bytes: int = 20 * 1024 * 1024
     workspace_preview_job_poll_seconds: float = 1.0
@@ -130,7 +138,32 @@ class Settings(BaseSettings):
         return bool(
             self.workspace_object_storage_enabled
             and self.storage_gateway_url.strip()
-            and self.storage_project_token.strip()
+            and self.storage_project_token_value
+        )
+
+    @property
+    def storage_project_token_value(self) -> str:
+        value = self.storage_project_token
+        if isinstance(value, SecretStr):
+            return value.get_secret_value().strip()
+        # Tests and gradual configuration reloads may temporarily assign the
+        # legacy plain-string representation.  Never expose it from repr/logs.
+        return str(value or "").strip()
+
+    @property
+    def workspace_office_event_callback_secret_value(self) -> str:
+        value = self.workspace_office_event_callback_secret
+        if isinstance(value, SecretStr):
+            return value.get_secret_value().strip()
+        return str(value or "").strip()
+
+    @property
+    def workspace_weboffice_edit_configured(self) -> bool:
+        """Fail closed unless every Platform-side editing dependency exists."""
+        return bool(
+            self.workspace_weboffice_edit_enabled
+            and self.workspace_object_storage_configured
+            and len(self.workspace_office_event_callback_secret_value) >= 32
         )
 
     @property

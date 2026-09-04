@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,15 +11,6 @@ from app.models.workspace import Workspace
 
 DEPARTMENT_READ_PREFIX = "workspace.department.read:"
 DEPARTMENT_UPLOAD_PREFIX = "workspace.department.upload:"
-PERMISSION_QUESTION_MARKERS = (
-    "权限", "角色", "能不能", "能否", "可以吗", "能做什么", "可做什么", "哪些部门", "什么部门",
-)
-WRITE_ACTION_MARKERS = ("修改", "上传", "写入", "保存", "生成", "重命名", "恢复", "新建", "创建")
-DIRECT_FILE_ACTION_MARKERS = (
-    "读取", "查看", "列出", "扫描", "处理", "分析", "修改", "上传", "写入", "保存", "生成", "重命名", "恢复",
-)
-
-
 def department_workspace_scope_ids(cu: CurrentUser) -> tuple[str, ...]:
     """Return departments explicitly exposed to the user by role permissions."""
     department_ids: set[str] = set()
@@ -84,17 +73,12 @@ async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) 
     scope_type = getattr(workspace, "scope_type", "organization")
     scope_id = str(getattr(workspace, "scope_id", None) or "")
     own = scope_type == "user" and scope_id == str(getattr(cu, "id", ""))
-    team_id = getattr(cu, "team_id", None)
     department_read, department_upload = _department_workspace_access(cu, scope_id)
     same_department = scope_type == "department" and department_read
-    same_team = scope_type == "team" and bool(team_id) and scope_id == str(team_id)
-    same_organization = scope_type == "organization"
-    # Terminal work is personal by default.  Shared department workspaces are
-    # readable for the home department and for departments explicitly granted
-    # to a role.  The organization workspace is a company-wide read-only area.
-    # Shared writes are never inferred from administrator status or the legacy
-    # role data-scope field.
-    can_read = own or same_department or same_team or same_organization
+    # Workspace file access follows the explicit administrator role matrix.
+    # Until organization/team workspace permissions have corresponding role
+    # codes, membership alone must not silently disclose those catalogues.
+    can_read = own or same_department
     can_write_department = scope_type == "department" and department_upload
     can_update = own or can_write_department
     return {
@@ -119,10 +103,6 @@ def capability_sources(workspace: Workspace, cu: CurrentUser) -> dict[str, list[
     if own:
         source = [{"type": "ownership", "id": str(cu.id), "name": "个人工作空间"}]
         return {key: source for key in ("read", "create", "update", "delete")}
-    if scope_type == "organization":
-        return {"read": [{"type": "organization", "id": str(cu.organization_id), "name": "同公司公共只读"}]}
-    if scope_type == "team" and scope_id == str(getattr(cu, "team_id", None) or ""):
-        return {"read": [{"type": "membership", "id": scope_id, "name": "所属团队"}]}
     if scope_type != "department":
         return {}
 
@@ -164,6 +144,12 @@ async def effective_access(db: AsyncSession, cu: CurrentUser) -> dict:
             # organization permission catalogue and must not be disclosed.
             continue
         caps = await capabilities(db, workspace, cu)
+        # The employee/runtime catalogue is an allow-list, not an organization
+        # directory.  Workspaces for which the principal has no capability must
+        # not leak their name, slug or scope id through the terminal API or the
+        # model prompt.
+        if not any(caps.values()):
+            continue
         rows.append({
             "id": str(workspace.id),
             "name": workspace.name,
@@ -189,87 +175,32 @@ def resolve_workspace_intent(
     *,
     referenced_workspace_ids: list[str] | tuple[str, ...] = (),
 ) -> dict:
-    """Resolve this turn's shared-workspace boundary without reading file metadata.
+    """Return the capability-derived workspace set available to the agent.
 
-    The personal workspace is always the default. Shared workspace names only
-    authorize tools for a concrete file operation, while permission questions
-    are answered from ``access`` alone.
+    This compatibility helper deliberately ignores natural-language keywords.
+    Role-based capabilities are the only workspace boundary; every concrete
+    tool operation performs a fresh RBAC check before reading or mutating data.
+    ``referenced_workspace_ids`` remains accepted for older callers but never
+    widens the capability set.
     """
-    text = (request or "").casefold().strip()
+    del request, referenced_workspace_ids
     workspaces = list(access.get("workspaces") or [])
-    personal_ids = {
+    read_ids = {
         str(item["id"]) for item in workspaces
-        if item.get("scope_type") == "user" and item.get("capabilities", {}).get("read")
+        if item.get("capabilities", {}).get("read")
     }
-    # A referenced file authorizes that exact file in the tool layer, never
-    # the rest of its workspace. The caller still supplies workspace ids so
-    # this distinction stays explicit at the boundary.
-    direct_file_operation = (
-        any(marker in text for marker in DIRECT_FILE_ACTION_MARKERS)
-        and any(marker in text for marker in ("文件", "表格", "文档", "附件", "目录", "工作空间"))
-    )
-    leading_permission_question = any(marker in text for marker in ("能不能", "能否", "是否", "可不可以"))
-    permission_question = leading_permission_question or (
-        any(marker in text for marker in PERMISSION_QUESTION_MARKERS) and not direct_file_operation
-    )
-    file_operation = direct_file_operation and not permission_question
-    write_operation = file_operation and any(marker in text for marker in WRITE_ACTION_MARKERS)
-
-    aliases: dict[str, list[dict]] = {}
-    for item in workspaces:
-        if item.get("scope_type") == "user":
-            continue
-        for raw in (item.get("name"), item.get("slug")):
-            key = str(raw or "").casefold().strip()
-            if key:
-                aliases.setdefault(key, []).append(item)
-    organization_rows = [item for item in workspaces if item.get("scope_type") == "organization"]
-    if any(phrase in text for phrase in ("公司公共", "公司空间", "企业公共", "组织公共")):
-        aliases.setdefault("__organization__", []).extend(organization_rows)
-
-    matched: dict[str, dict] = {}
-    ambiguous: list[str] = []
-    for alias, rows in aliases.items():
-        if alias == "__organization__":
-            mentioned = True
-        elif re.fullmatch(r"[a-z0-9][a-z0-9_-]*", alias):
-            mentioned = bool(re.search(rf"(?<![a-z0-9_-]){re.escape(alias)}(?![a-z0-9_-])", text))
-        else:
-            mentioned = alias in text
-        if not mentioned:
-            continue
-        unique = {str(item["id"]): item for item in rows}
-        if len(unique) > 1:
-            ambiguous.append("公司公共空间" if alias == "__organization__" else alias)
-            continue
-        matched.update(unique)
-
-    if any(phrase in text for phrase in ("所有我有权限的部门", "全部我有权限的部门", "所有有权限的部门")):
-        for item in workspaces:
-            if item.get("scope_type") == "department" and item.get("capabilities", {}).get("read"):
-                matched[str(item["id"])] = item
-
-    read_ids = set(personal_ids)
-    write_ids = set(personal_ids)
-    if file_operation and not ambiguous:
-        read_ids.update(
-            workspace_id for workspace_id, item in matched.items()
-            if item.get("capabilities", {}).get("read")
-        )
-        if write_operation:
-            write_ids.update(
-                workspace_id for workspace_id, item in matched.items()
-                if item.get("capabilities", {}).get("create")
-                or item.get("capabilities", {}).get("update")
-            )
+    write_ids = {
+        str(item["id"]) for item in workspaces
+        if any(item.get("capabilities", {}).get(key) for key in ("create", "update", "delete"))
+    }
     return {
-        "permission_question": permission_question,
-        "file_operation": file_operation,
-        "write_operation": write_operation,
-        "matched_workspace_ids": sorted(matched),
+        "permission_question": False,
+        "file_operation": False,
+        "write_operation": False,
+        "matched_workspace_ids": sorted(read_ids),
         "read_workspace_ids": sorted(read_ids),
         "write_workspace_ids": sorted(write_ids),
-        "ambiguous_names": sorted(set(ambiguous)),
+        "ambiguous_names": [],
     }
 
 

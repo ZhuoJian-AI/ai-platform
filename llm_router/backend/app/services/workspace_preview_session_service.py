@@ -106,6 +106,7 @@ async def _browser_source(file: WorkspaceFile, *, filename: str) -> dict:
     signed = await storage_gateway_service.get_browser_signed_download(
         str(file.content_ref),
         filename=filename,
+        version_id=str((file.metadata_ or {}).get("storage_version_id") or "") or None,
     )
     return {"mode": "url", **signed}
 
@@ -171,6 +172,13 @@ async def create_preview_session(
         return {**base, "mode": "fallback", "reason": "正在生成备用预览"}
 
     if suffix in PRESENTATION_SUFFIXES:
+        if bool(getattr(file, "is_historical", False)):
+            await enqueue_fallback(db, file)
+            return {
+                **base,
+                "mode": "fallback",
+                "reason": "历史版本使用版本化快速预览，不创建指向当前文件的 WebOffice 会话",
+            }
         if preferred_mode == "fast_layout":
             ready = await fallback_status(db, file, create=False)
             if ready["status"] == "ready":

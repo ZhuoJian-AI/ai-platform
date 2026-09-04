@@ -87,8 +87,12 @@ async def current_user_for_user(db: AsyncSession, user: User) -> CurrentUser:
         .where(User.id == user.id, User.deleted_at.is_(None))
         .execution_options(populate_existing=True)
     )).scalar_one_or_none()
-    if fresh is not None:
-        user = fresh
+    # This helper is also used after long-running Agent/Office/storage work.
+    # Never fall back to the caller's stale ORM object: a deleted or disabled
+    # account must lose all effective permissions before the final write.
+    if fresh is None or not fresh.is_active:
+        raise HTTPException(status_code=401, detail="User account disabled")
+    user = fresh
     rbac = await rbac_for_user(db, user)
     return CurrentUser(
         user=user,

@@ -40,9 +40,16 @@ def initial_state(agent_id: str, org_id: str, message: str, session_id: str | No
 def general_initial_state(
     *, org_id: str, user: CurrentUser, task_id: str, message: str, session_id: str | None,
     config: dict, attachment_files: list[dict] | None = None,
+    file_refs_v1: list[dict] | None = None,
     invoked_skills: list[dict] | None = None,
 ) -> AgentState:
     invoked = list(invoked_skills or [])
+    attachments = list(attachment_files or [])
+    file_refs = list(file_refs_v1 or [])
+    referenced_ids = list(dict.fromkeys([
+        *(str(item["file_id"]) for item in attachments),
+        *(str(item["file_id"]) for item in file_refs),
+    ]))
     return {
         "mode": "general", "org_id": org_id, "task_id": task_id, "user_id": user.id,
         "run_started_monotonic": time.monotonic(),
@@ -60,8 +67,9 @@ def general_initial_state(
         "template_agent_id": config.get("template_agent_id"),
         "application_id": config.get("application_id"),
         "page_context": dict(config.get("page_context") or {}),
-        "attachment_files": list(attachment_files or []),
-        "referenced_file_ids": [str(item["file_id"]) for item in (attachment_files or [])],
+        "attachment_files": attachments,
+        "file_refs_v1": file_refs,
+        "referenced_file_ids": referenced_ids,
     }
 
 
@@ -69,6 +77,8 @@ def user_message_metadata(initial: AgentState) -> dict:
     metadata: dict = {}
     if attachments := list(initial.get("attachment_files") or []):
         metadata["attachments"] = attachments
+    if file_refs := list(initial.get("file_refs_v1") or []):
+        metadata["file_refs_v1"] = file_refs
     if invoked := list(initial.get("invoked_skills") or []):
         metadata["invoked_skills"] = invoked
     if initial.get("application_id"):

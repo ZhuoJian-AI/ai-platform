@@ -21,11 +21,13 @@ from app.api.dlp_rules import router as dlp_router
 from app.api.dsh_internal import router as dsh_internal_router
 from app.api.ecs_publisher import router as ecs_publisher_router
 from app.api.enterprise_applications import router as enterprise_application_router
+from app.api.file_events import router as file_event_router
 from app.api.llm_providers import router as provider_router
 from app.api.memory import router as memory_router
 from app.api.module_publisher import router as module_publisher_router
 from app.api.monitor import router as monitor_router
 from app.api.multimodal import router as multimodal_router
+from app.api.office_edit import router as office_edit_router
 from app.api.ontology import router as ontology_router
 from app.api.organizations import router as org_router
 from app.api.platform_extensions import router as platform_extension_router
@@ -52,6 +54,9 @@ api_router.include_router(module_publisher_router, tags=["module-publisher"])
 api_router.include_router(ecs_publisher_router, tags=["ecs-publisher"])
 # Docker-internal DSH callbacks use a dedicated service token, never user/admin JWTs.
 api_router.include_router(dsh_internal_router, tags=["internal-dsh"])
+# Storage Gateway save notifications use an independent HMAC boundary.  This
+# route is intentionally registered before user/admin JWT protected routes.
+api_router.include_router(office_edit_router, tags=["internal-weboffice"])
 
 # 以下路由需要 JWT 管理员认证，
 # 认证通过 require_admin 依赖在各自的路由文件中声明
@@ -82,5 +87,6 @@ api_router.include_router(monitor_router, tags=["monitor"])
 api_router.include_router(multimodal_router, tags=["multimodal"])
 # 终端用户端（require_user 守卫，用户 JWT）
 api_router.include_router(terminal_router, tags=["terminal"])
+api_router.include_router(file_event_router, tags=["terminal-file-events"])
 # 长期记忆（管理端维护 org/dept/team 级长期记忆）
 api_router.include_router(memory_router, tags=["memory"])

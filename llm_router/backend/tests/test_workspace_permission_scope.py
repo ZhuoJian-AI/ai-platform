@@ -132,3 +132,32 @@ async def test_generic_data_scope_does_not_expand_workspace_visibility(db_sessio
     visible = await scope_service.list_workspaces_for_user(db_session, cu)
 
     assert {str(item.id) for item in visible} == {str(home_ws.id)}
+
+
+@pytest.mark.asyncio
+async def test_effective_access_omits_workspaces_with_no_capability(db_session) -> None:
+    org = Organization(name="Capability catalog", slug="capability-catalog")
+    user = User(
+        organization_id=org.id, username="catalog-user", role="member", is_active=True,
+    )
+    db_session.add_all([org, user])
+    await db_session.flush()
+    readable = Workspace(
+        organization_id=org.id, name="个人空间", slug="personal-catalog",
+        scope_type="user", scope_id=str(user.id),
+    )
+    hidden = Workspace(
+        organization_id=org.id, name="其他团队秘密", slug="hidden-catalog",
+        scope_type="team", scope_id="other-team",
+    )
+    db_session.add_all([readable, hidden])
+    await db_session.flush()
+    cu = CurrentUser(
+        user=user, id=str(user.id), email=user.username, role=user.role,
+        organization_id=org.id, team_id=None,
+    )
+
+    access = await workspace_permission_service.effective_access(db_session, cu)
+
+    assert [item["id"] for item in access["workspaces"]] == [str(readable.id)]
+    assert "其他团队秘密" not in str(access)

@@ -22,8 +22,10 @@ from app.models.platform_extension import PlatformExtensionSource
 from app.models.rag import RagChunk, RagCollection, RagDocument, RagFolder
 from app.models.skill import SkillFile, SkillFolder, SkillVersion
 from app.models.workspace import (
+    OfficeEditRoom,
     Workspace,
     WorkspaceFile,
+    WorkspaceFileEventOutbox,
     WorkspaceFileVersion,
     WorkspaceFolder,
     WorkspacePreviewJob,
@@ -57,19 +59,37 @@ def restore(*rows: Any) -> None:
 
 
 async def mark_workspace_deleted(db: AsyncSession, workspace: Workspace) -> datetime:
-    """Trash a workspace and every visible file/folder under it."""
+    """Trash a workspace and explicitly invalidate every active edit room."""
     now = datetime.now(UTC)
     deadline = retention_deadline(now)
-    mark_deleted(workspace, now=now)
     files = list((await db.execute(select(WorkspaceFile).where(
         WorkspaceFile.workspace_id == workspace.id,
         WorkspaceFile.deleted_at.is_(None),
-    ))).scalars().all())
+    ).order_by(WorkspaceFile.id).with_for_update())).scalars().all())
+    if files:
+        rooms = list((await db.execute(select(OfficeEditRoom).where(
+            OfficeEditRoom.workspace_file_id.in_([file.id for file in files]),
+            OfficeEditRoom.status.in_(("open", "closing")),
+        ).with_for_update())).scalars().all())
+        for room in rooms:
+            room.status = "expired"
+            room.expires_at = now
+            room.closed_at = room.closed_at or now
+            room.last_error = "工作空间已删除，编辑会话已失效"
     folders = list((await db.execute(select(WorkspaceFolder).where(
         WorkspaceFolder.workspace_id == workspace.id,
         WorkspaceFolder.deleted_at.is_(None),
-    ))).scalars().all())
+    ).order_by(WorkspaceFolder.id).with_for_update())).scalars().all())
+    mark_deleted(workspace, now=now)
     mark_deleted(*files, *folders, now=now)
+    for file in files:
+        db.add(WorkspaceFileEventOutbox(
+            organization_id=workspace.organization_id,
+            workspace_id=workspace.id,
+            workspace_file_id=file.id,
+            version_id=file.current_version_id,
+            event_type="file_deleted",
+        ))
     await db.flush()
     return deadline
 
@@ -422,6 +442,9 @@ async def run_cleanup(db: AsyncSession) -> dict[str, int]:
     rag_items = await _purge_rag(db, now)
     ontology_items = await _purge_ontology(db, now)
     migrated = await migrate_inline_skill_packages(db)
+    outbox_result = await db.execute(delete(WorkspaceFileEventOutbox).where(
+        WorkspaceFileEventOutbox.created_at < now - timedelta(days=7),
+    ))
     await db.flush()
     return {
         "backfilled": backfilled,
@@ -436,6 +459,7 @@ async def run_cleanup(db: AsyncSession) -> dict[str, int]:
         "ontology_items": ontology_items,
         "migrated_skill_versions": migrated["migrated"],
         "migration_failures": migrated["failed"],
+        "expired_file_events": int(outbox_result.rowcount or 0),
     }
 
 

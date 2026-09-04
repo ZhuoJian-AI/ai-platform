@@ -86,12 +86,22 @@ SYSTEM_TOOL_GROUPS = [
     {
         "slug": "workspace-files",
         "name": "工作空间文件",
-        "description": "列出、读取、写入和删除当前工作空间文件",
+        "description": "搜索当前用户可读空间，并按稳定文件 ID 读写和管理版本",
         "tools": [
+            "workspace_list",
+            "workspace_search",
+            "workspace_get_file",
             "workspace_list_files",
             "workspace_read_file",
+            "workspace_create_file",
             "workspace_write_file",
+            "workspace_update_file",
+            "workspace_rename_file",
+            "workspace_move_file",
+            "workspace_copy_file",
             "workspace_delete_file",
+            "workspace_list_versions",
+            "workspace_restore_version",
         ],
     },
     {

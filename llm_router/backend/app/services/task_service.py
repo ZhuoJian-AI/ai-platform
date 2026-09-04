@@ -2,25 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import re
 import uuid
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.task import Task, TaskMessage
+from app.models.task import Task, TaskFileRef, TaskMessage
 from app.models.workspace import WorkspaceFile
 from app.schemas.task import TaskCreate, TaskUpdate
-from app.services.storage_lifecycle_service import mark_deleted
-from app.services.workspace_service import get_file_by_path as workspace_service_get_file_by_path
-
-# 写文件类内置工具：arguments 中 path/filename 为产出文件路径。
-# 删除一整轮对话时据此识别本轮产出的工作空间文件，避免残留孤立产物。
-FILE_WRITE_TOOLS = {"workspace_write_file", "generate_docx"}
 
 _LEADING_COMMAND_RE = re.compile(r"^\s*/[a-zA-Z0-9][a-zA-Z0-9_-]*\s*")
 _LEADING_UUID_RE = re.compile(
@@ -143,6 +136,129 @@ async def get_task(db: AsyncSession, task_id: UUID) -> Task | None:
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+async def list_persistent_file_refs(db: AsyncSession, task_id: UUID, *, limit: int = 20) -> list[dict]:
+    """Recover pinned plus recently used file references from message metadata.
+
+    References are durable context only.  Callers must resolve each current
+    file identity and re-check RBAC before placing it in an agent state.
+    """
+    indexed = list((await db.execute(
+        select(TaskFileRef)
+        .where(TaskFileRef.task_id == task_id)
+        .order_by(
+            case((TaskFileRef.scope == "task", 0), else_=1),
+            TaskFileRef.updated_at.desc(),
+        )
+        .limit(max(limit * 2, 40))
+    )).scalars().all())
+    candidates: list[dict] = [{
+        "file_id": str(ref.workspace_file_id),
+        "scope": ref.scope,
+        "version_id": str(ref.version_id) if ref.version_id else None,
+        "follow_latest": bool(ref.follow_latest),
+        "workspace_name": ref.workspace_name,
+        "canonical_path": ref.canonical_path,
+    } for ref in indexed]
+
+    # Compatibility backfill for tasks created before the durable index.
+    rows = list((await db.execute(
+        select(TaskMessage)
+        .where(TaskMessage.task_id == task_id)
+        .order_by(TaskMessage.created_at.desc())
+        .limit(200)
+    )).scalars().all())
+    for message_index, message in enumerate(rows):
+        metadata = message.metadata_ or {}
+        values = [
+            *(metadata.get("file_refs_v1") or []),
+            *(metadata.get("attachments") or []),
+            *(metadata.get("artifacts") or []),
+        ]
+        for item in reversed(values):
+            if not isinstance(item, dict):
+                continue
+            file_id = str(item.get("file_id") or "")
+            if not file_id:
+                continue
+            scope = "task" if item.get("scope") == "task" else "turn"
+            # Task-scoped refs remain pinned.  Turn refs, actual tool reads and
+            # outputs stay in working context for the most recent 40 messages.
+            if scope != "task" and message_index >= 40:
+                continue
+            candidates.append({
+                "file_id": file_id,
+                "scope": scope,
+                "version_id": item.get("version_id") or item.get("current_version_id"),
+                "follow_latest": bool(item.get("follow_latest", True)),
+            })
+
+    # Pinned refs take priority, then recently used refs in reverse chronology.
+    ordered = [
+        *[item for item in candidates if item["scope"] == "task"],
+        *[item for item in candidates if item["scope"] != "task"],
+    ]
+    refs: list[dict] = []
+    seen: set[str] = set()
+    for item in ordered:
+        if item["file_id"] in seen:
+            continue
+        seen.add(item["file_id"])
+        refs.append(item)
+        if len(refs) >= limit:
+            break
+    return refs
+
+
+async def upsert_task_file_refs(
+    db: AsyncSession,
+    task_id: UUID,
+    refs: list[dict],
+) -> None:
+    """Persist actually supplied/read/written file context without granting access."""
+    for item in refs:
+        try:
+            file_id = UUID(str(item.get("file_id") or ""))
+        except (TypeError, ValueError):
+            continue
+        file = await db.get(WorkspaceFile, file_id)
+        if file is None:
+            continue
+        existing = (await db.execute(select(TaskFileRef).where(
+            TaskFileRef.task_id == task_id,
+            TaskFileRef.workspace_file_id == file_id,
+        ).with_for_update())).scalar_one_or_none()
+        raw_version = item.get("version_id") or item.get("current_version_id")
+        try:
+            version_id = UUID(str(raw_version)) if raw_version else None
+        except (TypeError, ValueError):
+            version_id = None
+        requested_scope = "task" if item.get("scope") == "task" else "turn"
+        source = str(item.get("source") or "message")[:32]
+        if existing is None:
+            existing = TaskFileRef(
+                task_id=task_id,
+                workspace_file_id=file_id,
+                scope=requested_scope,
+            )
+            db.add(existing)
+        elif existing.scope == "task":
+            requested_scope = "task"
+        preserve_pinned_version = bool(
+            existing is not None
+            and existing.scope == "task"
+            and not existing.follow_latest
+            and source == "tool_result"
+        )
+        existing.scope = requested_scope
+        if not preserve_pinned_version:
+            existing.version_id = version_id
+            existing.follow_latest = bool(item.get("follow_latest", True))
+        existing.source = source
+        existing.workspace_name = str(item.get("workspace_name") or "")[:255] or None
+        existing.canonical_path = str(item.get("canonical_path") or "")[:1400] or None
+    await db.flush()
+
+
 async def update_task(db: AsyncSession, task: Task, data: TaskUpdate) -> Task:
     values = data.model_dump(exclude_unset=True)
     if "config" in values and values["config"] is not None:
@@ -167,24 +283,26 @@ async def soft_delete_task(db: AsyncSession, task: Task) -> None:
 
 
 async def _soft_delete_task_files(db: AsyncSession, task: Task) -> int:
-    """软删除该任务在工作空间中产出的文件（``metadata.task_id`` 标记）；返回清理条数。"""
-    ws_id = (task.config or {}).get("workspace_id")
-    if not ws_id:
-        return 0
-    stmt = (
-        select(WorkspaceFile)
-        .where(
-            WorkspaceFile.workspace_id == ws_id,
-            WorkspaceFile.metadata_["task_id"].as_string() == str(task.id),
-            WorkspaceFile.deleted_at.is_(None),
-        )
-    )
-    files = list((await db.execute(stmt)).scalars().all())
-    now = datetime.now(UTC)
-    for f in files:
-        mark_deleted(f, now=now)
-    if files:
-        await db.flush()
+    """Delete only task-created stable file generations, never matching paths."""
+    messages = list((await db.execute(select(TaskMessage).where(
+        TaskMessage.task_id == task.id,
+        TaskMessage.role == "assistant",
+    ).order_by(TaskMessage.created_at))).scalars().all())
+    owned: dict[UUID, UUID] = {}
+    for message in messages:
+        for file_id, version_id, created_new in _message_file_generations(message):
+            if created_new:
+                owned[file_id] = version_id
+            elif file_id in owned:
+                # A later task mutation keeps ownership but advances the exact
+                # generation that may safely be removed with this task.
+                owned[file_id] = version_id
+    # Use the same row-lock, active-room and outbox path as direct/folder
+    # deletion.  A task cleanup must never tombstone a file while its human
+    # WebOffice editor is still saving.
+    from app.services import workspace_service
+
+    files = await workspace_service.soft_delete_file_generations(db, owned)
     return len(files)
 
 
@@ -197,56 +315,26 @@ async def list_messages(db: AsyncSession, task_id: UUID) -> list[TaskMessage]:
     return list((await db.execute(stmt)).scalars().all())
 
 
-def _extract_turn_file_paths(assistant_msg: TaskMessage) -> list[str]:
-    """从 assistant 消息 metadata.traces 中提取本轮产出的工作空间文件路径。
-
-    仅取 ``category='skill'`` 且 ``name`` 属于写文件类工具的 trace，且 ``result.ok !== false``。
-    ``workspace_write_file`` 取 ``arguments.path``，``generate_docx`` 取 ``arguments.filename``。
-    """
-    meta = assistant_msg.metadata_ or {}
-    traces = meta.get("traces") or []
-    if not isinstance(traces, list):
-        return []
-    paths: list[str] = []
-    for t in traces:
-        if not isinstance(t, dict):
+def _message_file_generations(message: TaskMessage) -> list[tuple[UUID, UUID, bool]]:
+    """Read trusted stable ids/generations persisted by ``save_memory``."""
+    values = (message.metadata_ or {}).get("artifacts") or []
+    result: list[tuple[UUID, UUID, bool]] = []
+    for item in values:
+        if not isinstance(item, dict):
             continue
-        if t.get("category") != "skill":
+        try:
+            file_id = UUID(str(item.get("file_id") or ""))
+            version_id = UUID(str(item.get("current_version_id") or ""))
+        except (TypeError, ValueError):
             continue
-        name = t.get("name") or ""
-        if name not in FILE_WRITE_TOOLS:
-            continue
-        result = t.get("result")
-        if isinstance(result, dict) and result.get("ok") is False:
-            continue
-        raw_args = t.get("arguments") or ""
-        if isinstance(raw_args, str):
-            try:
-                args = json.loads(raw_args) if raw_args.strip() else {}
-            except Exception:
-                continue
-        elif isinstance(raw_args, dict):
-            args = raw_args
-        else:
-            continue
-        path = ("filename" if name == "generate_docx" else "path")
-        val = args.get(path) if isinstance(args, dict) else None
-        if isinstance(val, str) and val.strip():
-            paths.append(val.strip())
-    return paths
+        result.append((file_id, version_id, item.get("created_new") is True))
+    return result
 
 
 async def soft_delete_task_turn(
     db: AsyncSession, task: Task, user_message_id: UUID,
 ) -> dict:
-    """软删除一整轮对话：用户消息 + 紧随其后的 assistant 消息，以及仅本轮产出的工作空间文件。
-
-    文件清理复用 ``metadata.task_id`` 之外的另一条线索——从 assistant 消息 ``metadata.traces``
-    里提取 ``workspace_write_file`` / ``generate_docx`` 写入的路径，按 (workspace_id, path) 软删除。
-    若同一路径在后续轮次中又被写入，则视为后续轮次所有，不在本轮删除（避免误删别轮产物）。
-
-    返回 ``{deleted_messages, deleted_files}`` 供接口日志展示。
-    """
+    """Delete a turn and only its exact task-created file generations."""
     # 1) 定位本轮 user / assistant 消息
     stmt = (
         select(TaskMessage)
@@ -270,42 +358,19 @@ async def soft_delete_task_turn(
     )
     assistant_msg = (await db.execute(stmt_asst)).scalar_one_or_none()
 
-    # 2) 收集本轮产出文件路径；若有 assistant 消息则剔除后续轮次重复写入的路径
-    turn_paths: list[str] = []
-    if assistant_msg is not None:
-        turn_paths = _extract_turn_file_paths(assistant_msg)
-    if turn_paths:
-        later_stmt = (
-            select(TaskMessage)
-            .where(
-                TaskMessage.task_id == task.id,
-                TaskMessage.role == "assistant",
-                TaskMessage.created_at > assistant_msg.created_at,
-            )
-            .order_by(TaskMessage.created_at.asc())
-        )
-        later_msgs = list((await db.execute(later_stmt)).scalars().all())
-        later_paths: set[str] = set()
-        for m in later_msgs:
-            later_paths.update(_extract_turn_file_paths(m))
-        turn_paths = [p for p in turn_paths if p not in later_paths]
+    # 2) Stable IDs cannot accidentally select a later upload that reused the
+    # same path.  The generation check also preserves a file updated later.
+    generations = _message_file_generations(assistant_msg) if assistant_msg is not None else []
+    owned = {
+        file_id: version_id
+        for file_id, version_id, created_new in generations
+        if created_new
+    }
+    from app.services import workspace_service
 
-    # 3) 软删除工作空间文件（若任务绑定了工作空间）
-    ws_id = (task.config or {}).get("workspace_id")
-    deleted_files = 0
-    if ws_id and turn_paths:
-        # 同一 (workspace_id, path) 可能因多次写入存在历史软删除记录——只清理当前可见的一条。
-        ws_uuid = UUID(ws_id) if isinstance(ws_id, str) else ws_id
-        for path in turn_paths:
-            f = await workspace_service_get_file_by_path(db, ws_uuid, path)
-            if f is None:
-                continue
-            mark_deleted(f)
-            deleted_files += 1
-        if deleted_files:
-            await db.flush()
+    deleted_files = len(await workspace_service.soft_delete_file_generations(db, owned))
 
-    # 4) 删除消息（硬删除——TaskMessage 无 SoftDeleteMixin，对话历史不留软删除残留）
+    # 3) 删除消息（硬删除——TaskMessage 无 SoftDeleteMixin，对话历史不留软删除残留）
     to_delete = [user_msg]
     if assistant_msg is not None:
         to_delete.append(assistant_msg)
