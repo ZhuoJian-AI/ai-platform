@@ -342,13 +342,26 @@ function AppLayout() {
   );
 }
 
-export default function App() {
+function AdminApp() {
   return (
     <AuthProvider>
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/:slug/login" element={<OrgLogin />} />
-        {/* 终端用户门户（独立 shell，用户 JWT） */}
+        <Route path="/*" element={
+          <RequireAuth>
+            <AppLayout />
+          </RequireAuth>
+        } />
+      </Routes>
+    </AuthProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <Routes>
+        {/* 终端用户门户完全独立于管理员会话。 */}
         <Route path="/:slug/terminal/login" element={
           <UserAuthProvider><UserLoginPage /></UserAuthProvider>
         } />
@@ -367,12 +380,7 @@ export default function App() {
         <Route path="/f/:fileId" element={
           <UserAuthProvider><FileDeepLinkPage /></UserAuthProvider>
         } />
-        <Route path="/*" element={
-          <RequireAuth>
-            <AppLayout />
-          </RequireAuth>
-        } />
-      </Routes>
-    </AuthProvider>
+        <Route path="/*" element={<AdminApp />} />
+    </Routes>
   );
 }

@@ -1,26 +1,12 @@
 """Admin management API — login, CRUD, password change."""
 
 import hmac
-from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.admin_auth import CurrentAdmin, require_admin
-from app.auth.login_throttle import (
-    assert_login_allowed,
-    clear_login_failures,
-    record_login_failure,
-)
-from app.auth.mfa import (
-    generate_recovery_codes,
-    generate_totp_secret,
-    hash_recovery_code,
-    matching_totp_counter,
-    provisioning_uri,
-)
 from app.auth.session_cookies import (
     admin_csrf_cookie_name,
     admin_session_cookie_name,
@@ -29,7 +15,6 @@ from app.auth.session_cookies import (
     set_session_cookie,
 )
 from app.database import get_db
-from app.models.admin import Admin
 from app.schemas.admin import (
     AdminCreate,
     AdminRead,
@@ -37,14 +22,12 @@ from app.schemas.admin import (
     ChangePasswordRequest,
     LoginRequest,
     LoginResponse,
-    MfaCodeRequest,
     OrgInfoResponse,
 )
 from app.services.admin_service import (
     admin_read_with_org,
     assert_can_manage_admin,
     change_password,
-    create_access_token,
     create_admin,
     delete_admin,
     get_admin,
@@ -53,8 +36,6 @@ from app.services.admin_service import (
     update_admin,
 )
 from app.services.organization_service import get_org_public_by_slug
-from app.utils.crypto import decrypt_provider_api_key, encrypt_provider_api_key
-from app.utils.request_source import client_source
 
 router = APIRouter()
 
@@ -62,7 +43,6 @@ router = APIRouter()
 @router.post("/auth/login", response_model=LoginResponse)
 async def login_endpoint(
     data: LoginRequest,
-    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
@@ -71,21 +51,9 @@ async def login_endpoint(
     - 带 slug：组织门户登录，仅匹配该组织的 enterprise_admin。
     - 不带 slug：平台登录，仅匹配 platform_super_admin。
     """
-    identity = f"{data.slug or 'platform'}:{data.username}"
-    source = client_source(request)
-    await assert_login_allowed("admin", identity, source)
-    try:
-        result = await login(db, data.username, data.password, slug=data.slug, mfa_code=data.mfa_code)
-    except HTTPException as exc:
-        # A correct password entering the second MFA step is not a failed
-        # login. Invalid MFA codes still consume the shared throttle budget.
-        if exc.detail != "MFA_REQUIRED":
-            await record_login_failure("admin", identity, source)
-        raise
+    result = await login(db, data.username, data.password, slug=data.slug)
     if result is None:
-        await record_login_failure("admin", identity, source)
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    await clear_login_failures("admin", identity, source)
     set_session_cookie(
         response,
         admin_session_cookie_name(),
@@ -94,71 +62,6 @@ async def login_endpoint(
     )
     result.csrf_token = set_admin_csrf_cookie(response)
     return result
-
-
-@router.post("/auth/mfa/setup")
-async def setup_mfa_endpoint(
-    auth: CurrentAdmin = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Create a pending TOTP seed; confirmation is required before enabling."""
-    admin = (
-        await db.execute(select(Admin).where(Admin.id == auth.admin.id).with_for_update())
-    ).scalar_one()
-    if admin.mfa_enabled:
-        raise HTTPException(status_code=409, detail="MFA is already enabled")
-    secret = (
-        decrypt_provider_api_key(admin.mfa_secret_encrypted)
-        if admin.mfa_secret_encrypted
-        else generate_totp_secret()
-    )
-    admin.mfa_secret_encrypted = encrypt_provider_api_key(secret)
-    admin.mfa_recovery_code_hashes = []
-    admin.mfa_last_totp_counter = None
-    await db.flush()
-    return {
-        "secret": secret,
-        "provisioning_uri": provisioning_uri(secret, auth.admin.username),
-    }
-
-
-@router.post("/auth/mfa/confirm")
-async def confirm_mfa_endpoint(
-    data: MfaCodeRequest,
-    response: Response,
-    auth: CurrentAdmin = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """Verify enrollment and return one-time recovery codes plus a full session."""
-    admin = (
-        await db.execute(select(Admin).where(Admin.id == auth.admin.id).with_for_update())
-    ).scalar_one()
-    if admin.mfa_enabled:
-        raise HTTPException(status_code=409, detail="MFA is already enabled")
-    encrypted = admin.mfa_secret_encrypted
-    if not encrypted:
-        raise HTTPException(status_code=409, detail="Start MFA setup first")
-    secret = decrypt_provider_api_key(encrypted)
-    counter = matching_totp_counter(secret, data.code)
-    if counter is None:
-        raise HTTPException(status_code=400, detail="Invalid verification code")
-    recovery_codes = generate_recovery_codes()
-    admin.mfa_recovery_code_hashes = [hash_recovery_code(code) for code in recovery_codes]
-    admin.mfa_enabled = True
-    admin.mfa_last_totp_counter = counter
-    admin.mfa_verified_at = datetime.now(UTC)
-    admin.auth_epoch += 1
-    await db.flush()
-    token = create_access_token(admin, mfa_verified=True)
-    set_session_cookie(response, admin_session_cookie_name(), token, max_age=24 * 60 * 60)
-    csrf_token = set_admin_csrf_cookie(response)
-    return {
-        "recovery_codes": recovery_codes,
-        "access_token": token,
-        "token_type": "bearer",
-        "csrf_token": csrf_token,
-        "admin": (await admin_read_with_org(db, admin)).model_dump(mode="json"),
-    }
 
 
 @router.get("/auth/csrf")

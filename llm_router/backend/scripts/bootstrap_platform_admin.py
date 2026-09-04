@@ -15,7 +15,7 @@ from app.services.admin_service import bootstrap_platform_admin  # noqa: E402
 
 
 async def _run(username: str) -> None:
-    password = getpass.getpass("Initial password (at least 12 characters): ")
+    password = getpass.getpass("Initial password: ")
     confirmation = getpass.getpass("Repeat password: ")
     if password != confirmation:
         raise SystemExit("Passwords do not match")

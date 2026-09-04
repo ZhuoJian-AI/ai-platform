@@ -2,7 +2,6 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import { Spin } from 'antd';
 import { Navigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import AdminMfaEnrollment, { type MfaEnrollmentCompletion } from '../components/AdminMfaEnrollment';
 import {
   adminFetch,
   clearAdminSession,
@@ -23,15 +22,13 @@ export interface AdminUser {
   display_name: string | null;
   role: AdminRole;
   is_active: boolean;
-  must_change_password?: boolean;
-  mfa_enabled?: boolean;
   /** enterprise_admin 必填且登录后不可切换。 */
   organization_id?: string | null;
   organization_name?: string | null;
   organization_slug?: string | null;
 }
 
-type AuthStatus = 'loading' | 'authenticated' | 'mfa_enrollment_required' | 'anonymous';
+type AuthStatus = 'loading' | 'authenticated' | 'anonymous';
 
 interface AuthContextType {
   status: AuthStatus;
@@ -72,8 +69,6 @@ export function normalizeAdminUser(value: unknown): AdminUser | null {
     display_name: typeof raw.display_name === 'string' ? raw.display_name : null,
     role,
     is_active: true,
-    must_change_password: raw.must_change_password === true,
-    mfa_enabled: typeof raw.mfa_enabled === 'boolean' ? raw.mfa_enabled : undefined,
     organization_id: organizationId,
     organization_name: typeof raw.organization_name === 'string' ? raw.organization_name : null,
     organization_slug: typeof raw.organization_slug === 'string' ? raw.organization_slug : null,
@@ -110,7 +105,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setAdminSession(migratedSession.accessToken, authenticatedAdmin.organization_slug);
       setLoginRedirectSlug(authenticatedAdmin.organization_slug ?? null);
       setAdmin(authenticatedAdmin);
-      setStatus(authenticatedAdmin.mfa_enabled === false ? 'mfa_enrollment_required' : 'authenticated');
+      setStatus('authenticated');
     }).catch(() => {
       if (!disposed) expireSession();
     });
@@ -123,16 +118,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAdminSession(accessToken, adminData.organization_slug, csrfToken);
     setLoginRedirectSlug(adminData.organization_slug ?? null);
     setAdmin(adminData);
-    setStatus(adminData.mfa_enabled === false ? 'mfa_enrollment_required' : 'authenticated');
+    setStatus('authenticated');
   }, [queryClient]);
-
-  const completeMfaEnrollment = useCallback((completion: MfaEnrollmentCompletion) => {
-    const authenticatedAdmin = normalizeAdminUser(completion.admin);
-    if (!authenticatedAdmin || authenticatedAdmin.mfa_enabled !== true) {
-      throw new Error('服务器返回的管理员 MFA 状态无效');
-    }
-    login(null, authenticatedAdmin, completion.csrfToken);
-  }, [login]);
 
   const logout = useCallback(() => {
     // Start server-side revocation while the optional legacy in-memory bearer
@@ -152,10 +139,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   return (
     <AuthContext.Provider value={{ status, admin, loginRedirectSlug, login, logout, isAdmin, isSuperAdmin, isOrgScoped, isOrgAdmin }}>
       {children}
-      <AdminMfaEnrollment
-        open={status === 'mfa_enrollment_required' && admin !== null}
-        onConfirmed={completeMfaEnrollment}
-      />
     </AuthContext.Provider>
   );
 }
@@ -170,9 +153,6 @@ export function useAuth() {
 export function RequireAuth({ children }: { children: ReactNode }) {
   const { status, loginRedirectSlug } = useAuth();
   if (status === 'loading') {
-    return <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><Spin size="large" /></div>;
-  }
-  if (status === 'mfa_enrollment_required') {
     return <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><Spin size="large" /></div>;
   }
   if (status !== 'authenticated') {

@@ -133,29 +133,6 @@ async def require_admin(
             raise HTTPException(status_code=401, detail="Organization is unavailable")
     if payload.get("auth_epoch") != admin.auth_epoch:
         raise HTTPException(status_code=401, detail="Admin session revoked")
-    if admin.must_change_password:
-        password_change_routes = {
-            "/api/v1/auth/me",
-            "/api/v1/auth/csrf",
-            "/api/v1/auth/logout",
-            "/api/v1/auth/change-password",
-        }
-        if request.url.path not in password_change_routes:
-            raise HTTPException(status_code=403, detail="PASSWORD_CHANGE_REQUIRED")
-    if admin.mfa_enabled and payload.get("mfa") is not True:
-        raise HTTPException(status_code=401, detail="Administrator MFA verification required")
-    if not admin.mfa_enabled:
-        enrollment_routes = {
-            "/api/v1/auth/me",
-            "/api/v1/auth/csrf",
-            "/api/v1/auth/logout",
-            "/api/v1/auth/change-password",
-            "/api/v1/auth/mfa/setup",
-            "/api/v1/auth/mfa/confirm",
-        }
-        if request.url.path not in enrollment_routes:
-            raise HTTPException(status_code=403, detail="MFA_ENROLLMENT_REQUIRED")
-
     return CurrentAdmin(
         admin=admin,
         id=admin.id,

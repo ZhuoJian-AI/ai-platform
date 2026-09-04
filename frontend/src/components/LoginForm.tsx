@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Form, Input, Button, Card, ConfigProvider, Alert, Modal, message } from 'antd';
+import { Form, Input, Button, Card, ConfigProvider, Alert } from 'antd';
 import { LockOutlined, UserOutlined, ApartmentOutlined } from '@ant-design/icons';
 import { normalizeAdminUser, useAuth } from '../context/AuthContext';
-import { adminFetch, setAdminCsrfToken } from '../auth/adminSession';
+import { setAdminCsrfToken } from '../auth/adminSession';
 import { WB, WB_FONT, FS, antdTheme } from './finder/theme';
 import ContactUs from './ContactUs';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, type BrandLogoSlotId } from '../branding/BrandLogoSlot';
@@ -31,18 +31,6 @@ interface LoginCredentials {
   password: string;
 }
 
-class AdminLoginError extends Error {
-  constructor(messageText: string, readonly code?: string) {
-    super(messageText);
-  }
-}
-
-function loginErrorMessage(detail: unknown): string {
-  if (detail === 'MFA_REQUIRED') return '请输入身份验证器验证码';
-  if (detail === 'INVALID_MFA_CODE') return '验证码或恢复码无效';
-  return typeof detail === 'string' && detail ? detail : '登录失败';
-}
-
 /**
  * 登录卡片（平台 / 组织门户共用）。
  * - 不带 slug：平台登录（/login），仅匹配 platform_super_admin。
@@ -51,17 +39,10 @@ function loginErrorMessage(detail: unknown): string {
 export default function LoginForm({ slug, orgName }: LoginFormProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [mustChangePwd, setMustChangePwd] = useState(false);
-  const [loggedInPassword, setLoggedInPassword] = useState('');
-  const [mfaCredentials, setMfaCredentials] = useState<LoginCredentials | null>(null);
-  const [mfaLoading, setMfaLoading] = useState(false);
-  const [mfaError, setMfaError] = useState('');
-  const [newPwdForm] = Form.useForm();
-  const [mfaForm] = Form.useForm<{ code: string }>();
   const { login } = useAuth();
   const navigate = useNavigate();
 
-  const authenticate = async (credentials: LoginCredentials, mfaCode?: string) => {
+  const authenticate = async (credentials: LoginCredentials) => {
     const resp = await fetch(`${BASE_URL}/api/v1/auth/login`, {
       method: 'POST',
       credentials: 'include',
@@ -70,13 +51,11 @@ export default function LoginForm({ slug, orgName }: LoginFormProps) {
         slug,
         username: credentials.username,
         password: credentials.password,
-        ...(mfaCode ? { mfa_code: mfaCode.trim() } : {}),
       }),
     });
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({})) as { detail?: unknown };
-      const code = typeof body.detail === 'string' ? body.detail : undefined;
-      throw new AdminLoginError(loginErrorMessage(body.detail), code);
+      throw new Error(typeof body.detail === 'string' && body.detail ? body.detail : '登录失败');
     }
     const data = await resp.json();
     const authenticatedAdmin = normalizeAdminUser(data.admin);
@@ -84,18 +63,9 @@ export default function LoginForm({ slug, orgName }: LoginFormProps) {
     const csrfToken = typeof data.csrf_token === 'string' ? data.csrf_token : null;
     setAdminCsrfToken(csrfToken);
 
-    // Password rotation runs before MFA enrollment because it revokes the
-    // current cookie. The next login resumes the mandatory MFA gate.
-    if (data.must_change_password) {
-      setMustChangePwd(true);
-      setLoggedInPassword(credentials.password);
-      return;
-    }
-
     // New browser sessions rely on the HttpOnly cookie. The response bearer
     // is deliberately not copied into memory; memory bearer is migration-only.
     login(null, authenticatedAdmin, csrfToken);
-    if (data.mfa_enrollment_required === true || authenticatedAdmin.mfa_enabled === false) return;
     navigate(postLoginPath('/monitor/router'));
   };
 
@@ -105,55 +75,9 @@ export default function LoginForm({ slug, orgName }: LoginFormProps) {
     try {
       await authenticate(values);
     } catch (reason) {
-      if (reason instanceof AdminLoginError && reason.code === 'MFA_REQUIRED') {
-        setMfaCredentials(values);
-        setMfaError('');
-        mfaForm.resetFields();
-      } else {
-        setError(reason instanceof Error ? reason.message : '未知错误');
-      }
+      setError(reason instanceof Error ? reason.message : '未知错误');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleMfaLogin = async ({ code }: { code: string }) => {
-    if (!mfaCredentials) return;
-    setMfaLoading(true);
-    setMfaError('');
-    try {
-      await authenticate(mfaCredentials, code);
-      setMfaCredentials(null);
-      mfaForm.resetFields();
-    } catch (reason) {
-      setMfaError(reason instanceof Error ? reason.message : '验证码校验失败');
-    } finally {
-      setMfaLoading(false);
-    }
-  };
-
-  const handleChangePassword = async (values: { newPassword: string }) => {
-    try {
-      const resp = await adminFetch(`${BASE_URL}/api/v1/auth/change-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          old_password: loggedInPassword,
-          new_password: values.newPassword,
-        }),
-      }, { notifyOnUnauthorized: false, organizationScoped: false });
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}));
-        throw new Error(body.detail || '修改密码失败');
-      }
-      // 服务端会在修改密码后撤销所有旧会话。必须用新密码重新登录，
-      // 不能继续复用首次登录时的 bearer 或 cookie。
-      setMustChangePwd(false);
-      setLoggedInPassword('');
-      newPwdForm.resetFields();
-      message.success('密码已修改，请使用新密码重新登录');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '未知错误');
     }
   };
 
@@ -199,86 +123,6 @@ export default function LoginForm({ slug, orgName }: LoginFormProps) {
         </Form>
       </LoginCard>
 
-      {/* 强制修改密码弹窗 */}
-      <Modal
-        title="⚠️ 首次登录 — 请修改默认密码"
-        open={mustChangePwd}
-        closable={false}
-        maskClosable={false}
-        okText="确认修改"
-        onOk={() => newPwdForm.submit()}
-      >
-        <Alert type="warning" message="检测到您使用的是默认密码，请立即修改以确保安全" style={{ marginBottom: 16 }} />
-        <Form form={newPwdForm} layout="vertical" onFinish={handleChangePassword}>
-          <Form.Item
-            name="newPassword"
-            label="新密码"
-            rules={[
-              { required: true, min: 15, max: 128, message: '请输入新密码（15–128位）' },
-            ]}
-          >
-            <Input.Password placeholder="请输入新密码" autoFocus />
-          </Form.Item>
-          <Form.Item
-            name="confirmPassword"
-            label="确认密码"
-            dependencies={['newPassword']}
-            rules={[
-              { required: true, message: '请确认密码' },
-              ({ getFieldValue }) => ({
-                validator(_, value) {
-                  if (!value || getFieldValue('newPassword') === value) return Promise.resolve();
-                  return Promise.reject(new Error('两次输入不一致'));
-                },
-              }),
-            ]}
-          >
-            <Input.Password placeholder="再次输入新密码" />
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      <Modal
-        title="管理员双重验证"
-        open={mfaCredentials !== null}
-        closable={!mfaLoading}
-        maskClosable={false}
-        keyboard={!mfaLoading}
-        okText="验证并登录"
-        cancelText="取消"
-        confirmLoading={mfaLoading}
-        onOk={() => mfaForm.submit()}
-        onCancel={() => {
-          setMfaCredentials(null);
-          setMfaError('');
-          mfaForm.resetFields();
-        }}
-      >
-        <Alert
-          type="info"
-          showIcon
-          message="请输入身份验证器中的 6 位动态码，也可以使用一枚未用过的恢复码。"
-          style={{ marginBottom: 16 }}
-        />
-        {mfaError && <Alert type="error" showIcon message={mfaError} style={{ marginBottom: 16 }} />}
-        <Form form={mfaForm} layout="vertical" onFinish={handleMfaLogin}>
-          <Form.Item
-            name="code"
-            label="验证码或恢复码"
-            rules={[
-              { required: true, message: '请输入验证码或恢复码' },
-              { min: 6, max: 32, message: '请输入有效的验证码或恢复码' },
-            ]}
-          >
-            <Input
-              autoComplete="one-time-code"
-              maxLength={32}
-              placeholder="6 位验证码或恢复码"
-              autoFocus
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
     </>
   );
 }

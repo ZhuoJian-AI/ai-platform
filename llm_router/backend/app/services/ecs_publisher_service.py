@@ -27,6 +27,17 @@ from app.services import enterprise_application_service, subsystem_integration_s
 from app.utils.crypto import hash_api_key
 from app.utils.public_url import assert_public_http_url, same_origin
 
+CANONICAL_ENTERPRISE_KEY = "alphabet"
+LEGACY_ENTERPRISE_KEYS = frozenset({"aifabei"})
+
+
+def canonical_enterprise_key(value: str) -> str:
+    """Return the current contract identity without rewriting persisted legacy runtimes."""
+    normalized = value.strip().lower()
+    if normalized in LEGACY_ENTERPRISE_KEYS:
+        return CANONICAL_ENTERPRISE_KEY
+    return normalized
+
 
 def _new_credential() -> tuple[str, str, str]:
     token = f"zjrt_{secrets.token_urlsafe(48)}"
@@ -91,6 +102,8 @@ async def create_runtime(
     row = EcsRuntime(
         organization_id=organization.id,
         runtime_key=data.runtime_key,
+        # Persist the requested identity so an explicitly restored legacy
+        # Runtime keeps its historical container and image namespace.
         enterprise_key=data.enterprise_key,
         environment=data.environment,
         domain_suffix=data.domain_suffix,
@@ -537,7 +550,10 @@ async def register_module(
         if discovery["suggested_slug"] != data.application_slug:
             raise ValueError("Manifest applicationSlug does not match the release")
         enterprise = manifest.get("enterprise") if isinstance(manifest, dict) else None
-        if not isinstance(enterprise, dict) or enterprise.get("key") != runtime.enterprise_key:
+        manifest_enterprise_key = enterprise.get("key") if isinstance(enterprise, dict) else ""
+        if canonical_enterprise_key(str(manifest_enterprise_key or "")) != canonical_enterprise_key(
+            runtime.enterprise_key
+        ):
             raise ValueError("Manifest enterprise.key does not match the ECS runtime")
         application = await _upsert_application(db, runtime, release, data)
         await subsystem_integration_service.configure_integration(

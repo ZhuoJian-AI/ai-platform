@@ -50,6 +50,12 @@ def test_org_feature_gate_accepts_stable_id_and_slug_fallback(
     assert enabled_for("renamed-again", organization_id=organization_id) is True
     assert enabled_for("alphabet", organization_id=foreign_id) is False
 
+    legacy_configured = Settings(
+        _env_file=None,
+        **{enabled_field: True, allowlist_field: "aifabei"},
+    )
+    assert getattr(legacy_configured, method_name)("alphabet", organization_id=foreign_id) is True
+
 
 @pytest.mark.parametrize(
     ("method_name", "enabled_field", "allowlist_field"),

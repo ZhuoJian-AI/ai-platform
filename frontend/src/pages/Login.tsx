@@ -13,7 +13,7 @@ export default function Login() {
 
   return (
     <LoginBackdrop>
-      {status === 'loading' || status === 'mfa_enrollment_required' ? <Spin size="large" /> : <LoginForm />}
+      {status === 'loading' ? <Spin size="large" /> : <LoginForm />}
     </LoginBackdrop>
   );
 }

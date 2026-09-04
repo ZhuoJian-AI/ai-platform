@@ -68,15 +68,16 @@ try {
 
   const loginSource = await readFile(resolve('src/components/LoginForm.tsx'), 'utf8');
   const authContextSource = await readFile(resolve('src/context/AuthContext.tsx'), 'utf8');
-  const enrollmentSource = await readFile(resolve('src/components/AdminMfaEnrollment.tsx'), 'utf8');
-  assert.match(loginSource, /mfa_code/);
-  assert.match(loginSource, /MFA_REQUIRED/);
+  const appSource = await readFile(resolve('src/App.tsx'), 'utf8');
+  assert.doesNotMatch(loginSource, /mfa_code|MFA_REQUIRED|must_change_password/);
   assert.match(loginSource, /login\(null, authenticatedAdmin, csrfToken\)/,
     'new administrator logins must rely on the HttpOnly cookie');
   assert.doesNotMatch(loginSource, /localStorage/);
-  assert.match(authContextSource, /mfa_enrollment_required/);
-  assert.match(enrollmentSource, /recovery_codes/);
-  assert.match(enrollmentSource, /每个只能使用一次/);
+  assert.doesNotMatch(authContextSource, /mfa_enrollment_required|AdminMfaEnrollment/);
+  assert.match(appSource, /function AdminApp\(\)/);
+  assert.match(appSource, /<Route path="\/:slug\/terminal\/login"/);
+  assert.match(appSource, /<Route path="\/\*" element={<AdminApp \/>} \/>/,
+    'employee routes must be resolved before the administrator provider is mounted');
 
   process.stdout.write('admin session tests passed\n');
 } finally {

@@ -71,6 +71,23 @@ def test_admin_create_schema_allows_only_the_two_valid_role_shapes() -> None:
         )
 
 
+def test_admin_password_schema_requires_only_nonempty_value() -> None:
+    created = AdminCreate(
+        username="short-password",
+        password="x",
+        role="platform_super_admin",
+    )
+    updated = AdminUpdate(password="y")
+
+    assert created.password == "x"
+    assert updated.password == "y"
+
+    with pytest.raises(ValueError):
+        AdminCreate(username="empty", password="", role="platform_super_admin")
+    with pytest.raises(ValueError):
+        AdminUpdate(password="")
+
+
 @pytest.mark.asyncio
 async def test_enterprise_admin_can_only_create_and_list_peers_in_its_organization(db_session) -> None:
     first_org = await _organization(db_session, "first")
@@ -184,3 +201,29 @@ async def test_password_change_increments_auth_epoch(db_session, monkeypatch) ->
     assert changed is True
     assert admin.password_hash == "hashed:new-password"
     assert admin.auth_epoch == 1
+
+
+@pytest.mark.asyncio
+async def test_admin_login_ignores_legacy_mfa_and_forced_password_state(db_session, monkeypatch) -> None:
+    admin = await _admin(db_session, "legacy-security-state", "platform_super_admin")
+    admin.mfa_enabled = True
+    admin.must_change_password = True
+    monkeypatch.setattr(admin_service, "_verify_password", lambda _plain, _hashed: True)
+
+    result = await admin_service.login(db_session, admin.username, "x")
+
+    assert result is not None
+    assert result.must_change_password is False
+    assert "mfa" not in admin_service.decode_access_token(result.access_token)
+
+
+@pytest.mark.asyncio
+async def test_admin_login_has_no_failed_attempt_lockout(db_session, monkeypatch) -> None:
+    admin = await _admin(db_session, "no-lockout", "platform_super_admin")
+    attempts = iter([False] * 11 + [True])
+    monkeypatch.setattr(admin_service, "_verify_password", lambda _plain, _hashed: next(attempts))
+
+    for _ in range(11):
+        assert await admin_service.login(db_session, admin.username, "wrong") is None
+
+    assert await admin_service.login(db_session, admin.username, "correct") is not None

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hmac
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -12,12 +11,10 @@ from fastapi import HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.mfa import hash_recovery_code, matching_totp_counter
 from app.auth.security import hash_password, verify_password
 from app.config import settings
 from app.models.admin import Admin
 from app.schemas.admin import AdminCreate, AdminRead, AdminUpdate, LoginResponse
-from app.utils.crypto import decrypt_provider_api_key
 
 PLATFORM_ROLE = "platform_super_admin"
 ENTERPRISE_ROLE = "enterprise_admin"
@@ -28,7 +25,7 @@ _hash_password = hash_password
 _verify_password = verify_password
 
 
-def create_access_token(admin: Admin, *, mfa_verified: bool) -> str:
+def create_access_token(admin: Admin) -> str:
     """生成 JWT access token。"""
     now = datetime.now(UTC)
     payload: dict[str, Any] = {
@@ -40,7 +37,6 @@ def create_access_token(admin: Admin, *, mfa_verified: bool) -> str:
         "iss": "ai-infra-admin",
         "aud": "ai-infra-admin-api",
         "jti": str(uuid4()),
-        "mfa": mfa_verified,
         "iat": now,
         "exp": now + timedelta(hours=24),
     }
@@ -65,31 +61,11 @@ def decode_access_token(token: str) -> dict[str, Any] | None:
         return None
 
 
-def _consume_mfa_code(admin: Admin, code: str) -> bool:
-    if admin.mfa_secret_encrypted:
-        secret = decrypt_provider_api_key(admin.mfa_secret_encrypted)
-        counter = matching_totp_counter(secret, code)
-        if counter is not None and (
-            admin.mfa_last_totp_counter is None or counter > admin.mfa_last_totp_counter
-        ):
-            admin.mfa_last_totp_counter = counter
-            return True
-    candidate = hash_recovery_code(code)
-    for index, stored in enumerate(admin.mfa_recovery_code_hashes or []):
-        if hmac.compare_digest(candidate, stored):
-            admin.mfa_recovery_code_hashes = [
-                value for position, value in enumerate(admin.mfa_recovery_code_hashes) if position != index
-            ]
-            return True
-    return False
-
-
 async def login(
     db: AsyncSession,
     username: str,
     password: str,
     slug: str | None = None,
-    mfa_code: str | None = None,
 ) -> LoginResponse | None:
     """管理员登录，返回 JWT token 或 None。
 
@@ -108,26 +84,15 @@ async def login(
     else:
         stmt = stmt.where(Admin.organization_id.is_(None), Admin.role == PLATFORM_ROLE)
 
-    result = await db.execute(stmt.with_for_update())
+    result = await db.execute(stmt)
     admin = result.scalar_one_or_none()
     if admin is None or not _verify_password(password, admin.password_hash):
         return None
 
-    mfa_verified = False
-    if admin.mfa_enabled:
-        if not mfa_code:
-            raise HTTPException(status_code=401, detail="MFA_REQUIRED")
-        if not _consume_mfa_code(admin, mfa_code):
-            raise HTTPException(status_code=401, detail="INVALID_MFA_CODE")
-        mfa_verified = True
-        admin.mfa_verified_at = datetime.now(UTC)
-        await db.flush()
-
-    token = create_access_token(admin, mfa_verified=mfa_verified)
+    token = create_access_token(admin)
     return LoginResponse(
         access_token=token,
-        must_change_password=admin.must_change_password,
-        mfa_enrollment_required=not admin.mfa_enabled,
+        must_change_password=False,
         admin=await admin_read_with_org(db, admin),
     )
 
@@ -172,7 +137,7 @@ async def create_admin(db: AsyncSession, data: AdminCreate, *, actor: Admin) -> 
         display_name=data.display_name,
         role=data.role,
         organization_id=data.organization_id,
-        must_change_password=True,
+        must_change_password=False,
     )
     db.add(admin)
     await db.flush()
@@ -204,8 +169,8 @@ async def bootstrap_platform_admin(db: AsyncSession, *, username: str, password:
     username = username.strip()
     if not username or len(username) > 320:
         raise ValueError("username must contain 1 to 320 characters")
-    if len(password) < 12:
-        raise ValueError("initial password must contain at least 12 characters")
+    if not password or len(password) > 128:
+        raise ValueError("initial password must contain 1 to 128 characters")
     existing = (
         await db.execute(
             select(Admin.id)
@@ -225,7 +190,7 @@ async def bootstrap_platform_admin(db: AsyncSession, *, username: str, password:
         password_hash=_hash_password(password),
         display_name=username,
         role=PLATFORM_ROLE,
-        must_change_password=True,
+        must_change_password=False,
     )
     db.add(admin)
     await db.flush()
@@ -291,7 +256,7 @@ async def update_admin(
         session_sensitive_change = True
     if "password" in fields and data.password is not None:
         admin.password_hash = _hash_password(data.password)
-        admin.must_change_password = True
+        admin.must_change_password = False
         session_sensitive_change = True
     if session_sensitive_change:
         admin.auth_epoch += 1

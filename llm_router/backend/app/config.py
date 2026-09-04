@@ -118,13 +118,13 @@ class Settings(BaseSettings):
     # keep the emergency deployment switch but no tenant allowlist.
     original_preview_org_allowlist: str = ""
     multimodal_vision_enabled: bool = True
-    multimodal_vision_org_allowlist: str = "aifabei"
+    multimodal_vision_org_allowlist: str = "alphabet"
     image_generation_enabled: bool = True
-    image_generation_org_allowlist: str = "aifabei"
+    image_generation_org_allowlist: str = "alphabet"
     model_gateway_enabled: bool = True
-    model_gateway_org_allowlist: str = "aifabei"
+    model_gateway_org_allowlist: str = "alphabet"
     multimodal_audio_enabled: bool = False
-    multimodal_audio_org_allowlist: str = "aifabei"
+    multimodal_audio_org_allowlist: str = "alphabet"
     multimodal_user_concurrency: int = 2
     multimodal_daily_audio_seconds: int = 2 * 60 * 60
     multimodal_worker_poll_seconds: float = 1.0
@@ -213,15 +213,20 @@ class Settings(BaseSettings):
             and self.coolify_api_token.strip()
         )
 
+    @staticmethod
+    def _canonical_org_identity(value: str) -> str:
+        normalized = value.strip().lower()
+        return "alphabet" if normalized == "aifabei" else normalized
+
     def original_preview_enabled_for(self, organization_slug: str) -> bool:
         if not self.original_preview_enabled:
             return False
         allowed = {
-            value.strip().lower()
+            self._canonical_org_identity(value)
             for value in self.original_preview_org_allowlist.split(",")
             if value.strip()
         }
-        return not allowed or organization_slug.lower() in allowed
+        return not allowed or self._canonical_org_identity(organization_slug) in allowed
 
     def agent_skills_enabled_for(
         self,
@@ -233,11 +238,11 @@ class Settings(BaseSettings):
         if not self.code_skills_enabled:
             return False
         allowed = {
-            value.strip().lower()
+            self._canonical_org_identity(value)
             for value in self.agent_skills_org_allowlist.split(",")
             if value.strip()
         }
-        identities = {organization_slug.lower()}
+        identities = {self._canonical_org_identity(organization_slug)}
         if organization_id is not None:
             identities.add(str(organization_id).lower())
         return not allowed or bool(allowed & identities)
@@ -252,8 +257,12 @@ class Settings(BaseSettings):
     ) -> bool:
         if not enabled:
             return False
-        allowed = {value.strip().lower() for value in allowlist.split(",") if value.strip()}
-        identities = {organization_slug.lower()}
+        allowed = {
+            Settings._canonical_org_identity(value)
+            for value in allowlist.split(",")
+            if value.strip()
+        }
+        identities = {Settings._canonical_org_identity(organization_slug)}
         if organization_id is not None:
             identities.add(str(organization_id).lower())
         return not allowed or bool(allowed & identities)

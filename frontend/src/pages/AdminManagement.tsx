@@ -226,7 +226,7 @@ export default function AdminManagement() {
       >
         <Form form={createForm} layout="vertical" onFinish={(values) => createAdmin.mutate(values)}>
           <Form.Item name="username" label="用户名" rules={[{ required: true, min: 2, message: '请输入用户名（至少2位）' }]}><Input autoComplete="off" /></Form.Item>
-          <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 15, max: 128, message: '请输入15–128位密码' }]}><Input.Password autoComplete="new-password" /></Form.Item>
+          <Form.Item name="password" label="初始密码" rules={[{ required: true, message: '请输入密码' }, { max: 128, message: '密码不能超过128位' }]}><Input.Password autoComplete="new-password" /></Form.Item>
           <Form.Item name="display_name" label="姓名"><Input /></Form.Item>
           {isSuperAdmin() ? <>
             <Form.Item name="role" label="角色" rules={[{ required: true }]}>
@@ -279,10 +279,10 @@ export default function AdminManagement() {
         onCancel={() => { setResetPwdAdmin(null); setNewPassword(''); }}
         onOk={() => { if (resetPwdAdmin) resetPassword.mutate({ id: resetPwdAdmin.id, password: newPassword }); }}
         confirmLoading={resetPassword.isPending}
-        okButtonProps={{ disabled: newPassword.length < 15 || newPassword.length > 128 }}
+        okButtonProps={{ disabled: newPassword.length < 1 || newPassword.length > 128 }}
       >
         <Alert type="warning" showIcon message="完整密码仅通过受控渠道交给该管理员" style={{ marginBottom: 16 }} />
-        <Input.Password autoComplete="new-password" placeholder="输入15–128位新密码" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
+        <Input.Password autoComplete="new-password" placeholder="输入新密码" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
       </Modal>
 
       <ConfirmModal

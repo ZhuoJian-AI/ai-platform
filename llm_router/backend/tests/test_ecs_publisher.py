@@ -4,7 +4,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from app.models.ecs_runtime import EcsModuleRelease
+from app.models.ecs_runtime import EcsModuleRelease, EcsRuntime
 from app.models.enterprise_application import EnterpriseApplication, EnterpriseApplicationGrant
 from app.models.organization import Organization
 from app.schemas.ecs_publisher import EcsModuleCredentialsInput
@@ -93,8 +93,8 @@ async def test_admin_creates_runtime_and_credential_is_returned_once(client, db_
     response = await client.post(
         f"/api/v1/ecs-publisher/organizations/{organization.id}/runtimes",
         json={
-            "runtime_key": "aifabei-hk-01",
-            "enterprise_key": "aifabei",
+            "runtime_key": "alphabet-hk-01",
+            "enterprise_key": "alphabet",
             "environment": "staging",
             "domain_suffix": "aifabei.example",
             "public_address": "8.219.202.188",
@@ -104,6 +104,8 @@ async def test_admin_creates_runtime_and_credential_is_returned_once(client, db_
     payload = response.json()
     assert payload["credential"].startswith("zjrt_")
     assert payload["runtime_profile"]["deployment"]["provider"] == "direct-ecs"
+    assert payload["runtime"]["enterprise_key"] == "alphabet"
+    assert payload["runtime_profile"]["enterpriseKey"] == "alphabet"
     assert payload["runtime_profile"]["platform"]["registrationEndpoint"].endswith(
         "/ecs-publisher/modules/register"
     )
@@ -132,6 +134,13 @@ async def test_runtime_registers_and_resyncs_module_without_grants(
     )
     credential = created.json()["credential"]
     manifest = _manifest()
+    runtime = await db_session.scalar(
+        select(EcsRuntime).where(EcsRuntime.organization_id == organization.id)
+    )
+    assert runtime is not None
+    runtime.enterprise_key = "aifabei"
+    manifest["enterprise"]["key"] = "alphabet"
+    await db_session.flush()
 
     async def fake_discovery(_db, organization_id, base_url, auth_token):
         assert str(organization_id) == str(organization.id)

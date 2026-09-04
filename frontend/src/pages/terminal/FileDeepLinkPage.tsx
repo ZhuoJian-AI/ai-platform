@@ -2,8 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, Button, Input, Spin, Typography } from 'antd';
 import { FileTextOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { terminal, workspaces } from '../../api/client';
-import { useAuth } from '../../context/AuthContext';
+import { terminal } from '../../api/client';
 import { useUserAuth } from '../../context/UserAuthContext';
 import { workspaceFileDestination } from '../../utils/workspaceFileLinks';
 
@@ -20,49 +19,38 @@ export default function FileDeepLinkPage() {
   const [searchParams] = useSearchParams();
   const versionId = searchParams.get('version');
   const navigate = useNavigate();
-  const { status: adminStatus } = useAuth();
   const { token: userToken, user } = useUserAuth();
-  const adminAuthenticated = adminStatus === 'authenticated';
-  // 同时存在两类凭据时使用权限更小的员工身份，避免深链意外提升为管理员读取。
-  const useTerminalIdentity = !!userToken;
   const [organizationSlug, setOrganizationSlug] = useState(user?.organization_slug || '');
   const [attempt, setAttempt] = useState(0);
   const [accessError, setAccessError] = useState(false);
 
   useEffect(() => {
-    if (adminStatus === 'loading' || userToken || adminAuthenticated) return;
+    if (userToken) return;
     const returnTo = `/f/${encodeURIComponent(fileId)}${versionId ? `?version=${encodeURIComponent(versionId)}` : ''}`;
     sessionStorage.setItem(RETURN_TO_KEY, returnTo);
-  }, [adminAuthenticated, adminStatus, fileId, userToken, versionId]);
+  }, [fileId, userToken, versionId]);
 
   useEffect(() => {
-    if (adminStatus === 'loading' || (!userToken && !adminAuthenticated)) return;
+    if (!userToken) return;
     let disposed = false;
     setAccessError(false);
 
     const resolve = async () => {
       if (!fileId) throw new Error('missing file id');
-      if (useTerminalIdentity) {
-        const slug = user?.organization_slug;
-        if (!slug) throw new Error('missing organization slug');
-        const file = await terminal.getWsFile(fileId);
-        if (versionId) await terminal.getWsFileVersion(fileId, versionId);
-        if (!disposed) {
-          navigate(workspaceFileDestination(file, { kind: 'user', organizationSlug: slug }, versionId), { replace: true });
-        }
-        return;
+      const slug = user?.organization_slug;
+      if (!slug) throw new Error('missing organization slug');
+      const file = await terminal.getWsFile(fileId);
+      if (versionId) await terminal.getWsFileVersion(fileId, versionId);
+      if (!disposed) {
+        navigate(workspaceFileDestination(file, { kind: 'user', organizationSlug: slug }, versionId), { replace: true });
       }
-
-      const file = await workspaces.getFile(fileId);
-      if (versionId) await workspaces.getFileVersion(fileId, versionId);
-      if (!disposed) navigate(workspaceFileDestination(file, { kind: 'admin' }, versionId), { replace: true });
     };
 
     void resolve().catch(() => {
       if (!disposed) setAccessError(true);
     });
     return () => { disposed = true; };
-  }, [adminAuthenticated, adminStatus, attempt, fileId, navigate, useTerminalIdentity, user?.organization_slug, userToken, versionId]);
+  }, [attempt, fileId, navigate, user?.organization_slug, userToken, versionId]);
 
   const openEmployeeLogin = () => {
     const slug = organizationSlug.trim();
@@ -70,11 +58,7 @@ export default function FileDeepLinkPage() {
     window.location.assign(`/${encodeURIComponent(slug)}/terminal/login`);
   };
 
-  if (adminStatus === 'loading' && !userToken) {
-    return <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><Spin size="large" /></div>;
-  }
-
-  if (!userToken && !adminAuthenticated) {
+  if (!userToken) {
     const validSlug = /^[a-z0-9][a-z0-9-]{0,62}$/i.test(organizationSlug.trim());
     return (
       <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24, background: '#f8f9fc' }}>

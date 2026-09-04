@@ -47,7 +47,7 @@ export default function OrgLogin() {
 
   return (
     <LoginBackdrop>
-      {status === 'loading' || status === 'mfa_enrollment_required' || loading ? (
+      {status === 'loading' || loading ? (
         <Spin size="large" style={{ position: 'relative', zIndex: 1 }} />
       ) : notFound ? (
         <Alert

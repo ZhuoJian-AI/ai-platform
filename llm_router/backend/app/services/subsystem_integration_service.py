@@ -1129,7 +1129,7 @@ async def deliver_pending_events(
                 "event": {
                     "eventId": event.event_id,
                     "eventType": event.event_type,
-                    "enterpriseKey": str(manifest.get("enterprise", {}).get("key") or "aifabei"),
+                    "enterpriseKey": str(manifest.get("enterprise", {}).get("key") or "alphabet"),
                     "moduleKey": event.module_key,
                     "entityType": event.entity_type,
                     "entityId": event.entity_id,
