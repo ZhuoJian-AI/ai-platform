@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from openpyxl import Workbook
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,12 +25,7 @@ from app.schemas.workspace import WorkspaceFileCreate, WorkspaceFolderCreate
 from app.services import workspace_permission_service, workspace_service
 
 
-async def _make_workspace_with_file(
-    db: AsyncSession,
-    *,
-    path: str,
-    content: str,
-) -> tuple[Organization, Workspace, WorkspaceFile]:
+async def _make_workspace(db: AsyncSession) -> tuple[Organization, Workspace]:
     suffix = uuid4().hex[:10]
     org = Organization(name=f"引用测试组织-{suffix}", slug=f"ref-{suffix}")
     db.add(org)
@@ -41,6 +38,16 @@ async def _make_workspace_with_file(
     )
     db.add(ws)
     await db.flush()
+    return org, ws
+
+
+async def _make_workspace_with_file(
+    db: AsyncSession,
+    *,
+    path: str,
+    content: str,
+) -> tuple[Organization, Workspace, WorkspaceFile]:
+    org, ws = await _make_workspace(db)
     file = await workspace_service.upsert_file(
         db,
         ws,
@@ -48,6 +55,16 @@ async def _make_workspace_with_file(
     )
     await db.flush()
     return org, ws, file
+
+
+def _xlsx_bytes(value: str) -> bytes:
+    """Build a real OOXML workbook for tests that exercise spreadsheet replacement."""
+    stream = io.BytesIO()
+    workbook = Workbook()
+    workbook.active["A1"] = value
+    workbook.save(stream)
+    workbook.close()
+    return stream.getvalue()
 
 
 def test_workspace_file_tool_schema_exposes_ids_and_paths():
@@ -75,12 +92,12 @@ async def test_workspace_tools_list_mapping_and_read_by_file_id(
 ):
     _, ws, selected = await _make_workspace_with_file(
         db_session,
-        path="WAIC展商联系方式.xlsx",
+        path="WAIC展商联系方式.txt",
         content="选中文件的解析内容",
     )
     _, other_ws, other_file = await _make_workspace_with_file(
         db_session,
-        path="其他空间.xlsx",
+        path="其他空间.txt",
         content="不能跨空间读取",
     )
     assert other_ws.id != ws.id
@@ -164,14 +181,14 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
 ):
     org, ws, selected = await _make_workspace_with_file(
         db_session,
-        path="WAIC展商联系方式.xlsx",
+        path="WAIC展商联系方式.txt",
         content="唯一应被分析的文件内容",
     )
     await workspace_service.upsert_file(
         db_session,
         ws,
         WorkspaceFileCreate(
-            path="附件3报名表.xlsx",
+            path="附件3报名表.txt",
             content="不应被注入的其他文件内容",
         ),
     )
@@ -213,7 +230,7 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
     })
 
     prompt = result["system_prompt"]
-    canonical = f"{ws.name}:/WAIC展商联系方式.xlsx"
+    canonical = f"{ws.name}:/WAIC展商联系方式.txt"
     assert f"@{file_id} → {canonical}" in prompt
     assert f"file_id={file_id} path={canonical}" in prompt
     assert "唯一应被分析的文件内容" in prompt
@@ -233,13 +250,13 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
 ):
     org, ws, selected = await _make_workspace_with_file(
         db_session,
-        path="会话附件/task-1/指定文件.docx",
+        path="会话附件/task-1/指定文件.txt",
         content="只能注入这份附件的内容",
     )
     await workspace_service.upsert_file(
         db_session,
         ws,
-        WorkspaceFileCreate(path="根目录/其他文件.docx", content="绝对不得注入"),
+        WorkspaceFileCreate(path="根目录/其他文件.txt", content="绝对不得注入"),
     )
     await db_session.flush()
     async def fake_build_tools(
@@ -281,7 +298,7 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
     prompt = result["system_prompt"]
     assert "只能注入这份附件的内容" in prompt
     assert "绝对不得注入" not in prompt
-    assert f"@{file_id} → {ws.name}:/会话附件/task-1/指定文件.docx" in prompt
+    assert f"@{file_id} → {ws.name}:/会话附件/task-1/指定文件.txt" in prompt
 
 
 @pytest.mark.asyncio
@@ -452,7 +469,7 @@ def test_workspace_intent_is_capability_derived_not_keyword_gated() -> None:
 
     prompt = nodes._workspace_access_prompt(access, question)
     assert "财务经理" in prompt
-    assert "全部实时 read=true" in prompt
+    assert "所有实时 read=true 的空间中使用 workspace_search" in prompt
     assert "预算表" not in prompt
 
 
@@ -460,18 +477,18 @@ def test_workspace_intent_is_capability_derived_not_keyword_gated() -> None:
 async def test_delete_inferred_workspace_folder_path_recursively(db_session: AsyncSession):
     _, ws, first = await _make_workspace_with_file(
         db_session,
-        path="平台工具输出/task-a/result.xlsx",
+        path="平台工具输出/task-a/result.txt",
         content="a",
     )
     second = await workspace_service.upsert_file(
         db_session,
         ws,
-        WorkspaceFileCreate(path="平台工具输出/task-b/report.docx", content="b"),
+        WorkspaceFileCreate(path="平台工具输出/task-b/report.md", content="b"),
     )
     keep = await workspace_service.upsert_file(
         db_session,
         ws,
-        WorkspaceFileCreate(path="会话附件/task-c/input.xlsx", content="c"),
+        WorkspaceFileCreate(path="会话附件/task-c/input.txt", content="c"),
     )
     await db_session.flush()
 
@@ -488,13 +505,13 @@ async def test_delete_inferred_workspace_folder_path_recursively(db_session: Asy
 @pytest.mark.asyncio
 async def test_bulk_delete_deduplicates_nested_folders_and_selected_files(db_session: AsyncSession):
     _, ws, first = await _make_workspace_with_file(
-        db_session, path="平台工具输出/task-a/result.xlsx", content="a",
+        db_session, path="平台工具输出/task-a/result.txt", content="a",
     )
     second = await workspace_service.upsert_file(
-        db_session, ws, WorkspaceFileCreate(path="平台工具输出/task-b/report.docx", content="b"),
+        db_session, ws, WorkspaceFileCreate(path="平台工具输出/task-b/report.md", content="b"),
     )
     keep = await workspace_service.upsert_file(
-        db_session, ws, WorkspaceFileCreate(path="会话附件/task-c/input.xlsx", content="c"),
+        db_session, ws, WorkspaceFileCreate(path="会话附件/task-c/input.txt", content="c"),
     )
     await workspace_service.create_folder(
         db_session, ws, WorkspaceFolderCreate(path="平台工具输出/task-a"),
@@ -571,7 +588,7 @@ async def test_history_restores_available_and_unavailable_attachment_refs(
     monkeypatch: pytest.MonkeyPatch,
 ):
     org, ws, available = await _make_workspace_with_file(
-        db_session, path="会话附件/task/报告.xlsx", content="历史文件正文",
+        db_session, path="会话附件/task/报告.txt", content="历史文件正文",
     )
     user = User(
         organization_id=org.id,
@@ -598,7 +615,7 @@ async def test_history_restores_available_and_unavailable_attachment_refs(
         content="请分析这两份文件",
         metadata_={"attachments": [
             {"file_id": str(available.id), "workspace_id": str(ws.id),
-             "path": available.path, "name": "报告.xlsx"},
+             "path": available.path, "name": "报告.txt"},
             {"file_id": missing_id, "workspace_id": str(ws.id),
              "path": "会话附件/task/已删除.xlsx", "name": "已删除.xlsx"},
         ]},
@@ -645,7 +662,7 @@ async def test_agent_searches_and_reads_authorized_shared_space_without_referenc
         db_session, path="personal.txt", content="personal",
     )
     _, shared_ws, shared_file = await _make_workspace_with_file(
-        db_session, path="2026冬尺寸表/AD2604M601.xlsx", content="shared-data",
+        db_session, path="2026冬尺寸表/AD2604M601.txt", content="shared-data",
     )
     principal = SimpleNamespace(id=str(uuid4()))
     allowed = {"value": True}
@@ -667,7 +684,7 @@ async def test_agent_searches_and_reads_authorized_shared_space_without_referenc
     ))
     assert [item["file_id"] for item in searched["items"]] == [str(shared_file.id)]
     assert searched["items"][0]["canonical_path"] == (
-        f"{shared_ws.name}:/2026冬尺寸表/AD2604M601.xlsx"
+        f"{shared_ws.name}:/2026冬尺寸表/AD2604M601.txt"
     )
 
     read = json.loads(await nodes._execute_builtin_tool(
@@ -689,11 +706,26 @@ async def test_platform_runner_target_file_updates_in_place(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    _, ws, file = await _make_workspace_with_file(
-        db_session, path="财务/共享明细.xlsx", content="old",
+    org, ws = await _make_workspace(db_session)
+    file = await workspace_service.ingest_uploaded_file(
+        db_session,
+        ws,
+        path="财务/共享明细.xlsx",
+        filename="共享明细.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        raw=_xlsx_bytes("old"),
     )
-    principal = SimpleNamespace(id=str(uuid4()))
+    principal_user = User(
+        organization_id=org.id,
+        username=f"runner-{uuid4().hex[:8]}",
+        role="member",
+        is_active=True,
+    )
+    db_session.add(principal_user)
+    await db_session.flush()
+    principal = SimpleNamespace(id=str(principal_user.id))
     base_version_id = file.current_version_id
+    output_bytes = _xlsx_bytes("new")
 
     async def caps(*_args, **_kwargs):
         return {"read": True, "create": True, "update": True, "delete": False}
@@ -704,7 +736,7 @@ async def test_platform_runner_target_file_updates_in_place(
             "outputs": [{
                 "name": "runner-output.xlsx",
                 "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "content_base64": base64.b64encode(b"new-workbook").decode("ascii"),
+                "content_base64": base64.b64encode(output_bytes).decode("ascii"),
             }],
         }, 12)
 
@@ -728,4 +760,4 @@ async def test_platform_runner_target_file_updates_in_place(
     assert result["status"] == "success"
     assert result["outputs"][0]["file_id"] == str(file.id)
     assert file.current_version_id != base_version_id
-    assert file.content == base64.b64encode(b"new-workbook").decode("ascii")
+    assert file.content == base64.b64encode(output_bytes).decode("ascii")

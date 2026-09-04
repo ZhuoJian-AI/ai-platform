@@ -110,6 +110,8 @@ async def test_terminal_global_file_summary_can_read_projected_metadata(
         role="member",
         is_active=True,
     )
+    db_session.add(user)
+    await db_session.flush()
     ws = Workspace(
         organization_id=org.id,
         name="个人空间",
@@ -117,7 +119,7 @@ async def test_terminal_global_file_summary_can_read_projected_metadata(
         scope_type="user",
         scope_id=str(user.id),
     )
-    db_session.add_all([user, ws])
+    db_session.add(ws)
     await db_session.flush()
     file = await workspace_service.upsert_file(
         db_session,
@@ -158,7 +160,7 @@ async def test_terminal_global_file_summary_can_read_projected_metadata(
             "skill_version": None,
             "created_at": file.created_at.isoformat(),
         },
-        "scope_type": "organization",
+        "scope_type": "user",
         "is_binary": True,
         "current_version_id": str(file.current_version_id),
         "current_version_no": 1,
@@ -190,13 +192,15 @@ async def test_terminal_patch_preserves_id_replays_and_reports_stale_version(
 ):
     suffix = uuid4().hex[:8]
     org = Organization(name=f"更新测试-{suffix}", slug=f"update-{suffix}")
+    db_session.add(org)
+    await db_session.flush()
     user = User(
         organization_id=org.id,
         username=f"updater-{suffix}",
         role="member",
         is_active=True,
     )
-    db_session.add_all([org, user])
+    db_session.add(user)
     await db_session.flush()
     ws = Workspace(
         organization_id=org.id,

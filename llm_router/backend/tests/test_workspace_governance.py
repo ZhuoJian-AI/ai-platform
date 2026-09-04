@@ -331,6 +331,8 @@ async def test_explicit_same_path_upload_creates_version_without_changing_file_i
             "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "version_id": None, "integrity_algorithm": "crc64ecma", "integrity_value": value,
             "content_hash": "",
+            "format_verified": True,
+            "detected_format": "xlsx",
         }
 
     monkeypatch.setattr(settings, "workspace_object_storage_enabled", True)

@@ -8,11 +8,14 @@ new identity so an old task reference can never silently resolve to new data.
 """
 
 import hashlib
+from io import BytesIO
+from types import SimpleNamespace
 from uuid import uuid4
 
 import asyncpg
 import pytest
 import pytest_asyncio
+from openpyxl import Workbook
 from sqlalchemy import select, text
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -91,6 +94,73 @@ async def _make_workspace(db) -> Workspace:
     return ws
 
 
+def _valid_xlsx_bytes() -> bytes:
+    """Build a real XLSX fixture so binary-safety tests exercise valid bytes."""
+    output = BytesIO()
+    workbook = Workbook()
+    workbook.active["A1"] = "原始内容"
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("path", "mime", "parse_kind"),
+    [
+        ("说明.txt", "text/plain", "txt"),
+        ("说明.md", "text/markdown", "md"),
+        ("明细.csv", "text/csv", "csv"),
+        ("配置.json", "application/json", "json"),
+    ],
+)
+def test_uploaded_text_storage_marker_does_not_block_text_edit(
+    path: str,
+    mime: str,
+    parse_kind: str,
+):
+    uploaded = SimpleNamespace(
+        path=path,
+        metadata_={"binary": True, "name": path, "mime": mime},
+        content=None,
+        parse_kind=parse_kind,
+    )
+
+    workspace_service._assert_plain_text_update_supported(uploaded)
+
+
+@pytest.mark.parametrize(
+    ("path", "mime", "detected_format"),
+    [
+        (
+            "原表.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "xlsx",
+        ),
+        ("合同.pdf", "application/pdf", "pdf"),
+    ],
+)
+def test_binary_identity_cannot_be_overridden_by_text_hints(
+    path: str,
+    mime: str,
+    detected_format: str,
+):
+    uploaded = SimpleNamespace(
+        path=path,
+        metadata_={
+            "binary": True,
+            "name": "伪装.txt",
+            "mime": mime,
+            "artifact_format_verified": True,
+            "detected_artifact_format": detected_format,
+        },
+        content=None,
+        parse_kind="txt",
+    )
+
+    with pytest.raises(workspace_service.WorkspaceFileUnsupportedTextUpdate):
+        workspace_service._assert_plain_text_update_supported(uploaded)
+
+
 @pytest.mark.asyncio
 async def test_upsert_after_delete_creates_new_file_identity(session: AsyncSession):
     """同路径重传保留旧删除身份，且创建新文件 UUID。"""
@@ -98,7 +168,7 @@ async def test_upsert_after_delete_creates_new_file_identity(session: AsyncSessi
     ws = await _make_workspace(db)
 
     f1 = await workspace_service.upsert_file(db, ws, WorkspaceFileCreate(
-        path="报告.docx", content="AAAA", metadata={"binary": False}))
+        path="报告.txt", content="AAAA", metadata={"binary": False}))
     await db.flush()
     assert f1.deleted_at is None
     assert f1.content == "AAAA"
@@ -108,7 +178,7 @@ async def test_upsert_after_delete_creates_new_file_identity(session: AsyncSessi
     assert f1.deleted_at is not None
 
     f2 = await workspace_service.upsert_file(db, ws, WorkspaceFileCreate(
-        path="报告.docx", content="BBBB", metadata={"task_id": "new-task"}))
+        path="报告.txt", content="BBBB", metadata={"task_id": "new-task"}))
     await db.flush()
 
     assert f2.id != f1.id
@@ -118,7 +188,7 @@ async def test_upsert_after_delete_creates_new_file_identity(session: AsyncSessi
     assert f2.metadata_.get("task_id") == "new-task"
 
     rows = (await db.execute(select(WorkspaceFile).where(
-        WorkspaceFile.workspace_id == ws.id, WorkspaceFile.path == "报告.docx"
+        WorkspaceFile.workspace_id == ws.id, WorkspaceFile.path == "报告.txt"
     ))).scalars().all()
     assert len(rows) == 2
     assert sum(row.deleted_at is None for row in rows) == 1
@@ -345,20 +415,18 @@ async def test_update_rejects_stale_base_with_current_version(session: AsyncSess
 @pytest.mark.asyncio
 async def test_plain_text_update_rejects_office_binary_without_changing_version(
     session: AsyncSession,
+    monkeypatch,
 ):
     ws = await _make_workspace(session)
-    file = await workspace_service.upsert_file(
+    raw = _valid_xlsx_bytes()
+    monkeypatch.setattr(settings, "workspace_object_storage_enabled", False)
+    file = await workspace_service.ingest_uploaded_file(
         session,
         ws,
-        WorkspaceFileCreate(
-            path="共享/原表.xlsx",
-            content="UEsDBA==",
-            metadata={
-                "binary": True,
-                "name": "原表.xlsx",
-                "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            },
-        ),
+        path="共享/原表.xlsx",
+        filename="原表.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        raw=raw,
     )
     original_version = file.current_version_id
     original_content = file.content
@@ -394,14 +462,14 @@ async def test_cross_workspace_move_preserves_file_id_and_version_history(
     session.add(target_ws)
     await session.flush()
     file = await workspace_service.upsert_file(
-        session, source_ws, WorkspaceFileCreate(path="尺寸表/AD2604.xlsx", content="v1"),
+        session, source_ws, WorkspaceFileCreate(path="尺寸表/AD2604.txt", content="v1"),
     )
     stable_file_id = file.id
     source_version = file.current_version_id
     moved = await workspace_service.move_file(
         session,
         file,
-        "2026冬/AD2604.xlsx",
+        "2026冬/AD2604.txt",
         target_workspace=target_ws,
         base_version_id=source_version,
         idempotency_key="cross-workspace-move-0001",
@@ -409,7 +477,7 @@ async def test_cross_workspace_move_preserves_file_id_and_version_history(
     move_version = moved.current_version_id
     assert moved.id == stable_file_id
     assert moved.workspace_id == target_ws.id
-    assert moved.path == "2026冬/AD2604.xlsx"
+    assert moved.path == "2026冬/AD2604.txt"
     assert move_version != source_version
 
     await workspace_service.update_file(
@@ -425,7 +493,7 @@ async def test_cross_workspace_move_preserves_file_id_and_version_history(
     replay = await workspace_service.move_file(
         session,
         moved,
-        "2026冬/AD2604.xlsx",
+        "2026冬/AD2604.txt",
         target_workspace=target_ws,
         base_version_id=source_version,
         idempotency_key="cross-workspace-move-0001",

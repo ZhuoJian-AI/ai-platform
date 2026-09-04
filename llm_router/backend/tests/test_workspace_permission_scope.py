@@ -137,10 +137,12 @@ async def test_generic_data_scope_does_not_expand_workspace_visibility(db_sessio
 @pytest.mark.asyncio
 async def test_effective_access_omits_workspaces_with_no_capability(db_session) -> None:
     org = Organization(name="Capability catalog", slug="capability-catalog")
+    db_session.add(org)
+    await db_session.flush()
     user = User(
         organization_id=org.id, username="catalog-user", role="member", is_active=True,
     )
-    db_session.add_all([org, user])
+    db_session.add(user)
     await db_session.flush()
     readable = Workspace(
         organization_id=org.id, name="个人空间", slug="personal-catalog",

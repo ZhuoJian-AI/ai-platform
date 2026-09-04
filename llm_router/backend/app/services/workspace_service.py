@@ -280,17 +280,30 @@ def _merge_update_metadata(file: WorkspaceFile, patch: dict | None) -> dict:
 
 
 def _assert_plain_text_update_supported(file: WorkspaceFile) -> None:
-    """Reject binary corruption using only persisted server-owned metadata."""
+    """Allow persisted text uploads without permitting binary corruption.
+
+    ``metadata.binary`` records how an uploaded file is stored (raw bytes in
+    OSS/PostgreSQL), not whether its logical format is editable text.  CSV,
+    TXT, Markdown and JSON uploads therefore legitimately keep that marker.
+    A known binary suffix, MIME type, or verified byte format always wins over
+    a conflicting text hint so Office/PDF files cannot be overwritten through
+    the generic text editor.
+    """
     metadata = dict(file.metadata_ or {})
     path_suffix = PurePosixPath(str(file.path)).suffix.lower()
     name_suffix = PurePosixPath(str(metadata.get("name") or "")).suffix.lower()
     suffixes = {path_suffix, name_suffix} - {""}
     mime = str(metadata.get("mime") or "").split(";", 1)[0].strip().lower()
+    verified_format = None
+    if metadata.get("artifact_format_verified") is True:
+        verified_format = _normalize_detected_artifact_format(
+            str(metadata.get("detected_artifact_format") or "")
+        )
     if (
         any(suffix in _KNOWN_BINARY_SUFFIXES for suffix in suffixes)
         or mime in (_KNOWN_BINARY_MIMES - {"application/octet-stream"})
         or mime.startswith(_KNOWN_BINARY_MIME_PREFIXES)
-        or bool(metadata.get("binary"))
+        or (verified_format is not None and verified_format != "text")
     ):
         raise WorkspaceFileUnsupportedTextUpdate(
             "该文件是二进制格式，不能用纯文本更新；请使用对应文件工具生成并替换原文件版本"
@@ -299,6 +312,10 @@ def _assert_plain_text_update_supported(file: WorkspaceFile) -> None:
         return
     if mime in {"application/json", "application/xml", "application/javascript"}:
         return
+    if bool(metadata.get("binary")):
+        raise WorkspaceFileUnsupportedTextUpdate(
+            "无法确认该文件是安全文本格式，请使用文件制品更新接口"
+        )
     if file.content is not None or str(file.parse_kind or "") in {"text", "csv", "json", "markdown"}:
         return
     if mime == "application/octet-stream":
