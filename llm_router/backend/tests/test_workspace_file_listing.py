@@ -121,14 +121,13 @@ async def test_terminal_global_file_summary_can_read_projected_metadata(
     )
     db_session.add(ws)
     await db_session.flush()
-    file = await workspace_service.upsert_file(
+    file = await workspace_service.ingest_uploaded_file(
         db_session,
         ws,
-        WorkspaceFileCreate(
-            path="二进制报告.pdf",
-            content="JVBERi0xLjQ=",
-            metadata={"binary": True, "name": "二进制报告.pdf"},
-        ),
+        path="二进制报告.pdf",
+        filename="二进制报告.pdf",
+        content_type="application/pdf",
+        raw=b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n",
     )
     current_user = CurrentUser(
         user=user,

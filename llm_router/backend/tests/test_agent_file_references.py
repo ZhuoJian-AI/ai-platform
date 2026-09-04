@@ -17,6 +17,7 @@ from app.agents import runtime_support
 from app.agents.dsh import runner as dsh_runner
 from app.agents.graph import nodes
 from app.api import terminal as terminal_api
+from app.auth.user_auth import CurrentUser
 from app.models.organization import Organization
 from app.models.task import Task, TaskMessage
 from app.models.user import User
@@ -39,6 +40,27 @@ async def _make_workspace(db: AsyncSession) -> tuple[Organization, Workspace]:
     db.add(ws)
     await db.flush()
     return org, ws
+
+
+async def _make_personal_principal(
+    db: AsyncSession,
+    org: Organization,
+    workspace: Workspace,
+    *,
+    prefix: str,
+) -> User:
+    user = User(
+        organization_id=org.id,
+        username=f"{prefix}-{uuid4().hex[:8]}",
+        role="member",
+        is_active=True,
+    )
+    db.add(user)
+    await db.flush()
+    workspace.scope_type = "user"
+    workspace.scope_id = str(user.id)
+    await db.flush()
+    return user
 
 
 async def _make_workspace_with_file(
@@ -192,6 +214,16 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
             content="不应被注入的其他文件内容",
         ),
     )
+    user = await _make_personal_principal(
+        db_session, org, ws, prefix="prompt-ref",
+    )
+    principal = CurrentUser(
+        user=user,
+        id=str(user.id),
+        email=user.username,
+        role=user.role,
+        organization_id=org.id,
+    )
     await db_session.flush()
     async def fake_build_tools(
         _db,
@@ -208,7 +240,7 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
     async def fake_visual(_state, _db, _user, _messages, prompt):
         return None, None, prompt
 
-    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session})
+    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": principal})
     monkeypatch.setattr(nodes, "_build_tools", fake_build_tools)
     monkeypatch.setattr(nodes, "_configure_visual_turn", fake_visual)
 
@@ -220,6 +252,7 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
         "system_prompt": "你是测试助手。",
         "messages": [{"role": "user", "content": f"@{file_id} 这个能分析一下么？"}],
         "referenced_file_ids": [file_id],
+        "file_refs_v1": [{"file_id": file_id, "inject_content": True}],
         "skill_ids": [],
         "exec_mode": "craft",
         "memory_context": [],
@@ -232,14 +265,19 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
     prompt = result["system_prompt"]
     canonical = f"{ws.name}:/WAIC展商联系方式.txt"
     assert f"@{file_id} → {canonical}" in prompt
-    assert f"file_id={file_id} path={canonical}" in prompt
+    assert f"file_id={file_id}" in prompt
+    assert f"path={canonical}" in prompt
     assert "唯一应被分析的文件内容" in prompt
     assert "不应被注入的其他文件内容" not in prompt
     assert "不得声称无法按 UUID 定位" in prompt
     assert "引用是上下文提示，不是授权凭证" in prompt
     file_trace = next(trace for trace in result["traces"] if trace.get("category") == "file")
     assert file_trace["references"] == [
-        {"file_id": file_id, "path": canonical},
+        {
+            "file_id": file_id,
+            "path": canonical,
+            "version_id": str(selected.current_version_id),
+        },
     ]
 
 
@@ -258,6 +296,16 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
         ws,
         WorkspaceFileCreate(path="根目录/其他文件.txt", content="绝对不得注入"),
     )
+    user = await _make_personal_principal(
+        db_session, org, ws, prefix="structured-ref",
+    )
+    principal = CurrentUser(
+        user=user,
+        id=str(user.id),
+        email=user.username,
+        role=user.role,
+        organization_id=org.id,
+    )
     await db_session.flush()
     async def fake_build_tools(
         _db,
@@ -274,7 +322,7 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
     async def fake_visual(_state, _db, _user, _messages, prompt):
         return None, None, prompt
 
-    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session})
+    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": principal})
     monkeypatch.setattr(nodes, "_build_tools", fake_build_tools)
     monkeypatch.setattr(nodes, "_configure_visual_turn", fake_visual)
 
@@ -286,6 +334,7 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
         "system_prompt": "你是测试助手。",
         "messages": [{"role": "user", "content": "请分析我刚刚拖入的文件"}],
         "referenced_file_ids": [file_id],
+        "file_refs_v1": [{"file_id": file_id, "inject_content": True}],
         "skill_ids": [],
         "exec_mode": "craft",
         "memory_context": [],
@@ -590,14 +639,9 @@ async def test_history_restores_available_and_unavailable_attachment_refs(
     org, ws, available = await _make_workspace_with_file(
         db_session, path="会话附件/task/报告.txt", content="历史文件正文",
     )
-    user = User(
-        organization_id=org.id,
-        username=f"history-{uuid4().hex[:8]}",
-        role="member",
-        is_active=True,
+    user = await _make_personal_principal(
+        db_session, org, ws, prefix="history",
     )
-    db_session.add(user)
-    await db_session.flush()
     task = Task(
         organization_id=org.id,
         user_id=user.id,
@@ -695,10 +739,10 @@ async def test_agent_searches_and_reads_authorized_shared_space_without_referenc
     # The next operation uses fresh capabilities rather than the earlier result
     # or an attachment/file-ref snapshot.
     allowed["value"] = False
-    denied = json.loads(await nodes._execute_builtin_tool(
+    denied = await nodes._execute_builtin_tool(
         state, "workspace_read_file", {"file_id": str(shared_file.id)},
-    ))
-    assert denied["status"] == "error"
+    )
+    assert denied == "file not found"
 
 
 @pytest.mark.asyncio
