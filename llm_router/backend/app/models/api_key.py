@@ -15,7 +15,9 @@ class ApiKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     key_prefix: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
     key_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
-    key_encrypted: Mapped[str] = mapped_column(Text, nullable=False, default="")  # AES-256-GCM 加密存储
+    # Legacy rows may contain a reversibly encrypted credential.  New rows
+    # intentionally store an empty string and rely exclusively on key_hash.
+    key_encrypted: Mapped[str] = mapped_column(Text, nullable=False, default="")
     key_name: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # 层级范围
@@ -41,6 +43,8 @@ class ApiKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     budget_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     # 预算上限（以 token 计）；NULL = 继承上层
     budget_cap_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 每月平台 AI 操作准入次数；失败不退，NULL = 继承上层
+    budget_cap_credits: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     # 状态
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

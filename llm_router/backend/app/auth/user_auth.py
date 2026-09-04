@@ -18,6 +18,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import get_db
+from app.models.organization import Organization
 from app.models.role import Role, UserRole
 from app.models.user import User
 from app.services.user_service import get_user
@@ -38,12 +39,22 @@ class CurrentUser:
     role_ids: tuple[str, ...] = ()
     permission_codes: tuple[str, ...] = ()
     effective_data_scopes: dict | None = None
+    # Per-role resolved scopes let application authorization merge only roles
+    # that independently grant the current app/module/page/action.
+    role_data_scopes: dict[str, dict] | None = None
 
 
 def decode_user_token(token: str) -> dict | None:
     """解码用户 JWT；非用户 token 或过期返回 None。"""
     try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=["HS256"])
+        payload = jwt.decode(
+            token,
+            settings.secret_key,
+            algorithms=["HS256"],
+            audience="ai-infra-user-api",
+            issuer="ai-infra-user",
+            options={"require": ["exp", "iat", "iss", "aud", "sub", "jti"]},
+        )
     except jwt.PyJWTError:
         return None
     if payload.get("type") != "user":
@@ -67,10 +78,20 @@ async def require_user(
     payload = decode_user_token(token)
     if payload is None:
         raise HTTPException(status_code=401, detail="Invalid or expired user token")
-    user_id = UUID(payload["sub"])
+    try:
+        user_id = UUID(str(payload["sub"]))
+    except (KeyError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid user token subject")
     user = await get_user(db, user_id)
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="User account disabled")
+    if int(payload.get("auth_epoch", -1)) != user.auth_epoch:
+        raise HTTPException(status_code=401, detail="User session has been revoked")
+    organization = await db.get(Organization, user.organization_id)
+    if organization is None or organization.deleted_at is not None:
+        raise HTTPException(status_code=401, detail="Organization is unavailable")
+    if user.must_change_password and request.url.path != "/api/v1/users/change-password":
+        raise HTTPException(status_code=403, detail="PASSWORD_CHANGE_REQUIRED")
     return await current_user_for_user(db, user)
 
 
@@ -78,15 +99,21 @@ async def current_user_for_user(db: AsyncSession, user: User) -> CurrentUser:
     """Build the same effective terminal principal for login and admin previews."""
     from app.services.role_service import rbac_for_user
 
-    fresh = (await db.execute(
-        select(User)
-        .options(
-            selectinload(User.role_assignments).selectinload(UserRole.role).selectinload(Role.permissions),
-            selectinload(User.role_assignments).selectinload(UserRole.role).selectinload(Role.data_departments),
+    organization = await db.get(Organization, user.organization_id)
+    if organization is None or organization.deleted_at is not None:
+        raise HTTPException(status_code=401, detail="Organization is unavailable")
+
+    fresh = (
+        await db.execute(
+            select(User)
+            .options(
+                selectinload(User.role_assignments).selectinload(UserRole.role).selectinload(Role.permissions),
+                selectinload(User.role_assignments).selectinload(UserRole.role).selectinload(Role.data_departments),
+            )
+            .where(User.id == user.id, User.deleted_at.is_(None))
+            .execution_options(populate_existing=True)
         )
-        .where(User.id == user.id, User.deleted_at.is_(None))
-        .execution_options(populate_existing=True)
-    )).scalar_one_or_none()
+    ).scalar_one_or_none()
     # This helper is also used after long-running Agent/Office/storage work.
     # Never fall back to the caller's stale ORM object: a deleted or disabled
     # account must lose all effective permissions before the final write.
@@ -106,6 +133,7 @@ async def current_user_for_user(db: AsyncSession, user: User) -> CurrentUser:
         role_ids=rbac["role_ids"],
         permission_codes=rbac["permission_codes"],
         effective_data_scopes=rbac["effective_data_scopes"],
+        role_data_scopes=rbac["role_data_scopes"],
     )
 
 

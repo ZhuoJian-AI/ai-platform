@@ -1,6 +1,6 @@
 """User ORM model."""
 
-from sqlalchemy import Column, ForeignKey, Index, String, Table, UniqueConstraint
+from sqlalchemy import Column, ForeignKey, Index, Integer, String, Table, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -44,6 +44,10 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     # 密码登录体系：nullable 以兼容存量用户（无密码则不可密码登录，需管理员重置）
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     must_change_password: Mapped[bool] = mapped_column(default=False)
+    # Monotonic credential/authorization version.  Browser and MCP sessions
+    # carry this value and fail immediately after a password, role or scope
+    # change instead of waiting for token expiry.
+    auth_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # 关系
     organization = relationship("Organization", back_populates="users")

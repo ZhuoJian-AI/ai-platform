@@ -99,6 +99,10 @@ class WorkspaceFileUploadError(ValueError):
     """工作空间原文件上传校验失败。"""
 
 
+class WorkspaceFileInvalidPath(ValueError):  # noqa: N818
+    """The caller supplied an unsafe or otherwise invalid logical path."""
+
+
 class WorkspaceFileUnsupportedTextUpdate(ValueError):  # noqa: N818
     """A plain-text mutation was attempted against a known binary artifact."""
 
@@ -226,22 +230,22 @@ async def soft_delete_workspace(db: AsyncSession, ws: Workspace) -> None:
 def _normalize_path(path: str) -> str:
     """Normalize one logical relative path and reject traversal spellings."""
     if not isinstance(path, str):
-        raise ValueError("路径必须是字符串")
+        raise WorkspaceFileInvalidPath("路径必须是字符串")
     path = unicodedata.normalize("NFC", path)
     if "\x00" in path or any(ord(char) < 32 for char in path):
-        raise ValueError("路径包含非法控制字符")
+        raise WorkspaceFileInvalidPath("路径包含非法控制字符")
     parts: list[str] = []
     for seg in path.replace("\\", "/").split("/"):
         if seg in ("", ".",):
             continue
         if seg == "..":
-            raise ValueError("路径不允许包含 ..")
+            raise WorkspaceFileInvalidPath("路径不允许包含 ..")
         parts.append(seg)
     normalized = "/".join(parts)
     if not normalized:
-        raise ValueError("路径不能为空")
+        raise WorkspaceFileInvalidPath("路径不能为空")
     if len(normalized) > 1024:
-        raise ValueError("路径过长")
+        raise WorkspaceFileInvalidPath("路径过长")
     return normalized
 
 

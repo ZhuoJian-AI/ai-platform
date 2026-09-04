@@ -21,6 +21,7 @@ import {
 import { FinderShell } from '../../components/finder/primitives';
 import { useOrgTree } from '../../hooks/useOrgTree';
 import './EnterpriseApplicationDetail.css';
+import { validateHttpsApplicationUrl } from '../../utils/applicationUrl';
 
 const OPERATION_META: Record<EnterpriseApplicationOperation, { label: string; color: string }> = {
   query: { label: '查询', color: '#2563eb' },
@@ -112,7 +113,10 @@ export default function EnterpriseApplicationDetail() {
     if (!app) return;
     integrationForm.setFieldsValue({
       manifest_url: integrationQuery.data?.manifest_url || `${app.entry_url.replace(/\/$/, '')}/api/integration/manifest`,
-      auth_token: '',
+      manifest_access_token: '',
+      sso_exchange_token: '',
+      action_signing_secret: '',
+      event_signing_secret: '',
       sync_enabled: integrationQuery.data?.sync_enabled ?? true,
     });
   }, [app, integrationForm, integrationQuery.data]);
@@ -123,7 +127,12 @@ export default function EnterpriseApplicationDetail() {
   ]);
 
   const updateApp = useMutation({
-    mutationFn: (values: Partial<EnterpriseApplicationInput>) => enterpriseApplications.update(appId, values),
+    mutationFn: (values: Partial<EnterpriseApplicationInput>) => {
+      const securityBoundaryChanged = !!app && (
+        values.entry_url !== app.entry_url || values.display_mode !== app.display_mode
+      );
+      return enterpriseApplications.update(appId, securityBoundaryChanged ? { ...values, is_active: false } : values);
+    },
     onSuccess: () => {
       setEditOpen(false);
       refresh();
@@ -141,11 +150,36 @@ export default function EnterpriseApplicationDetail() {
     onError: (error) => message.error(errorText(error, '连接测试失败')),
   });
   const configureIntegration = useMutation({
-    mutationFn: (values: { manifest_url: string; auth_token?: string; sync_enabled: boolean }) =>
-      enterpriseApplications.configureIntegration(appId, values),
+    mutationFn: (values: {
+      manifest_url: string;
+      manifest_access_token?: string;
+      sso_exchange_token?: string;
+      action_signing_secret?: string;
+      event_signing_secret?: string;
+      sync_enabled: boolean;
+    }) => {
+      const payload = { ...values };
+      const secretFields = [
+        'manifest_access_token',
+        'sso_exchange_token',
+        'action_signing_secret',
+        'event_signing_secret',
+      ] as const;
+      for (const field of secretFields) {
+        const value = payload[field];
+        if (!value?.trim()) delete payload[field];
+        else payload[field] = value.trim();
+      }
+      return enterpriseApplications.configureIntegration(appId, payload);
+    },
     onSuccess: (result) => {
       qc.setQueryData(['enterprise-application-integration', appId], result);
-      integrationForm.setFieldValue('auth_token', '');
+      integrationForm.setFieldsValue({
+        manifest_access_token: '',
+        sso_exchange_token: '',
+        action_signing_secret: '',
+        event_signing_secret: '',
+      });
       message.success('子系统连接已保存，密钥不会回显');
     },
     onError: (error) => message.error(errorText(error, '连接配置保存失败')),
@@ -154,6 +188,9 @@ export default function EnterpriseApplicationDetail() {
     mutationFn: () => enterpriseApplications.configureIntegration(appId, {
       manifest_url: integrationQuery.data!.manifest_url,
       clear_auth_token: true,
+      clear_sso_exchange_token: true,
+      clear_action_signing_secret: true,
+      clear_event_signing_secret: true,
       sync_enabled: false,
     }),
     onSuccess: (result) => {
@@ -169,9 +206,34 @@ export default function EnterpriseApplicationDetail() {
       qc.invalidateQueries({ queryKey: ['enterprise-application-actions', appId] });
       if (result.status === 'healthy') {
         message.success(`同步完成：新增 ${result.received_events} 个事件，生成 ${result.created_work_items} 个跨部门待办，投递 ${result.delivered_events} 个目标系统事件`);
+      } else if (result.status === 'pending_review') {
+        message.info('同步完成；新清单需要管理员审核后才会生效');
       } else message.error(result.detail || '子系统同步失败');
     },
     onError: (error) => message.error(errorText(error, '子系统同步失败')),
+  });
+  const reviewManifest = useMutation({
+    mutationFn: (decision: 'approve' | 'reject') => {
+      const expectedDigest = integrationQuery.data?.pending_manifest_digest;
+      if (!expectedDigest) return Promise.reject(new Error('待审核清单摘要缺失，请先刷新'));
+      return enterpriseApplications.reviewManifest(appId, decision, expectedDigest);
+    },
+    onSuccess: (result, decision) => {
+      qc.setQueryData(['enterprise-application-integration', appId], result);
+      void Promise.all([
+        qc.invalidateQueries({ queryKey: ['enterprise-application-actions', appId] }),
+        qc.invalidateQueries({ queryKey: ['enterprise-application-overview', appId] }),
+      ]);
+      message.success(decision === 'approve' ? 'Manifest 变更已批准并生效' : 'Manifest 变更已拒绝，继续使用当前版本');
+    },
+    onError: (error) => {
+      if (error instanceof ApiError && error.status === 409) {
+        void qc.invalidateQueries({ queryKey: ['enterprise-application-integration', appId] });
+        message.warning('清单已发生变化，已刷新待审核内容，请重新确认');
+        return;
+      }
+      message.error(errorText(error, 'Manifest 审核失败'));
+    },
   });
   const routePayload = (route: NonNullable<typeof routesQuery.data>[number]) => ({
     name: route.name,
@@ -271,6 +333,27 @@ export default function EnterpriseApplicationDetail() {
   if (!app) {
     return <FinderShell><Empty description="应用不存在或无权访问" /></FinderShell>;
   }
+
+  const pendingManifestReview = integrationQuery.data?.manifest_review_status === 'pending'
+    ? integrationQuery.data
+    : null;
+  const changedManifestPaths = Array.from(new Set(
+    (pendingManifestReview?.manifest_diff ?? []).flatMap((item) => (
+      Array.isArray(item.changedPaths)
+        ? item.changedPaths.filter((path): path is string => typeof path === 'string' && path.length > 0)
+        : []
+    )),
+  ));
+  const securitySensitiveManifestChange = (pendingManifestReview?.manifest_diff ?? [])
+    .some((item) => item.securitySensitive === true);
+  const changedManifestPathCount = Math.max(
+    changedManifestPaths.length,
+    ...(pendingManifestReview?.manifest_diff ?? []).map((item) => (
+      typeof item.changedPathCount === 'number' ? item.changedPathCount : 0
+    )),
+  );
+  const changedManifestPathsTruncated = (pendingManifestReview?.manifest_diff ?? [])
+    .some((item) => item.changedPathsTruncated === true);
 
   const permissionTable = (
     <Table
@@ -409,6 +492,82 @@ export default function EnterpriseApplicationDetail() {
             showIcon type="info" message="页面更新与业务数据同步是两条链路"
             description="iframe 负责实时显示子系统页面；这里的 HTTPS 连接负责发现模块、增量接收业务事件，并按管理员规则生成跨部门待办。中央平台不会复制子系统业务表。"
           />
+          {pendingManifestReview && (
+            <Card title={<Space><SafetyCertificateOutlined />待审核的 Manifest 变更</Space>}>
+              <Alert
+                showIcon
+                type={securitySensitiveManifestChange ? 'warning' : 'info'}
+                message={securitySensitiveManifestChange ? '此次变更涉及权限或安全边界' : '子系统声明已发生变化'}
+                description="批准前，平台继续使用当前已生效版本；请核对变更路径后再决定。"
+                style={{ marginBottom: 16 }}
+              />
+              <Descriptions bordered size="small" column={1} style={{ marginBottom: 16 }}>
+                <Descriptions.Item label="目标契约版本">
+                  {pendingManifestReview.pending_contract_revision || '未声明'}
+                </Descriptions.Item>
+                <Descriptions.Item label="变更路径">
+                  <Space wrap>
+                    {changedManifestPaths.length > 0
+                      ? changedManifestPaths.map((path) => <Typography.Text code key={path}>{path}</Typography.Text>)
+                      : <Typography.Text type="secondary">清单内容有变化，但未提供路径摘要</Typography.Text>}
+                    {changedManifestPathsTruncated && <Tag>共 {changedManifestPathCount} 项，仅展示前 200 项</Tag>}
+                  </Space>
+                </Descriptions.Item>
+              </Descriptions>
+              <details style={{ marginBottom: 16 }}>
+                <summary style={{ cursor: 'pointer', fontWeight: 600 }}>查看当前版本与候选版本完整内容</summary>
+                <div className="app-detail-two-columns" style={{ marginTop: 12 }}>
+                  <Card size="small" title="当前已生效">
+                    <pre style={{ maxHeight: 360, overflow: 'auto', whiteSpace: 'pre-wrap', margin: 0 }}>
+                      {JSON.stringify(pendingManifestReview.manifest, null, 2)}
+                    </pre>
+                  </Card>
+                  <Card size="small" title="等待批准">
+                    <pre style={{ maxHeight: 360, overflow: 'auto', whiteSpace: 'pre-wrap', margin: 0 }}>
+                      {JSON.stringify(pendingManifestReview.pending_manifest, null, 2)}
+                    </pre>
+                  </Card>
+                </div>
+              </details>
+              {!pendingManifestReview.credentials_complete && (
+                <Alert
+                  showIcon
+                  type="warning"
+                  message="四类独立凭证尚未全部配置，当前不能批准"
+                  style={{ marginBottom: 16 }}
+                />
+              )}
+              <Space>
+                <Popconfirm
+                  title="批准这版 Manifest？"
+                  description="批准后，新模块、页面与操作声明将立即成为生效版本。"
+                  okText="批准"
+                  cancelText="取消"
+                  onConfirm={() => reviewManifest.mutate('approve')}
+                >
+                  <Button
+                    type="primary"
+                    disabled={!pendingManifestReview.credentials_complete || !pendingManifestReview.pending_manifest_digest}
+                    loading={reviewManifest.isPending}
+                  >
+                    批准变更
+                  </Button>
+                </Popconfirm>
+                <Popconfirm
+                  title="拒绝这版 Manifest？"
+                  description="拒绝后继续使用当前已生效版本。"
+                  okText="拒绝"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => reviewManifest.mutate('reject')}
+                >
+                  <Button danger disabled={!pendingManifestReview.pending_manifest_digest} loading={reviewManifest.isPending}>
+                    拒绝变更
+                  </Button>
+                </Popconfirm>
+              </Space>
+            </Card>
+          )}
           <Card title={<Space><CloudServerOutlined />子系统连接</Space>} extra={integrationQuery.data && (
             <Button type="primary" loading={syncIntegration.isPending} onClick={() => syncIntegration.mutate()}>立即同步</Button>
           )}>
@@ -416,28 +575,59 @@ export default function EnterpriseApplicationDetail() {
               form={integrationForm} layout="vertical"
               initialValues={{
                 manifest_url: integrationQuery.data?.manifest_url || `${app.entry_url.replace(/\/$/, '')}/api/integration/manifest`,
-                auth_token: '', sync_enabled: integrationQuery.data?.sync_enabled ?? true,
+                manifest_access_token: '', sso_exchange_token: '', action_signing_secret: '',
+                event_signing_secret: '', sync_enabled: integrationQuery.data?.sync_enabled ?? true,
               }}
               onFinish={(values) => configureIntegration.mutate(values)}
             >
               <Form.Item name="manifest_url" label="系统清单地址" extra="必须与应用入口同域；生产环境必须使用 HTTPS。" rules={[{ required: true }, { type: 'url' }]}>
                 <Input prefix={<LinkOutlined />} placeholder="https://业务系统/api/integration/manifest" />
               </Form.Item>
-              <Form.Item name="auth_token" label={integrationQuery.data?.token_configured ? '连接密钥（已配置，留空表示不修改）' : '连接密钥'}>
-                <Input.Password autoComplete="new-password" placeholder="只在保存时发送，平台加密保存且不回显" />
-              </Form.Item>
+              <Alert
+                showIcon
+                type="info"
+                message="新系统由 ECS Runtime 自动完成凭证配置"
+                description="以下输入框只用于旧系统迁移或凭证轮换；已配置的项目留空即可，不需要日常填写。"
+                style={{ marginBottom: 16 }}
+              />
+              <div className="app-detail-two-columns">
+                <Form.Item
+                  name="manifest_access_token"
+                  label={`清单读取凭证${integrationQuery.data?.manifest_token_configured ? '（已配置）' : ''}`}
+                >
+                  <Input.Password autoComplete="new-password" placeholder="zjmf_…（留空不修改）" />
+                </Form.Item>
+                <Form.Item
+                  name="sso_exchange_token"
+                  label={`登录交换凭证${integrationQuery.data?.sso_exchange_configured ? '（已配置）' : ''}`}
+                >
+                  <Input.Password autoComplete="new-password" placeholder="zjss_…（留空不修改）" />
+                </Form.Item>
+                <Form.Item
+                  name="action_signing_secret"
+                  label={`业务操作凭证${integrationQuery.data?.action_signing_configured ? '（已配置）' : ''}`}
+                >
+                  <Input.Password autoComplete="new-password" placeholder="zjac_…（留空不修改）" />
+                </Form.Item>
+                <Form.Item
+                  name="event_signing_secret"
+                  label={`事件签名凭证${integrationQuery.data?.event_signing_configured ? '（已配置）' : ''}`}
+                >
+                  <Input.Password autoComplete="new-password" placeholder="zjev_…（留空不修改）" />
+                </Form.Item>
+              </div>
               <Space size={24} align="start">
                 <Form.Item name="sync_enabled" valuePropName="checked"><Switch checkedChildren="自动同步" unCheckedChildren="暂停同步" /></Form.Item>
                 <Button type="primary" htmlType="submit" loading={configureIntegration.isPending}>保存连接</Button>
                 {integrationQuery.data?.token_configured && <Popconfirm
-                  title="撤销模块连接密钥？"
-                  description="撤销后新的 iframe 登录、AI 操作和自动同步都会停止。"
+                  title="撤销全部系统凭证？"
+                  description="撤销后新的 iframe 登录、业务操作和自动同步都会停止。"
                   okText="确认撤销"
                   cancelText="取消"
                   okButtonProps={{ danger: true }}
                   onConfirm={() => revokeIntegration.mutate()}
                 >
-                  <Button danger loading={revokeIntegration.isPending}>撤销密钥</Button>
+                  <Button danger loading={revokeIntegration.isPending}>撤销全部凭证</Button>
                 </Popconfirm>}
               </Space>
             </Form>
@@ -445,6 +635,11 @@ export default function EnterpriseApplicationDetail() {
               <Descriptions.Item label="同步状态"><Tag color={integrationQuery.data.sync_status === 'healthy' ? 'green' : integrationQuery.data.sync_status === 'error' ? 'red' : 'blue'}>{integrationQuery.data.sync_status}</Tag></Descriptions.Item>
               <Descriptions.Item label="已接收游标">{integrationQuery.data.cursor_sequence}</Descriptions.Item>
               <Descriptions.Item label="发现模块">{integrationQuery.data.modules.length} 个</Descriptions.Item>
+              <Descriptions.Item label="四类凭证">
+                <Tag color={integrationQuery.data.credentials_complete ? 'green' : 'orange'}>
+                  {integrationQuery.data.credentials_complete ? '已完整配置' : '需要迁移或补齐'}
+                </Tag>
+              </Descriptions.Item>
               <Descriptions.Item label="最近同步">{integrationQuery.data.last_event_sync_at ? new Date(integrationQuery.data.last_event_sync_at).toLocaleString('zh-CN') : '尚未同步'}</Descriptions.Item>
               {integrationQuery.data.last_error && <Descriptions.Item label="最近错误" span={2}><Typography.Text type="danger">{integrationQuery.data.last_error}</Typography.Text></Descriptions.Item>}
             </Descriptions>}
@@ -509,7 +704,7 @@ export default function EnterpriseApplicationDetail() {
           </div>
           <Space>
             <Button icon={<PlayCircleOutlined />} loading={testApp.isPending} onClick={() => testApp.mutate()}>检查连接</Button>
-            <Button icon={<ExportOutlined />} onClick={() => window.open(app.entry_url, '_blank', 'noopener,noreferrer')}>打开应用</Button>
+            <Button icon={<ExportOutlined />} disabled={!app.is_active} title={!app.is_active ? '应用待审核或已停用' : undefined} onClick={() => window.open(app.entry_url, '_blank', 'noopener,noreferrer')}>打开应用</Button>
             <Button type="primary" icon={<EditOutlined />} onClick={openEdit}>编辑配置</Button>
           </Space>
         </div>
@@ -520,10 +715,10 @@ export default function EnterpriseApplicationDetail() {
         <Form form={form} layout="vertical" onFinish={(values) => updateApp.mutate(values)}>
           <Form.Item name="name" label="应用名称" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="description" label="说明"><Input.TextArea rows={2} /></Form.Item>
-          <Form.Item name="entry_url" label="入口地址" rules={[{ required: true }, { type: 'url' }]}><Input prefix={<LinkOutlined />} /></Form.Item>
+          <Form.Item name="entry_url" label="入口地址" rules={[{ required: true }, { validator: validateHttpsApplicationUrl }]}><Input prefix={<LinkOutlined />} /></Form.Item>
           <Form.Item name="display_mode" label="打开方式"><Select options={[{ value: 'embedded', label: '平台内嵌（iframe）' }, { value: 'external', label: '外部打开' }]} /></Form.Item>
           <Form.Item name="assistant_prompt" label="业务助手提示词"><Input.TextArea rows={4} /></Form.Item>
-          <Space size={32}><Form.Item name="is_active" label="启用应用" valuePropName="checked"><Switch /></Form.Item><Form.Item name="assistant_enabled" label="启用业务助手" valuePropName="checked"><Switch /></Form.Item></Space>
+          <Space size={32}><Form.Item name="is_active" label="审核并启用应用" valuePropName="checked"><Switch /></Form.Item><Form.Item name="assistant_enabled" label="启用业务助手" valuePropName="checked"><Switch /></Form.Item></Space>
         </Form>
       </Modal>
       <Modal title="新增跨部门分发规则" open={routeOpen} onCancel={() => setRouteOpen(false)} onOk={() => routeForm.submit()} confirmLoading={saveRoute.isPending} forceRender>

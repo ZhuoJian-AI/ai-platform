@@ -31,6 +31,8 @@ class Team(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     budget_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     # 预算上限（以 token 计）；NULL = 依次继承部门→组织
     budget_cap_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 每月平台 AI 操作准入次数；失败不退，NULL = 依次继承部门→组织
+    budget_cap_credits: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     # 关系
     department = relationship("Department", back_populates="teams")

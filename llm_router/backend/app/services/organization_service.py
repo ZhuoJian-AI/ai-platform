@@ -1,10 +1,10 @@
 """Organization service — CRUD for orgs, departments, teams."""
 
-from datetime import UTC
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import noload
 
@@ -109,11 +109,90 @@ async def update_organization(db: AsyncSession, org: Organization, data: Organiz
 
 
 async def soft_delete_organization(db: AsyncSession, org: Organization) -> None:
-    from datetime import datetime
-    org.deleted_at = datetime.now(UTC)
+    from app.models.admin import Admin
+    from app.models.api_key import ApiKey
+    from app.models.ecs_runtime import EcsModuleRelease, EcsRuntime
+    from app.models.enterprise_application import (
+        EnterpriseApplication,
+        EnterpriseApplicationIntegration,
+    )
+    from app.models.llm_provider import LlmProvider, ModelDeployment
+    from app.models.oauth import OAuthAuthorizationCode, OAuthRefreshToken
+    from app.models.user import User
+
+    now = datetime.now(UTC)
+    org.deleted_at = now
     # 默认组织被删除后不再有效，清除标记（部分唯一索引排除软删除行，
     # 但语义上不应残留 is_default=True 的已删除组织）
     org.is_default = False
+    # Organization deletion is an authorization event, not only a sidebar
+    # change. Revoke every principal, model credential and deployment entry in
+    # the same transaction so no stale JWT/API key can keep spending quota.
+    await db.execute(
+        update(User)
+        .where(User.organization_id == org.id, User.is_active.is_(True))
+        .values(is_active=False, auth_epoch=User.auth_epoch + 1)
+    )
+    await db.execute(
+        update(Admin)
+        .where(Admin.organization_id == org.id, Admin.is_active.is_(True))
+        .values(is_active=False, auth_epoch=Admin.auth_epoch + 1)
+    )
+    await db.execute(
+        update(ApiKey)
+        .where(ApiKey.organization_id == org.id, ApiKey.is_active.is_(True))
+        .values(is_active=False, revoked_at=now, expires_at=now)
+    )
+    provider_ids = select(LlmProvider.id).where(LlmProvider.organization_id == org.id)
+    await db.execute(
+        update(ModelDeployment)
+        .where(ModelDeployment.provider_id.in_(provider_ids))
+        .values(is_active=False, deleted_at=now)
+    )
+    await db.execute(
+        update(LlmProvider)
+        .where(LlmProvider.organization_id == org.id)
+        .values(is_active=False, deleted_at=now)
+    )
+    application_ids = select(EnterpriseApplication.id).where(
+        EnterpriseApplication.organization_id == org.id
+    )
+    await db.execute(
+        update(EnterpriseApplicationIntegration)
+        .where(EnterpriseApplicationIntegration.application_id.in_(application_ids))
+        .values(sync_enabled=False, sync_status="revoked")
+    )
+    await db.execute(
+        update(EnterpriseApplication)
+        .where(EnterpriseApplication.organization_id == org.id)
+        .values(is_active=False, assistant_enabled=False)
+    )
+    await db.execute(
+        update(EcsRuntime)
+        .where(EcsRuntime.organization_id == org.id)
+        .values(is_active=False)
+    )
+    await db.execute(
+        update(EcsModuleRelease)
+        .where(EcsModuleRelease.organization_id == org.id)
+        .values(status="failed", last_error="Organization has been deleted")
+    )
+    await db.execute(
+        update(OAuthAuthorizationCode)
+        .where(
+            OAuthAuthorizationCode.organization_id == org.id,
+            OAuthAuthorizationCode.consumed_at.is_(None),
+        )
+        .values(consumed_at=now)
+    )
+    await db.execute(
+        update(OAuthRefreshToken)
+        .where(
+            OAuthRefreshToken.organization_id == org.id,
+            OAuthRefreshToken.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+    )
     await soft_delete_node_workspace(db, org.id, "organization", None)
     await soft_delete_node_memory(db, org.id, "organization", None)
     await db.flush()

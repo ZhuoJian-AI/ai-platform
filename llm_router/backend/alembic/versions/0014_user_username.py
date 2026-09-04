@@ -31,7 +31,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_constraint("uq_user_org_username", "users", type_="unique")
+    op.execute("ALTER TABLE users RENAME COLUMN username TO email")
     op.create_unique_constraint(
         "uq_user_org_email", "users", ["organization_id", "email"]
     )
-    op.execute("ALTER TABLE users RENAME COLUMN username TO email")

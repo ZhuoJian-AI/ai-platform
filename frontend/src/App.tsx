@@ -92,7 +92,7 @@ const SUBSYSTEMS: Subsystem[] = [
   {
     key: 'enterprise_settings', label: '企业设置', icon: <SettingOutlined />, built: true,
     menu: [
-      { path: '/org/admins', label: '管理员', icon: <TeamOutlined />, superOnly: true },
+      { path: '/org/admins', label: '管理员', icon: <TeamOutlined /> },
       { path: '/org/profile', label: '企业资料', icon: <ApartmentOutlined /> },
       { path: '/org/contact', label: '联系方式', icon: <PhoneOutlined /> },
       // 旧入口保留直达路由，但不再占用企业管理主导航。
@@ -214,7 +214,13 @@ function AppLayout() {
     if (active) setExpandedGroups((current) => current.has(active.key) ? current : new Set([...current, active.key]));
   }, [location.pathname]);
 
-  const ROLE_LABELS: Record<string, string> = { super_admin: '超管', admin: '管理员', org_admin: '组织管理员' };
+  const ROLE_LABELS: Record<string, string> = {
+    platform_super_admin: '超级平台管理员',
+    enterprise_admin: '企业管理员',
+    // 仅用于数据库迁移期间显示旧会话；新表单不再产生这些值。
+    super_admin: '超级平台管理员',
+    org_admin: '企业管理员',
+  };
 
   // 扁平渲染全部已建成子系统的路由——单侧栏全路由可见，直达链接不再被重定向回首页
   // （原 activeSubsystem 状态不随 URL 同步的坑由此彻底移除）

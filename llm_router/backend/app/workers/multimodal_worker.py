@@ -202,16 +202,20 @@ async def _transcribe(db, job: MultimodalJob, directory: Path) -> dict:
     total_usage: dict[str, int] = {}
     deployment_id = None
     model = None
-    for index, part in enumerate(parts):
-        result = await model_gateway.transcribe_audio(
-            db,
-            UUID(str(job.organization_id)),
-            part.read_bytes(),
-            audio_format="mp3",
-            language=str(job.params.get("language") or "auto"),
-            model_alias=str(job.params.get("model") or "default"),
-            dept_id=job.department_id,
-        )
+    # The persisted job request id is the quota idempotency key: segmentation
+    # and later worker retries remain one platform logical AI operation.
+    results = await model_gateway.transcribe_audio_segments(
+        db,
+        UUID(str(job.organization_id)),
+        (part.read_bytes() for part in parts),
+        audio_format="mp3",
+        language=str(job.params.get("language") or "auto"),
+        model_alias=str(job.params.get("model") or "default"),
+        dept_id=job.department_id,
+        team_id=job.team_id,
+        request_id=job.request_id,
+    )
+    for index, result in enumerate(results):
         transcripts.append(result["text"])
         segment_results.append({"index": index, "text": result["text"]})
         for key, value in (result.get("usage") or {}).items():
@@ -247,6 +251,7 @@ async def _synthesize(db, job: MultimodalJob, directory: Path) -> dict:
         clone_audio = normalized.read_bytes()
         clone_format = "mp3"
     requested_format = str(job.params.get("format") or "wav")
+    # Synthesis retries reuse the same logical-operation reservation as well.
     result = await model_gateway.synthesize_audio(
         db,
         UUID(str(job.organization_id)),
@@ -260,6 +265,8 @@ async def _synthesize(db, job: MultimodalJob, directory: Path) -> dict:
         clone_format=clone_format,
         model_alias=str(job.params.get("model") or "default"),
         dept_id=job.department_id,
+        team_id=job.team_id,
+        request_id=job.request_id,
     )
     raw = result["audio"]
     final_format = requested_format

@@ -118,6 +118,7 @@ async def _create_job(
         organization_id=cu.organization_id,
         user_id=UUID(cu.id),
         department_id=UUID(cu.department_id) if cu.department_id else None,
+        team_id=UUID(cu.team_id) if cu.team_id else None,
         capability=capability,
         input_file_id=input_file_id,
         voice_profile_id=voice_profile_id,
@@ -269,6 +270,7 @@ async def understand_file(
         model_alias=model,
         dept_id=cu.department_id,
         team_id=cu.team_id,
+        audio_size_bytes=file.size,
     )
     return {
         "content": result.content or result.reasoning_content or "",
@@ -299,6 +301,7 @@ async def stream_understand_file(
         model_alias=model,
         dept_id=cu.department_id,
         team_id=cu.team_id,
+        audio_size_bytes=file.size,
     )
 
 

@@ -15,6 +15,7 @@ import structlog
 from app.graph.context import get_deps
 from app.graph.state import ProxyState
 from app.models.audit_log import AuditLog
+from app.services.ai_quota_service import settle_ai_quota
 
 logger = structlog.get_logger()
 
@@ -29,6 +30,23 @@ async def write_audit(state: ProxyState) -> dict:
     usage = state.get("usage") or {}
     dlp_result = state.get("dlp_request_result") or {}
     dlp_resp_result = state.get("dlp_response_result") or {}
+
+    # Streaming calls settle in the proxy node so disconnect cancellation is
+    # covered. This second call is idempotent. Non-streaming and early-error
+    # paths settle here before the HTTP response is returned.
+    reservation = state.get("quota_reservation")
+    if reservation:
+        quota_usage = (
+            usage
+            if state.get("upstream_started")
+            else {"input_tokens": 0, "output_tokens": 0}
+        )
+        await settle_ai_quota(
+            reservation,
+            quota_usage,
+            db=db,
+            outcome="completed" if not err else "failed",
+        )
 
     # 错误路径下 status_code 取自 error；成功路径取自 proxy 回填的 status_code
     status_code = state.get("status_code")

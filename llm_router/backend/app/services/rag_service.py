@@ -333,7 +333,14 @@ def _split_text(text: str, chunk_size: int, overlap: int) -> list[str]:
 
 
 async def ingest_document(
-    db: AsyncSession, coll: RagCollection, org_id: UUID, data: RagDocumentCreate, created_by: str | None = None,
+    db: AsyncSession,
+    coll: RagCollection,
+    org_id: UUID,
+    data: RagDocumentCreate,
+    created_by: str | None = None,
+    *,
+    department_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
 ) -> RagDocument:
     """同步入库（终端 JSON 文本 / 既有文本粘贴路径）：写入源文档，分块并嵌入向量。
 
@@ -356,7 +363,15 @@ async def ingest_document(
     await db.flush()
 
     chunks = _split_text(data.content, coll.chunk_size, coll.chunk_overlap)
-    await _chunk_and_embed(db, doc, coll, org_id, chunks)
+    await _chunk_and_embed(
+        db,
+        doc,
+        coll,
+        org_id,
+        chunks,
+        department_id=department_id,
+        team_id=team_id,
+    )
     return doc
 
 
@@ -367,6 +382,8 @@ async def _chunk_and_embed(
     org_id: UUID,
     chunks: list[str],
     *,
+    department_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
     on_progress: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> None:
     """删除旧分块 → 分批嵌入 → 写入 RagChunk → 置 ready/100。
@@ -382,7 +399,14 @@ async def _chunk_and_embed(
     for start in range(0, total, _EMBED_BATCH):
         batch = chunks[start:start + _EMBED_BATCH]
         try:
-            vectors = await llm_client.embed(db, org_id, coll.embedding_model, batch)
+            vectors = await llm_client.embed(
+                db,
+                org_id,
+                coll.embedding_model,
+                batch,
+                dept_id=department_id,
+                team_id=team_id,
+            )
         except Exception as exc:  # noqa: BLE001 — 嵌入是入库契约的一部分，失败即 fail loud
             # 清理本批之前已 flush 的半成品 chunk，置 failed 供调用方 commit 落库排查
             await db.execute(delete(RagChunk).where(RagChunk.document_id == doc.id))
@@ -426,6 +450,8 @@ async def ingest_uploaded_file(
     title: str | None = None,
     folder_path: str = "",
     created_by: str | None = None,
+    department_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
 ) -> RagDocument:
     """上传文件入库：请求线程内同步解析抽取文本并落库，分块+嵌入交后台任务异步进行。
 
@@ -462,7 +488,15 @@ async def ingest_uploaded_file(
     coll_id = str(coll.id)
     doc_id = str(doc.id)
     org_id_str = str(org_id)
-    asyncio.create_task(_run_ingest_bg(doc_id, coll_id, org_id_str))
+    asyncio.create_task(
+        _run_ingest_bg(
+            doc_id,
+            coll_id,
+            org_id_str,
+            str(department_id) if department_id is not None else None,
+            str(team_id) if team_id is not None else None,
+        )
+    )
     return doc
 
 
@@ -490,7 +524,13 @@ async def _ensure_folder_chain(
         await create_folder(db, coll, RagFolderCreate(path=prefix), created_by=created_by)
 
 
-async def _run_ingest_bg(doc_id: str, coll_id: str, org_id: str) -> None:
+async def _run_ingest_bg(
+    doc_id: str,
+    coll_id: str,
+    org_id: str,
+    department_id: str | None = None,
+    team_id: str | None = None,
+) -> None:
     """后台入库任务：自带 session，分阶段更新 status/progress。
 
     阶段：parsing(5) → chunking(10) → embedding(10..95，按批递增) → ready(100)。
@@ -527,7 +567,14 @@ async def _run_ingest_bg(doc_id: str, coll_id: str, org_id: str) -> None:
                 await db.commit()
 
             await _chunk_and_embed(
-                db, doc, coll, UUID(org_id), chunks, on_progress=_p,
+                db,
+                doc,
+                coll,
+                UUID(org_id),
+                chunks,
+                department_id=department_id,
+                team_id=team_id,
+                on_progress=_p,
             )
             await db.commit()
     except Exception as exc:  # noqa: BLE001 — 后台任务兜底：置失败，不抛出（否则无捕获）
@@ -610,7 +657,13 @@ async def list_chunks(db: AsyncSession, doc_id: UUID) -> list[RagChunk]:
 
 
 async def reingest_document(
-    db: AsyncSession, doc: RagDocument, org_id: UUID, data: RagReingestRequest,
+    db: AsyncSession,
+    doc: RagDocument,
+    org_id: UUID,
+    data: RagReingestRequest,
+    *,
+    department_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
 ) -> RagDocument:
     """按分块重新入库：替换原分块并重新嵌入，保留同一文档 id。
 
@@ -642,7 +695,14 @@ async def reingest_document(
     # embedding 是入库契约的一部分：失败即 raise，让事务回滚——旧分块已在上面 delete
     # （仅 flush 未 commit），回滚后旧 chunk 与原 doc 恢复，不留下 0 chunk 的 failed 行。
     try:
-        vectors = await llm_client.embed(db, org_id, coll.embedding_model, chunks)
+        vectors = await llm_client.embed(
+            db,
+            org_id,
+            coll.embedding_model,
+            chunks,
+            dept_id=department_id,
+            team_id=team_id,
+        )
     except Exception as exc:  # noqa: BLE001
         raise EmbeddingError(str(exc)) from exc
     if not vectors or len(vectors) != len(chunks):
@@ -905,6 +965,9 @@ async def retrieve(
     coll: RagCollection,
     org_id: UUID,
     req: RagRetrieveRequest,
+    *,
+    department_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
 ) -> list[dict]:
     """检索 collection 命中。优先 pgvector 余弦检索；向量不可用或无命中时回退 CJK 关键词检索。
 
@@ -917,7 +980,14 @@ async def retrieve(
     # 1. 向量检索
     qvec = None
     try:
-        qvecs = await llm_client.embed(db, org_id, coll.embedding_model, [req.query])
+        qvecs = await llm_client.embed(
+            db,
+            org_id,
+            coll.embedding_model,
+            [req.query],
+            dept_id=department_id,
+            team_id=team_id,
+        )
         if qvecs:
             qvec = qvecs[0]
     except Exception as exc:  # noqa: BLE001 — embedding 不可用时降级到关键词检索

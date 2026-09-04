@@ -9,8 +9,8 @@ const { Title, Paragraph, Text } = Typography;
 
 /** 帮助文档抽屉内容：左侧目录（滚动联动高亮）+ 卡片化正文。
  *  内容在 Drawer 的滚动容器内，用 scrollIntoView 定位（不依赖 window/hash）。
- *  按当前账号角色切换：组织级账号（org_admin 等）展示组织管理员帮助，
- *  平台级账号展示超管/平台管理员帮助。 */
+ *  按当前账号角色切换：enterprise_admin 展示企业管理员帮助，
+ *  platform_super_admin 展示平台管理员帮助。 */
 export default function HelpBody() {
   const { isOrgScoped } = useAuth();
   const sections = isOrgScoped() ? HELP_SECTIONS_ORG_ADMIN : HELP_SECTIONS;

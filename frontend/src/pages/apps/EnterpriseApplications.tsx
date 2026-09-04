@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Alert, Button, Card, Checkbox, Empty, Form, Input, InputNumber, Modal, Select,
+  Alert, Button, Card, Checkbox, Empty, Form, Input, InputNumber, Modal, Popconfirm, Select,
   Space, Switch, Table, Tag, TreeSelect, Typography, message,
 } from 'antd';
 import {
-  AppstoreOutlined, DeleteOutlined, EditOutlined, LinkOutlined, PlusOutlined,
+  AppstoreOutlined, CheckCircleOutlined, DeleteOutlined, EditOutlined, LinkOutlined, PlusOutlined,
   RobotOutlined, SafetyCertificateOutlined, SettingOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -22,6 +22,7 @@ import ConfirmModal from '../../components/finder/ConfirmModal';
 import { FinderShell, TitleBar } from '../../components/finder/primitives';
 import { useOrgTree } from '../../hooks/useOrgTree';
 import EnterpriseApplicationOnboardingWizard from './EnterpriseApplicationOnboardingWizard';
+import { validateHttpsApplicationUrl } from '../../utils/applicationUrl';
 
 export type EnterpriseApplicationsSection = 'applications' | 'navigation' | 'permissions' | 'assistant';
 
@@ -175,8 +176,11 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   const saveApp = useMutation({
     mutationFn: async (values: AppFormValues) => {
       if (!orgId) throw new Error('请先选择企业');
+      const securityBoundaryChanged = !!editing && (
+        values.entry_url !== editing.entry_url || values.display_mode !== editing.display_mode
+      );
       return editing
-        ? enterpriseApplications.update(editing.id, values)
+        ? enterpriseApplications.update(editing.id, securityBoundaryChanged ? { ...values, is_active: false } : values)
         : enterpriseApplications.create(orgId, values);
     },
     onSuccess: (saved) => {
@@ -207,7 +211,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   const openCreate = () => {
     setEditing(null); appForm.resetFields();
     appForm.setFieldsValue({
-      display_mode: 'embedded', sort_order: 0, is_active: true, assistant_enabled: true,
+      display_mode: 'embedded', sort_order: 0, is_active: false, assistant_enabled: false,
     });
     setAppModalOpen(true);
   };
@@ -347,10 +351,17 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
       ) },
       { title: '入口地址', dataIndex: 'entry_url', ellipsis: true },
       { title: '展示', dataIndex: 'display_mode', width: 100, render: (value: string) => <Tag>{value === 'embedded' ? '平台内嵌' : '外部打开'}</Tag> },
-      { title: '状态', width: 150, render: (_: unknown, row: EnterpriseApplication) => <Space><Tag color={row.is_active ? 'green' : 'default'}>{row.is_active ? '启用' : '停用'}</Tag><Tag>{row.health_status}</Tag></Space> },
-      { title: '操作', width: 260, render: (_: unknown, row: EnterpriseApplication) => <Space>
+      { title: '状态', width: 170, render: (_: unknown, row: EnterpriseApplication) => <Space><Tag color={row.is_active ? 'green' : 'gold'}>{row.is_active ? '已审核启用' : '待审核 / 已停用'}</Tag><Tag>{row.health_status}</Tag></Space> },
+      { title: '操作', width: 360, render: (_: unknown, row: EnterpriseApplication) => <Space>
         <Button size="small" type="primary" onClick={() => navigate(`/enterprise-apps/${row.id}`)}>管理</Button>
         <Button size="small" icon={<ThunderboltOutlined />} loading={testApp.isPending} onClick={() => testApp.mutate(row.id)}>测试</Button>
+        {!row.is_active && <Popconfirm
+          title="审核并启用这个应用？"
+          description="请先确认入口域名、Manifest、页面和 Action；启用后仍只有获授权角色可进入。"
+          okText="审核通过并启用"
+          cancelText="取消"
+          onConfirm={() => updateApp.mutate({ id: row.id, data: { is_active: true } })}
+        ><Button size="small" icon={<CheckCircleOutlined />}>审核启用</Button></Popconfirm>}
         <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>编辑</Button>
         <Button size="small" danger icon={<DeleteOutlined />} onClick={() => setDeleteTarget(row)}>删除</Button>
       </Space> },
@@ -462,7 +473,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
         <Form form={appForm} layout="vertical" onFinish={(values) => saveApp.mutate(values)} onValuesChange={(changed) => { if (!editing && changed.name && !appForm.getFieldValue('slug')) appForm.setFieldValue('slug', slugify(changed.name)); }}>
           <Space align="start" style={{ display: 'flex' }}><Form.Item name="name" label="显示名称" rules={[{ required: true }]} style={{ flex: 1 }}><Input placeholder="生产协同" /></Form.Item><Form.Item name="slug" label="模块标识" rules={[{ required: true }, { pattern: /^[a-z0-9]+(?:-[a-z0-9]+)*$/, message: '仅小写字母、数字和连字符' }]} style={{ flex: 1 }}><Input disabled={!!editing} placeholder="production-collaboration" /></Form.Item></Space>
           <Form.Item name="description" label="说明"><Input.TextArea rows={2} /></Form.Item>
-          <Form.Item name="entry_url" label="独立项目入口 URL" rules={[{ required: true }, { type: 'url' }]}><Input prefix={<LinkOutlined />} placeholder="https://business.example.com" /></Form.Item>
+          <Form.Item name="entry_url" label="独立项目入口 URL" rules={[{ required: true }, { validator: validateHttpsApplicationUrl }]}><Input prefix={<LinkOutlined />} placeholder="https://business.example.com" /></Form.Item>
           <Form.Item name="icon_url" label="图标 URL" rules={[{ type: 'url', warningOnly: true }]}><Input placeholder="https://.../icon.png" /></Form.Item>
           <Space align="start" style={{ display: 'flex' }}><Form.Item name="display_mode" label="打开方式" style={{ flex: 1 }}><Select options={[{ value: 'embedded', label: '平台内嵌（iframe）' }, { value: 'external', label: '外部打开' }]} /></Form.Item><Form.Item name="sort_order" label="导航排序" style={{ flex: 1 }}><InputNumber style={{ width: '100%' }} /></Form.Item></Space>
           <Alert
@@ -470,7 +481,8 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
             message="登记只负责连接模块系统，不在这里授权员工"
             description="请在“角色权限”中按企业模块、业务子模块、最小页面、操作和 AI 授权；员工通过一个或多个角色取得权限。"
           />
-          <Space size={32}><Form.Item name="is_active" label="启用应用" valuePropName="checked"><Switch /></Form.Item><Form.Item name="assistant_enabled" label="业务小助手" valuePropName="checked"><Switch /></Form.Item></Space>
+          <Alert showIcon type="warning" style={{ marginBottom: 18 }} message="新登记应用默认不可启动" description="确认域名、Manifest、页面和 Action 后，再打开“审核并启用”。停用时员工入口、SSO 与 Action 都应立即失效。" />
+          <Space size={32}><Form.Item name="is_active" label="审核并启用" valuePropName="checked"><Switch /></Form.Item><Form.Item name="assistant_enabled" label="业务小助手" valuePropName="checked"><Switch /></Form.Item></Space>
         </Form>
       </Modal>
 

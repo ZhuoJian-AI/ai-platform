@@ -14,6 +14,8 @@
     "test:csv-document": "node scripts/test-csv-document.mjs",
     "test:file-ui": "node scripts/test-workspace-file-ui.mjs",
     "test:subsystem-bridge": "node scripts/test-subsystem-bridge.mjs",
+    "test:admin-session": "node scripts/test-admin-session.mjs",
+    "test:admin-quota": "node scripts/test-admin-quota.mjs",
     "test:e2e:attachments": "node scripts/e2e-chat-attachments.mjs",
     "preview": "vite preview",
     "lint": "eslint ."

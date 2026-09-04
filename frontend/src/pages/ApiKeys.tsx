@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import {
   PlusOutlined, CopyOutlined, StopOutlined, BookOutlined, KeyOutlined,
-  EyeInvisibleOutlined, EyeOutlined, BankOutlined, ApartmentOutlined, TeamOutlined,
+  BankOutlined, ApartmentOutlined, TeamOutlined,
   EditOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -106,6 +106,7 @@ export default function ApiKeys() {
   const [editForm] = Form.useForm();
   const [editTarget, setEditTarget] = useState<ApiKey | null>(null);
   const [confirm, setConfirm] = useState<{ id: string; name: string } | null>(null);
+  const [createdSecret, setCreatedSecret] = useState<string | null>(null);
 
   // 组织架构树（用于左侧浏览与绑定节点解析）
   const { treeData, nodeMap, isLoading: treeLoading } = useOrgTree();
@@ -150,6 +151,7 @@ export default function ApiKeys() {
         rate_limit_rpm: formData.rate_limit_rpm ?? null,
         rate_limit_tpm: formData.rate_limit_tpm ?? null,
         budget_cap_tokens: formData.budget_cap_tokens ?? null,
+        budget_cap_credits: formData.budget_cap_credits ?? null,
         expires_at: formData.expires_at ?? null,
       };
 
@@ -164,12 +166,12 @@ export default function ApiKeys() {
           return Promise.reject(new Error(`Unknown scope type: ${selectedNode.type}`));
       }
     },
-    onSuccess: () => {
+    onSuccess: (created) => {
       qc.invalidateQueries({ queryKey: ['apiKeys'] });
       qc.invalidateQueries({ queryKey: ['orgTree'] });
       setCreateModalOpen(false);
       form.resetFields();
-      message.success('API Key 创建成功');
+      setCreatedSecret(created.key);
     },
     onError: (err: unknown) => {
       const msg = err instanceof ApiError ? err.message : '创建失败，请检查输入';
@@ -192,6 +194,7 @@ export default function ApiKeys() {
         rate_limit_rpm: formData.rate_limit_rpm ?? null,
         rate_limit_tpm: formData.rate_limit_tpm ?? null,
         budget_cap_tokens: formData.budget_cap_tokens ?? null,
+        budget_cap_credits: formData.budget_cap_credits ?? null,
         expires_at: formData.expires_at ?? null,
         is_active: formData.is_active,
       };
@@ -217,6 +220,7 @@ export default function ApiKeys() {
       rate_limit_rpm: r.rate_limit_rpm,
       rate_limit_tpm: r.rate_limit_tpm,
       budget_cap_tokens: r.budget_cap_tokens,
+      budget_cap_credits: r.budget_cap_credits,
       expires_at: r.expires_at ? dayjs(r.expires_at) : null,
       is_active: r.is_active,
     });
@@ -309,13 +313,9 @@ export default function ApiKeys() {
                   columns={[
                     { title: '名称', dataIndex: 'key_name', width: 160 },
                     {
-                      title: 'API Key', dataIndex: 'key_plain', width: 280,
-                      render: (v: string) => (
-                        !v ? (
-                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>历史 Key，无法查看</Typography.Text>
-                        ) : (
-                          <KeyCopyButton value={v} />
-                        )
+                      title: 'API Key', dataIndex: 'key_prefix', width: 220,
+                      render: (prefix: string) => (
+                        <code style={{ fontSize: 12 }}>{prefix}••••••••••••</code>
                       ),
                     },
                     {
@@ -333,8 +333,12 @@ export default function ApiKeys() {
                       render: (v: number | null) => v ?? '继承',
                     },
                     {
-                      title: '预算(token)', dataIndex: 'budget_cap_tokens', width: 90,
-                      render: (v: number | null) => v ? v.toLocaleString() : '继承',
+                      title: 'Token/月', dataIndex: 'budget_cap_tokens', width: 100,
+                      render: (v: number | null) => v != null ? v.toLocaleString() : '继承',
+                    },
+                    {
+                      title: '调用额度/月', dataIndex: 'budget_cap_credits', width: 110,
+                      render: (v: number | null) => v != null ? v.toLocaleString() : '继承',
                     },
                     {
                       title: '状态', dataIndex: 'is_active', width: 70,
@@ -399,19 +403,24 @@ export default function ApiKeys() {
             <Select mode="tags" placeholder="输入模型名称，如 claude-opus-4-8" />
           </Form.Item>
           <Row gutter={16}>
-            <Col span={8}>
+            <Col span={12}>
               <Form.Item name="rate_limit_rpm" label="RPM 上限">
                 <InputNumber min={1} style={{ width: '100%' }} placeholder="继承" />
               </Form.Item>
             </Col>
-            <Col span={8}>
+            <Col span={12}>
               <Form.Item name="rate_limit_tpm" label="TPM 上限">
                 <InputNumber min={1} style={{ width: '100%' }} placeholder="继承" />
               </Form.Item>
             </Col>
-            <Col span={8}>
-              <Form.Item name="budget_cap_tokens" label="预算(token)">
+            <Col span={12}>
+              <Form.Item name="budget_cap_tokens" label="每月 Token 上限">
                 <InputNumber min={0} style={{ width: '100%' }} placeholder="继承" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="budget_cap_credits" label="每月调用额度" extra="一次平台 AI 操作准入扣 1；失败不退；供应商重试或故障转移不重复扣">
+                <InputNumber min={0} precision={0} style={{ width: '100%' }} placeholder="继承" />
               </Form.Item>
             </Col>
           </Row>
@@ -419,6 +428,36 @@ export default function ApiKeys() {
             <DatePicker showTime style={{ width: '100%' }} placeholder="永不过期" />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title="API Key 创建成功"
+        open={!!createdSecret}
+        onCancel={() => setCreatedSecret(null)}
+        onOk={() => setCreatedSecret(null)}
+        okText="我已保存"
+        cancelButtonProps={{ style: { display: 'none' } }}
+        closable={false}
+        maskClosable={false}
+      >
+        <Alert
+          type="warning"
+          showIcon
+          message="请立即复制并妥善保存"
+          description="完整密钥只显示这一次。关闭后平台无法再次查看；遗失时请撤销并新建。"
+          style={{ marginBottom: 16 }}
+        />
+        <Input.Password
+          readOnly
+          value={createdSecret ?? ''}
+          visibilityToggle
+          addonAfter={(
+            <CopyOutlined
+              style={{ cursor: 'pointer' }}
+              onClick={() => createdSecret && copyText(createdSecret)}
+            />
+          )}
+        />
       </Modal>
 
       {/* 编辑 Modal：绑定节点不可改（scope_type/department_id/team_id 只读） */}
@@ -455,22 +494,32 @@ export default function ApiKeys() {
               <Select mode="tags" placeholder="输入模型名称，如 claude-opus-4-8" />
             </Form.Item>
             <Row gutter={16}>
-              <Col span={8}>
+              <Col span={12}>
                 <Form.Item name="rate_limit_rpm" label="RPM 上限">
                   <InputNumber min={1} style={{ width: '100%' }} placeholder="继承" />
                 </Form.Item>
               </Col>
-              <Col span={8}>
+              <Col span={12}>
                 <Form.Item name="rate_limit_tpm" label="TPM 上限">
                   <InputNumber min={1} style={{ width: '100%' }} placeholder="继承" />
                 </Form.Item>
               </Col>
-              <Col span={8}>
-                <Form.Item name="budget_cap_tokens" label="预算(token)">
+              <Col span={12}>
+                <Form.Item name="budget_cap_tokens" label="每月 Token 上限">
                   <InputNumber min={0} style={{ width: '100%' }} placeholder="继承" />
                 </Form.Item>
               </Col>
+              <Col span={12}>
+                <Form.Item name="budget_cap_credits" label="每月调用额度" extra="一次平台 AI 操作准入扣 1；失败不退；供应商重试或故障转移不重复扣">
+                  <InputNumber min={0} precision={0} style={{ width: '100%' }} placeholder="继承" />
+                </Form.Item>
+              </Col>
             </Row>
+            {editTarget.budget_cap_usd != null && (
+              <Form.Item label="历史 USD 预算（只读，不再执行）">
+                <Input value={`$${editTarget.budget_cap_usd}`} disabled />
+              </Form.Item>
+            )}
             <Form.Item name="expires_at" label="过期时间">
               <DatePicker showTime style={{ width: '100%' }} placeholder="永不过期" />
             </Form.Item>
@@ -541,25 +590,5 @@ export default function ApiKeys() {
         onOk={() => { if (confirm) revokeKey.mutate(confirm.id); setConfirm(null); }}
       />
     </FinderShell>
-  );
-}
-
-/** API Key 显示/复制组件：默认掩码，点击眼睛可切换明文 */
-function KeyCopyButton({ value }: { value: string }) {
-  const [visible, setVisible] = useState(false);
-  const display = visible ? value : (value.slice(0, 12) + '••••••••••••');
-  return (
-    <Space size={4}>
-      <code style={{ fontSize: 12, userSelect: visible ? 'all' : 'none', letterSpacing: 0.3 }}>{display}</code>
-      {visible ? (
-        <EyeInvisibleOutlined style={{ color: WB.textAux, cursor: 'pointer' }} onClick={() => setVisible(false)} />
-      ) : (
-        <EyeOutlined style={{ color: WB.primary, cursor: 'pointer' }} onClick={() => setVisible(true)} />
-      )}
-      <CopyOutlined style={{ color: WB.primary, cursor: 'pointer' }} onClick={() => {
-        navigator.clipboard.writeText(value);
-        message.success('已复制完整 API Key');
-      }} />
-    </Space>
   );
 }

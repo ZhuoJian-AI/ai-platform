@@ -15,6 +15,16 @@ from app.services.llm_provider_service import effective_provider, provider_base_
 from app.utils.crypto import encrypt_provider_api_key
 
 
+@pytest.fixture(autouse=True)
+def _isolate_gateway_adapter_tests_from_quota(monkeypatch):
+    """These tests exercise provider adapters; quota has its own integration suite."""
+
+    async def allow(*_args, **_kwargs):
+        return model_gateway.QuotaReservation("gateway-adapter-test", 0, enforced=False)
+
+    monkeypatch.setattr(model_gateway, "_reserve_gateway_quota", allow)
+
+
 def test_bailian_and_ark_endpoint_presets():
     assert provider_base_url(
         "aliyun_bailian", region="cn-beijing", workspace_id="llm-demo",

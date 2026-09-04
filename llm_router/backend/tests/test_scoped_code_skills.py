@@ -35,6 +35,25 @@ from app.services.skill_scope_service import (
     validate_scope_target,
 )
 
+_AUTHENTICATED_BUILTIN_TOOLS = {
+    "workspace_list",
+    "workspace_search",
+    "workspace_get_file",
+    "workspace_list_files",
+    "workspace_read_file",
+    "workspace_create_file",
+    "workspace_write_file",
+    "workspace_update_file",
+    "workspace_rename_file",
+    "workspace_move_file",
+    "workspace_copy_file",
+    "workspace_delete_file",
+    "workspace_list_versions",
+    "workspace_restore_version",
+    "web_tool",
+    *nodes.PLATFORM_TOOL_NAMES,
+}
+
 
 async def _hierarchy(db_session):
     org = Organization(name="Scoped Skill Org", slug=f"scoped-{uuid4().hex[:8]}")
@@ -150,10 +169,13 @@ Always validate the input workbook before processing.
 
     assert await assert_bound_skills_visible(db_session, cu, [str(folder.id)]) == [folder]
     empty_tools, empty_registry = await _build_tools(db_session, [], None, user=cu)
-    assert [tool["function"]["name"] for tool in empty_tools] == ["web_tool"]
+    empty_names = {tool["function"]["name"] for tool in empty_tools}
+    assert _AUTHENTICATED_BUILTIN_TOOLS <= empty_names
     assert empty_registry == {}
     tools, registry = await _build_tools(db_session, [str(folder.id)], None, user=cu)
-    assert [tool["function"]["name"] for tool in tools] == ["load_bank-process", "web_tool"]
+    tool_names = {tool["function"]["name"] for tool in tools}
+    assert _AUTHENTICATED_BUILTIN_TOOLS <= tool_names
+    assert "load_bank-process" in tool_names
     assert set(registry) == {"load_bank-process"}
 
     folder.is_active = False
@@ -161,8 +183,13 @@ Always validate the input workbook before processing.
     with pytest.raises(HTTPException) as exc:
         await assert_bound_skills_visible(db_session, cu, [str(folder.id)])
     assert exc.value.status_code == 422
-    disabled_tools, _ = await _build_tools(db_session, [str(folder.id)], None, user=cu)
-    assert [tool["function"]["name"] for tool in disabled_tools] == ["web_tool"]
+    disabled_tools, disabled_registry = await _build_tools(
+        db_session, [str(folder.id)], None, user=cu,
+    )
+    disabled_names = {tool["function"]["name"] for tool in disabled_tools}
+    assert _AUTHENTICATED_BUILTIN_TOOLS <= disabled_names
+    assert "load_bank-process" not in disabled_names
+    assert disabled_registry == {}
 
 
 @pytest.mark.asyncio
@@ -210,9 +237,9 @@ Read references/rules.md, then run scripts/clean.py with the input attachment.
 
     monkeypatch.setattr(skill_import_service.settings, "code_skills_enabled", True)
     tools, registry = await _build_tools(db_session, [str(folder.id)], None, user=cu)
-    assert [item["function"]["name"] for item in tools] == [
-        "load_skill", "read_skill_resource", "run_skill_script", "web_tool",
-    ]
+    tool_names = {item["function"]["name"] for item in tools}
+    assert _AUTHENTICATED_BUILTIN_TOOLS <= tool_names
+    assert {"load_skill", "read_skill_resource", "run_skill_script"} <= tool_names
     run_tool = next(
         item["function"] for item in tools
         if item.get("function", {}).get("name") == "run_skill_script"
@@ -541,7 +568,9 @@ def test_enterprise_action_idempotency_is_scoped_to_the_current_run():
 async def test_web_tool_is_available_and_executable_without_workspace(db_session, monkeypatch):
     _, _, _, _, _, _, cu = await _hierarchy(db_session)
     tools, registry = await _build_tools(db_session, [], None, user=cu)
-    assert {item["function"]["name"] for item in tools} == {"web_tool"}
+    assert _AUTHENTICATED_BUILTIN_TOOLS <= {
+        item["function"]["name"] for item in tools
+    }
     assert registry == {}
 
     runner = AsyncMock(return_value=({

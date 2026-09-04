@@ -43,7 +43,7 @@ services:
     command:
       - /bin/sh
       - -c
-      - exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}" --bind 127.0.0.1 ${DATA_PLANE_PREFIX:-10.0.10}.11 --protected-mode yes
+      - exec redis-server --appendonly yes --appendfsync everysec --requirepass "$${REDIS_PASSWORD}" --bind 127.0.0.1 ${DATA_PLANE_PREFIX:-10.0.10}.11 --protected-mode yes
     volumes:
       - redis_data:/data
     healthcheck:
@@ -196,6 +196,11 @@ services:
       DATABASE_URL: ${DATABASE_URL:?}
       REDIS_URL: ${REDIS_URL:?}
       PROXY_BASE_URL: ${PUBLIC_ORIGIN:?}
+      OAUTH_ISSUER: ${PUBLIC_ORIGIN:?}
+      OAUTH_PUBLIC_BASE_URL: ${PUBLIC_ORIGIN:?}
+      OAUTH_SIGNING_KEY: ${OAUTH_SIGNING_KEY:?}
+      BROWSER_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:?}
+      TRUSTED_PROXY_CIDRS: "${TRUSTED_PROXY_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
       API_KEY_CACHE_TTL: "${API_KEY_CACHE_TTL:-60}"
       DLP_EXPOSE_MATCHES_IN_ERROR: "${DLP_EXPOSE_MATCHES_IN_ERROR:-false}"
       CODE_SKILLS_ENABLED: "${CODE_SKILLS_ENABLED:-true}"

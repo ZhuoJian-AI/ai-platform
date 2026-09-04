@@ -20,8 +20,9 @@ export default function FileDeepLinkPage() {
   const [searchParams] = useSearchParams();
   const versionId = searchParams.get('version');
   const navigate = useNavigate();
-  const { token: adminToken } = useAuth();
+  const { status: adminStatus } = useAuth();
   const { token: userToken, user } = useUserAuth();
+  const adminAuthenticated = adminStatus === 'authenticated';
   // 同时存在两类凭据时使用权限更小的员工身份，避免深链意外提升为管理员读取。
   const useTerminalIdentity = !!userToken;
   const [organizationSlug, setOrganizationSlug] = useState(user?.organization_slug || '');
@@ -29,13 +30,13 @@ export default function FileDeepLinkPage() {
   const [accessError, setAccessError] = useState(false);
 
   useEffect(() => {
-    if (userToken || adminToken) return;
+    if (adminStatus === 'loading' || userToken || adminAuthenticated) return;
     const returnTo = `/f/${encodeURIComponent(fileId)}${versionId ? `?version=${encodeURIComponent(versionId)}` : ''}`;
     sessionStorage.setItem(RETURN_TO_KEY, returnTo);
-  }, [adminToken, fileId, userToken, versionId]);
+  }, [adminAuthenticated, adminStatus, fileId, userToken, versionId]);
 
   useEffect(() => {
-    if (!userToken && !adminToken) return;
+    if (adminStatus === 'loading' || (!userToken && !adminAuthenticated)) return;
     let disposed = false;
     setAccessError(false);
 
@@ -61,7 +62,7 @@ export default function FileDeepLinkPage() {
       if (!disposed) setAccessError(true);
     });
     return () => { disposed = true; };
-  }, [adminToken, attempt, fileId, navigate, useTerminalIdentity, user?.organization_slug, userToken, versionId]);
+  }, [adminAuthenticated, adminStatus, attempt, fileId, navigate, useTerminalIdentity, user?.organization_slug, userToken, versionId]);
 
   const openEmployeeLogin = () => {
     const slug = organizationSlug.trim();
@@ -69,7 +70,11 @@ export default function FileDeepLinkPage() {
     window.location.assign(`/${encodeURIComponent(slug)}/terminal/login`);
   };
 
-  if (!userToken && !adminToken) {
+  if (adminStatus === 'loading' && !userToken) {
+    return <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><Spin size="large" /></div>;
+  }
+
+  if (!userToken && !adminAuthenticated) {
     const validSlug = /^[a-z0-9][a-z0-9-]{0,62}$/i.test(organizationSlug.trim());
     return (
       <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 24, background: '#f8f9fc' }}>

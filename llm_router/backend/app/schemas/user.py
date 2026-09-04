@@ -64,6 +64,11 @@ class UserPasswordReset(BaseModel):
     password: str = Field(..., min_length=8, max_length=128)
 
 
+class UserPasswordChange(BaseModel):
+    old_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
 class UserLoginRequest(BaseModel):
     """组织用户登录请求。username 仅组织内唯一，故必须带 organization_id。"""
     organization_id: UUID

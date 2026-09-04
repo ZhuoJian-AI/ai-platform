@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote, urljoin
 from uuid import UUID, uuid4
@@ -11,20 +12,23 @@ from uuid import UUID, uuid4
 import httpx
 import jwt
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.auth.user_auth import CurrentUser
+from app.auth.user_auth import CurrentUser, current_user_for_user
 from app.models.enterprise_application import (
     EnterpriseApplication,
     EnterpriseApplicationAction,
     EnterpriseApplicationActionRequest,
     EnterpriseApplicationIntegration,
+    EnterpriseApplicationSsoCode,
 )
+from app.models.user import User
 from app.services import enterprise_application_service
-from app.utils.crypto import decrypt_provider_api_key, encrypt_provider_api_key
-from app.utils.public_url import assert_public_http_url, same_origin
+from app.services.subsystem_access_service import assert_application_available
+from app.utils.crypto import decrypt_provider_api_key, encrypt_provider_api_key, hash_api_key
+from app.utils.public_url import request_public_http, same_origin
 
 OPERATION_PERMISSION = {
     "query": "ai_query",
@@ -34,8 +38,20 @@ OPERATION_PERMISSION = {
     "approve": "ai_approve",
     "export": "export",
 }
+
+FORCED_CONFIRMATION_OPERATIONS = {"delete", "approve"}
+
+
+def action_requires_confirmation(action: EnterpriseApplicationAction) -> bool:
+    """Keep the high-risk boundary independent of untrusted manifest flags."""
+
+    return bool(action.requires_confirmation) or action.operation in FORCED_CONFIRMATION_OPERATIONS
 CONFIRMATION_TTL = timedelta(minutes=5)
 SSO_TICKET_TTL = timedelta(seconds=120)
+SSO_CODE_RETENTION = timedelta(hours=1)
+SSO_CODE_RATE_WINDOW = timedelta(minutes=1)
+SSO_CODE_RATE_LIMIT = 30
+SSO_CODE_OUTSTANDING_LIMIT = 10
 
 
 async def list_actions(
@@ -65,6 +81,8 @@ async def list_actions_for_user(
     page_key: str | None = None,
     module_key: str | None = None,
 ) -> list[EnterpriseApplicationAction]:
+    if not application.assistant_enabled:
+        return []
     integration = await _integration_or_409(db, application.id)
     result: list[EnterpriseApplicationAction] = []
     for action in await list_actions(db, application.id, active_only=True):
@@ -106,11 +124,32 @@ async def _integration_or_409(db: AsyncSession, application_id: UUID | str) -> E
             )
         )
     ).scalar_one_or_none()
-    if row is None or not row.auth_token_encrypted or row.protocol_version < 2:
-        raise HTTPException(status_code=409, detail="Protocol v2 integration secret is not configured")
+    has_action_credential = bool(
+        row
+        and (
+            row.action_signing_secret_encrypted
+            or (row.credential_version < 2 and row.auth_token_encrypted)
+        )
+    )
+    if row is None or not has_action_credential or row.protocol_version < 2:
+        raise HTTPException(status_code=409, detail="Subsystem Action credential is not configured")
     if not row.sync_enabled:
         raise HTTPException(status_code=409, detail="Subsystem integration is disabled")
+    application = await db.get(EnterpriseApplication, row.application_id)
+    if application is None:
+        raise HTTPException(status_code=409, detail="Subsystem application is unavailable")
+    await assert_application_available(db, application)
     return row
+
+
+def _action_signing_secret(integration: EnterpriseApplicationIntegration) -> str:
+    """Use separated credentials for v2.5; preserve read-only migration support for v2.4."""
+    encrypted = integration.action_signing_secret_encrypted
+    if not encrypted and integration.credential_version < 2:
+        encrypted = integration.auth_token_encrypted
+    if not encrypted:
+        raise HTTPException(status_code=409, detail="Subsystem Action credential is not configured")
+    return decrypt_provider_api_key(encrypted)
 
 
 def _manifest_page_action_keys(
@@ -172,7 +211,14 @@ def _identity_claims(
         "departmentId": user.department_id,
         "departmentIds": list(user.department_ids),
         "roleIds": list(user.role_ids),
-        "effectiveDataScope": user.effective_data_scopes or {},
+        "effectiveDataScope": enterprise_application_service.effective_data_scope(
+            application,
+            user,
+            action.module_key,
+            page_key,
+            action.action_key,
+            OPERATION_PERMISSION[action.operation],
+        ),
         "teamId": user.team_id,
         "moduleKey": action.module_key,
         "pageKey": page_key,
@@ -242,7 +288,7 @@ async def _execute_request(
         )
     ):
         raise HTTPException(status_code=403, detail="Action is no longer authorized")
-    secret = decrypt_provider_api_key(integration.auth_token_encrypted or "")
+    secret = _action_signing_secret(integration)
     token = jwt.encode(
         _identity_claims(
             application,
@@ -252,7 +298,7 @@ async def _execute_request(
             permissions,
             page_key,
             params,
-            confirmation_id=str(request_row.id) if confirmed and action.requires_confirmation else None,
+            confirmation_id=str(request_row.id) if confirmed and action_requires_confirmation(action) else None,
         ),
         secret,
         algorithm="HS256",
@@ -263,16 +309,19 @@ async def _execute_request(
     )
     if not same_origin(application.entry_url, url):
         raise HTTPException(status_code=409, detail="Action endpoint left the registered application origin")
-    try:
-        assert_public_http_url(url, require_https=True)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     request_row.status = "executing"
     await db.flush()
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=8.0), follow_redirects=False) as client:
-            response = await client.post(
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=8.0),
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            response = await request_public_http(
+                client,
+                "POST",
                 url,
+                require_https=True,
                 headers={
                     "authorization": f"Bearer {token}",
                     "content-type": "application/json",
@@ -317,7 +366,7 @@ def action_result(
     return {
         "request_id": request_row.request_id,
         "status": request_row.status,
-        "confirmation_id": request_row.id if action.requires_confirmation else None,
+        "confirmation_id": request_row.id if action_requires_confirmation(action) else None,
         "result": request_row.result or {},
         "error": request_row.error,
         "provenance": _provenance(application, action, request_row.request_id, page_key),
@@ -340,6 +389,8 @@ async def invoke_action(
     application = await enterprise_application_service.get_application(db, application_id)
     if application is None or str(application.organization_id) != str(user.organization_id):
         raise HTTPException(status_code=404, detail="Application not found")
+    if not application.assistant_enabled:
+        raise HTTPException(status_code=403, detail="The administrator disabled AI for this application")
     action = (
         await db.execute(
             select(EnterpriseApplicationAction).where(
@@ -406,7 +457,7 @@ async def invoke_action(
     )
     db.add(request_row)
     await db.flush()
-    if action.requires_confirmation:
+    if action_requires_confirmation(action):
         return action_result(request_row, application, action, page_key=page_key)
     return await _execute_request(db, request_row, application, action, user)
 
@@ -509,16 +560,19 @@ async def resolve_confirmation(db: AsyncSession, confirmation_id: UUID, user: Cu
     return await _execute_request(db, request_row, application, action, user, confirmed=True)
 
 
-def issue_launch_ticket(
+def _launch_claims(
     integration: EnterpriseApplicationIntegration,
     application: EnterpriseApplication,
     user: CurrentUser,
     module_key: str,
     permissions: set[str],
     module_claims: dict | None = None,
-) -> str:
-    if not integration.auth_token_encrypted or integration.protocol_version < 2:
-        raise HTTPException(status_code=409, detail="Protocol v2 integration secret is not configured")
+    *,
+    launch_nonce: str,
+    session_binding_hash: str,
+) -> dict:
+    if not integration.sso_exchange_credential_hash or integration.protocol_version < 2:
+        raise HTTPException(status_code=409, detail="Subsystem SSO exchange credential is not configured")
     action_keys = module_claims.get("action_keys") if isinstance(module_claims, dict) else None
     page_access = module_claims.get("page_access") if isinstance(module_claims, dict) else None
     if not isinstance(action_keys, list) or not isinstance(page_access, dict) or not page_access:
@@ -530,28 +584,86 @@ def issue_launch_ticket(
     claims = {
         "iss": "zhuojian-saas",
         "aud": application.slug,
-        "typ": "zhuojian-sso",
+        "typ": "zhuojian-sso-code",
         "sub": user.id,
         "organizationId": str(user.organization_id),
         "departmentId": user.department_id,
         "departmentIds": list(user.department_ids),
         "roleIds": list(user.role_ids),
-        "effectiveDataScope": user.effective_data_scopes or {},
+        "effectiveDataScope": enterprise_application_service.effective_data_scope(
+            application, user, module_key
+        ),
         "teamId": user.team_id,
         "moduleKey": module_key,
         "permissions": sorted(permissions),
         "jti": uuid4().hex,
-        "iat": now,
-        "exp": now + SSO_TICKET_TTL,
+        "launchNonce": launch_nonce,
+        "sessionBindingHash": session_binding_hash,
+        "authEpoch": user.user.auth_epoch,
+        "iat": now.isoformat(),
+        "exp": (now + SSO_TICKET_TTL).isoformat(),
     }
     claims["actionKeys"] = action_keys
     claims["pageAccess"] = {
         page_key: {
             "permissions": page.get("permissions") or [],
             "actionKeys": page.get("action_keys") or [],
+            "dataScopes": page.get("data_scopes") or {},
+            "actionDataScopes": page.get("action_data_scopes") or {},
         }
         for page_key, page in page_access.items()
         if isinstance(page_key, str) and isinstance(page, dict)
+    }
+    claims["pageKeys"] = sorted(claims["pageAccess"])
+    return claims
+
+
+def issue_legacy_launch_ticket(
+    integration: EnterpriseApplicationIntegration,
+    application: EnterpriseApplication,
+    user: CurrentUser,
+    module_key: str,
+    permissions: set[str],
+    module_claims: dict,
+) -> str:
+    """Keep already-deployed v2.0-v2.4 systems usable while they migrate to v2.5."""
+    if integration.credential_version >= 2 or not integration.auth_token_encrypted:
+        raise HTTPException(status_code=409, detail="Legacy subsystem credential is not configured")
+    action_keys = module_claims.get("action_keys")
+    page_access = module_claims.get("page_access")
+    if not isinstance(action_keys, list) or not isinstance(page_access, dict) or not page_access:
+        raise HTTPException(status_code=403, detail="请联系企业管理员配置该子模块的具体页面和操作权限")
+    now = datetime.now(UTC)
+    claims = {
+        "iss": "zhuojian-saas",
+        "aud": application.slug,
+        "typ": "zhuojian-sso",
+        "sub": user.id,
+        "organizationId": str(user.organization_id),
+        "departmentId": user.department_id,
+        "departmentIds": list(user.department_ids),
+        "roleIds": list(user.role_ids),
+        "effectiveDataScope": enterprise_application_service.effective_data_scope(
+            application, user, module_key
+        ),
+        "teamId": user.team_id,
+        "moduleKey": module_key,
+        "permissions": sorted(permissions),
+        "actionKeys": action_keys,
+        "pageAccess": {
+            page_key: {
+                "permissions": page.get("permissions") or [],
+                "actionKeys": page.get("action_keys") or [],
+                "dataScopes": page.get("data_scopes") or {},
+                "actionDataScopes": page.get("action_data_scopes") or {},
+            }
+            for page_key, page in page_access.items()
+            if isinstance(page_key, str) and isinstance(page, dict)
+        },
+        "jti": uuid4().hex,
+        "authEpoch": user.user.auth_epoch,
+        "iat": now,
+        "exp": now + SSO_TICKET_TTL,
     }
     claims["pageKeys"] = sorted(claims["pageAccess"])
     return jwt.encode(
@@ -559,3 +671,219 @@ def issue_launch_ticket(
         decrypt_provider_api_key(integration.auth_token_encrypted),
         algorithm="HS256",
     )
+
+
+async def issue_launch_code(
+    db: AsyncSession,
+    integration: EnterpriseApplicationIntegration,
+    application: EnterpriseApplication,
+    user: CurrentUser,
+    module_key: str,
+    permissions: set[str],
+    module_claims: dict,
+    *,
+    redirect_path: str,
+    session_binding_hash: str,
+    launch_nonce: str | None = None,
+) -> tuple[str, str]:
+    """Persist only a hash of the browser-visible code and encrypted claims."""
+
+    await assert_application_available(db, application)
+    if not integration.sync_enabled:
+        raise HTTPException(status_code=409, detail="Subsystem integration is disabled")
+    if not integration.sso_exchange_credential_hash or integration.credential_version < 2:
+        raise HTTPException(status_code=409, detail="Subsystem SSO exchange credential is not configured")
+    if not redirect_path.startswith("/") or redirect_path.startswith("//"):
+        raise HTTPException(status_code=409, detail="Subsystem redirect path is invalid")
+    if len(session_binding_hash) != 64:
+        raise HTTPException(status_code=409, detail="User session binding is invalid")
+
+    now = datetime.now(UTC)
+    # Serialize per-user issuance so concurrent launch requests cannot bypass
+    # the rate/outstanding limits.
+    await db.execute(select(User.id).where(User.id == UUID(user.id)).with_for_update())
+    stale_ids = (
+        select(EnterpriseApplicationSsoCode.id)
+        .where(
+            or_(
+                EnterpriseApplicationSsoCode.expires_at < now - SSO_CODE_RETENTION,
+                EnterpriseApplicationSsoCode.consumed_at < now - SSO_CODE_RETENTION,
+            )
+        )
+        .limit(500)
+    )
+    await db.execute(delete(EnterpriseApplicationSsoCode).where(EnterpriseApplicationSsoCode.id.in_(stale_ids)))
+    outstanding = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(EnterpriseApplicationSsoCode)
+                .where(
+                    EnterpriseApplicationSsoCode.application_id == application.id,
+                    EnterpriseApplicationSsoCode.user_id == UUID(user.id),
+                    EnterpriseApplicationSsoCode.consumed_at.is_(None),
+                    EnterpriseApplicationSsoCode.expires_at > now,
+                )
+            )
+        ).scalar_one()
+    )
+    recent = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(EnterpriseApplicationSsoCode)
+                .where(
+                    EnterpriseApplicationSsoCode.application_id == application.id,
+                    EnterpriseApplicationSsoCode.user_id == UUID(user.id),
+                    EnterpriseApplicationSsoCode.created_at >= now - SSO_CODE_RATE_WINDOW,
+                )
+            )
+        ).scalar_one()
+    )
+    if outstanding >= SSO_CODE_OUTSTANDING_LIMIT or recent >= SSO_CODE_RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many subsystem launch requests")
+
+    nonce = launch_nonce or secrets.token_urlsafe(24)
+    code = f"zjsc_{secrets.token_urlsafe(48)}"
+    claims = _launch_claims(
+        integration,
+        application,
+        user,
+        module_key,
+        permissions,
+        module_claims,
+        launch_nonce=nonce,
+        session_binding_hash=session_binding_hash,
+    )
+    db.add(
+        EnterpriseApplicationSsoCode(
+            application_id=application.id,
+            organization_id=application.organization_id,
+            user_id=UUID(user.id),
+            code_hash=hash_api_key(code),
+            module_key=module_key,
+            redirect_path=redirect_path,
+            session_binding_hash=session_binding_hash,
+            launch_nonce=nonce,
+            claims_encrypted=encrypt_provider_api_key(
+                json.dumps(claims, ensure_ascii=False, separators=(",", ":"), default=str)
+            ),
+            expires_at=now + SSO_TICKET_TTL,
+        )
+    )
+    await db.flush()
+    return code, nonce
+
+
+async def redeem_launch_code(
+    db: AsyncSession,
+    integration: EnterpriseApplicationIntegration,
+    *,
+    code: str,
+    redirect_path: str,
+    launch_nonce: str,
+) -> dict:
+    """Atomically consume a code bound to this app, redirect and launch nonce."""
+
+    application = await db.get(EnterpriseApplication, integration.application_id)
+    if application is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired subsystem SSO code")
+    await assert_application_available(db, application)
+    now = datetime.now(UTC)
+    row = (
+        await db.execute(
+            update(EnterpriseApplicationSsoCode)
+            .where(
+                EnterpriseApplicationSsoCode.application_id == application.id,
+                EnterpriseApplicationSsoCode.organization_id == application.organization_id,
+                EnterpriseApplicationSsoCode.code_hash == hash_api_key(code),
+                EnterpriseApplicationSsoCode.redirect_path == redirect_path,
+                EnterpriseApplicationSsoCode.launch_nonce == launch_nonce,
+                EnterpriseApplicationSsoCode.consumed_at.is_(None),
+                EnterpriseApplicationSsoCode.expires_at > now,
+            )
+            .values(consumed_at=now)
+            .returning(EnterpriseApplicationSsoCode)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired subsystem SSO code")
+    user = await db.get(User, row.user_id)
+    if user is None or user.deleted_at is not None or not user.is_active:
+        raise HTTPException(status_code=401, detail="Invalid or expired subsystem SSO code")
+    try:
+        claims = json.loads(decrypt_provider_api_key(row.claims_encrypted))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=401, detail="Invalid or expired subsystem SSO code")
+    if (
+        not isinstance(claims, dict)
+        or claims.get("sub") != str(user.id)
+        or claims.get("organizationId") != str(application.organization_id)
+        or claims.get("aud") != application.slug
+        or claims.get("moduleKey") != row.module_key
+        or claims.get("launchNonce") != launch_nonce
+        or claims.get("sessionBindingHash") != row.session_binding_hash
+        or claims.get("authEpoch") != user.auth_epoch
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or expired subsystem SSO code")
+    return {
+        "application_id": application.id,
+        "application_slug": application.slug,
+        "organization_id": application.organization_id,
+        "module_key": row.module_key,
+        "redirect": row.redirect_path,
+        "launch_nonce": row.launch_nonce,
+        "claims": claims,
+    }
+
+
+async def validate_live_subsystem_session(
+    db: AsyncSession,
+    integration: EnterpriseApplicationIntegration,
+    *,
+    user_id: UUID,
+    auth_epoch: int,
+    module_key: str,
+    page_key: str,
+    action_key: str | None,
+) -> dict:
+    """Re-check an iframe session against current SaaS grants and revocations."""
+
+    application = await enterprise_application_service.get_application(
+        db, integration.application_id
+    )
+    if application is None:
+        raise HTTPException(status_code=401, detail="Subsystem session is no longer valid")
+    await assert_application_available(db, application)
+    user = await db.get(User, user_id)
+    if (
+        user is None
+        or user.deleted_at is not None
+        or not user.is_active
+        or user.must_change_password
+        or str(user.organization_id) != str(application.organization_id)
+        or user.auth_epoch != auth_epoch
+    ):
+        raise HTTPException(status_code=401, detail="Subsystem session is no longer valid")
+    current_user = await current_user_for_user(db, user)
+    module_claims = enterprise_application_service.effective_module_claims(
+        application,
+        current_user,
+        module_key,
+    )
+    page = (module_claims.get("page_access") or {}).get(page_key)
+    if not isinstance(page, dict) or "view" not in (page.get("permissions") or []):
+        raise HTTPException(status_code=403, detail="Subsystem page access has been revoked")
+    if action_key is None:
+        data_scope = (page.get("data_scopes") or {}).get("view")
+    else:
+        if action_key not in (page.get("action_keys") or []):
+            raise HTTPException(status_code=403, detail="Subsystem Action access has been revoked")
+        data_scope = (page.get("action_data_scopes") or {}).get(action_key)
+    if not isinstance(data_scope, dict):
+        raise HTTPException(status_code=403, detail="Subsystem data scope is unavailable")
+    return {
+        "valid": True,
+        "auth_epoch": user.auth_epoch,
+        "effective_data_scope": data_scope,
+    }

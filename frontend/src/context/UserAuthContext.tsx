@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, type ReactNode } from 'react';
+import { Navigate } from 'react-router-dom';
 
 export interface TerminalUserState {
   id: string;
@@ -17,7 +18,7 @@ interface UserAuthContextType {
   token: string | null;
   user: TerminalUserState | null;
   login: (token: string, user: TerminalUserState) => void;
-  logout: () => void;
+  logout: () => Promise<void>;
 }
 
 const UserAuthContext = createContext<UserAuthContextType | null>(null);
@@ -26,21 +27,36 @@ const TOKEN_KEY = 'ai_infra_user_token';
 const USER_KEY = 'ai_infra_user';
 
 export function UserAuthProvider({ children }: { children: ReactNode }) {
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY));
+  const [token, setToken] = useState<string | null>(() => sessionStorage.getItem(TOKEN_KEY));
   const [user, setUser] = useState<TerminalUserState | null>(() => {
     const stored = localStorage.getItem(USER_KEY);
     return stored ? JSON.parse(stored) : null;
   });
 
   const login = (newToken: string, userState: TerminalUserState) => {
-    localStorage.setItem(TOKEN_KEY, newToken);
+    sessionStorage.setItem(TOKEN_KEY, newToken);
     localStorage.setItem(USER_KEY, JSON.stringify(userState));
     setToken(newToken);
     setUser(userState);
   };
 
-  const logout = () => {
-    localStorage.removeItem(TOKEN_KEY);
+  const logout = async () => {
+    const currentToken = sessionStorage.getItem(TOKEN_KEY);
+    if (currentToken) {
+      try {
+        const response = await fetch('/api/v1/users/logout', {
+          method: 'POST',
+          credentials: 'include',
+          keepalive: true,
+          headers: { Authorization: `Bearer ${currentToken}` },
+        });
+        if (!response.ok && response.status !== 401) throw new Error('logout failed');
+      } catch {
+        window.alert('退出失败，当前会话尚未撤销，请检查网络后重试。');
+        return;
+      }
+    }
+    sessionStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
     setToken(null);
     setUser(null);
@@ -65,8 +81,7 @@ export function UserRequireAuth({ children }: { children: ReactNode }) {
   if (!token) {
     const m = window.location.pathname.match(/^\/([^/]+)\/terminal/);
     const slug = m ? m[1] : null;
-    window.location.href = slug ? `/${slug}/terminal/login` : '/login';
-    return null;
+    return <Navigate to={slug ? `/${slug}/terminal/login` : '/login'} replace />;
   }
   return <>{children}</>;
 }

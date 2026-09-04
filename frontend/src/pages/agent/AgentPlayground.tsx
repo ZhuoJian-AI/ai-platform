@@ -9,8 +9,10 @@ import type { AgentRunRead } from './types';
 import OrgSelect from '../../components/OrgSelect';
 import { FinderShell, TitleBar, Toolbar } from '../../components/finder/primitives';
 import { WB } from '../../components/finder/theme';
+import { adminFetch } from '../../auth/adminSession';
 
 const { TextArea } = Input;
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 interface ChatMsg { role: 'user' | 'assistant'; content: string; }
 
@@ -37,8 +39,8 @@ export default function AgentPlayground() {
     queryKey: ['agent-runs', agentId],
     queryFn: async () => {
       if (!agentId) return { total: 0, data: [] };
-      const token = localStorage.getItem('ai_infra_token');
-      const resp = await fetch(`/api/v1/agents/${agentId}/runs`, { headers: { Authorization: `Bearer ${token}` } });
+      const resp = await adminFetch(`${BASE_URL}/api/v1/agents/${agentId}/runs`);
+      if (!resp.ok) throw new Error(`运行记录读取失败（HTTP ${resp.status}）`);
       return resp.json();
     },
     enabled: !!agentId,
@@ -52,15 +54,14 @@ export default function AgentPlayground() {
     setSteps([]);
     setStreaming(true);
 
-    const token = localStorage.getItem('ai_infra_token');
     const controller = new AbortController();
     abortRef.current = controller;
     let assistantAcc = '';
 
     try {
-      const resp = await fetch(`/api/v1/agents/${agentId}/playground`, {
+      const resp = await adminFetch(`${BASE_URL}/api/v1/agents/${agentId}/playground`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: userMsg, session_id: sessionId || undefined, stream: true }),
         signal: controller.signal,
       });

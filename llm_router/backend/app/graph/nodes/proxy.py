@@ -27,6 +27,7 @@ from app.models.llm_provider import LlmProvider
 from app.proxy.anthropic_adapter import proxy_anthropic_request
 from app.proxy.openai_adapter import proxy_openai_request
 from app.proxy.usage import _StreamUsageTracker, extract_usage_from_body
+from app.services.ai_quota_service import settle_ai_quota
 
 logger = structlog.get_logger()
 
@@ -42,6 +43,7 @@ async def proxy_upstream(state: ProxyState) -> dict:
     body = state.get("body", {})
     protocol = state.get("protocol", "openai")
     is_stream = state.get("is_stream", False)
+    reservation = state.get("quota_reservation")
 
     try:
         if protocol == "anthropic":
@@ -52,6 +54,7 @@ async def proxy_upstream(state: ProxyState) -> dict:
         logger.error("proxy_upstream_error", request_id=state.get("request_id", ""), error=str(e), exc_info=True)
         return {
             "status_code": 500,
+            "upstream_started": True,
             "error": {
                 "status_code": 500,
                 "error_type": "internal_error",
@@ -81,13 +84,29 @@ async def proxy_upstream(state: ProxyState) -> dict:
             )
             outcome = StreamDlpOutcome()
             upstream = filter_stream_with_dlp(upstream, scanner, protocol, outcome=outcome)
-        async for chunk in upstream:
-            tracker.feed(chunk)
-            writer(chunk)
+        completed = False
+        try:
+            async for chunk in upstream:
+                tracker.feed(chunk)
+                writer(chunk)
+            completed = True
+        finally:
+            await settle_ai_quota(
+                reservation,
+                {
+                    "input_tokens": tracker.input_tokens,
+                    "output_tokens": tracker.output_tokens,
+                }
+                if completed
+                else None,
+                db=db,
+                outcome="completed" if completed else "disconnected",
+            )
 
         result: dict = {
             "status_code": response.status_code,
             "content_type": response.media_type or "text/event-stream",
+            "upstream_started": True,
             "usage": {
                 "input_tokens": tracker.input_tokens,
                 "output_tokens": tracker.output_tokens,
@@ -118,6 +137,7 @@ async def proxy_upstream(state: ProxyState) -> dict:
         "response_body": response.body,
         "status_code": response.status_code,
         "content_type": content_type,
+        "upstream_started": True,
         "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
     }
 

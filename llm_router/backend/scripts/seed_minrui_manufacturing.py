@@ -32,7 +32,7 @@ from app.models.organization import Organization
 from app.models.routing_policy import RoutingPolicy
 from app.models.team import Team
 from app.models.user import User
-from app.utils.crypto import encrypt_api_key, encrypt_provider_api_key, generate_api_key, hash_api_key
+from app.utils.crypto import encrypt_api_key, encrypt_provider_api_key, generate_api_key
 
 logger = structlog.get_logger()
 
@@ -45,7 +45,7 @@ ORG_DEF = {
     "description": "生产制造企业 POC 演示组织——用于体验 LLM Router 在制造行业的组织架构、路由与安全围栏能力",
     "rate_limit_rpm": 1200,
     "rate_limit_tpm": 600_000,
-    "budget_cap_usd": 2000,
+    "budget_cap_credits": 2000,
     "budget_cap_tokens": 100_000_000,
     "settings": {"locale": "zh-CN", "industry": "manufacturing"},
 }
@@ -57,63 +57,63 @@ DEPARTMENT_DEFS = {
         "slug": "executive",
         "description": "经营决策、战略规划与跨部门协调",
         "rate_limit_rpm": 200,
-        "budget_cap_usd": 300,
+        "budget_cap_credits": 300,
     },
     "rnd": {
         "name": "研发部",
         "slug": "rnd",
         "description": "产品研发与工艺技术",
         "rate_limit_rpm": 400,
-        "budget_cap_usd": 500,
+        "budget_cap_credits": 500,
     },
     "production": {
         "name": "生产部",
         "slug": "production",
         "description": "制造排产、机加工与装配",
         "rate_limit_rpm": 300,
-        "budget_cap_usd": 300,
+        "budget_cap_credits": 300,
     },
     "quality": {
         "name": "质量部",
         "slug": "quality",
         "description": "来料 / 制程 / 出货全流程品控",
         "rate_limit_rpm": 200,
-        "budget_cap_usd": 200,
+        "budget_cap_credits": 200,
     },
     "supply-chain": {
         "name": "供应链部",
         "slug": "supply-chain",
         "description": "采购与仓储物流",
         "rate_limit_rpm": 200,
-        "budget_cap_usd": 200,
+        "budget_cap_credits": 200,
     },
     "sales": {
         "name": "销售部",
         "slug": "sales",
         "description": "市场拓展与客户经营",
         "rate_limit_rpm": 250,
-        "budget_cap_usd": 250,
+        "budget_cap_credits": 250,
     },
     "finance": {
         "name": "财务部",
         "slug": "finance",
         "description": "会计核算与成本管理",
         "rate_limit_rpm": 150,
-        "budget_cap_usd": 150,
+        "budget_cap_credits": 150,
     },
     "hr": {
         "name": "人力资源部",
         "slug": "hr",
         "description": "招聘培训与薪酬绩效",
         "rate_limit_rpm": 150,
-        "budget_cap_usd": 150,
+        "budget_cap_credits": 150,
     },
     "it": {
         "name": "信息技术部",
         "slug": "it",
         "description": "系统运维与数字化转型",
         "rate_limit_rpm": 300,
-        "budget_cap_usd": 350,
+        "budget_cap_credits": 350,
     },
 }
 
@@ -260,7 +260,7 @@ APIKEY_DEFS = [
         "team_slug": None,
         "allowed_models": [],  # 空 = 全部
         "rate_limit_rpm": 120,
-        "budget_cap_usd": 100,
+        "budget_cap_credits": 100,
     },
     {
         "key_name": "数字化转型组 Key（团队级）",
@@ -269,7 +269,7 @@ APIKEY_DEFS = [
         "team_slug": "digital-transformation",
         "allowed_models": ["claude-*", "gpt-4o-mini", "deepseek-chat"],
         "rate_limit_rpm": 60,
-        "budget_cap_usd": 50,
+        "budget_cap_credits": 50,
     },
     {
         "key_name": "生产计划组 Key（团队级）",
@@ -278,7 +278,7 @@ APIKEY_DEFS = [
         "team_slug": "planning",
         "allowed_models": ["claude-sonnet-4", "gpt-4o-mini"],
         "rate_limit_rpm": 40,
-        "budget_cap_usd": 30,
+        "budget_cap_credits": 30,
     },
 ]
 
@@ -473,7 +473,7 @@ async def seed() -> dict:
                     team_id=team_id,
                     allowed_models=kdef["allowed_models"],
                     rate_limit_rpm=kdef["rate_limit_rpm"],
-                    budget_cap_usd=kdef["budget_cap_usd"],
+                    budget_cap_credits=kdef["budget_cap_credits"],
                     is_active=True,
                 )
             )

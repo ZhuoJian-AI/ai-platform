@@ -197,3 +197,10 @@ def mcp_app():
     from app.mcp.auth import BearerCaptureMiddleware
 
     return BearerCaptureMiddleware(mcp.streamable_http_app())
+
+
+def organization_mcp_app():
+    """Return the OAuth-only, organization-audience MCP ASGI application."""
+    from app.mcp.auth import OrganizationOAuthMiddleware
+
+    return OrganizationOAuthMiddleware(mcp.streamable_http_app())

@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import jwt
 from sqlalchemy import delete, insert, select, update
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.security import hash_password, verify_password
 from app.config import settings
 from app.models.enterprise_application import EnterpriseApplicationGrant
+from app.models.organization import Organization
 from app.models.user import User, user_department_memberships
 from app.schemas.user import UserCreate, UserLoginResponse, UserRead, UserUpdate
 from app.services.memory_lifecycle import soft_delete_node_memory
@@ -111,6 +112,10 @@ def _create_user_access_token(user: User) -> str:
         "role": user.role,
         "org": str(user.organization_id),
         "type": "user",
+        "auth_epoch": user.auth_epoch,
+        "iss": "ai-infra-user",
+        "aud": "ai-infra-user-api",
+        "jti": str(uuid4()),
         "iat": now,
         "exp": now + timedelta(hours=24),
     }
@@ -302,6 +307,25 @@ async def update_user(
         or (role_changed and prev_role == "admin")
     ):
         await _sync_user_profile_memory(db, user)
+    auth_affecting = bool(
+        password is not None
+        or requested_role_ids is not None
+        or requested_manager_scopes is not None
+        or role_changed
+        or department_ids_were_set
+        or {"department_id", "team_id", "is_active"} & values.keys()
+    )
+    if auth_affecting:
+        user.auth_epoch += 1
+        from app.services.oauth_service import revoke_user_refresh_tokens
+
+        await revoke_user_refresh_tokens(db, user.id)
+        await db.flush()
+        # ``updated_at`` is populated by the database on UPDATE.  A flush
+        # expires that attribute, so returning the ORM object immediately
+        # would make response-model serialization perform async I/O outside
+        # SQLAlchemy's greenlet context (MissingGreenlet).
+        await db.refresh(user)
     return user
 
 
@@ -309,6 +333,10 @@ async def reset_password(db: AsyncSession, user: User, password: str) -> User:
     """重置用户密码，并强制下次登录改密。"""
     user.password_hash = hash_password(password)
     user.must_change_password = True
+    user.auth_epoch += 1
+    from app.services.oauth_service import revoke_user_refresh_tokens
+
+    await revoke_user_refresh_tokens(db, user.id)
     await db.flush()
     await db.refresh(user)
     return user
@@ -319,11 +347,12 @@ async def login_user(
 ) -> UserLoginResponse | None:
     """组织用户登录，返回 JWT token 或 None。"""
     result = await db.execute(
-        select(User).where(
+        select(User).join(Organization, Organization.id == User.organization_id).where(
             User.organization_id == org_id,
             User.username == username,
             User.deleted_at.is_(None),
             User.is_active.is_(True),
+            Organization.deleted_at.is_(None),
         )
     )
     user = result.scalar_one_or_none()
@@ -338,10 +367,40 @@ async def login_user(
     )
 
 
+async def change_own_password(
+    db: AsyncSession,
+    user: User,
+    old_password: str,
+    new_password: str,
+) -> UserLoginResponse | None:
+    """Replace an employee's temporary password and revoke every old grant."""
+    if not user.password_hash or not verify_password(old_password, user.password_hash):
+        return None
+    if verify_password(new_password, user.password_hash):
+        raise ValueError("New password must be different from the current password")
+    user.password_hash = hash_password(new_password)
+    user.must_change_password = False
+    user.auth_epoch += 1
+    from app.services.oauth_service import revoke_user_refresh_tokens
+
+    await revoke_user_refresh_tokens(db, user.id)
+    await db.flush()
+    await db.refresh(user)
+    return UserLoginResponse(
+        access_token=_create_user_access_token(user),
+        must_change_password=False,
+        user=UserRead.model_validate(user),
+    )
+
+
 async def soft_delete_user(db: AsyncSession, user: User) -> None:
     deleted_at = datetime.now(UTC)
     # 登录名只要求在职员工唯一。软删记录保留 UUID 后缀供审计，同时释放原登录名。
     user.username = _archived_username(user.username, user.id)
+    user.auth_epoch += 1
+    from app.services.oauth_service import revoke_user_refresh_tokens
+
+    await revoke_user_refresh_tokens(db, user.id)
     user.deleted_at = deleted_at
     await db.execute(
         update(EnterpriseApplicationGrant)

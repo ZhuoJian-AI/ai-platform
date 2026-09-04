@@ -27,6 +27,7 @@ from app.api.memory import router as memory_router
 from app.api.module_publisher import router as module_publisher_router
 from app.api.monitor import router as monitor_router
 from app.api.multimodal import router as multimodal_router
+from app.api.oauth import router as oauth_router
 from app.api.office_edit import router as office_edit_router
 from app.api.ontology import router as ontology_router
 from app.api.organizations import router as org_router
@@ -46,6 +47,7 @@ api_router = APIRouter(prefix="/api/v1")
 
 # 认证相关 — 无需 JWT 保护
 api_router.include_router(admin_router, tags=["auth"])
+api_router.include_router(oauth_router, tags=["oauth"])
 api_router.include_router(config_router, tags=["config"])
 api_router.include_router(platform_extension_router, tags=["platform-extensions"])
 api_router.include_router(storage_lifecycle_router, tags=["storage-lifecycle"])

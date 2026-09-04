@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  Card, Typography, Table, Space, Spin, Tag, Row, Col, Statistic, Progress, Switch,
+  Alert, Card, Typography, Table, Space, Spin, Tag, Row, Col, Statistic, Switch,
   Tabs, Select, DatePicker, Button,
 } from 'antd';
 import {
@@ -14,7 +14,8 @@ import {
   organizations, providers as providersApi, dlpRules as dlpRulesApi, auditLogs,
 } from '../../api/client';
 import type {
-  RouterMetrics, BudgetKeyUsage, BudgetProviderUsage, AuditLogEntry,
+  RouterMetrics, BudgetKeyUsage, BudgetProviderUsage, BudgetScopeType, BudgetScopeUsage,
+  AuditLogEntry,
 } from '../../api/client';
 import OrgSelect from '../../components/OrgSelect';
 import StatCard from '../../components/StatCard';
@@ -27,6 +28,74 @@ function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
   return String(n);
+}
+
+function fmtAsOf(value?: string, timezone?: string): string {
+  if (!value) return '—';
+  try {
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone: timezone || 'UTC',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
+}
+
+const SCOPE_LABELS: Record<BudgetScopeType, string> = {
+  organization: '企业',
+  department: '部门',
+  team: '团队',
+  api_key: 'API Key',
+};
+
+const SCOPE_COLORS: Record<BudgetScopeType, string> = {
+  organization: 'purple',
+  department: 'blue',
+  team: 'cyan',
+  api_key: 'gold',
+};
+
+interface BudgetScopeTreeNode extends BudgetScopeUsage {
+  children?: BudgetScopeTreeNode[];
+}
+
+function buildScopeTree(scopes: BudgetScopeUsage[]): BudgetScopeTreeNode[] {
+  const nodes = new Map(scopes.map((scope) => [
+    `${scope.scope_type}:${scope.scope_id}`,
+    { ...scope, children: [] } as BudgetScopeTreeNode,
+  ]));
+  const roots: BudgetScopeTreeNode[] = [];
+
+  for (const node of nodes.values()) {
+    const parentKey = node.parent_scope_type && node.parent_scope_id
+      ? `${node.parent_scope_type}:${node.parent_scope_id}`
+      : null;
+    const parent = parentKey ? nodes.get(parentKey) : undefined;
+    if (parent) parent.children?.push(node);
+    else roots.push(node);
+  }
+
+  const sortNodes = (items: BudgetScopeTreeNode[]) => {
+    items.sort((a, b) => a.scope_name.localeCompare(b.scope_name, 'zh-CN'));
+    items.forEach((item) => {
+      if (item.children?.length) sortNodes(item.children);
+      else delete item.children;
+    });
+  };
+  sortNodes(roots);
+  return roots;
+}
+
+function renderDirectCap(value: number | null, scopeType: BudgetScopeType, token = false) {
+  if (value == null) return <Tag>{scopeType === 'organization' ? '无限' : '继承'}</Tag>;
+  return token ? fmtTokens(value) : value.toLocaleString();
+}
+
+function renderEffectiveRemaining(value: number | null, token = false) {
+  if (value == null) return <Tag>无限</Tag>;
+  return token ? fmtTokens(value) : value.toLocaleString();
 }
 
 const EVENT_TYPE_COLORS: Record<string, string> = {
@@ -95,7 +164,42 @@ export default function RouterMonitor() {
 
   // ── 预算表列定义 ──
   const budgetKeys: BudgetKeyUsage[] = usage?.api_keys ?? [];
-  const totalCap = budgetKeys.reduce((s, k) => s + (k.budget_cap_tokens ?? 0), 0);
+  const budgetScopes = buildScopeTree(usage?.scopes ?? []);
+  const reportedTokens = Math.max(0, (usage?.total_tokens ?? 0) - (usage?.retained_unknown_tokens ?? 0));
+
+  const scopeColumns = [
+    {
+      title: '额度作用域', dataIndex: 'scope_name', width: 260, fixed: 'left' as const,
+      render: (name: string, row: BudgetScopeUsage) => (
+        <Space size={6}>
+          <Tag color={SCOPE_COLORS[row.scope_type]}>{SCOPE_LABELS[row.scope_type]}</Tag>
+          <Typography.Text>{name}</Typography.Text>
+          {row.is_inactive && <Tag color="default">已停用</Tag>}
+        </Space>
+      ),
+    },
+    { title: '直接 RPM', width: 115, align: 'right' as const, render: (_: unknown, row: BudgetScopeUsage) => renderDirectCap(row.direct_caps.rpm, row.scope_type) },
+    { title: '直接 TPM', width: 115, align: 'right' as const, render: (_: unknown, row: BudgetScopeUsage) => renderDirectCap(row.direct_caps.tpm, row.scope_type, true) },
+    { title: '直接 Token/月', width: 145, align: 'right' as const, render: (_: unknown, row: BudgetScopeUsage) => renderDirectCap(row.direct_caps.monthly_tokens, row.scope_type, true) },
+    { title: '直接调用额度/月', width: 155, align: 'right' as const, render: (_: unknown, row: BudgetScopeUsage) => renderDirectCap(row.direct_caps.monthly_credits, row.scope_type) },
+    { title: '已回报 Token', width: 140, align: 'right' as const, render: (_: unknown, row: BudgetScopeUsage) => fmtTokens(row.usage.actual_tokens) },
+    {
+      title: '保守占用/尚未回报', width: 180, align: 'right' as const,
+      render: (_: unknown, row: BudgetScopeUsage) => row.usage.held_unknown_tokens
+        ? <Tag color="gold">{fmtTokens(row.usage.held_unknown_tokens)}</Tag>
+        : '0',
+    },
+    { title: '已扣调用额度', width: 140, align: 'right' as const, render: (_: unknown, row: BudgetScopeUsage) => row.usage.credits.toLocaleString() },
+    { title: '请求数', width: 105, align: 'right' as const, render: (_: unknown, row: BudgetScopeUsage) => row.usage.requests.toLocaleString() },
+    {
+      title: '有效 Token 余额', width: 155, align: 'right' as const,
+      render: (_: unknown, row: BudgetScopeUsage) => renderEffectiveRemaining(row.effective_remaining.monthly_tokens, true),
+    },
+    {
+      title: '有效调用额度余额', width: 175, align: 'right' as const,
+      render: (_: unknown, row: BudgetScopeUsage) => renderEffectiveRemaining(row.effective_remaining.monthly_credits),
+    },
+  ];
 
   const providerColumns = [
     {
@@ -109,7 +213,9 @@ export default function RouterMonitor() {
     },
     { title: '输入 token', dataIndex: 'input_tokens', width: 140, align: 'right' as const, render: (v: number) => fmtTokens(v) },
     { title: '输出 token', dataIndex: 'output_tokens', width: 140, align: 'right' as const, render: (v: number) => fmtTokens(v) },
-    { title: '合计 token', dataIndex: 'total_tokens', width: 140, align: 'right' as const, render: (v: number) => <strong>{fmtTokens(v)}</strong> },
+    { title: '已回报 token', width: 140, align: 'right' as const, render: (_v: unknown, r: BudgetProviderUsage) => <strong>{fmtTokens(Math.max(0, r.total_tokens - (r.retained_unknown_tokens ?? 0)))}</strong> },
+    { title: '保守占用/尚未回报', dataIndex: 'retained_unknown_tokens', width: 180, align: 'right' as const, render: (v: number) => v ? <Tag color="gold">{fmtTokens(v)}</Tag> : '0' },
+    { title: '扣减额度', dataIndex: 'credits', width: 120, align: 'right' as const, render: (v: number) => v.toLocaleString() },
     { title: '请求数', dataIndex: 'request_count', width: 120, align: 'right' as const },
   ];
 
@@ -123,32 +229,19 @@ export default function RouterMonitor() {
         </span>
       ),
     },
-    {
-      title: '预算上限 (token)', dataIndex: 'budget_cap_tokens', width: 160,
-      render: (v: number | null) => (v != null ? fmtTokens(v) : <Tag>不限</Tag>),
-    },
     { title: '输入 token', dataIndex: 'input_tokens', width: 130, align: 'right' as const, render: (v: number) => fmtTokens(v) },
     { title: '输出 token', dataIndex: 'output_tokens', width: 130, align: 'right' as const, render: (v: number) => fmtTokens(v) },
     {
-      title: '已用 token', dataIndex: 'total_tokens', width: 130, align: 'right' as const,
-      render: (v: number) => <strong>{fmtTokens(v)}</strong>,
+      title: '已回报 token', width: 140, align: 'right' as const,
+      render: (_v: unknown, r: BudgetKeyUsage) => <strong>{fmtTokens(Math.max(0, r.total_tokens - (r.retained_unknown_tokens ?? 0)))}</strong>,
     },
     {
-      title: '消耗进度', width: 200,
-      render: (_v: unknown, r: BudgetKeyUsage) => {
-        const cap = r.budget_cap_tokens;
-        const percent = cap ? Math.min(100, Math.round((r.total_tokens / cap) * 100)) : 0;
-        return cap ? (
-          <Progress
-            percent={percent}
-            status={percent > 90 ? 'exception' : percent > 70 ? 'active' : 'normal'}
-            size="small"
-            format={() => `${fmtTokens(r.total_tokens)} / ${fmtTokens(cap)}`}
-          />
-        ) : (
-          <Tag>无上限</Tag>
-        );
-      },
+      title: '保守占用/尚未回报', dataIndex: 'retained_unknown_tokens', width: 180, align: 'right' as const,
+      render: (v: number) => v ? <Tag color="gold">{fmtTokens(v)}</Tag> : '0',
+    },
+    {
+      title: '已扣调用额度', dataIndex: 'credits', width: 140, align: 'right' as const,
+      render: (v: number) => <strong>{v.toLocaleString()}</strong>,
     },
     { title: 'Provider 数', width: 110, align: 'center' as const, render: (_v: unknown, r: BudgetKeyUsage) => r.providers.length },
   ];
@@ -285,38 +378,63 @@ export default function RouterMonitor() {
                   right={
                     <span style={{ color: WB.textAux, fontSize: FS.aux }}>
                       统计周期：{usage?.period_start ?? '—'} ~ {usage?.period_end ?? '—'}
+                      {' · '}数据截至：{fmtAsOf(usage?.as_of, usage?.timezone)} {usage?.timezone ?? ''}
                     </span>
                   }
                 />
                 <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
                   {!orgId ? <Typography.Text type="secondary">请选择组织。</Typography.Text> : (
                     <>
+                      <Alert
+                        showIcon
+                        type="info"
+                        message="一次平台 AI 操作准入扣 1 次调用额度；失败不退；供应商重试或故障转移不重复扣"
+                        description="下表的有效余额由服务端沿企业、部门、团队和 API Key 额度链计算后直接返回；页面不自行推算。企业未设置直接额度显示为“无限”，其他层显示为“继承”；有效余额为“无限”表示整条链均未设置上限。历史 USD 预算只读且不再执行。"
+                        style={{ marginBottom: 16 }}
+                      />
                       <Row gutter={[16, 16]}>
-                        <Col xs={24} sm={8}>
+                        <Col xs={24} sm={12} lg={6}>
                           <Card>
-                            <Statistic title="本月总 token 消耗" value={fmtTokens(usage?.total_tokens ?? 0)}
+                            <Statistic title="本月已回报 token" value={fmtTokens(reportedTokens)}
                               prefix={<ThunderboltOutlined />} valueStyle={{ color: WB.primary }} />
                           </Card>
                         </Col>
-                        <Col xs={24} sm={8}>
+                        <Col xs={24} sm={12} lg={6}>
                           <Card>
-                            <Statistic title="总预算上限 (token)" value={totalCap ? fmtTokens(totalCap) : '不限'}
-                              prefix={<ThunderboltOutlined />} />
+                            <Statistic title="保守占用/尚未回报" value={fmtTokens(usage?.retained_unknown_tokens ?? 0)}
+                              prefix={<ThunderboltOutlined />} valueStyle={{ color: '#d97706' }} />
                           </Card>
                         </Col>
-                        <Col xs={24} sm={8}>
+                        <Col xs={24} sm={12} lg={6}>
+                          <Card>
+                            <Statistic title="本月已扣调用额度" value={(usage?.credits ?? 0).toLocaleString()}
+                              prefix={<ThunderboltOutlined />} valueStyle={{ color: WB.primary }} />
+                          </Card>
+                        </Col>
+                        <Col xs={24} sm={12} lg={6}>
                           <Card>
                             <Statistic title="活跃 Key 数量" value={keyList?.filter(k => k.is_active).length ?? 0}
                               prefix={<ThunderboltOutlined />} />
                           </Card>
                         </Col>
                       </Row>
-                      <Card title="各 API Key token 消耗（展开查看各 Provider 明细）" style={{ marginTop: 16 }}>
+                      <Card title="企业 / 部门 / 团队 / API Key 四级额度" style={{ marginTop: 16 }}>
+                        <Table<BudgetScopeTreeNode>
+                          dataSource={budgetScopes}
+                          rowKey={(row) => `${row.scope_type}:${row.scope_id}`}
+                          loading={budgetLoading}
+                          pagination={false}
+                          scroll={{ x: 1700 }}
+                          columns={scopeColumns}
+                        />
+                      </Card>
+                      <Card title="API Key / Provider 用量明细（展开查看 Provider）" style={{ marginTop: 16 }}>
                         <Table<BudgetKeyUsage>
                           dataSource={budgetKeys}
                           rowKey={(r) => r.api_key_id ?? '__unassigned__'}
                           loading={budgetLoading}
                           pagination={{ pageSize: 15 }}
+                          scroll={{ x: 1200 }}
                           columns={mainColumns}
                           expandable={{
                             rowExpandable: (r) => r.providers.length > 0,

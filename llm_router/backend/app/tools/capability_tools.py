@@ -188,7 +188,14 @@ async def _search_rag(db: AsyncSession, cu: CurrentUser, query: str, top_k: int)
     out: list[str] = []
     for coll in colls:
         try:
-            hits = await rag_retrieve(db, coll, UUID(str(cu.organization_id)), req)
+            hits = await rag_retrieve(
+                db,
+                coll,
+                UUID(str(cu.organization_id)),
+                req,
+                department_id=cu.department_id,
+                team_id=cu.team_id,
+            )
         except Exception as exc:  # noqa: BLE001 — 检索失败不阻断其余集合
             out.append(f"[{coll.name}] 检索失败：{exc}")
             continue

@@ -23,11 +23,40 @@ class Settings(BaseSettings):
     secret_key: str = "ai-infra-dev-secret-key-change-in-production"
     master_encryption_key: str = "zmE5st2H+zdf25a+oul6Ci8dEvLavTOdn+7j/ZH1Q1c="
 
+    # Public OAuth/MCP boundary.  Production must set both URLs to the same
+    # externally reachable HTTPS origin (for example https://infra.example.com).
+    # Access tokens are deliberately short lived; refresh tokens rotate on
+    # every use and have a separate absolute lifetime.
+    oauth_issuer: str = ""
+    oauth_public_base_url: str = ""
+    oauth_signing_key: SecretStr = SecretStr("")
+    oauth_access_token_minutes: int = 10
+    oauth_authorization_code_seconds: int = 300
+    oauth_refresh_token_days: int = 30
+    oauth_refresh_token_absolute_days: int = 90
+    oauth_dynamic_client_registration_enabled: bool = True
+    oauth_dynamic_client_ttl_days: int = 180
+    oauth_dynamic_client_limit_per_hour: int = 60
+    oauth_dynamic_client_max_active: int = 5000
+    browser_allowed_origins: str = ""
+    # Comma-separated networks of reverse proxies that are allowed to supply
+    # X-Forwarded-For.  Keep empty outside a controlled proxy deployment.
+    trusted_proxy_cidrs: str = ""
+    login_failure_limit: int = 10
+    login_failure_window_seconds: int = 15 * 60
+
     # Database (Docker PostgreSQL on port 5434)
     database_url: str = "postgresql+asyncpg://ai_infra:ai_infra@localhost:5434/ai_infra"
 
     # Redis (Docker Redis on port 6381)
     redis_url: str = "redis://localhost:6381/0"
+    # Every billable AI call must reserve hierarchical quota in Redis before
+    # contacting a provider. Production is always fail-closed; this switch is
+    # intentionally honored only in the development environment.
+    ai_quota_development_fail_open: bool = True
+    ai_quota_redis_timeout_seconds: float = 0.5
+    ai_quota_default_max_output_tokens: int = 4096
+    ai_quota_reservation_ttl_seconds: int = 40 * 24 * 60 * 60
 
     # Executable Skill runner (internal network only)
     code_skills_enabled: bool = False
@@ -291,6 +320,29 @@ class Settings(BaseSettings):
         if not self.proxy_base_url:
             return None
         return self.proxy_base_url.rstrip("/")
+
+    @property
+    def oauth_signing_key_value(self) -> str:
+        value = self.oauth_signing_key
+        if isinstance(value, SecretStr):
+            configured = value.get_secret_value().strip()
+        else:
+            configured = str(value or "").strip()
+        # A separate key is mandatory in production.  Development keeps a
+        # deterministic fallback so local onboarding and tests remain simple.
+        if configured:
+            return configured
+        return self.secret_key if self.is_development else ""
+
+    @property
+    def normalized_oauth_issuer(self) -> str:
+        value = (self.oauth_issuer or self.oauth_public_base_url).strip().rstrip("/")
+        return value
+
+    @property
+    def normalized_oauth_public_base_url(self) -> str:
+        value = (self.oauth_public_base_url or self.oauth_issuer).strip().rstrip("/")
+        return value
 
     @property
     def is_development(self) -> bool:

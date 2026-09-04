@@ -16,6 +16,14 @@ def db_engine():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolate_gateway_contracts_from_quota(monkeypatch):
+    async def allow(*_args, **_kwargs):
+        return model_gateway.QuotaReservation("gateway-contract-test", 0, enforced=False)
+
+    monkeypatch.setattr(model_gateway, "_reserve_gateway_quota", allow)
+
+
 def test_compatible_endpoints_are_keyed_by_wire_protocol() -> None:
     assert provider_base_url(
         "openai", region=None, workspace_id=None, provider_type="openai",

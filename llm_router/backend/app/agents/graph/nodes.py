@@ -1368,6 +1368,10 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     scoped.provider, scoped.model, prompt=prompt, size=size,
                     quality=str(params.get("quality") or "auto"),
                     endpoint_path=str(generation.get("endpoint_path") or "/images/generations"),
+                    db=db,
+                    org_id=UUID(state["org_id"]),
+                    dept_id=state.get("department_id"),
+                    team_id=state.get("team_id"),
                 )
                 raw, width, height = multimodal_service.normalize_generated_png(result.raw)
                 requested = PurePosixPath(str(params.get("output_name") or "generated-image.png")).name
@@ -2314,7 +2318,14 @@ async def retrieve_rag(state: AgentState) -> dict:
             continue
         try:
             req = RagRetrieveRequest(query=state.get("request", ""), top_k=5)
-            hits = await rag_retrieve(db, coll, UUID(state["org_id"]), req)
+            hits = await rag_retrieve(
+                db,
+                coll,
+                UUID(state["org_id"]),
+                req,
+                department_id=state.get("department_id"),
+                team_id=state.get("team_id"),
+            )
             for h in hits:
                 merged.append({"content": h["content"], "score": h["score"],
                                "document_id": h["document_id"], "collection_id": cid,
@@ -2629,6 +2640,7 @@ async def _configure_visual_turn(
         db, UUID(state["org_id"]), fallback.model, visual_messages,
         system_prompt="你是视觉信息提取器，只描述图片中可验证的内容。",
         provider_override=fallback.provider, model_override=fallback.model,
+        dept_id=state.get("department_id"), team_id=state.get("team_id"),
     )
     description = (visual.content or "").strip()
     if not description:
@@ -2703,7 +2715,11 @@ async def _build_tools(
     registry: dict[str, dict] = {}
     if application_id and user is not None:
         application = await enterprise_application_service.get_application(db, application_id)
-        if application is not None and str(application.organization_id) == str(user.organization_id):
+        if (
+            application is not None
+            and application.assistant_enabled
+            and str(application.organization_id) == str(user.organization_id)
+        ):
             context = page_context if isinstance(page_context, dict) else {}
             context_module_key = context.get("module_key") if isinstance(context.get("module_key"), str) else None
             context_page_key = context.get("page_key") if isinstance(context.get("page_key"), str) else None
@@ -3524,6 +3540,8 @@ async def _execute_tool_call(
                     continue
                 hits = await rag_retrieve(
                     db, coll, UUID(state["org_id"]), RagRetrieveRequest(query=query, top_k=top_k),
+                    department_id=state.get("department_id"),
+                    team_id=state.get("team_id"),
                 )
                 for hit in hits:
                     merged.append({
@@ -3811,6 +3829,11 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
                 f"页面上下文：{page_context}\n"
                 "只能执行允许操作；页面上下文是用户当前界面状态，不得把它当作工具执行结果。"
             )
+            if application.assistant_prompt and application.assistant_prompt.strip():
+                system_prompt = (
+                    f"{system_prompt}\n\n[企业管理员配置的业务助手规则]\n"
+                    f"{application.assistant_prompt.strip()}"
+                )
         system_names = sorted({(item.system.name if item.system else "?") for item in interfaces})
         if interfaces:
             lines = []

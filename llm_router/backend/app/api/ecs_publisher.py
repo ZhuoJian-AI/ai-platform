@@ -13,6 +13,7 @@ from app.models.ecs_runtime import EcsRuntime
 from app.models.organization import Organization
 from app.schemas.ecs_publisher import (
     EcsModulePublishInput,
+    EcsModuleReleaseIntentInput,
     EcsModuleReleaseRead,
     EcsRuntimeCreate,
     EcsRuntimeCredentialRead,
@@ -121,6 +122,36 @@ async def register_module_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
     return await ecs_publisher_service.register_module(db, runtime, data)
+
+
+@router.post("/modules/{application_slug}/begin-change", status_code=204)
+async def begin_module_change_endpoint(
+    application_slug: str,
+    data: EcsModuleReleaseIntentInput,
+    runtime: EcsRuntime = Depends(authenticate_ecs_runtime),
+    db: AsyncSession = Depends(get_db),
+):
+    await ecs_publisher_service.begin_release_change(
+        db,
+        runtime,
+        application_slug,
+        data.target_commit,
+    )
+
+
+@router.post("/modules/{application_slug}/cancel-change", status_code=204)
+async def cancel_module_change_endpoint(
+    application_slug: str,
+    data: EcsModuleReleaseIntentInput,
+    runtime: EcsRuntime = Depends(authenticate_ecs_runtime),
+    db: AsyncSession = Depends(get_db),
+):
+    await ecs_publisher_service.cancel_release_change(
+        db,
+        runtime,
+        application_slug,
+        data.target_commit,
+    )
 
 
 @router.get("/modules/{application_slug}", response_model=EcsModuleReleaseRead)

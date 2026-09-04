@@ -37,12 +37,14 @@ from app.graph.nodes import (
     dlp_request,
     dlp_response,
     proxy_upstream,
+    reserve_quota,
     resolve_permissions,
     resolve_route,
     route_after_dlp,
     route_after_dlp_response,
     route_after_perms,
     route_after_proxy,
+    route_after_quota,
     route_after_routing,
     write_audit,
 )
@@ -56,6 +58,7 @@ def build_proxy_graph():
     graph.add_node("resolve_permissions", resolve_permissions)
     graph.add_node("dlp_request", dlp_request)
     graph.add_node("resolve_route", resolve_route)
+    graph.add_node("reserve_quota", reserve_quota)
     graph.add_node("proxy_upstream", proxy_upstream)
     graph.add_node("dlp_response", dlp_response)
     graph.add_node("build_error", build_error)
@@ -75,6 +78,11 @@ def build_proxy_graph():
     graph.add_conditional_edges(
         "resolve_route",
         route_after_routing,
+        {"build_error": "build_error", "proxy_upstream": "reserve_quota"},
+    )
+    graph.add_conditional_edges(
+        "reserve_quota",
+        route_after_quota,
         {"build_error": "build_error", "proxy_upstream": "proxy_upstream"},
     )
     graph.add_conditional_edges(

@@ -15,9 +15,14 @@ class EffectivePermissions:
     allowed_models: set[str] = field(default_factory=lambda: {"*"})
     rate_limit_rpm: int | None = None
     rate_limit_tpm: int | None = None
+    # USD is retained as read-only history. It is not an enforced dimension
+    # until a versioned provider/model price ledger exists.
     budget_cap_usd: Decimal | None = None
-    # 预算上限以 token 计（与 budget_cap_usd 并存；当前预算消耗以 token 为准）
+    # Token budgets are the enforceable monthly budget dimension.
     budget_cap_tokens: int | None = None
+    # Credits meter platform AI operation admissions, including image/audio
+    # operations without token metering. Internal retries/failover share one admission.
+    budget_cap_credits: int | None = None
 
 
 def resolve_effective_permissions(
@@ -31,7 +36,9 @@ def resolve_effective_permissions(
     规则:
     - 模型列表: 子级与父级取交集（子级只能缩小范围）
     - 速率限制: 取所有层级的最小值（子级不能突破父级上限）
-    - 预算上限: 取所有层级的最小值
+    - USD 配置: 仅返回历史最小值，不参与准入，也禁止新增
+    - Token 预算: 取最小值并由 Redis 原子账本强制执行
+    - Credit 预算: 取最小值；每个逻辑 AI 操作准入并保留 1，失败不退，内部重试不重复扣
     """
     # ── 模型列表 (交集) ──
     model_sets: list[set[str]] = []
@@ -91,12 +98,21 @@ def resolve_effective_permissions(
     ] if v is not None]
     effective_budget_tokens = min(token_candidates) if token_candidates else None
 
+    credit_candidates = [v for v in [
+        getattr(api_key, "budget_cap_credits", None),
+        getattr(team, "budget_cap_credits", None) if team else None,
+        getattr(dept, "budget_cap_credits", None) if dept else None,
+        getattr(org, "budget_cap_credits", None),
+    ] if v is not None]
+    effective_budget_credits = min(credit_candidates) if credit_candidates else None
+
     return EffectivePermissions(
         allowed_models=allowed_models,
         rate_limit_rpm=effective_rpm,
         rate_limit_tpm=effective_tpm,
         budget_cap_usd=effective_budget,
         budget_cap_tokens=effective_budget_tokens,
+        budget_cap_credits=effective_budget_credits,
     )
 
 

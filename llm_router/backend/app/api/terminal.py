@@ -564,8 +564,8 @@ async def export_skills_pack_endpoint(
 ):
     """即时生成归口用户 skills 包 zip 并下载。
 
-    鉴权内嵌 + 即时轮换：撤销该用户上一份 skills-pack key、即时签发新 scoped key，
-    明文嵌入 zip 内 ``.mcp.json``（仅此一次返回）。第三方终端解压即可识别，无需再输凭证。
+    包内只有当前企业的 MCP OAuth URL，不包含任何 bearer 或供应商密钥。
+    第三方终端首次连接时由用户在平台登录页用自己的员工账号授权。
     """
     zip_bytes, filename = await skills_pack_service.build_skills_pack_zip(db, cu, request)
     await db.commit()
@@ -908,6 +908,8 @@ async def run_task_endpoint(
         application, application_permissions = await enterprise_application_service.assert_application_permission(
             db, cfg["application_id"], cu, "view",
         )
+        if not application.assistant_enabled:
+            raise HTTPException(status_code=403, detail="该系统的业务 AI 已由管理员停用")
         page_application_id = cfg["page_context"].get("application_id")
         if page_application_id and str(page_application_id) != str(application.id):
             raise HTTPException(status_code=400, detail="页面上下文与当前应用不匹配")
@@ -2727,7 +2729,15 @@ async def ingest_kb_document_endpoint(
     assert_user_write(cu)
     coll = await _get_visible_collection(db, coll_id, cu)
     try:
-        doc = await rag_service.ingest_document(db, coll, coll.organization_id, data, created_by=cu.id)
+        doc = await rag_service.ingest_document(
+            db,
+            coll,
+            coll.organization_id,
+            data,
+            created_by=cu.id,
+            department_id=cu.department_id,
+            team_id=cu.team_id,
+        )
     except rag_service.EmbeddingError as exc:
         # service 已置 doc=failed + flush；commit 落库 failed 供排查，转 502
         await db.commit()
@@ -2761,6 +2771,8 @@ async def upload_kb_document_endpoint(
             title=title,
             folder_path=folder_path,
             created_by=cu.id,
+            department_id=cu.department_id,
+            team_id=cu.team_id,
         )
     except doc_parser.UnsupportedFileTypeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -2848,7 +2860,14 @@ async def reingest_kb_document_endpoint(
     coll = await _get_visible_collection(db, doc.collection_id, cu)
     _assert_owner(doc, cu)
     try:
-        doc = await rag_service.reingest_document(db, doc, coll.organization_id, data)
+        doc = await rag_service.reingest_document(
+            db,
+            doc,
+            coll.organization_id,
+            data,
+            department_id=cu.department_id,
+            team_id=cu.team_id,
+        )
     except rag_service.EmbeddingError as exc:
         # 回滚：恢复旧分块与原 doc，不留下 0 chunk 的 failed 行
         await db.rollback()

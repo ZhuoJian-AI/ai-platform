@@ -93,7 +93,7 @@ async def db_session(db_engine) -> AsyncSession:
 async def client(db_session: AsyncSession) -> AsyncClient:
     """Yield an HTTP test client with DB session + admin auth overridden.
 
-    管理类 API 需要 admin 鉴权；测试中以 super_admin 身份绕过 JWT 校验，
+    管理类 API 需要 admin 鉴权；测试中以 platform_super_admin 身份绕过 JWT 校验，
     同时复用注入的 db_session，保证读写落到测试库。
     """
 
@@ -103,7 +103,7 @@ async def client(db_session: AsyncSession) -> AsyncClient:
     test_admin = Admin(
         username="test-admin",
         password_hash="x",
-        role="super_admin",
+        role="platform_super_admin",
         is_active=True,
     )
     # Persist the overridden principal so audit/version foreign keys exercise
@@ -114,7 +114,7 @@ async def client(db_session: AsyncSession) -> AsyncClient:
         admin=test_admin,
         id=test_admin.id,
         username=test_admin.username,
-        role="super_admin",
+        role="platform_super_admin",
     )
 
     app.dependency_overrides[get_db] = override_get_db

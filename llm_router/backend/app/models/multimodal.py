@@ -22,6 +22,9 @@ class MultimodalJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     department_id: Mapped[str | None] = mapped_column(ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    team_id: Mapped[str | None] = mapped_column(
+        ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
     capability: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     deployment_id: Mapped[str | None] = mapped_column(
         ForeignKey("model_deployments.id", ondelete="SET NULL"), nullable=True,

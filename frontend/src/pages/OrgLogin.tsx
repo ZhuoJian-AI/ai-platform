@@ -1,18 +1,20 @@
 import { useEffect, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Navigate, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Spin } from 'antd';
 import LoginForm, { LoginBackdrop } from '../components/LoginForm';
 import { auth as authApi, type OrgInfo } from '../api/client';
 import { BRAND_TITLES, useBrandTitle } from '../branding/brand';
+import { useAuth } from '../context/AuthContext';
 
 /**
- * 组织门户登录页（/{slug}/login）：org_admin 通过所属组织的 slug 登录。
+ * 组织门户登录页（/{slug}/login）：enterprise_admin 通过所属企业的 slug 登录。
  * 进入时按 slug 公开查询组织名并展示在登录框上方；slug 无效则提示。
  */
 export default function OrgLogin() {
   useBrandTitle(BRAND_TITLES.organization);
 
   const { slug = '' } = useParams<{ slug: string }>();
+  const { status } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [org, setOrg] = useState<OrgInfo | null>(null);
@@ -20,6 +22,7 @@ export default function OrgLogin() {
   const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
+    if (status !== 'anonymous') return;
     let cancelled = false;
     setLoading(true);
     setNotFound(false);
@@ -38,11 +41,13 @@ export default function OrgLogin() {
       .catch(() => { if (!cancelled) setNotFound(true); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [location.hash, location.pathname, location.search, navigate, slug]);
+  }, [location.hash, location.pathname, location.search, navigate, slug, status]);
+
+  if (status === 'authenticated') return <Navigate to="/monitor/router" replace />;
 
   return (
     <LoginBackdrop>
-      {loading ? (
+      {status === 'loading' || status === 'mfa_enrollment_required' || loading ? (
         <Spin size="large" style={{ position: 'relative', zIndex: 1 }} />
       ) : notFound ? (
         <Alert

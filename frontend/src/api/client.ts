@@ -2,6 +2,12 @@
  * API 客户端 — 统一封装所有后端 HTTP 请求
  */
 import { buildTaskRunFilePayload } from '../utils/workspaceFileLinks';
+import {
+  adminFetch,
+  authorizeAdminXhr,
+  getAdminAccessToken,
+  handleAdminXhrUnauthorized,
+} from '../auth/adminSession';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -22,29 +28,19 @@ function withWorkspaceVersion(path: string, versionId?: string | null): string {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const token = localStorage.getItem('ai_infra_token');
   const isMultipart = options?.body instanceof FormData;
   const headers: Record<string, string> = isMultipart ? {} : { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
   const { headers: optionHeaders, ...requestOptions } = options ?? {};
 
-  const resp = await fetch(`${BASE_URL}${path}`, {
+  const resp = await adminFetch(`${BASE_URL}${path}`, {
     ...requestOptions,
     headers: { ...headers, ...(optionHeaders as Record<string, string> | undefined) },
   });
 
-  // 401 时自动跳转登录
   if (resp.status === 401) {
-    const stored = localStorage.getItem('ai_infra_admin');
     if (window.location.pathname.startsWith('/f/')) {
       sessionStorage.setItem('zhuojian_return_to', `${window.location.pathname}${window.location.search}`);
     }
-    localStorage.removeItem('ai_infra_token');
-    localStorage.removeItem('ai_infra_admin');
-    // 组织级账号回跳 /{slug}/login，平台级账号回跳 /login
-    let slug: string | null = null;
-    try { slug = stored ? JSON.parse(stored)?.organization_slug ?? null : null; } catch { slug = null; }
-    window.location.href = slug ? `/${slug}/login` : '/login';
     throw new ApiError(401, 'Session expired');
   }
 
@@ -58,17 +54,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 async function requestText(path: string, options?: RequestInit): Promise<string> {
-  const token = localStorage.getItem('ai_infra_token');
   const headers: Record<string, string> = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetch(`${BASE_URL}${path}`, { ...options, headers: { ...headers, ...(options?.headers as Record<string, string> | undefined) } });
+  const resp = await adminFetch(`${BASE_URL}${path}`, { ...options, headers: { ...headers, ...(options?.headers as Record<string, string> | undefined) } });
   if (resp.status === 401) {
-    const stored = localStorage.getItem('ai_infra_admin');
-    localStorage.removeItem('ai_infra_token');
-    localStorage.removeItem('ai_infra_admin');
-    let slug: string | null = null;
-    try { slug = stored ? JSON.parse(stored)?.organization_slug ?? null : null; } catch { slug = null; }
-    window.location.href = slug ? `/${slug}/login` : '/login';
     throw new ApiError(401, 'Session expired');
   }
   if (!resp.ok) {
@@ -99,8 +87,10 @@ export interface Organization {
   settings: Record<string, unknown>;
   rate_limit_rpm: number | null;
   rate_limit_tpm: number | null;
-  budget_cap_usd: string | null;
+  /** 历史只读字段；后端不再执行或接受写入。 */
+  readonly budget_cap_usd: string | null;
   budget_cap_tokens: number | null;
+  budget_cap_credits: number | null;
   is_default: boolean;
   created_at: string;
   updated_at: string;
@@ -116,8 +106,10 @@ export interface Department {
   settings: Record<string, unknown>;
   rate_limit_rpm: number | null;
   rate_limit_tpm: number | null;
-  budget_cap_usd: string | null;
+  /** 历史只读字段；后端不再执行或接受写入。 */
+  readonly budget_cap_usd: string | null;
   budget_cap_tokens: number | null;
+  budget_cap_credits: number | null;
   sort_order: number;
   created_at: string;
   updated_at: string;
@@ -133,8 +125,10 @@ export interface Team {
   settings: Record<string, unknown>;
   rate_limit_rpm: number | null;
   rate_limit_tpm: number | null;
-  budget_cap_usd: string | null;
+  /** 历史只读字段；后端不再执行或接受写入。 */
+  readonly budget_cap_usd: string | null;
   budget_cap_tokens: number | null;
+  budget_cap_credits: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -220,18 +214,20 @@ export interface ApiKey {
   allowed_models: string[];
   rate_limit_rpm: number | null;
   rate_limit_tpm: number | null;
-  budget_cap_usd: string | null;
+  /** 历史只读字段；后端不再执行或接受写入。 */
+  readonly budget_cap_usd: string | null;
   budget_cap_tokens: number | null;
+  budget_cap_credits: number | null;
   is_active: boolean;
   expires_at: string | null;
   last_used_at: string | null;
   created_at: string;
   revoked_at: string | null;
-  key_plain: string; // 可解密的完整 API Key
 }
 
 export interface ApiKeyWithSecret extends ApiKey {
-  key: string; // 等同于 key_plain，向后兼容
+  /** 创建响应中仅返回一次；后续接口无法恢复。 */
+  key: string;
 }
 
 export interface DlpRule {
@@ -344,16 +340,9 @@ export const organizations = {
       fd.append('file', file);
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${BASE_URL}/api/v1/organizations/${orgId}/contact-image`);
-      const token = localStorage.getItem('ai_infra_token');
-      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
       xhr.onload = () => {
         if (xhr.status === 401) {
-          const stored = localStorage.getItem('ai_infra_admin');
-          localStorage.removeItem('ai_infra_token');
-          localStorage.removeItem('ai_infra_admin');
-          let slug: string | null = null;
-          try { slug = stored ? JSON.parse(stored)?.organization_slug ?? null : null; } catch { slug = null; }
-          window.location.href = slug ? `/${slug}/login` : '/login';
+          handleAdminXhrUnauthorized(xhr.status);
           reject(new ApiError(401, 'Session expired'));
           return;
         }
@@ -366,7 +355,7 @@ export const organizations = {
         resolve();
       };
       xhr.onerror = () => reject(new ApiError(0, '网络错误，上传失败'));
-      xhr.send(fd);
+      authorizeAdminXhr(xhr).then(() => xhr.send(fd)).catch(() => reject(new ApiError(0, '无法建立安全上传会话')));
     }),
   /** 删除组织联系二维码图片（管理员鉴权）。 */
   deleteContactImage: (orgId: string) =>
@@ -446,11 +435,14 @@ export interface User {
 }
 
 async function requestBlob(path: string, tokenKey: string, signal?: AbortSignal): Promise<Blob> {
-  const token = localStorage.getItem(tokenKey);
-  const resp = await fetch(`${BASE_URL}${path}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    signal,
-  });
+  const isAdminRequest = tokenKey === 'ai_infra_token';
+  const token = isAdminRequest ? getAdminAccessToken() : sessionStorage.getItem(tokenKey);
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const init: RequestInit = { headers, signal };
+  const resp = isAdminRequest
+    ? await adminFetch(`${BASE_URL}${path}`, init)
+    : await fetch(`${BASE_URL}${path}`, init);
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
     throw new ApiError(resp.status, responseErrorMessage(body, resp.statusText), body);
@@ -748,7 +740,41 @@ export const auditLogs = {
   },
 };
 
-// ── Budget (token consumption) ────────────────────────────────────────
+// ── AI quota usage (credits + token consumption) ─────────────────────
+
+export type BudgetScopeType = 'organization' | 'department' | 'team' | 'api_key';
+
+export interface BudgetScopeCaps {
+  rpm: number | null;
+  tpm: number | null;
+  monthly_tokens: number | null;
+  monthly_credits: number | null;
+}
+
+export interface BudgetScopeUsageValues {
+  actual_tokens: number;
+  held_unknown_tokens: number;
+  credits: number;
+  requests: number;
+}
+
+export interface BudgetScopeRemaining {
+  monthly_tokens: number | null;
+  monthly_credits: number | null;
+}
+
+export interface BudgetScopeUsage {
+  scope_type: BudgetScopeType;
+  scope_id: string;
+  scope_name: string;
+  parent_scope_type: BudgetScopeType | null;
+  parent_scope_id: string | null;
+  is_inactive: boolean;
+  direct_caps: BudgetScopeCaps;
+  usage: BudgetScopeUsageValues;
+  direct_remaining: BudgetScopeRemaining;
+  effective_remaining: BudgetScopeRemaining;
+}
 
 export interface BudgetProviderUsage {
   provider_id: string | null;
@@ -757,6 +783,8 @@ export interface BudgetProviderUsage {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
+  retained_unknown_tokens: number;
+  credits: number;
   request_count: number;
 }
 
@@ -765,21 +793,38 @@ export interface BudgetKeyUsage {
   key_name: string;
   key_prefix: string | null;
   budget_cap_tokens: number | null;
+  budget_cap_credits: number | null;
   is_revoked: boolean;
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
+  retained_unknown_tokens: number;
+  credits: number;
   request_count: number;
+  effective_remaining: BudgetScopeRemaining | null;
   providers: BudgetProviderUsage[];
 }
 
 export interface BudgetUsageResponse {
+  timezone: string;
+  as_of: string;
   period_start: string;
   period_end: string;
   total_input_tokens: number;
   total_output_tokens: number;
   total_tokens: number;
+  retained_unknown_tokens: number;
+  credits: number;
   request_count: number;
+  enforcement: {
+    rpm: string;
+    tpm: string;
+    token_budget: string;
+    credit_budget: string;
+    usd_budget: 'legacy_read_only_not_enforced' | string;
+    durable_ledger: string;
+  };
+  scopes: BudgetScopeUsage[];
   api_keys: BudgetKeyUsage[];
 }
 
@@ -963,7 +1008,8 @@ function uploadWorkspaceFile(
     Object.entries(uploadMutationPayload(options)).forEach(([key, value]) => fd.append(key, value || ''));
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${BASE_URL}${url}`);
-    const token = localStorage.getItem(tokenKey);
+    const isAdminRequest = tokenKey === 'ai_infra_token';
+    const token = isAdminRequest ? getAdminAccessToken() : sessionStorage.getItem(tokenKey);
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && event.total > 0) {
@@ -990,7 +1036,11 @@ function uploadWorkspaceFile(
       }
       options.signal.addEventListener('abort', () => xhr.abort(), { once: true });
     }
-    xhr.send(fd);
+    if (isAdminRequest) {
+      authorizeAdminXhr(xhr).then(() => xhr.send(fd)).catch(() => reject(new ApiError(0, '无法建立安全上传会话')));
+    } else {
+      xhr.send(fd);
+    }
   });
 }
 
@@ -1232,19 +1282,12 @@ export const rag = {
     if (opts.folder_path !== undefined) fd.append('folder_path', opts.folder_path);
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${BASE_URL}/api/v1/rag/${collId}/documents/upload`);
-    const token = localStorage.getItem('ai_infra_token');
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
     if (onProgress && xhr.upload) {
       xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     }
     xhr.onload = () => {
       if (xhr.status === 401) {
-        const stored = localStorage.getItem('ai_infra_admin');
-        localStorage.removeItem('ai_infra_token');
-        localStorage.removeItem('ai_infra_admin');
-        let slug: string | null = null;
-        try { slug = stored ? JSON.parse(stored)?.organization_slug ?? null : null; } catch { slug = null; }
-        window.location.href = slug ? `/${slug}/login` : '/login';
+        handleAdminXhrUnauthorized(xhr.status);
         reject(new ApiError(401, 'Session expired'));
         return;
       }
@@ -1258,7 +1301,7 @@ export const rag = {
       catch (e) { reject(new ApiError(xhr.status, '响应解析失败')); }
     };
     xhr.onerror = () => reject(new ApiError(0, '网络错误，上传失败'));
-    xhr.send(fd);
+    authorizeAdminXhr(xhr).then(() => xhr.send(fd)).catch(() => reject(new ApiError(0, '无法建立安全上传会话')));
   }),
   getDocumentStatus: (docId: string) =>
     request<RagDocumentStatus>(`/api/v1/rag/documents/${docId}/status`),
@@ -1667,12 +1710,12 @@ export const monitor = {
 };
 
 // ── Terminal User Portal (user JWT) ────────────────────────────────────
-// 终端用户端使用独立 localStorage 键 ai_infra_user_token，与管理员 token 隔离。
+// 终端用户 bearer 只保留在当前标签会话；长期 OAuth 复用依赖 HttpOnly cookie。
 
 const USER_TOKEN_KEY = 'ai_infra_user_token';
 
 function userRequest<T>(path: string, options?: RequestInit): Promise<T> {
-  const token = localStorage.getItem(USER_TOKEN_KEY);
+  const token = sessionStorage.getItem(USER_TOKEN_KEY);
   const isMultipart = options?.body instanceof FormData;
   const headers: Record<string, string> = isMultipart ? {} : { 'Content-Type': 'application/json' };
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -1687,7 +1730,7 @@ function userRequest<T>(path: string, options?: RequestInit): Promise<T> {
         if (window.location.pathname.startsWith('/f/')) {
           sessionStorage.setItem('zhuojian_return_to', `${window.location.pathname}${window.location.search}`);
         }
-        localStorage.removeItem(USER_TOKEN_KEY);
+        sessionStorage.removeItem(USER_TOKEN_KEY);
         localStorage.removeItem('ai_infra_user');
         // 回跳到当前 slug 的用户登录页（或平台 /login 兜底）
         const m = window.location.pathname.match(/^\/([^/]+)\/terminal/);
@@ -2299,6 +2342,7 @@ export type EnterpriseApplicationInput = Pick<EnterpriseApplication,
 export interface TerminalEnterpriseApplication {
   id: string; name: string; slug: string; description: string | null;
   icon_url: string | null; display_mode: 'embedded' | 'external';
+  is_active?: boolean;
   sort_order: number; assistant_enabled: boolean;
   permissions: EnterpriseApplicationPermission[];
   module_keys: string[];
@@ -2311,6 +2355,11 @@ export interface EnterpriseApplicationLaunch {
   module_keys: string[];
   module_key: string | null;
   modules: Array<{ module_key: string; name: string }>;
+  page_keys: string[];
+  /** v2 native launch isolation. Embedded launches fail closed when absent. */
+  launch_nonce: string | null;
+  allowed_origin: string | null;
+  application_slug: string | null;
 }
 
 export interface EnterpriseApplicationManifestDepartment {
@@ -2353,6 +2402,39 @@ export interface EnterpriseApplicationIntegration {
   sync_status: 'unconfigured' | 'ready' | 'syncing' | 'healthy' | 'error';
   token_configured: boolean; last_manifest_sync_at: string | null;
   last_event_sync_at: string | null; last_error: string | null;
+  credential_version: number;
+  manifest_token_configured: boolean;
+  sso_exchange_configured: boolean;
+  action_signing_configured: boolean;
+  event_signing_configured: boolean;
+  credentials_complete: boolean;
+  manifest_review_status: 'approved' | 'pending' | 'rejected';
+  manifest_diff: Array<{
+    securitySensitive?: boolean;
+    changedPaths?: string[];
+    changedPathCount?: number;
+    changedPathsTruncated?: boolean;
+    beforeDigest?: string;
+    afterDigest?: string;
+    [key: string]: unknown;
+  }>;
+  pending_contract_revision: string | null;
+  pending_manifest: Record<string, unknown> | null;
+  pending_manifest_digest: string | null;
+}
+
+export interface EnterpriseApplicationIntegrationInput {
+  manifest_url: string;
+  auth_token?: string;
+  manifest_access_token?: string;
+  sso_exchange_token?: string;
+  action_signing_secret?: string;
+  event_signing_secret?: string;
+  clear_auth_token?: boolean;
+  clear_sso_exchange_token?: boolean;
+  clear_action_signing_secret?: boolean;
+  clear_event_signing_secret?: boolean;
+  sync_enabled: boolean;
 }
 
 export interface EnterpriseApplicationDiscovery {
@@ -2472,13 +2554,15 @@ export const enterpriseApplications = {
     `/api/v1/applications/${id}/test`, { method: 'POST' },
   ),
   integration: (id: string) => request<EnterpriseApplicationIntegration>(`/api/v1/applications/${id}/integration`),
-  configureIntegration: (id: string, data: {
-    manifest_url: string; auth_token?: string; clear_auth_token?: boolean; sync_enabled: boolean;
-  }) => request<EnterpriseApplicationIntegration>(`/api/v1/applications/${id}/integration`, {
+  configureIntegration: (id: string, data: EnterpriseApplicationIntegrationInput) => request<EnterpriseApplicationIntegration>(`/api/v1/applications/${id}/integration`, {
     method: 'PUT', body: JSON.stringify(data),
   }),
+  reviewManifest: (id: string, decision: 'approve' | 'reject', expectedManifestDigest: string) =>
+    request<EnterpriseApplicationIntegration>(`/api/v1/applications/${id}/integration/manifest-review`, {
+      method: 'POST', body: JSON.stringify({ decision, expected_manifest_digest: expectedManifestDigest }),
+    }),
   syncIntegration: (id: string) => request<{
-    status: 'healthy' | 'error'; manifest_updated: boolean; received_events: number;
+    status: 'healthy' | 'pending_review' | 'error'; manifest_updated: boolean; received_events: number;
     created_work_items: number; delivered_events: number; cursor_sequence: number; detail: string | null;
   }>(`/api/v1/applications/${id}/integration/sync`, { method: 'POST' }),
   actions: (id: string) => request<EnterpriseApplicationAction[]>(`/api/v1/applications/${id}/actions`),
@@ -2548,13 +2632,25 @@ export interface TerminalMemoryItem {
 
 export const terminal = {
   // 登录端点的 401 是「凭据错误」（预期业务错误），不是「会话过期」：
-  // 不能复用 request 的 401 自动跳转（那会因无 ai_infra_admin 而 fallback 到 /login 平台登录页）。
+  // 不能复用管理员 request 的 401 自动跳转，否则会跳到管理员登录页。
   // 这里走裸 fetch，401 当普通错误抛出，由登录页 message.error 提示并留在原 slug 终端登录页。
   loginBySlug: async (slug: string, username: string, password: string) => {
     const resp = await fetch(`${BASE_URL}/api/v1/users/login-by-slug`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ slug, username, password }),
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new ApiError(resp.status, responseErrorMessage(body, resp.statusText), body);
+    }
+    return resp.json() as Promise<{ access_token: string; must_change_password: boolean; user: User }>;
+  },
+  changeOwnPassword: async (token: string, oldPassword: string, newPassword: string) => {
+    const resp = await fetch(`${BASE_URL}/api/v1/users/change-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
     });
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({}));
@@ -2635,12 +2731,12 @@ export const terminal = {
   memory: () => userRequest<TerminalMemoryItem[]>('/api/v1/terminal/memory'),
   /** 即时生成归口用户 skills 包 zip 并下载（鉴权内嵌、即时轮换；无需在第三方端再输凭证）。 */
   exportSkillsPack: async (): Promise<void> => {
-    const token = localStorage.getItem(USER_TOKEN_KEY);
+    const token = sessionStorage.getItem(USER_TOKEN_KEY);
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
     const resp = await fetch(`${BASE_URL}/api/v1/terminal/skills-pack/export`, { method: 'POST', headers });
     if (resp.status === 401) {
-      localStorage.removeItem(USER_TOKEN_KEY);
+      sessionStorage.removeItem(USER_TOKEN_KEY);
       localStorage.removeItem('ai_infra_user');
       const m = window.location.pathname.match(/^\/([^/]+)\/terminal/);
       const slug = m ? m[1] : null;
@@ -2693,7 +2789,7 @@ export const terminal = {
   ) =>
     fetch(`${BASE_URL}/api/v1/terminal/tasks/${id}/run`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem(USER_TOKEN_KEY) || ''}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionStorage.getItem(USER_TOKEN_KEY) || ''}` },
       body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null, invoked_skill_ids, application_id: application_id ?? null, page_context, ...buildTaskRunFilePayload(attachment_file_ids, file_refs_v1) }),
       signal,
     }),
@@ -2701,7 +2797,7 @@ export const terminal = {
   streamTask: (id: string, signal: AbortSignal) =>
     fetch(`${BASE_URL}/api/v1/terminal/tasks/${id}/stream`, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${localStorage.getItem(USER_TOKEN_KEY) || ''}` },
+      headers: { Authorization: `Bearer ${sessionStorage.getItem(USER_TOKEN_KEY) || ''}` },
       signal,
     }),
   streamWorkspaceFileEvents: (after: number, signal: AbortSignal) =>
@@ -2709,7 +2805,7 @@ export const terminal = {
       method: 'GET',
       headers: {
         Accept: 'text/event-stream',
-        Authorization: `Bearer ${localStorage.getItem(USER_TOKEN_KEY) || ''}`,
+        Authorization: `Bearer ${sessionStorage.getItem(USER_TOKEN_KEY) || ''}`,
       },
       cache: 'no-store',
       signal,
@@ -2872,14 +2968,14 @@ export const terminal = {
     if (opts.folder_path !== undefined) fd.append('folder_path', opts.folder_path);
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${BASE_URL}/api/v1/terminal/rag/${collId}/documents/upload`);
-    const token = localStorage.getItem(USER_TOKEN_KEY);
+    const token = sessionStorage.getItem(USER_TOKEN_KEY);
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
     if (onProgress && xhr.upload) {
       xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     }
     xhr.onload = () => {
       if (xhr.status === 401) {
-        localStorage.removeItem(USER_TOKEN_KEY);
+        sessionStorage.removeItem(USER_TOKEN_KEY);
         localStorage.removeItem('ai_infra_user');
         const m = window.location.pathname.match(/^\/([^/]+)\/terminal/);
         const slug = m ? m[1] : null;

@@ -81,6 +81,7 @@ from app.services.workspace_preview_service import (
     source_metadata,
 )
 from app.services.workspace_service import (
+    WorkspaceFileInvalidPath,
     WorkspaceFilePathConflict,
     WorkspaceFileUnsupportedTextUpdate,
     WorkspaceFileUploadError,
@@ -271,6 +272,11 @@ async def upsert_file_endpoint(
     assert_org_write_access(auth, ws.organization_id)
     try:
         saved = await upsert_file(db, ws, data, created_by_admin_id=auth.id)
+    except WorkspaceFileInvalidPath as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "workspace_file_invalid_path",
+            "message": str(exc),
+        }) from exc
     except WorkspaceFileUnsupportedTextUpdate as exc:
         raise HTTPException(status_code=422, detail={
             "code": "workspace_file_unsupported_text_create",

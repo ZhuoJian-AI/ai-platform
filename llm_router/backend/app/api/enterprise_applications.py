@@ -1,10 +1,11 @@
 """Management and terminal APIs for tenant business applications."""
 
-from urllib.parse import urlencode, urljoin
+import hashlib
+from urllib.parse import urlencode, urljoin, urlsplit
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,8 +17,10 @@ from app.auth.admin_auth import (
     require_org_access,
     require_org_access_write,
 )
+from app.auth.subsystem_sso_auth import authenticate_subsystem_sso_client
 from app.auth.user_auth import CurrentUser, require_user
 from app.database import get_db
+from app.models.enterprise_application import EnterpriseApplicationIntegration
 from app.schemas.enterprise_application import (
     CrossDepartmentWorkItemRead,
     CrossDepartmentWorkItemUpdate,
@@ -35,19 +38,67 @@ from app.schemas.enterprise_application import (
     EnterpriseApplicationIntegrationInput,
     EnterpriseApplicationIntegrationRead,
     EnterpriseApplicationLaunchRead,
+    EnterpriseApplicationManifestReviewInput,
     EnterpriseApplicationOverviewRead,
     EnterpriseApplicationRead,
     EnterpriseApplicationSyncRead,
     EnterpriseApplicationToolBindingsReplace,
     EnterpriseApplicationUpdate,
+    SubsystemSessionCheckInput,
+    SubsystemSessionCheckRead,
+    SubsystemSsoCodeExchangeInput,
+    SubsystemSsoCodeExchangeRead,
     TerminalEnterpriseApplicationRead,
 )
 from app.services import enterprise_application_service as service
 from app.services import subsystem_action_service as action_service
 from app.services import subsystem_integration_service as integration_service
-from app.utils.public_url import assert_public_http_url, same_origin
+from app.utils.public_url import request_public_http, same_origin
 
 router = APIRouter()
+
+
+@router.post(
+    "/subsystem-sso/exchange",
+    response_model=SubsystemSsoCodeExchangeRead,
+)
+async def exchange_subsystem_sso_code_endpoint(
+    data: SubsystemSsoCodeExchangeInput,
+    response: Response,
+    integration: EnterpriseApplicationIntegration = Depends(authenticate_subsystem_sso_client),
+    db: AsyncSession = Depends(get_db),
+):
+    response.headers["cache-control"] = "no-store"
+    response.headers["pragma"] = "no-cache"
+    return await action_service.redeem_launch_code(
+        db,
+        integration,
+        code=data.code,
+        redirect_path=data.redirect,
+        launch_nonce=data.launch_nonce,
+    )
+
+
+@router.post(
+    "/subsystem-sso/session-check",
+    response_model=SubsystemSessionCheckRead,
+)
+async def check_subsystem_session_endpoint(
+    data: SubsystemSessionCheckInput,
+    integration: EnterpriseApplicationIntegration = Depends(
+        authenticate_subsystem_sso_client
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    return await action_service.validate_live_subsystem_session(
+        db,
+        integration,
+        user_id=data.user_id,
+        auth_epoch=data.auth_epoch,
+        module_key=data.module_key,
+        page_key=data.page_key,
+        action_key=data.action_key,
+    )
 
 
 async def _application_or_404(db: AsyncSession, app_id: UUID):
@@ -215,6 +266,27 @@ async def sync_application_integration_endpoint(
     return await integration_service.sync_integration(db, row)
 
 
+@router.post(
+    "/applications/{app_id}/integration/manifest-review",
+    response_model=EnterpriseApplicationIntegrationRead,
+)
+async def review_application_manifest_endpoint(
+    app_id: UUID,
+    data: EnterpriseApplicationManifestReviewInput,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await _application_or_404(db, app_id)
+    assert_org_write_access(auth, row.organization_id)
+    integration = await integration_service.review_pending_manifest(
+        db,
+        row,
+        data.decision,
+        data.expected_manifest_digest,
+    )
+    return integration_service.integration_read(integration)
+
+
 @router.get(
     "/applications/{app_id}/actions",
     response_model=list[EnterpriseApplicationActionRead],
@@ -271,9 +343,18 @@ async def test_application_endpoint(
     healthy = False
     try:
         health_url = urljoin(row.entry_url.rstrip("/") + "/", "health")
-        assert_public_http_url(health_url, require_https=True)
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0), follow_redirects=False) as client:
-            response = await client.get(health_url, headers={"user-agent": "AI-Platform-App-Health/2.0"})
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, connect=5.0),
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            response = await request_public_http(
+                client,
+                "GET",
+                health_url,
+                require_https=True,
+                headers={"user-agent": "AI-Platform-App-Health/2.0"},
+            )
             status_code = response.status_code
             healthy = 200 <= status_code < 300
             if not healthy:
@@ -320,6 +401,7 @@ async def terminal_applications_endpoint(
 )
 async def launch_terminal_application_endpoint(
     app_id: UUID,
+    request: Request,
     response: Response,
     module_key: str | None = None,
     cu: CurrentUser = Depends(require_user),
@@ -330,7 +412,10 @@ async def launch_terminal_application_endpoint(
     module_keys = service.effective_module_keys(row, cu)
     integration = await integration_service.get_integration(db, row.id)
     launch_url = row.entry_url
+    launch_nonce: str | None = None
+    allowed_origin: str | None = None
     selected_module = module_key
+    page_keys: list[str] = []
     accessible_modules: list[dict[str, str]] = []
     if integration is not None and integration.protocol_version >= 2:
         if not integration.sync_enabled or not integration.auth_token_encrypted:
@@ -352,6 +437,7 @@ async def launch_terminal_application_endpoint(
         if module is None:
             raise HTTPException(status_code=404, detail="Subsystem module not found")
         module_claims = service.effective_module_claims(row, cu, selected_module)
+        page_keys = sorted((module_claims.get("page_access") or {}).keys())
         redirect_path = str(module.get("route") or "/")
         page_access = module_claims.get("page_access")
         if isinstance(page_access, dict):
@@ -372,15 +458,38 @@ async def launch_terminal_application_endpoint(
         sso_url = urljoin(row.entry_url.rstrip("/") + "/", sso_path)
         if not same_origin(row.entry_url, sso_url):
             raise HTTPException(status_code=409, detail="SSO endpoint left the registered application origin")
-        ticket = action_service.issue_launch_ticket(
-            integration,
-            row,
-            cu,
-            selected_module,
-            module_permissions,
-            module_claims,
-        )
-        launch_url = f"{sso_url}?{urlencode({'ticket': ticket, 'redirect': redirect_path})}"
+        if integration.credential_version >= 2:
+            authorization = request.headers.get("authorization", "")
+            if not authorization.startswith("Bearer "):
+                raise HTTPException(status_code=401, detail="Missing authorization token")
+            session_binding_hash = hashlib.sha256(authorization[7:].strip().encode()).hexdigest()
+            code, launch_nonce = await action_service.issue_launch_code(
+                db,
+                integration,
+                row,
+                cu,
+                selected_module,
+                module_permissions,
+                module_claims,
+                redirect_path=redirect_path,
+                session_binding_hash=session_binding_hash,
+            )
+            launch_query = urlencode(
+                {"code": code, "redirect": redirect_path, "launch_nonce": launch_nonce}
+            )
+            launch_url = f"{sso_url}?{launch_query}"
+        else:
+            ticket = action_service.issue_legacy_launch_ticket(
+                integration,
+                row,
+                cu,
+                selected_module,
+                module_permissions,
+                module_claims,
+            )
+            launch_url = f"{sso_url}?{urlencode({'ticket': ticket, 'redirect': redirect_path})}"
+        parsed_entry = urlsplit(row.entry_url)
+        allowed_origin = f"{parsed_entry.scheme}://{parsed_entry.netloc}"
     return EnterpriseApplicationLaunchRead(
         application_id=row.id,
         url=launch_url,
@@ -389,6 +498,10 @@ async def launch_terminal_application_endpoint(
         module_keys=[item["module_key"] for item in accessible_modules] if accessible_modules else module_keys,
         module_key=selected_module,
         modules=accessible_modules,
+        page_keys=page_keys,
+        launch_nonce=launch_nonce,
+        allowed_origin=allowed_origin,
+        application_slug=row.slug,
     )
 
 

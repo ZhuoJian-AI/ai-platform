@@ -146,16 +146,25 @@ def test_version_restore_contract_requires_explicit_version_and_key():
 
 @pytest.mark.asyncio
 async def test_deleted_user_never_falls_back_to_stale_principal():
+    organization_id = uuid4()
+
     class Result:
         def scalar_one_or_none(self):
             return None
 
     class FakeDb:
+        async def get(self, _model, value):
+            assert value == organization_id
+            return SimpleNamespace(deleted_at=None)
+
         async def execute(self, _statement):
             return Result()
 
     with pytest.raises(HTTPException) as raised:
-        await current_user_for_user(FakeDb(), SimpleNamespace(id=uuid4(), is_active=True))
+        await current_user_for_user(
+            FakeDb(),
+            SimpleNamespace(id=uuid4(), organization_id=organization_id, is_active=True),
+        )
     assert raised.value.status_code == 401
 
 
