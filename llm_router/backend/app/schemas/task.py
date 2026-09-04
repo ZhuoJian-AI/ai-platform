@@ -43,6 +43,15 @@ class TaskUpdate(BaseModel):
     config: TaskConfig | None = None
 
 
+class TaskFileRefV1(BaseModel):
+    """Stable task/file reference; display and authorization fields are server-owned."""
+
+    file_id: UUID
+    scope: Literal["turn", "task"] = "turn"
+    version_id: UUID | None = None
+    follow_latest: bool = True
+
+
 class TaskRunRequest(BaseModel):
     message: str
     stream: bool = False
@@ -50,8 +59,12 @@ class TaskRunRequest(BaseModel):
     # /slug 仍由运行时解析以兼容历史和手动输入，但选择器必须传真实 UUID，避免同名 slug 歧义。
     invoked_skill_ids: list[UUID] = Field(default_factory=list, max_length=20)
     # 聊天输入框拖入/选择的工作空间文件。与正文中的历史 ``@UUID`` 引用并行兼容；
-    # 端点会校验文件属于任务当前工作空间且已解析完成，再把快照写入 user 消息 metadata。
+    # 端点按 file_id 解析真实所属空间并实时校验 read 权限；解析状态不是引用前置条件。
     attachment_file_ids: list[UUID] = Field(default_factory=list, max_length=10)
+    # Stable references selected by the client.  The server resolves all path,
+    # workspace, version and capability metadata from ``file_id`` and persists
+    # the authorized snapshot on the user message for later turns.
+    file_refs_v1: list[TaskFileRefV1] = Field(default_factory=list, max_length=20)
     # 逐次运行覆盖（不落库）：
     #   字段未传 → 沿用 task.config.template_agent_id（向后兼容 demo 旧 /run 调用）
     #   显式传 UUID → 该次用此智能体（load_config 拼 persona + 继承 skill_ids/model_alias）

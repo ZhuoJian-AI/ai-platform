@@ -2,32 +2,45 @@
 
 from __future__ import annotations
 
+import hmac
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import jwt
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.mfa import hash_recovery_code, matching_totp_counter
 from app.auth.security import hash_password, verify_password
 from app.config import settings
 from app.models.admin import Admin
-from app.schemas.admin import AdminCreate, AdminRead, LoginResponse
+from app.schemas.admin import AdminCreate, AdminRead, AdminUpdate, LoginResponse
+from app.utils.crypto import decrypt_provider_api_key
+
+PLATFORM_ROLE = "platform_super_admin"
+ENTERPRISE_ROLE = "enterprise_admin"
+ADMIN_ROLES = frozenset({PLATFORM_ROLE, ENTERPRISE_ROLE})
 
 # 向后兼容的薄封装（历史调用方仍可用私有名）
 _hash_password = hash_password
 _verify_password = verify_password
 
 
-def _create_access_token(admin: Admin) -> str:
+def create_access_token(admin: Admin, *, mfa_verified: bool) -> str:
     """生成 JWT access token。"""
     now = datetime.now(UTC)
     payload: dict[str, Any] = {
         "sub": str(admin.id),
         "username": admin.username,
         "role": admin.role,
+        "auth_epoch": admin.auth_epoch,
+        "type": "admin",
+        "iss": "ai-infra-admin",
+        "aud": "ai-infra-admin-api",
+        "jti": str(uuid4()),
+        "mfa": mfa_verified,
         "iat": now,
         "exp": now + timedelta(hours=24),
     }
@@ -37,20 +50,51 @@ def _create_access_token(admin: Admin) -> str:
 def decode_access_token(token: str) -> dict[str, Any] | None:
     """解码并验证 JWT token。返回 payload 或 None。"""
     try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=["HS256"])
+        payload = jwt.decode(
+            token,
+            settings.secret_key,
+            algorithms=["HS256"],
+            audience="ai-infra-admin-api",
+            issuer="ai-infra-admin",
+            options={"require": ["exp", "iat", "iss", "aud", "sub", "jti"]},
+        )
+        if payload.get("type") != "admin":
+            return None
         return payload
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
         return None
 
 
+def _consume_mfa_code(admin: Admin, code: str) -> bool:
+    if admin.mfa_secret_encrypted:
+        secret = decrypt_provider_api_key(admin.mfa_secret_encrypted)
+        counter = matching_totp_counter(secret, code)
+        if counter is not None and (
+            admin.mfa_last_totp_counter is None or counter > admin.mfa_last_totp_counter
+        ):
+            admin.mfa_last_totp_counter = counter
+            return True
+    candidate = hash_recovery_code(code)
+    for index, stored in enumerate(admin.mfa_recovery_code_hashes or []):
+        if hmac.compare_digest(candidate, stored):
+            admin.mfa_recovery_code_hashes = [
+                value for position, value in enumerate(admin.mfa_recovery_code_hashes) if position != index
+            ]
+            return True
+    return False
+
+
 async def login(
-    db: AsyncSession, username: str, password: str, slug: str | None = None
+    db: AsyncSession,
+    username: str,
+    password: str,
+    slug: str | None = None,
+    mfa_code: str | None = None,
 ) -> LoginResponse | None:
     """管理员登录，返回 JWT token 或 None。
 
-    - slug 非空：组织门户登录，仅匹配该 slug 对应组织下、绑定了 organization_id 的账号；
-      组织不存在或不匹配均返回 None。
-    - slug 为空：平台登录，仅匹配未绑定组织（organization_id IS NULL）的平台级账号。
+    - slug 非空：仅匹配该组织的 enterprise_admin。
+    - slug 为空：仅匹配 platform_super_admin。
     """
     stmt = select(Admin).where(Admin.username == username, Admin.is_active.is_(True))
     if slug:
@@ -60,35 +104,75 @@ async def login(
         org_id = await get_org_id_by_slug(db, slug)
         if org_id is None:
             return None
-        stmt = stmt.where(Admin.organization_id == org_id)
+        stmt = stmt.where(Admin.organization_id == org_id, Admin.role == ENTERPRISE_ROLE)
     else:
-        stmt = stmt.where(Admin.organization_id.is_(None))
+        stmt = stmt.where(Admin.organization_id.is_(None), Admin.role == PLATFORM_ROLE)
 
-    result = await db.execute(stmt)
+    result = await db.execute(stmt.with_for_update())
     admin = result.scalar_one_or_none()
     if admin is None or not _verify_password(password, admin.password_hash):
         return None
 
-    token = _create_access_token(admin)
+    mfa_verified = False
+    if admin.mfa_enabled:
+        if not mfa_code:
+            raise HTTPException(status_code=401, detail="MFA_REQUIRED")
+        if not _consume_mfa_code(admin, mfa_code):
+            raise HTTPException(status_code=401, detail="INVALID_MFA_CODE")
+        mfa_verified = True
+        admin.mfa_verified_at = datetime.now(UTC)
+        await db.flush()
+
+    token = create_access_token(admin, mfa_verified=mfa_verified)
     return LoginResponse(
         access_token=token,
         must_change_password=admin.must_change_password,
+        mfa_enrollment_required=not admin.mfa_enabled,
         admin=await admin_read_with_org(db, admin),
     )
 
 
-async def create_admin(db: AsyncSession, data: AdminCreate, created_by_id: int | None = None) -> Admin:
-    """创建管理员账号。"""
-    # org_admin 必须绑定组织；其余角色强制解绑（平台级账号）
-    org_id = data.organization_id if data.role == "org_admin" else None
-    if data.role == "org_admin" and org_id is None:
-        raise HTTPException(status_code=400, detail="organization_id is required for org_admin role")
+def _valid_role_organization(role: str, organization_id: UUID | None) -> bool:
+    return (role == PLATFORM_ROLE and organization_id is None) or (
+        role == ENTERPRISE_ROLE and organization_id is not None
+    )
+
+
+def _assert_valid_actor(actor: Admin) -> None:
+    if not actor.is_active or not _valid_role_organization(actor.role, actor.organization_id):
+        raise HTTPException(status_code=403, detail="Administrator role is invalid")
+
+
+def assert_can_manage_admin(actor: Admin, target: Admin) -> None:
+    """Apply administrator-manager isolation without leaking cross-tenant accounts."""
+    _assert_valid_actor(actor)
+    if actor.role == PLATFORM_ROLE:
+        return
+    if (
+        target.role == ENTERPRISE_ROLE
+        and actor.organization_id is not None
+        and target.organization_id == actor.organization_id
+    ):
+        return
+    raise HTTPException(status_code=404, detail="Admin not found")
+
+
+async def create_admin(db: AsyncSession, data: AdminCreate, *, actor: Admin) -> Admin:
+    """Create one of the two administrator types within the actor's authority."""
+    _assert_valid_actor(actor)
+    if not _valid_role_organization(data.role, data.organization_id):
+        raise HTTPException(status_code=422, detail="Administrator role and organization do not match")
+    if actor.role == ENTERPRISE_ROLE and (
+        data.role != ENTERPRISE_ROLE or data.organization_id != actor.organization_id
+    ):
+        raise HTTPException(status_code=403, detail="Enterprise admins can only create admins in their organization")
     admin = Admin(
         username=data.username,
         password_hash=_hash_password(data.password),
         display_name=data.display_name,
         role=data.role,
-        organization_id=org_id,
+        organization_id=data.organization_id,
+        must_change_password=True,
     )
     db.add(admin)
     await db.flush()
@@ -96,40 +180,72 @@ async def create_admin(db: AsyncSession, data: AdminCreate, created_by_id: int |
 
 
 async def ensure_super_admin(db: AsyncSession) -> Admin:
-    """确保至少存在一个 super_admin 账号；如不存在则自动创建默认账号。"""
+    """Return the existing platform administrator; never create a default."""
     result = await db.execute(
         select(Admin)
-        .where(Admin.role == "super_admin", Admin.is_active.is_(True))
+        .where(
+            Admin.role == PLATFORM_ROLE,
+            Admin.organization_id.is_(None),
+            Admin.is_active.is_(True),
+        )
         .order_by(Admin.id)
         .limit(1)
     )
     admin = result.scalar_one_or_none()
     if admin is not None:
         return admin
+    raise RuntimeError(
+        "No active platform administrator. Run scripts/bootstrap_platform_admin.py on the server."
+    )
 
-    # 自动创建默认 super admin: 用户名 root, 密码 root
+
+async def bootstrap_platform_admin(db: AsyncSession, *, username: str, password: str) -> Admin:
+    """Create the first platform administrator from an interactive server task."""
+    username = username.strip()
+    if not username or len(username) > 320:
+        raise ValueError("username must contain 1 to 320 characters")
+    if len(password) < 12:
+        raise ValueError("initial password must contain at least 12 characters")
+    existing = (
+        await db.execute(
+            select(Admin.id)
+            .where(
+                Admin.role == PLATFORM_ROLE,
+                Admin.organization_id.is_(None),
+                Admin.is_active.is_(True),
+            )
+            .limit(1)
+            .with_for_update()
+        )
+    ).first()
+    if existing is not None:
+        raise RuntimeError("An active platform administrator already exists; bootstrap is closed")
     admin = Admin(
-        username="root",
-        password_hash=_hash_password("root"),
-        display_name="Root",
-        role="super_admin",
+        username=username,
+        password_hash=_hash_password(password),
+        display_name=username,
+        role=PLATFORM_ROLE,
         must_change_password=True,
     )
     db.add(admin)
     await db.flush()
-
-    import structlog
-    logger = structlog.get_logger()
-    logger.warning(
-        "super_admin_auto_created",
-        username="root",
-        message="默认超级管理员已创建（用户名: root, 密码: root），请尽快修改密码",
-    )
     return admin
 
 
-async def list_admins(db: AsyncSession) -> list[Admin]:
-    result = await db.execute(select(Admin).order_by(Admin.id))
+async def list_admins(db: AsyncSession, *, actor: Admin) -> list[Admin]:
+    _assert_valid_actor(actor)
+    stmt = select(Admin).where(
+        or_(
+            (Admin.role == PLATFORM_ROLE) & Admin.organization_id.is_(None),
+            (Admin.role == ENTERPRISE_ROLE) & Admin.organization_id.is_not(None),
+        )
+    )
+    if actor.role == ENTERPRISE_ROLE:
+        stmt = stmt.where(
+            Admin.role == ENTERPRISE_ROLE,
+            Admin.organization_id == actor.organization_id,
+        )
+    result = await db.execute(stmt.order_by(Admin.id))
     return list(result.scalars().all())
 
 
@@ -137,26 +253,48 @@ async def get_admin(db: AsyncSession, admin_id: int) -> Admin | None:
     return await db.get(Admin, admin_id)
 
 
-async def update_admin(db: AsyncSession, admin: Admin, *, display_name: str | None = None,
-                       role: str | None = None, is_active: bool | None = None,
-                       password: str | None = None,
-                       organization_id: UUID | None = None) -> Admin:
-    if display_name is not None:
-        admin.display_name = display_name
-    if role is not None:
-        admin.role = role
-        # 角色变更后同步修正组织绑定：org_admin 必须有组织，非 org_admin 强制解绑
-        if role != "org_admin":
-            admin.organization_id = None
-    if is_active is not None:
-        admin.is_active = is_active
-    if password is not None:
-        admin.password_hash = _hash_password(password)
-    # organization_id 显式传入时（None 也表示解绑），仅在 org_admin 角色下生效
-    if organization_id is not None and admin.role == "org_admin":
-        admin.organization_id = organization_id
-    if admin.role == "org_admin" and admin.organization_id is None:
-        raise HTTPException(status_code=400, detail="organization_id is required for org_admin role")
+async def _assert_not_last_active_admin(db: AsyncSession, admin: Admin) -> None:
+    filters = [Admin.role == admin.role, Admin.is_active.is_(True)]
+    if admin.role == ENTERPRISE_ROLE:
+        filters.append(Admin.organization_id == admin.organization_id)
+    else:
+        filters.append(Admin.organization_id.is_(None))
+    active = list((await db.execute(select(Admin.id).where(*filters).with_for_update())).scalars().all())
+    if len(active) <= 1:
+        label = "enterprise" if admin.role == ENTERPRISE_ROLE else "platform super"
+        raise HTTPException(status_code=409, detail=f"Cannot disable the last active {label} admin")
+
+
+async def update_admin(
+    db: AsyncSession,
+    admin: Admin,
+    data: AdminUpdate,
+    *,
+    actor: Admin,
+) -> Admin:
+    assert_can_manage_admin(actor, admin)
+    fields = data.model_fields_set
+    if "role" in fields and data.role != admin.role:
+        raise HTTPException(status_code=409, detail="Administrator role is immutable")
+    if "organization_id" in fields and data.organization_id != admin.organization_id:
+        raise HTTPException(status_code=409, detail="Administrator organization is immutable")
+    if data.is_active is False and admin.is_active:
+        if admin.id == actor.id:
+            raise HTTPException(status_code=409, detail="Cannot disable yourself")
+        await _assert_not_last_active_admin(db, admin)
+
+    session_sensitive_change = False
+    if "display_name" in fields:
+        admin.display_name = data.display_name
+    if "is_active" in fields and data.is_active is not None and data.is_active != admin.is_active:
+        admin.is_active = data.is_active
+        session_sensitive_change = True
+    if "password" in fields and data.password is not None:
+        admin.password_hash = _hash_password(data.password)
+        admin.must_change_password = True
+        session_sensitive_change = True
+    if session_sensitive_change:
+        admin.auth_epoch += 1
     await db.flush()
     await db.refresh(admin)
     return admin
@@ -184,9 +322,15 @@ async def admin_read_with_org(db: AsyncSession, admin: Admin) -> AdminRead:
     return read
 
 
-async def delete_admin(db: AsyncSession, admin: Admin) -> None:
-    """硬删除管理员。不允许删除自己。"""
-    await db.delete(admin)
+async def delete_admin(db: AsyncSession, admin: Admin, *, actor: Admin) -> None:
+    """Recoverably delete an administrator by disabling it and revoking sessions."""
+    assert_can_manage_admin(actor, admin)
+    if admin.id == actor.id:
+        raise HTTPException(status_code=409, detail="Cannot delete yourself")
+    if admin.is_active:
+        await _assert_not_last_active_admin(db, admin)
+        admin.is_active = False
+        admin.auth_epoch += 1
     await db.flush()
 
 
@@ -196,5 +340,6 @@ async def change_password(db: AsyncSession, admin: Admin, old_password: str, new
         return False
     admin.password_hash = _hash_password(new_password)
     admin.must_change_password = False
+    admin.auth_epoch += 1
     await db.flush()
     return True

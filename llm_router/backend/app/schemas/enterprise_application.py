@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, BaseModel, Field, field_validator
+from pydantic import AnyHttpUrl, BaseModel, Field, field_validator, model_validator
 
 from app.schemas._base import OrmModel
 
@@ -221,13 +221,59 @@ class EnterpriseApplicationLaunchRead(BaseModel):
     module_keys: list[str] = Field(default_factory=list)
     module_key: str | None = None
     modules: list[EnterpriseApplicationLaunchModuleRead] = Field(default_factory=list)
+    page_keys: list[str] = Field(default_factory=list)
+    launch_nonce: str | None = None
+    allowed_origin: str | None = None
+    application_slug: str | None = None
 
 
 class EnterpriseApplicationIntegrationInput(BaseModel):
     manifest_url: AnyHttpUrl
+    # ``auth_token`` remains an input alias for pre-v2.5 administrators, but is
+    # stored and used only as the manifest/event-feed access token.
     auth_token: str | None = Field(None, min_length=16, max_length=4096)
+    manifest_access_token: str | None = Field(None, min_length=32, max_length=4096)
+    sso_exchange_token: str | None = Field(None, min_length=32, max_length=4096)
+    action_signing_secret: str | None = Field(None, min_length=32, max_length=4096)
+    event_signing_secret: str | None = Field(None, min_length=32, max_length=4096)
     clear_auth_token: bool = False
+    clear_sso_exchange_token: bool = False
+    clear_action_signing_secret: bool = False
+    clear_event_signing_secret: bool = False
     sync_enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_separated_credentials(self):
+        if self.auth_token and self.manifest_access_token:
+            raise ValueError("Use manifest_access_token instead of supplying both token fields")
+        if self.clear_auth_token and (self.auth_token or self.manifest_access_token):
+            raise ValueError("A manifest credential cannot be supplied and cleared together")
+        if self.clear_sso_exchange_token and self.sso_exchange_token:
+            raise ValueError("The SSO credential cannot be supplied and cleared together")
+        if self.clear_action_signing_secret and self.action_signing_secret:
+            raise ValueError("The Action credential cannot be supplied and cleared together")
+        if self.clear_event_signing_secret and self.event_signing_secret:
+            raise ValueError("The Event credential cannot be supplied and cleared together")
+        if self.auth_token and self.auth_token.startswith(("zjss_", "zjac_", "zjev_")):
+            raise ValueError(
+                "The legacy auth_token may only be used as a manifest access credential"
+            )
+        typed = {
+            "manifest_access_token": (self.manifest_access_token, "zjmf_"),
+            "sso_exchange_token": (self.sso_exchange_token, "zjss_"),
+            "action_signing_secret": (self.action_signing_secret, "zjac_"),
+            "event_signing_secret": (self.event_signing_secret, "zjev_"),
+        }
+        values: list[str] = []
+        for field_name, (value, prefix) in typed.items():
+            if value is None:
+                continue
+            if not value.startswith(prefix):
+                raise ValueError(f"{field_name} must use the {prefix} credential type")
+            values.append(value)
+        if len(values) != len(set(values)):
+            raise ValueError("Subsystem credentials must be distinct for every purpose")
+        return self
 
 
 class EnterpriseApplicationIntegrationRead(BaseModel):
@@ -241,6 +287,17 @@ class EnterpriseApplicationIntegrationRead(BaseModel):
     sync_enabled: bool
     sync_status: str
     token_configured: bool
+    credential_version: int = 1
+    manifest_token_configured: bool = False
+    sso_exchange_configured: bool = False
+    action_signing_configured: bool = False
+    event_signing_configured: bool = False
+    credentials_complete: bool = False
+    manifest_review_status: Literal["approved", "pending", "rejected"] = "approved"
+    manifest_diff: list[dict] = Field(default_factory=list)
+    pending_contract_revision: str | None = None
+    pending_manifest: dict = Field(default_factory=dict)
+    pending_manifest_digest: str | None = None
     last_manifest_sync_at: datetime | None
     last_event_sync_at: datetime | None
     last_error: str | None
@@ -317,13 +374,48 @@ class EnterpriseApplicationActionRequestRead(OrmModel):
 
 
 class EnterpriseApplicationSyncRead(BaseModel):
-    status: Literal["healthy", "error"]
+    status: Literal["healthy", "pending_review", "error"]
     manifest_updated: bool = False
     received_events: int = 0
     created_work_items: int = 0
     delivered_events: int = 0
     cursor_sequence: int = 0
     detail: str | None = None
+
+
+class EnterpriseApplicationManifestReviewInput(BaseModel):
+    decision: Literal["approve", "reject"]
+    expected_manifest_digest: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+
+
+class SubsystemSsoCodeExchangeInput(BaseModel):
+    code: str = Field(..., min_length=40, max_length=512, pattern=r"^zjsc_[A-Za-z0-9_-]+$")
+    redirect: str = Field(..., min_length=1, max_length=2048)
+    launch_nonce: str = Field(..., min_length=20, max_length=128)
+
+
+class SubsystemSsoCodeExchangeRead(BaseModel):
+    application_id: UUID
+    application_slug: str
+    organization_id: UUID
+    module_key: str
+    redirect: str
+    launch_nonce: str
+    claims: dict
+
+
+class SubsystemSessionCheckInput(BaseModel):
+    user_id: UUID
+    auth_epoch: int = Field(..., ge=0)
+    module_key: str = Field(..., min_length=1, max_length=120)
+    page_key: str = Field(..., min_length=1, max_length=160)
+    action_key: str | None = Field(None, min_length=1, max_length=160)
+
+
+class SubsystemSessionCheckRead(BaseModel):
+    valid: Literal[True] = True
+    auth_epoch: int
+    effective_data_scope: dict
 
 
 class EnterpriseApplicationEventRouteInput(BaseModel):

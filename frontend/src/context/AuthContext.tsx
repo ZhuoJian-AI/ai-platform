@@ -1,66 +1,161 @@
-import { createContext, useContext, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
+import { Spin } from 'antd';
+import { Navigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
+import AdminMfaEnrollment, { type MfaEnrollmentCompletion } from '../components/AdminMfaEnrollment';
+import {
+  adminFetch,
+  clearAdminSession,
+  getAdminOrganizationSlug,
+  migrateLegacyAdminSession,
+  onAdminSessionExpired,
+  rotateAdminOrganizationScope,
+  setAdminSession,
+} from '../auth/adminSession';
+
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+
+export type AdminRole = 'platform_super_admin' | 'enterprise_admin';
 
 export interface AdminUser {
   id: number;
   username: string;
   display_name: string | null;
-  role: 'super_admin' | 'admin' | 'org_admin';
+  role: AdminRole;
   is_active: boolean;
   must_change_password?: boolean;
-  /** 组织绑定：org_admin 必填，平台级账号为 null。驱动「受限门户」（只看自己组织）。 */
+  mfa_enabled?: boolean;
+  /** enterprise_admin 必填且登录后不可切换。 */
   organization_id?: string | null;
   organization_name?: string | null;
-  /** 组织 slug：org_admin 登录后用于失效时回跳到 /{slug}/login。平台级账号为 null。 */
   organization_slug?: string | null;
 }
 
+type AuthStatus = 'loading' | 'authenticated' | 'mfa_enrollment_required' | 'anonymous';
+
 interface AuthContextType {
-  token: string | null;
+  status: AuthStatus;
   admin: AdminUser | null;
-  login: (token: string, admin: AdminUser) => void;
+  loginRedirectSlug: string | null;
+  /** accessToken 只用于旧服务的当前页面内存兼容，从不写入浏览器存储。 */
+  login: (accessToken: string | null, admin: AdminUser, csrfToken?: string | null) => void;
   logout: () => void;
   isAdmin: () => boolean;
   isSuperAdmin: () => boolean;
-  /** 是否为组织级账号（绑定到单个组织）——驱动受限门户。 */
   isOrgScoped: () => boolean;
   isOrgAdmin: () => boolean;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
-const TOKEN_KEY = 'ai_infra_token';
-const ADMIN_KEY = 'ai_infra_admin';
+function legacyCompatibleRole(role: unknown): AdminRole | null {
+  if (role === 'platform_super_admin' || role === 'enterprise_admin') return role;
+  // Read-only compatibility during the database role migration. The legacy
+  // middle-level `admin` is intentionally rejected because mapping it upward
+  // would silently grant platform-super-admin authority.
+  if (role === 'super_admin') return 'platform_super_admin';
+  if (role === 'org_admin') return 'enterprise_admin';
+  return null;
+}
+
+export function normalizeAdminUser(value: unknown): AdminUser | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const role = legacyCompatibleRole(raw.role);
+  if (!role || typeof raw.id !== 'number' || typeof raw.username !== 'string' || raw.is_active !== true) return null;
+  const organizationId = typeof raw.organization_id === 'string' ? raw.organization_id : null;
+  if (role === 'enterprise_admin' && !organizationId) return null;
+  if (role === 'platform_super_admin' && organizationId) return null;
+  return {
+    id: raw.id,
+    username: raw.username,
+    display_name: typeof raw.display_name === 'string' ? raw.display_name : null,
+    role,
+    is_active: true,
+    must_change_password: raw.must_change_password === true,
+    mfa_enabled: typeof raw.mfa_enabled === 'boolean' ? raw.mfa_enabled : undefined,
+    organization_id: organizationId,
+    organization_name: typeof raw.organization_name === 'string' ? raw.organization_name : null,
+    organization_slug: typeof raw.organization_slug === 'string' ? raw.organization_slug : null,
+  };
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem(TOKEN_KEY));
-  const [admin, setAdmin] = useState<AdminUser | null>(() => {
-    const stored = localStorage.getItem(ADMIN_KEY);
-    return stored ? JSON.parse(stored) : null;
-  });
+  const queryClient = useQueryClient();
+  const [migratedSession] = useState(() => migrateLegacyAdminSession());
+  const [status, setStatus] = useState<AuthStatus>('loading');
+  const [admin, setAdmin] = useState<AdminUser | null>(null);
+  const [loginRedirectSlug, setLoginRedirectSlug] = useState<string | null>(() => getAdminOrganizationSlug());
 
-  const login = (newToken: string, adminData: AdminUser) => {
-    localStorage.setItem(TOKEN_KEY, newToken);
-    localStorage.setItem(ADMIN_KEY, JSON.stringify(adminData));
-    setToken(newToken);
-    setAdmin(adminData);
-  };
-
-  const logout = () => {
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(ADMIN_KEY);
-    setToken(null);
+  const expireSession = useCallback(() => {
+    rotateAdminOrganizationScope();
+    queryClient.clear();
+    clearAdminSession();
     setAdmin(null);
-  };
+    setStatus('anonymous');
+  }, [queryClient]);
 
-  const isAdmin = () => admin?.role === 'admin' || admin?.role === 'super_admin';
-  const isSuperAdmin = () => admin?.role === 'super_admin';
-  // 组织级账号：绑定了 organization_id（org_admin 或任何带组织绑定的账号）
-  const isOrgScoped = () => !!admin?.organization_id;
-  const isOrgAdmin = () => admin?.role === 'org_admin';
+  useEffect(() => {
+    let disposed = false;
+    if (migratedSession.organizationSlug) setLoginRedirectSlug(migratedSession.organizationSlug);
+    const unsubscribe = onAdminSessionExpired(expireSession);
+    adminFetch(`${BASE_URL}/api/v1/auth/me`, { cache: 'no-store' }, {
+      notifyOnUnauthorized: false,
+      organizationScoped: false,
+    }).then(async (response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const authenticatedAdmin = normalizeAdminUser(await response.json());
+      if (!authenticatedAdmin) throw new Error('Invalid administrator session');
+      if (disposed) return;
+      setAdminSession(migratedSession.accessToken, authenticatedAdmin.organization_slug);
+      setLoginRedirectSlug(authenticatedAdmin.organization_slug ?? null);
+      setAdmin(authenticatedAdmin);
+      setStatus(authenticatedAdmin.mfa_enabled === false ? 'mfa_enrollment_required' : 'authenticated');
+    }).catch(() => {
+      if (!disposed) expireSession();
+    });
+    return () => { disposed = true; unsubscribe(); };
+  }, [expireSession, migratedSession]);
+
+  const login = useCallback((accessToken: string | null, adminData: AdminUser, csrfToken?: string | null) => {
+    rotateAdminOrganizationScope();
+    queryClient.clear();
+    setAdminSession(accessToken, adminData.organization_slug, csrfToken);
+    setLoginRedirectSlug(adminData.organization_slug ?? null);
+    setAdmin(adminData);
+    setStatus(adminData.mfa_enabled === false ? 'mfa_enrollment_required' : 'authenticated');
+  }, [queryClient]);
+
+  const completeMfaEnrollment = useCallback((completion: MfaEnrollmentCompletion) => {
+    const authenticatedAdmin = normalizeAdminUser(completion.admin);
+    if (!authenticatedAdmin || authenticatedAdmin.mfa_enabled !== true) {
+      throw new Error('服务器返回的管理员 MFA 状态无效');
+    }
+    login(null, authenticatedAdmin, completion.csrfToken);
+  }, [login]);
+
+  const logout = useCallback(() => {
+    // Start server-side revocation while the optional legacy in-memory bearer
+    // still exists, then immediately remove all client-side authority.
+    void adminFetch(`${BASE_URL}/api/v1/auth/logout`, { method: 'POST' }, {
+      notifyOnUnauthorized: false,
+      organizationScoped: false,
+    }).catch(() => undefined);
+    expireSession();
+  }, [expireSession]);
+
+  const isAdmin = () => status === 'authenticated';
+  const isSuperAdmin = () => admin?.role === 'platform_super_admin';
+  const isOrgScoped = () => admin?.role === 'enterprise_admin';
+  const isOrgAdmin = () => admin?.role === 'enterprise_admin';
 
   return (
-    <AuthContext.Provider value={{ token, admin, login, logout, isAdmin, isSuperAdmin, isOrgScoped, isOrgAdmin }}>
+    <AuthContext.Provider value={{ status, admin, loginRedirectSlug, login, logout, isAdmin, isSuperAdmin, isOrgScoped, isOrgAdmin }}>
       {children}
+      <AdminMfaEnrollment
+        open={status === 'mfa_enrollment_required' && admin !== null}
+        onConfirmed={completeMfaEnrollment}
+      />
     </AuthContext.Provider>
   );
 }
@@ -71,14 +166,17 @@ export function useAuth() {
   return ctx;
 }
 
-/** 路由守卫组件 */
+/** Cookie-first route guard; waits for /auth/me before deciding. */
 export function RequireAuth({ children }: { children: ReactNode }) {
-  const { token, admin } = useAuth();
-  if (!token) {
-    // 组织级账号失效时回跳到 /{slug}/login，平台级账号回跳 /login
-    const slug = admin?.organization_slug;
-    window.location.href = slug ? `/${slug}/login` : '/login';
-    return null;
+  const { status, loginRedirectSlug } = useAuth();
+  if (status === 'loading') {
+    return <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><Spin size="large" /></div>;
+  }
+  if (status === 'mfa_enrollment_required') {
+    return <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><Spin size="large" /></div>;
+  }
+  if (status !== 'authenticated') {
+    return <Navigate to={loginRedirectSlug ? `/${loginRedirectSlug}/login` : '/login'} replace />;
   }
   return <>{children}</>;
 }

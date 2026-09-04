@@ -58,6 +58,14 @@ class WorkspaceFileCreate(BaseModel):
 class WorkspaceFileUpdate(BaseModel):
     content: str | None = None
     metadata: dict | None = None
+    base_version_id: UUID | None = None
+    idempotency_key: str | None = Field(None, min_length=8, max_length=160)
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if self.content is None and self.metadata is None:
+            raise ValueError("content or metadata is required")
+        return self
 
 
 class WorkspaceFilePresentation(BaseModel):
@@ -87,16 +95,35 @@ class WorkspaceFileRead(MetaReadModel):
     created_at: datetime
     updated_at: datetime
     current_version_id: UUID | None = None
+    mutation_result_version_id: UUID | None = None
+    previous_version_id: UUID | None = None
+    resolved_version_id: UUID | None = None
+    resolved_version_no: int | None = None
+    is_historical: bool = False
+    workspace_name: str | None = None
+    workspace_slug: str | None = None
+    canonical_path: str | None = None
+    current_version_no: int | None = None
+    capabilities: dict[str, bool] | None = None
+    effective_capabilities: dict[str, bool] | None = None
+    internal_url: str | None = None
+    office_edit_enabled: bool = False
     presentation: WorkspaceFilePresentation | None = None
 
     @model_validator(mode="after")
     def derive_presentation(self):
+        if self.canonical_path is None:
+            self.canonical_path = self.path
         if self.presentation is None:
             from app.utils.workspace_presentation import presentation_dict
 
             self.presentation = WorkspaceFilePresentation(**presentation_dict(
                 self.path, self.metadata, created_at=self.created_at,
             ))
+        if self.effective_capabilities is None:
+            self.effective_capabilities = self.capabilities
+        if self.capabilities is None:
+            self.capabilities = self.effective_capabilities
         return self
 
 
@@ -115,6 +142,16 @@ class WorkspaceFileListItem(BaseModel):
     mime_type: str | None = None
     is_binary: bool = False
     content_hash: str | None = None
+    current_version_id: UUID | None = None
+    previous_version_id: UUID | None = None
+    workspace_name: str | None = None
+    workspace_slug: str | None = None
+    canonical_path: str | None = None
+    current_version_no: int | None = None
+    capabilities: dict[str, bool] | None = None
+    effective_capabilities: dict[str, bool] | None = None
+    internal_url: str | None = None
+    office_edit_enabled: bool = False
     parse_status: str = "unparsed"
     parse_kind: str | None = None
     parse_error: str | None = None
@@ -175,17 +212,75 @@ class WorkspacePreviewSessionRead(BaseModel):
     refresh_context: str | None = None
     reason: str | None = None
     strict_range: bool = False
+    file_id: str | None = None
+    source_version_id: str | None = None
+    room_id: UUID | None = None
+    save_status: str | None = None
 
 
 class WorkspacePreviewSessionCreate(BaseModel):
     client_open_id: str = Field(..., min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     preferred_mode: Literal["default", "fast_layout", "interactive_ppt"] = "default"
+    version_id: UUID | None = None
 
 
 class WorkspacePreviewSessionRefresh(BaseModel):
     access_token: str = Field(..., min_length=16, max_length=4096)
     refresh_token: str = Field(..., min_length=16, max_length=4096)
     refresh_context: str = Field(..., min_length=32, max_length=4096)
+    room_id: UUID | None = None
+
+
+class WorkspaceEditRoomStatusRead(BaseModel):
+    room_id: UUID
+    status: str
+    save_status: str
+    source_file_version_id: UUID | None = None
+    final_file_version_id: UUID | None = None
+    current_version_id: UUID | None = None
+    error: str | None = None
+
+
+class WorkspaceEditSessionCreate(BaseModel):
+    client_open_id: str = Field(..., min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class WorkspaceEditSessionClose(BaseModel):
+    client_open_id: str = Field(..., min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class WorkspaceFileRestoreRequest(BaseModel):
+    """Explicit optimistic restore; the server never guesses a mutable base."""
+
+    base_version_id: UUID
+    idempotency_key: str = Field(..., min_length=8, max_length=160)
+
+
+class WorkspaceFileDeleteRequest(BaseModel):
+    """Explicit optimistic delete; the server never guesses a mutable base."""
+
+    base_version_id: UUID
+    idempotency_key: str = Field(..., min_length=8, max_length=160)
+
+
+class WorkspaceFileMoveRequest(BaseModel):
+    target_workspace_id: UUID | None = None
+    target_path: str = Field(..., min_length=1, max_length=1024)
+    base_version_id: UUID
+    idempotency_key: str = Field(..., min_length=8, max_length=160)
+
+
+class WorkspaceFileRenameRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=512)
+    base_version_id: UUID
+    idempotency_key: str = Field(..., min_length=8, max_length=160)
+
+
+class WorkspaceFileCopyRequest(BaseModel):
+    target_workspace_id: UUID
+    target_path: str | None = Field(None, min_length=1, max_length=1024)
+    base_version_id: UUID
+    idempotency_key: str = Field(..., min_length=8, max_length=160)
 
 
 class WorkspaceFallbackPreviewRead(BaseModel):
@@ -241,6 +336,22 @@ class WorkspaceUploadInitiate(BaseModel):
     content_type: str = Field("application/octet-stream", max_length=255)
     size: int = Field(..., gt=0)
     weak_network: bool = False
+    target_file_id: UUID | None = None
+    base_version_id: UUID | None = None
+    idempotency_key: str | None = Field(None, min_length=8, max_length=160)
+
+    @model_validator(mode="after")
+    def require_complete_version_replacement_identity(self):
+        supplied = (
+            self.target_file_id is not None,
+            self.base_version_id is not None,
+            bool(self.idempotency_key),
+        )
+        if any(supplied) and not all(supplied):
+            raise ValueError(
+                "target_file_id, base_version_id and idempotency_key must be supplied together"
+            )
+        return self
 
 
 class WorkspaceUploadSessionRead(BaseModel):
@@ -293,6 +404,7 @@ class WorkspaceFileVersionRead(BaseModel):
     parse_kind: str | None = None
     parse_error: str | None = None
     created_at: datetime
+    internal_url: str | None = None
 
     model_config = {"from_attributes": True}
 

@@ -29,7 +29,7 @@ from app.models.organization import Organization
 from app.models.routing_policy import RoutingPolicy
 from app.models.team import Team
 from app.models.user import User
-from app.utils.crypto import encrypt_api_key, encrypt_provider_api_key, generate_api_key, hash_api_key
+from app.utils.crypto import encrypt_api_key, encrypt_provider_api_key, generate_api_key
 
 logger = structlog.get_logger()
 
@@ -42,7 +42,7 @@ ORG_DEF = {
     "description": "预置演示组织——用于体验 LLM Router 的组织架构、路由与安全围栏能力",
     "rate_limit_rpm": 600,
     "rate_limit_tpm": 300_000,
-    "budget_cap_usd": 1000,
+    "budget_cap_credits": 1000,
     "budget_cap_tokens": 50_000_000,
     "settings": {"locale": "zh-CN"},
 }
@@ -54,14 +54,14 @@ DEPARTMENT_DEFS = {
         "slug": "eng",
         "description": "负责平台与产品研发",
         "rate_limit_rpm": 300,
-        "budget_cap_usd": 600,
+        "budget_cap_credits": 600,
     },
     "product": {
         "name": "产品部",
         "slug": "product",
         "description": "负责产品设计、需求与运营",
         "rate_limit_rpm": 150,
-        "budget_cap_usd": 200,
+        "budget_cap_credits": 200,
     },
 }
 
@@ -168,7 +168,7 @@ APIKEY_DEFS = [
         "team_slug": None,
         "allowed_models": [],  # 空 = 全部
         "rate_limit_rpm": 60,
-        "budget_cap_usd": 50,
+        "budget_cap_credits": 50,
     },
     {
         "key_name": "AI 组 Key（团队级）",
@@ -177,7 +177,7 @@ APIKEY_DEFS = [
         "team_slug": "ai-research",
         "allowed_models": ["claude-*", "gpt-4o-mini"],
         "rate_limit_rpm": 30,
-        "budget_cap_usd": 20,
+        "budget_cap_credits": 20,
     },
 ]
 
@@ -372,7 +372,7 @@ async def seed() -> dict:
                     team_id=team_id,
                     allowed_models=kdef["allowed_models"],
                     rate_limit_rpm=kdef["rate_limit_rpm"],
-                    budget_cap_usd=kdef["budget_cap_usd"],
+                    budget_cap_credits=kdef["budget_cap_credits"],
                     is_active=True,
                 )
             )

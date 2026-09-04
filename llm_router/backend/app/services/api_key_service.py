@@ -7,8 +7,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.api_key import ApiKey
+from app.models.organization import Organization
 from app.schemas.api_key import ApiKeyCreate, ApiKeyUpdate
-from app.utils.crypto import decrypt_api_key, encrypt_api_key, generate_api_key, hash_api_key
+from app.utils.crypto import generate_api_key, hash_api_key
 
 
 async def create_api_key(
@@ -21,7 +22,10 @@ async def create_api_key(
     api_key = ApiKey(
         key_prefix=key_prefix,
         key_hash=key_hash,
-        key_encrypted=encrypt_api_key(full_key),
+        # API keys are bearer credentials.  Persist only the verifier; the
+        # plaintext is returned once from the create endpoint and cannot be
+        # recovered later by an administrator or a database reader.
+        key_encrypted="",
         key_name=data.key_name,
         scope_type=scope,
         organization_id=org_id,
@@ -32,6 +36,7 @@ async def create_api_key(
         rate_limit_tpm=data.rate_limit_tpm,
         budget_cap_usd=data.budget_cap_usd,
         budget_cap_tokens=data.budget_cap_tokens,
+        budget_cap_credits=data.budget_cap_credits,
         expires_at=data.expires_at,
     )
     db.add(api_key)
@@ -45,11 +50,12 @@ async def validate_api_key(db: AsyncSession, raw_key: str) -> ApiKey | None:
     key_hash = hash_api_key(raw_key)
 
     result = await db.execute(
-        select(ApiKey).where(
+        select(ApiKey).join(Organization, Organization.id == ApiKey.organization_id).where(
             ApiKey.key_prefix == key_prefix,
             ApiKey.key_hash == key_hash,
             ApiKey.is_active.is_(True),
             ApiKey.revoked_at.is_(None),
+            Organization.deleted_at.is_(None),
         )
     )
     api_key = result.scalar_one_or_none()
@@ -93,10 +99,3 @@ async def revoke_api_key(db: AsyncSession, api_key: ApiKey) -> ApiKey:
     await db.flush()
     await db.refresh(api_key)
     return api_key
-
-
-def get_decrypted_key(api_key: ApiKey) -> str:
-    """解密 API Key 的完整明文。旧 Key 可能无密文，返回空串。"""
-    if not api_key.key_encrypted:
-        return ""
-    return decrypt_api_key(api_key.key_encrypted)

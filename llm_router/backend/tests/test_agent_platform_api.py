@@ -22,13 +22,20 @@ async def test_workspace_and_files(client: AsyncClient):
     assert ws.status_code == 201
     ws_id = ws.json()["id"]
 
-    # 写文件（路径规范化：剥离前导 / 与 ..）
-    f = await client.post(
+    # 路径穿越必须被安全拒绝，不能归一化成沙箱内的另一个文件。
+    rejected = await client.post(
         f"/api/v1/workspaces/{ws_id}/files",
         json={"path": "/../secret/../../notes.md", "content": "hello"},
     )
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"]["code"] == "workspace_file_invalid_path"
+
+    # 拒绝坏请求后，正常的相对路径仍可写入。
+    f = await client.post(
+        f"/api/v1/workspaces/{ws_id}/files",
+        json={"path": "/notes.md", "content": "hello"},
+    )
     assert f.status_code == 201
-    # 路径规范化：剥离前导 / 与所有 .. 段，确保沙箱内
     assert f.json()["path"] == "notes.md"
     assert f.json()["content"] == "hello"
 

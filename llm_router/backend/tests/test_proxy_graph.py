@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import json
-from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -27,6 +26,7 @@ from app.models.audit_log import AuditLog
 from app.models.dlp_rule import DlpRule
 from app.models.llm_provider import LlmProvider
 from app.models.organization import Organization
+from app.services.ai_quota_service import QuotaExceededError, QuotaReservation
 from app.utils.crypto import encrypt_api_key, generate_api_key
 
 ANTHROPIC_MODEL = "claude-opus-4-8"
@@ -41,7 +41,7 @@ async def _seed_org(db_session) -> tuple[Organization, str]:
         settings={},
         rate_limit_rpm=100,
         rate_limit_tpm=100000,
-        budget_cap_usd=Decimal("1000.00"),
+        budget_cap_tokens=1_000_000,
     )
     db_session.add(org)
     await db_session.flush()
@@ -187,6 +187,58 @@ async def test_openai_nonstream_success(client: AsyncClient, db_session, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_quota_rejection_happens_before_upstream(client: AsyncClient, db_session, monkeypatch):
+    org, full_key = await _seed_org(db_session)
+    await _seed_provider(db_session, org.id, "openai", [OPENAI_MODEL])
+    upstream_called = False
+
+    async def reject(*_args, **_kwargs):
+        raise QuotaExceededError("rpm", "organization", 17)
+
+    async def forbidden_upstream(*_args, **_kwargs):
+        nonlocal upstream_called
+        upstream_called = True
+        return await _mock_openai_nonstream(*_args, **_kwargs)
+
+    monkeypatch.setattr("app.graph.nodes.quota.reserve_ai_quota", reject)
+    monkeypatch.setattr("app.graph.nodes.proxy.proxy_openai_request", forbidden_upstream)
+    resp = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {full_key}"},
+        json={"model": OPENAI_MODEL, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 429
+    assert resp.json()["error"]["quota_scope"] == "organization"
+    assert resp.json()["error"]["retry_after_seconds"] == 17
+    assert upstream_called is False
+
+
+@pytest.mark.asyncio
+async def test_nonstream_usage_is_settled_before_response(client: AsyncClient, db_session, monkeypatch):
+    org, full_key = await _seed_org(db_session)
+    await _seed_provider(db_session, org.id, "openai", [OPENAI_MODEL])
+    reservation = QuotaReservation("proxy-settle", 100, ("counter",))
+    settled: list[dict | None] = []
+
+    async def allow(*_args, **_kwargs):
+        return reservation
+
+    async def record(_reservation, usage, **_kwargs):
+        settled.append(usage)
+
+    monkeypatch.setattr("app.graph.nodes.quota.reserve_ai_quota", allow)
+    monkeypatch.setattr("app.graph.nodes.audit.settle_ai_quota", record)
+    monkeypatch.setattr("app.graph.nodes.proxy.proxy_openai_request", _mock_openai_nonstream)
+    resp = await client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {full_key}"},
+        json={"model": OPENAI_MODEL, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    assert settled == [{"input_tokens": 5, "output_tokens": 3}]
+
+
+@pytest.mark.asyncio
 async def test_anthropic_stream_success(client: AsyncClient, db_session, monkeypatch):
     """流式 Anthropic 代理：SSE chunk 透传 + 流后审计落库 + usage 提取。"""
     org, full_key = await _seed_org(db_session)
@@ -226,7 +278,7 @@ async def test_model_not_allowed(client: AsyncClient, db_session):
         settings={"default_models": [ANTHROPIC_MODEL]},
         rate_limit_rpm=100,
         rate_limit_tpm=100000,
-        budget_cap_usd=Decimal("1000.00"),
+        budget_cap_tokens=1_000_000,
     )
     db_session.add(org)
     await db_session.flush()

@@ -1,29 +1,22 @@
 import { useState } from 'react';
 import {
-  Button, Card, Modal, Table, Tag, Form, Input, Select, Switch,
-  Space, message, Alert, Descriptions,
+  Alert, Button, Card, Descriptions, Form, Input, Modal, Select, Space, Switch, Table, Tag, message,
 } from 'antd';
-import {
-  PlusOutlined, DeleteOutlined, EditOutlined, LockOutlined, TeamOutlined,
-} from '@ant-design/icons';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useAuth } from '../context/AuthContext';
+import { DeleteOutlined, EditOutlined, LockOutlined, PlusOutlined, TeamOutlined } from '@ant-design/icons';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useAuth, type AdminRole } from '../context/AuthContext';
 import { organizations as orgApi } from '../api/client';
+import { adminFetch } from '../auth/adminSession';
 import { FinderShell, TitleBar } from '../components/finder/primitives';
 import ConfirmModal from '../components/finder/ConfirmModal';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
-function getAuthHeaders() {
-  const token = localStorage.getItem('ai_infra_token');
-  return { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
-}
-
 interface AdminItem {
   id: number;
   username: string;
   display_name: string | null;
-  role: string;
+  role: AdminRole;
   is_active: boolean;
   organization_id?: string | null;
   organization_name?: string | null;
@@ -31,259 +24,265 @@ interface AdminItem {
   updated_at: string;
 }
 
+interface AdminCreateValues {
+  username: string;
+  password: string;
+  display_name?: string;
+  role?: AdminRole;
+  organization_id?: string | null;
+}
+
+async function adminRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await adminFetch(`${BASE_URL}${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...init?.headers },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { detail?: unknown };
+    throw new Error(typeof body.detail === 'string' ? body.detail : `请求失败（HTTP ${response.status}）`);
+  }
+  if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
+}
+
+const ROLE_LABELS: Record<AdminRole, string> = {
+  platform_super_admin: '超级平台管理员',
+  enterprise_admin: '企业管理员',
+};
+
+const ROLE_COLORS: Record<AdminRole, string> = {
+  platform_super_admin: 'red',
+  enterprise_admin: 'geekblue',
+};
+
 export default function AdminManagement() {
-  const qc = useQueryClient();
+  const queryClient = useQueryClient();
   const { admin: currentUser, isSuperAdmin } = useAuth();
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editingAdmin, setEditingAdmin] = useState<AdminItem | null>(null);
-  const [createForm] = Form.useForm();
-  const [editForm] = Form.useForm();
-  const [resetPwdModalOpen, setResetPwdModalOpen] = useState(false);
+  const [createForm] = Form.useForm<AdminCreateValues>();
+  const [editForm] = Form.useForm<{ display_name?: string; is_active: boolean }>();
   const [resetPwdAdmin, setResetPwdAdmin] = useState<AdminItem | null>(null);
   const [newPassword, setNewPassword] = useState('');
   const [confirm, setConfirm] = useState<{ id: number; name: string } | null>(null);
+  const createRole = Form.useWatch('role', createForm);
 
-  const { data: adminList, isLoading } = useQuery({
-    queryKey: ['admins'],
-    queryFn: async () => {
-      const resp = await fetch(`${BASE_URL}/api/v1/admins`, { headers: getAuthHeaders() });
-      if (!resp.ok) throw new Error('获取管理员列表失败');
-      return resp.json() as Promise<AdminItem[]>;
-    },
+  const adminScopeKey = currentUser?.organization_id || 'platform';
+  const { data: adminList = [], isLoading } = useQuery({
+    queryKey: ['admins', adminScopeKey],
+    queryFn: () => adminRequest<AdminItem[]>('/api/v1/admins'),
+    enabled: !!currentUser,
+  });
+  const { data: orgList = [] } = useQuery({
+    queryKey: ['orgs'],
+    queryFn: orgApi.list,
     enabled: isSuperAdmin(),
   });
 
-  // 创建管理员
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['admins', adminScopeKey] });
+  const mutationError = (error: unknown, fallback: string) => message.error(error instanceof Error ? error.message : fallback);
+
   const createAdmin = useMutation({
-    mutationFn: async (data: { username: string; password: string; display_name?: string; role: string; organization_id?: string | null }) => {
-      const resp = await fetch(`${BASE_URL}/api/v1/admins`, {
-        method: 'POST', headers: getAuthHeaders(), body: JSON.stringify(data),
+    mutationFn: (values: AdminCreateValues) => {
+      const role: AdminRole = isSuperAdmin() ? (values.role || 'enterprise_admin') : 'enterprise_admin';
+      const organizationId = role === 'enterprise_admin'
+        ? (isSuperAdmin() ? values.organization_id : currentUser?.organization_id)
+        : null;
+      return adminRequest<AdminItem>('/api/v1/admins', {
+        method: 'POST',
+        body: JSON.stringify({ ...values, role, organization_id: organizationId }),
       });
-      if (!resp.ok) { const b = await resp.json().catch(() => ({})); throw new Error(b.detail || '创建失败'); }
-      return resp.json();
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['admins'] }); setCreateModalOpen(false); createForm.resetFields(); message.success('管理员创建成功'); },
+    onSuccess: () => {
+      void invalidate();
+      setCreateModalOpen(false);
+      createForm.resetFields();
+      message.success('管理员创建成功');
+    },
+    onError: (error) => mutationError(error, '创建失败'),
   });
 
-  // 组织列表（用于指派 org_admin）
-  const { data: orgList } = useQuery({ queryKey: ['orgs'], queryFn: orgApi.list });
-  const createRole = Form.useWatch('role', createForm) as string | undefined;
-  const editRole = Form.useWatch('role', editForm) as string | undefined;
-
-  // 更新管理员
   const updateAdmin = useMutation({
-    mutationFn: async ({ id, data }: { id: number; data: Record<string, unknown> }) => {
-      const resp = await fetch(`${BASE_URL}/api/v1/admins/${id}`, {
-        method: 'PATCH', headers: getAuthHeaders(), body: JSON.stringify(data),
-      });
-      if (!resp.ok) { const b = await resp.json().catch(() => ({})); throw new Error(b.detail || '更新失败'); }
-      return resp.json();
+    mutationFn: ({ id, data }: { id: number; data: { display_name?: string; is_active: boolean } }) => (
+      adminRequest<AdminItem>(`/api/v1/admins/${id}`, { method: 'PATCH', body: JSON.stringify(data) })
+    ),
+    onSuccess: () => {
+      void invalidate();
+      setEditModalOpen(false);
+      setEditingAdmin(null);
+      message.success('管理员更新成功');
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['admins'] }); setEditModalOpen(false); setEditingAdmin(null); message.success('管理员更新成功'); },
+    onError: (error) => mutationError(error, '更新失败'),
   });
 
-  // 删除管理员
   const deleteAdmin = useMutation({
-    mutationFn: async (id: number) => {
-      const resp = await fetch(`${BASE_URL}/api/v1/admins/${id}`, {
-        method: 'DELETE', headers: getAuthHeaders(),
-      });
-      if (!resp.ok) { const b = await resp.json().catch(() => ({})); throw new Error(b.detail || '删除失败'); }
-    },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['admins'] }); message.success('管理员已删除'); },
+    mutationFn: (id: number) => adminRequest<void>(`/api/v1/admins/${id}`, { method: 'DELETE' }),
+    onSuccess: () => { void invalidate(); message.success('管理员已删除'); },
+    onError: (error) => mutationError(error, '删除失败'),
   });
 
-  // 重置密码
   const resetPassword = useMutation({
-    mutationFn: async ({ id, password }: { id: number; password: string }) => {
-      const resp = await fetch(`${BASE_URL}/api/v1/admins/${id}`, {
-        method: 'PATCH', headers: getAuthHeaders(), body: JSON.stringify({ password }),
-      });
-      if (!resp.ok) { const b = await resp.json().catch(() => ({})); throw new Error(b.detail || '重置失败'); }
-      return resp.json();
+    mutationFn: ({ id, password }: { id: number; password: string }) => (
+      adminRequest<AdminItem>(`/api/v1/admins/${id}`, { method: 'PATCH', body: JSON.stringify({ password }) })
+    ),
+    onSuccess: () => {
+      setResetPwdAdmin(null);
+      setNewPassword('');
+      message.success('密码已重置');
     },
-    onSuccess: () => { setResetPwdModalOpen(false); setResetPwdAdmin(null); setNewPassword(''); message.success('密码已重置'); },
+    onError: (error) => mutationError(error, '重置失败'),
   });
 
-  const ROLE_LABELS: Record<string, string> = { super_admin: '超级管理员', admin: '管理员', org_admin: '组织管理员' };
-  const ROLE_COLORS: Record<string, string> = { super_admin: 'red', admin: 'blue', org_admin: 'geekblue' };
+  const openCreate = () => {
+    createForm.resetFields();
+    createForm.setFieldsValue({
+      role: 'enterprise_admin',
+      organization_id: isSuperAdmin() ? undefined : currentUser?.organization_id,
+    });
+    setCreateModalOpen(true);
+  };
+
+  const canManage = (target: AdminItem) => (
+    isSuperAdmin()
+    || (target.role === 'enterprise_admin' && target.organization_id === currentUser?.organization_id)
+  );
 
   return (
     <FinderShell>
       <TitleBar
         icon={<TeamOutlined />}
         title="管理员管理"
-        extra={isSuperAdmin() ? (
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalOpen(true)}>创建管理员</Button>
-        ) : undefined}
+        extra={<Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>创建管理员</Button>}
       />
 
       <div style={{ flex: 1, overflow: 'auto', padding: 16 }}>
-        {/* 当前账号信息 */}
         {currentUser && (
           <Card size="small" style={{ marginBottom: 16 }}>
             <Descriptions column={4} size="small">
               <Descriptions.Item label="当前账号">{currentUser.username}</Descriptions.Item>
               <Descriptions.Item label="姓名">{currentUser.display_name || '-'}</Descriptions.Item>
               <Descriptions.Item label="角色"><Tag color={ROLE_COLORS[currentUser.role]}>{ROLE_LABELS[currentUser.role]}</Tag></Descriptions.Item>
-              <Descriptions.Item label="状态">{currentUser.is_active ? '✅ 活跃' : '❌ 停用'}</Descriptions.Item>
+              <Descriptions.Item label="管理范围">{isSuperAdmin() ? '全部企业' : currentUser.organization_name}</Descriptions.Item>
             </Descriptions>
           </Card>
         )}
 
-        {!isSuperAdmin() && (
-          <Alert type="info" message="仅超级管理员可查看和管理其他管理员账号" style={{ marginBottom: 16 }} />
-        )}
+        <Alert
+          type="info"
+          showIcon
+          message={isSuperAdmin() ? '超级平台管理员可以管理全平台两类管理员' : '企业管理员只能管理本企业的企业管理员'}
+          description="管理员只有两级。员工业务角色在“角色权限”中单独维护，不属于这里的管理员角色。管理员创建后不可改角色或所属企业。"
+          style={{ marginBottom: 16 }}
+        />
 
-        {isSuperAdmin() && (
-          <Table
-            dataSource={adminList ?? []}
-            rowKey="id"
-            loading={isLoading}
-            pagination={{ pageSize: 20 }}
-            columns={[
-              { title: 'ID', dataIndex: 'id', width: 60 },
-              { title: '用户名', dataIndex: 'username', width: 240 },
-              { title: '姓名', dataIndex: 'display_name', width: 150, render: (v: string | null) => v || '-' },
-              {
-                title: '角色', dataIndex: 'role', width: 120,
-                render: (v: string) => <Tag color={ROLE_COLORS[v]}>{ROLE_LABELS[v] || v}</Tag>,
-              },
-              {
-                title: '组织', dataIndex: 'organization_name', width: 160,
-                render: (v: string | null) => v ? <Tag color="green">{v}</Tag> : <span style={{ color: '#999' }}>平台级</span>,
-              },
-              {
-                title: '状态', dataIndex: 'is_active', width: 80,
-                render: (v: boolean) => v ? <Tag color="green">活跃</Tag> : <Tag color="red">停用</Tag>,
-              },
-              {
-                title: '创建时间', dataIndex: 'created_at', width: 180,
-                render: (v: string) => new Date(v).toLocaleString('zh-CN'),
-              },
-              {
-                title: '操作', width: 240,
-                render: (_: unknown, r: AdminItem) => (
-                  <Space>
-                    <Button
-                      size="small"
-                      icon={<EditOutlined />}
-                      onClick={() => { setEditingAdmin(r); editForm.setFieldsValue(r); setEditModalOpen(true); }}
-                    >
-                      编辑
-                    </Button>
-                    <Button
-                      size="small"
-                      icon={<LockOutlined />}
-                      onClick={() => { setResetPwdAdmin(r); setResetPwdModalOpen(true); }}
-                    >
-                      重置密码
-                    </Button>
-                    {r.id !== currentUser?.id && (
-                      <Button size="small" danger icon={<DeleteOutlined />} onClick={() => setConfirm({ id: r.id, name: r.username })}>删除</Button>
-                    )}
-                  </Space>
-                ),
-              },
-            ]}
-          />
-        )}
+        <Table
+          dataSource={adminList}
+          rowKey="id"
+          loading={isLoading}
+          pagination={{ pageSize: 20 }}
+          columns={[
+            { title: '用户名', dataIndex: 'username', width: 220 },
+            { title: '姓名', dataIndex: 'display_name', width: 150, render: (value: string | null) => value || '-' },
+            {
+              title: '角色', dataIndex: 'role', width: 150,
+              render: (role: AdminRole) => <Tag color={ROLE_COLORS[role]}>{ROLE_LABELS[role] || role}</Tag>,
+            },
+            {
+              title: '企业', dataIndex: 'organization_name', width: 180,
+              render: (value: string | null) => value ? <Tag color="green">{value}</Tag> : <span style={{ color: '#999' }}>平台级</span>,
+            },
+            {
+              title: '状态', dataIndex: 'is_active', width: 90,
+              render: (active: boolean) => <Tag color={active ? 'green' : 'red'}>{active ? '活跃' : '停用'}</Tag>,
+            },
+            {
+              title: '创建时间', dataIndex: 'created_at', width: 180,
+              render: (value: string) => new Date(value).toLocaleString('zh-CN'),
+            },
+            {
+              title: '操作', width: 250,
+              render: (_: unknown, row: AdminItem) => canManage(row) ? <Space>
+                <Button size="small" icon={<EditOutlined />} onClick={() => {
+                  setEditingAdmin(row);
+                  editForm.setFieldsValue({ display_name: row.display_name || undefined, is_active: row.is_active });
+                  setEditModalOpen(true);
+                }}>编辑</Button>
+                {row.id !== currentUser?.id && <Button size="small" icon={<LockOutlined />} onClick={() => { setResetPwdAdmin(row); setNewPassword(''); }}>重置密码</Button>}
+                {row.id !== currentUser?.id && <Button size="small" danger icon={<DeleteOutlined />} onClick={() => setConfirm({ id: row.id, name: row.username })}>删除</Button>}
+              </Space> : <TypographyPlaceholder />,
+            },
+          ]}
+        />
       </div>
 
-      {/* 创建管理员 Modal */}
       <Modal
         title="创建管理员"
         open={createModalOpen}
         onCancel={() => setCreateModalOpen(false)}
         onOk={() => createForm.submit()}
-        width={500}
+        confirmLoading={createAdmin.isPending}
+        width={520}
       >
-        <Form form={createForm} layout="vertical" onFinish={v => createAdmin.mutate(v)}>
-          <Form.Item name="username" label="用户名" rules={[{ required: true, min: 2, message: '请输入用户名（至少2位）' }]}>
-            <Input placeholder="admin" />
-          </Form.Item>
-          <Form.Item name="password" label="密码" rules={[{ required: true, min: 8 }]}>
-            <Input.Password placeholder="至少8位" />
-          </Form.Item>
-          <Form.Item name="display_name" label="姓名">
-            <Input placeholder="张三" />
-          </Form.Item>
-          <Form.Item name="role" label="角色" rules={[{ required: true }]} initialValue="admin">
-            <Select options={[
-              { value: 'super_admin', label: '🔴 超级管理员 — 可创建/删除管理员，管理所有资源' },
-              { value: 'admin', label: '🔵 管理员 — 管理组织/Key/规则等，不可管理管理员' },
-              { value: 'org_admin', label: '🟢 组织管理员 — 仅管理被指派的单个组织' },
-            ]} />
-          </Form.Item>
-          {createRole === 'org_admin' && (
-            <Form.Item name="organization_id" label="所属组织" rules={[{ required: true, message: '请选择组织' }]}>
-              <Select
-                placeholder="选择该管理员负责的组织"
-                options={orgList?.map(o => ({ value: o.id, label: o.name })) ?? []}
-                showSearch
-                optionFilterProp="label"
-              />
+        <Form form={createForm} layout="vertical" onFinish={(values) => createAdmin.mutate(values)}>
+          <Form.Item name="username" label="用户名" rules={[{ required: true, min: 2, message: '请输入用户名（至少2位）' }]}><Input autoComplete="off" /></Form.Item>
+          <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 15, max: 128, message: '请输入15–128位密码' }]}><Input.Password autoComplete="new-password" /></Form.Item>
+          <Form.Item name="display_name" label="姓名"><Input /></Form.Item>
+          {isSuperAdmin() ? <>
+            <Form.Item name="role" label="角色" rules={[{ required: true }]}>
+              <Select options={[
+                { value: 'platform_super_admin', label: '超级平台管理员 — 管理整个平台' },
+                { value: 'enterprise_admin', label: '企业管理员 — 只管理一个企业' },
+              ]} />
             </Form.Item>
+            {createRole === 'enterprise_admin' && (
+              <Form.Item name="organization_id" label="所属企业" rules={[{ required: true, message: '请选择企业' }]}>
+                <Select showSearch optionFilterProp="label" options={orgList.map((org) => ({ value: org.id, label: org.name }))} />
+              </Form.Item>
+            )}
+          </> : (
+            <Descriptions size="small" bordered column={1}>
+              <Descriptions.Item label="角色">企业管理员</Descriptions.Item>
+              <Descriptions.Item label="所属企业">{currentUser?.organization_name}</Descriptions.Item>
+            </Descriptions>
           )}
         </Form>
       </Modal>
 
-      {/* 编辑管理员 Modal */}
       <Modal
-        title={`编辑：${editingAdmin?.username}`}
+        title={`编辑：${editingAdmin?.username || ''}`}
         open={editModalOpen}
         onCancel={() => { setEditModalOpen(false); setEditingAdmin(null); }}
         onOk={() => editForm.submit()}
+        confirmLoading={updateAdmin.isPending}
         width={500}
       >
-        <Form form={editForm} layout="vertical" onFinish={v => {
-          if (editingAdmin) updateAdmin.mutate({ id: editingAdmin.id, data: v });
+        <Alert type="info" showIcon message="管理员角色和所属企业创建后不可修改" style={{ marginBottom: 16 }} />
+        <Form form={editForm} layout="vertical" onFinish={(values) => {
+          if (editingAdmin) updateAdmin.mutate({
+            id: editingAdmin.id,
+            data: { ...values, is_active: editingAdmin.id === currentUser?.id ? true : values.is_active },
+          });
         }}>
-          <Form.Item name="display_name" label="姓名">
-            <Input placeholder="张三" />
-          </Form.Item>
-          <Form.Item name="role" label="角色">
-            <Select options={[
-              { value: 'super_admin', label: '超级管理员' },
-              { value: 'admin', label: '管理员' },
-              { value: 'org_admin', label: '组织管理员' },
-            ]} />
-          </Form.Item>
-          {editRole === 'org_admin' && (
-            <Form.Item name="organization_id" label="所属组织" rules={[{ required: true, message: '请选择组织' }]}>
-              <Select
-                placeholder="选择该管理员负责的组织"
-                options={orgList?.map(o => ({ value: o.id, label: o.name })) ?? []}
-                showSearch
-                optionFilterProp="label"
-              />
-            </Form.Item>
-          )}
+          <Form.Item label="角色"><Input value={editingAdmin ? ROLE_LABELS[editingAdmin.role] : ''} disabled /></Form.Item>
+          <Form.Item label="所属企业"><Input value={editingAdmin?.organization_name || '平台级'} disabled /></Form.Item>
+          <Form.Item name="display_name" label="姓名"><Input /></Form.Item>
           <Form.Item name="is_active" label="启用" valuePropName="checked">
-            <Switch />
+            <Switch disabled={editingAdmin?.id === currentUser?.id} />
           </Form.Item>
         </Form>
       </Modal>
 
-      {/* 重置密码 Modal */}
       <Modal
-        title={`重置密码：${resetPwdAdmin?.username}`}
-        open={resetPwdModalOpen}
-        onCancel={() => { setResetPwdModalOpen(false); setResetPwdAdmin(null); }}
-        onOk={() => {
-          if (resetPwdAdmin && newPassword.length >= 8) {
-            resetPassword.mutate({ id: resetPwdAdmin.id, password: newPassword });
-          }
-        }}
-        okButtonProps={{ disabled: newPassword.length < 8 }}
+        title={`重置密码：${resetPwdAdmin?.username || ''}`}
+        open={!!resetPwdAdmin}
+        onCancel={() => { setResetPwdAdmin(null); setNewPassword(''); }}
+        onOk={() => { if (resetPwdAdmin) resetPassword.mutate({ id: resetPwdAdmin.id, password: newPassword }); }}
+        confirmLoading={resetPassword.isPending}
+        okButtonProps={{ disabled: newPassword.length < 15 || newPassword.length > 128 }}
       >
-        <Alert type="warning" message="重置后请将新密码安全地通知该管理员" style={{ marginBottom: 16 }} />
-        <Input.Password
-          placeholder="输入新密码（至少8位）"
-          value={newPassword}
-          onChange={e => setNewPassword(e.target.value)}
-        />
+        <Alert type="warning" showIcon message="完整密码仅通过受控渠道交给该管理员" style={{ marginBottom: 16 }} />
+        <Input.Password autoComplete="new-password" placeholder="输入15–128位新密码" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
       </Modal>
 
       <ConfirmModal
@@ -296,4 +295,8 @@ export default function AdminManagement() {
       />
     </FinderShell>
   );
+}
+
+function TypographyPlaceholder() {
+  return <span style={{ color: '#999' }}>无权操作</span>;
 }

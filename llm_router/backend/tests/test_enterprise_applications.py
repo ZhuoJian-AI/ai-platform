@@ -1,6 +1,8 @@
 """Enterprise application visibility and AI-tool authorization tests."""
 
+import hashlib
 import json
+from copy import deepcopy
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -38,7 +40,20 @@ from app.services import enterprise_application_service as service
 from app.services import subsystem_action_service as action_service
 from app.services import subsystem_integration_service as integration_service
 
-INTEGRATION_SECRET = "test-integration-token-at-least-32-bytes"
+
+def _typed_secret(prefix: str, label: str, manifest_url: str) -> str:
+    digest = hashlib.sha256(manifest_url.encode()).hexdigest()[:16]
+    return f"{prefix}{digest}_{label}-at-least-32-bytes"
+
+
+def _integration_input(manifest_url: str) -> EnterpriseApplicationIntegrationInput:
+    return EnterpriseApplicationIntegrationInput(
+        manifest_url=manifest_url,
+        manifest_access_token=_typed_secret("zjmf_", "manifest", manifest_url),
+        sso_exchange_token=_typed_secret("zjss_", "sso", manifest_url),
+        action_signing_secret=_typed_secret("zjac_", "action", manifest_url),
+        event_signing_secret=_typed_secret("zjev_", "event", manifest_url),
+    )
 
 
 def test_protocol_v22_validates_department_page_and_action_limits():
@@ -93,6 +108,31 @@ def test_protocol_v22_validates_department_page_and_action_limits():
     assert events_url == "https://sample.example.test/api/integration/events"
     assert department["pageKeys"] == ["sample_review.list"]
     assert department["actionKeys"] == ["sample_review.query"]
+
+    high_risk_manifest = deepcopy(manifest)
+    high_risk_manifest["modules"][0]["actions"].append({
+        "actionKey": "sample_review.delete",
+        "name": "删除评审",
+        "operation": "delete",
+        "aiEnabled": True,
+        "requiresConfirmation": False,
+        "inputSchema": {"type": "object"},
+        "resultSchema": {"type": "object"},
+    })
+    high_risk_manifest["modules"][0]["pages"][0]["actionKeys"].append(
+        "sample_review.delete"
+    )
+    high_risk_manifest["modules"][0]["departments"][0]["actionKeys"].append(
+        "sample_review.delete"
+    )
+    normalized_high_risk, _, _ = integration_service._validate_manifest_payload(
+        high_risk_manifest,
+        entry_url="https://sample.example.test/",
+        manifest_url="https://sample.example.test/api/integration/manifest",
+        expected_slug="sample-review",
+    )
+    delete_action = normalized_high_risk["modules"][0]["actions"][1]
+    assert delete_action["requiresConfirmation"] is True
 
     manifest["modules"][0]["departments"][0]["actionKeys"] = ["sample_review.delete"]
     with pytest.raises(ValueError, match="department actionKeys"):
@@ -165,6 +205,172 @@ def test_protocol_v24_separates_department_responsibility_from_access_roles():
         )
 
 
+def test_protocol_v25_uses_code_exchange_and_reviews_nested_schema_changes():
+    manifest = {
+        "protocol": "zhuojian-subsystem",
+        "version": 2,
+        "contractRevision": "2.5",
+        "enterprise": {"key": "aifabei", "name": "爱法贝"},
+        "applicationSlug": "sample-review",
+        "applicationName": "样品评审",
+        "eventsUrl": "/api/integration/events",
+        "eventDeliveriesUrl": "/api/integration/event-deliveries",
+        "auth": {
+            "ssoPath": "/api/integration/sso",
+            "mode": "authorization_code",
+        },
+        "modules": [{
+            "moduleKey": "sample_review",
+            "name": "样品评审",
+            "route": "/sample-review",
+            "departments": [{"key": "design", "name": "设计部", "role": "owner"}],
+            "accessRoles": [{
+                "roleKey": "sample_review.designer",
+                "name": "样品设计负责人",
+                "suggestedDepartmentKey": "design",
+                "pageKeys": ["sample_review.list"],
+                "actionKeys": ["sample_review.query"],
+            }],
+            "pages": [{
+                "pageKey": "sample_review.list",
+                "name": "评审列表",
+                "routePattern": "/sample-review",
+                "queryActionKey": "sample_review.query",
+                "actionKeys": ["sample_review.query"],
+                "contextSchema": {"type": "object"},
+            }],
+            "actions": [{
+                "actionKey": "sample_review.query",
+                "name": "查询评审",
+                "operation": "query",
+                "aiEnabled": True,
+                "requiresConfirmation": False,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                },
+                "resultSchema": {"type": "object"},
+            }],
+        }],
+    }
+    normalized, _, _ = integration_service._validate_manifest_payload(
+        manifest,
+        entry_url="https://sample.example.test/",
+        manifest_url="https://sample.example.test/api/integration/manifest",
+        expected_slug="sample-review",
+    )
+
+    display_copy = deepcopy(normalized)
+    display_copy["modules"][0]["actions"][0]["name"] = "查询样品评审"
+    assert integration_service.manifest_change_summary(normalized, display_copy)[0][
+        "securitySensitive"
+    ] is True
+
+    schema_change = deepcopy(normalized)
+    schema_change["modules"][0]["actions"][0]["inputSchema"]["properties"]["name"] = {
+        "type": "number"
+    }
+    schema_diff = integration_service.manifest_change_summary(normalized, schema_change)[0]
+    assert schema_diff["securitySensitive"] is True
+    assert any("inputSchema.properties.name" in path for path in schema_diff["changedPaths"])
+
+    legacy_auth = deepcopy(manifest)
+    legacy_auth["auth"] = {
+        "ssoPath": "/api/integration/sso",
+        "algorithm": "HS256",
+    }
+    with pytest.raises(ValueError, match="authorization_code"):
+        integration_service._validate_manifest_payload(
+            legacy_auth,
+            entry_url="https://sample.example.test/",
+            manifest_url="https://sample.example.test/api/integration/manifest",
+            expected_slug="sample-review",
+        )
+
+
+def test_manifest_review_scans_sensitive_changes_after_display_cap():
+    before = {
+        "modules": [
+            {"name": f"模块 {index}", "description": f"说明 {index}"}
+            for index in range(205)
+        ],
+        "zzSecurityBoundary": "before",
+    }
+    after = deepcopy(before)
+    for index, module in enumerate(after["modules"]):
+        module["name"] = f"新模块 {index}"
+    after["zzSecurityBoundary"] = "after"
+
+    summary = integration_service.manifest_change_summary(before, after)[0]
+    assert summary["securitySensitive"] is True
+    assert summary["changedPathCount"] == 206
+    assert len(summary["changedPaths"]) == 200
+    assert summary["changedPathsTruncated"] is True
+    assert "$.zzSecurityBoundary" not in summary["changedPaths"]
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("modules", 0, "pages", 0, "routePattern"), "/new-list"),
+        (("modules", 0, "actions", 0, "operation"), "update"),
+        (
+            (
+                "modules", 0, "actions", 0, "inputSchema",
+                "properties", "styleId", "type",
+            ),
+            "integer",
+        ),
+        (("modules", 0, "actions", 0, "aiEnabled"), False),
+    ],
+)
+def test_protocol_v24_sensitive_manifest_updates_require_review(path, replacement):
+    before = {
+        "contractRevision": "2.4",
+        "modules": [{
+            "pages": [{"routePattern": "/list"}],
+            "actions": [{
+                "operation": "query",
+                "aiEnabled": True,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"styleId": {"type": "string"}},
+                },
+            }],
+        }],
+    }
+    after = deepcopy(before)
+    cursor = after
+    for segment in path[:-1]:
+        cursor = cursor[segment]
+    cursor[path[-1]] = replacement
+
+    summary = integration_service.manifest_change_summary(before, after)
+    assert summary[0]["securitySensitive"] is True
+    assert integration_service._manifest_requires_review(before, "2.4", summary) is True
+
+
+def test_manifest_review_preserves_initial_contract_gates():
+    sensitive_diff = [{"securitySensitive": True}]
+
+    assert integration_service._manifest_requires_review({}, "2.4", sensitive_diff) is False
+    assert integration_service._manifest_requires_review({}, "2.5", sensitive_diff) is True
+
+
+def test_integration_credentials_reject_cross_purpose_values():
+    manifest_url = "https://sample.example.test/api/integration/manifest"
+    with pytest.raises(ValueError, match="manifest access credential"):
+        EnterpriseApplicationIntegrationInput(
+            manifest_url=manifest_url,
+            auth_token=_typed_secret("zjss_", "sso", manifest_url),
+        )
+    with pytest.raises(ValueError, match="zjac_"):
+        EnterpriseApplicationIntegrationInput(
+            manifest_url=manifest_url,
+            action_signing_secret=_typed_secret("zjev_", "event", manifest_url),
+        )
+
+
 async def _organization_tree(db_session):
     org = Organization(name="Tenant Applications", slug=f"apps-{uuid4().hex[:8]}")
     other = Organization(name="Other Tenant", slug=f"other-{uuid4().hex[:8]}")
@@ -190,6 +396,57 @@ async def _organization_tree(db_session):
         organization_id=org.id, department_id=str(department.id), team_id=str(team.id),
     )
     return org, other, department, team, current
+
+
+@pytest.mark.asyncio
+async def test_v25_credentials_cannot_be_partially_cleared_or_downgraded(db_session):
+    org, _, _, _, _ = await _organization_tree(db_session)
+    manifest_url = "https://credentials.example.test/api/integration/manifest"
+    application = await service.create_application(
+        db_session,
+        org.id,
+        EnterpriseApplicationCreate(
+            name="Credentials",
+            slug="credentials",
+            entry_url="https://credentials.example.test/",
+        ),
+    )
+    integration = await integration_service.configure_integration(
+        db_session,
+        application,
+        _integration_input(manifest_url),
+    )
+    integration.manifest = {"contractRevision": "2.5"}
+    await db_session.flush()
+
+    with pytest.raises(HTTPException) as raised:
+        await integration_service.configure_integration(
+            db_session,
+            application,
+            EnterpriseApplicationIntegrationInput(
+                manifest_url=manifest_url,
+                clear_action_signing_secret=True,
+            ),
+        )
+    assert raised.value.status_code == 422
+    assert integration.credential_version == 2
+    assert integration.action_signing_secret_encrypted is not None
+
+    revoked = await integration_service.configure_integration(
+        db_session,
+        application,
+        EnterpriseApplicationIntegrationInput(
+            manifest_url=manifest_url,
+            sync_enabled=False,
+            clear_auth_token=True,
+            clear_sso_exchange_token=True,
+            clear_action_signing_secret=True,
+            clear_event_signing_secret=True,
+        ),
+    )
+    assert revoked.sync_enabled is False
+    assert revoked.credential_version == 2
+    assert integration_service.credentials_complete(revoked) is False
 
 
 @pytest.mark.asyncio
@@ -494,12 +751,12 @@ async def test_subsystem_sync_is_replay_safe_and_routes_work_items(db_session, m
     integration = await integration_service.configure_integration(
         db_session,
         application,
-        EnterpriseApplicationIntegrationInput(
-            manifest_url="https://garment.example.test/api/integration/manifest",
-            auth_token=INTEGRATION_SECRET,
-        ),
+        _integration_input("https://garment.example.test/api/integration/manifest"),
     )
-    assert integration.auth_token_encrypted != INTEGRATION_SECRET
+    expected_manifest_token = _typed_secret(
+        "zjmf_", "manifest", "https://garment.example.test/api/integration/manifest"
+    )
+    assert integration.auth_token_encrypted != expected_manifest_token
     await integration_service.replace_routes(
         db_session,
         application,
@@ -534,7 +791,7 @@ async def test_subsystem_sync_is_replay_safe_and_routes_work_items(db_session, m
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["authorization"] == f"Bearer {INTEGRATION_SECRET}"
+        assert request.headers["authorization"] == f"Bearer {expected_manifest_token}"
         if request.url.path.endswith("/manifest"):
             return httpx.Response(200, json=manifest)
         after = int(request.url.params.get("after", "0"))
@@ -571,6 +828,71 @@ async def test_subsystem_sync_is_replay_safe_and_routes_work_items(db_session, m
 
 
 @pytest.mark.asyncio
+async def test_subsystem_sync_rejects_late_bad_page_without_partial_activation(
+    db_session, monkeypatch
+):
+    org, _, _, _, _ = await _organization_tree(db_session)
+    application = await service.create_application(
+        db_session,
+        org.id,
+        EnterpriseApplicationCreate(
+            name="Atomic Sync",
+            slug="atomic-sync",
+            entry_url="https://atomic.example.test/",
+        ),
+    )
+    integration = await integration_service.configure_integration(
+        db_session,
+        application,
+        _integration_input("https://atomic.example.test/api/integration/manifest"),
+    )
+    baseline = {
+        "protocol": "zhuojian-subsystem",
+        "version": 1,
+        "applicationSlug": application.slug,
+        "applicationName": "Old Manifest",
+        "modules": [{"key": "orders", "name": "Orders"}],
+        "eventFeed": {"path": "/api/integration/events"},
+    }
+    integration.manifest = deepcopy(baseline)
+    integration.events_url = "https://atomic.example.test/api/integration/events"
+    integration.protocol_version = 1
+    integration.sync_status = "healthy"
+    await db_session.flush()
+    candidate = deepcopy(baseline)
+    candidate["applicationName"] = "New Manifest"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=candidate)
+        after = int(request.url.params.get("after", "0"))
+        event = {
+            "sequence": 1,
+            "eventId": f"event-{after}",
+            "eventType": "orders.changed.v1",
+            "moduleKey": "orders",
+            "payload": {},
+        }
+        return httpx.Response(200, json={"items": [event], "hasMore": True})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        integration_service.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: original_client(transport=httpx.MockTransport(handler)),
+    )
+
+    result = await integration_service.sync_integration(db_session, application)
+    await db_session.refresh(integration)
+    assert result["status"] == "error"
+    assert "strictly ascending" in str(result["detail"])
+    assert integration.manifest == baseline
+    assert integration.cursor_sequence == 0
+    assert not (await db_session.execute(select(EnterpriseApplicationEvent))).scalars().all()
+    assert not (await db_session.execute(select(CrossDepartmentWorkItem))).scalars().all()
+
+
+@pytest.mark.asyncio
 async def test_protocol_v2_sync_discovers_actions_and_matches_departments_without_auto_grants(
     db_session, monkeypatch,
 ):
@@ -585,10 +907,7 @@ async def test_protocol_v2_sync_discovers_actions_and_matches_departments_withou
     await integration_service.configure_integration(
         db_session,
         application,
-        EnterpriseApplicationIntegrationInput(
-            manifest_url="https://sample.example.test/api/integration/manifest",
-            auth_token=INTEGRATION_SECRET,
-        ),
+        _integration_input("https://sample.example.test/api/integration/manifest"),
     )
     manifest = {
         "protocol": "zhuojian-subsystem",
@@ -655,10 +974,7 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
     integration = await integration_service.configure_integration(
         db_session,
         application,
-        EnterpriseApplicationIntegrationInput(
-            manifest_url="https://action.example.test/api/integration/manifest",
-            auth_token=INTEGRATION_SECRET,
-        ),
+        _integration_input("https://action.example.test/api/integration/manifest"),
     )
     integration.protocol_version = 2
     integration.manifest = {
@@ -709,6 +1025,13 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
     assert service.effective_module_permissions(application, current, "sample_review") == {
         "view", "ai_approve",
     }
+    no_data_scope = {
+        "unrestricted": False,
+        "include_self": False,
+        "own_only": False,
+        "department_ids": (),
+    }
+    serialized_no_data_scope = {**no_data_scope, "department_ids": []}
     module_claims = service.effective_module_claims(application, current, "sample_review")
     assert module_claims == {
         "permissions": ["ai_approve", "view"],
@@ -717,28 +1040,88 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
             "sample_review.detail": {
                 "permissions": ["ai_approve", "view"],
                 "action_keys": ["sample_review.approve"],
+                "data_scopes": {
+                    "ai_approve": no_data_scope,
+                    "view": no_data_scope,
+                },
+                "action_data_scopes": {
+                    "sample_review.approve": no_data_scope,
+                },
             },
         },
     }
-    launch_claims = jwt.decode(
-        action_service.issue_launch_ticket(
-            integration,
-            application,
-            current,
-            "sample_review",
-            {"view", "ai_approve"},
-            module_claims,
-        ),
-        INTEGRATION_SECRET,
-        algorithms=["HS256"],
-        audience=application.slug,
+    launch_code, launch_nonce = await action_service.issue_launch_code(
+        db_session,
+        integration,
+        application,
+        current,
+        "sample_review",
+        {"view", "ai_approve"},
+        module_claims,
+        redirect_path="/sample-review",
+        session_binding_hash="a" * 64,
     )
+    redemption = await action_service.redeem_launch_code(
+        db_session,
+        integration,
+        code=launch_code,
+        redirect_path="/sample-review",
+        launch_nonce=launch_nonce,
+    )
+    launch_claims = redemption["claims"]
+    with pytest.raises(HTTPException) as replay:
+        await action_service.redeem_launch_code(
+            db_session,
+            integration,
+            code=launch_code,
+            redirect_path="/sample-review",
+            launch_nonce=launch_nonce,
+        )
+    assert replay.value.status_code == 401
+
+    disabled_code, disabled_nonce = await action_service.issue_launch_code(
+        db_session,
+        integration,
+        application,
+        current,
+        "sample_review",
+        {"view", "ai_approve"},
+        module_claims,
+        redirect_path="/sample-review",
+        session_binding_hash="b" * 64,
+    )
+    application.is_active = False
+    await db_session.flush()
+    with pytest.raises(HTTPException) as disabled:
+        await action_service.redeem_launch_code(
+            db_session,
+            integration,
+            code=disabled_code,
+            redirect_path="/sample-review",
+            launch_nonce=disabled_nonce,
+        )
+    assert disabled.value.status_code == 409
+    application.is_active = True
+    await db_session.flush()
+
     assert launch_claims["pageKeys"] == ["sample_review.detail"]
     assert launch_claims["actionKeys"] == ["sample_review.approve"]
-    assert launch_claims["exp"] - launch_claims["iat"] == 120
+    assert (
+        datetime.fromisoformat(launch_claims["exp"])
+        - datetime.fromisoformat(launch_claims["iat"])
+    ).total_seconds() == 120
+    assert launch_claims["sessionBindingHash"] == "a" * 64
+    assert launch_claims["authEpoch"] == current.user.auth_epoch
     assert launch_claims["pageAccess"]["sample_review.detail"] == {
         "permissions": ["ai_approve", "view"],
         "actionKeys": ["sample_review.approve"],
+        "dataScopes": {
+            "ai_approve": serialized_no_data_scope,
+            "view": serialized_no_data_scope,
+        },
+        "actionDataScopes": {
+            "sample_review.approve": serialized_no_data_scope,
+        },
     }
     calls = 0
 
@@ -746,7 +1129,14 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
         nonlocal calls
         calls += 1
         token = request.headers["authorization"].split(" ", 1)[1]
-        claims = jwt.decode(token, INTEGRATION_SECRET, algorithms=["HS256"], audience=application.slug)
+        claims = jwt.decode(
+            token,
+            _typed_secret(
+                "zjac_", "action", "https://action.example.test/api/integration/manifest"
+            ),
+            algorithms=["HS256"],
+            audience=application.slug,
+        )
         assert claims["typ"] == "zhuojian-action"
         assert claims["moduleKey"] == "sample_review"
         assert claims["pageKey"] == "sample_review.detail"
@@ -813,18 +1203,12 @@ async def test_cross_application_event_delivery_is_signed_and_idempotent(db_sess
     source_integration = await integration_service.configure_integration(
         db_session,
         source,
-        EnterpriseApplicationIntegrationInput(
-            manifest_url="https://source.example/api/integration/manifest",
-            auth_token=INTEGRATION_SECRET,
-        ),
+        _integration_input("https://source.example/api/integration/manifest"),
     )
     target_integration = await integration_service.configure_integration(
         db_session,
         target,
-        EnterpriseApplicationIntegrationInput(
-            manifest_url="https://target.example/api/integration/manifest",
-            auth_token=INTEGRATION_SECRET,
-        ),
+        _integration_input("https://target.example/api/integration/manifest"),
     )
     target_integration.protocol_version = 2
     target_integration.manifest = {
@@ -866,7 +1250,9 @@ async def test_cross_application_event_delivery_is_signed_and_idempotent(db_sess
         assert request.url == "https://target.example/api/integration/event-deliveries"
         claims = jwt.decode(
             request.headers["authorization"].split(" ", 1)[1],
-            INTEGRATION_SECRET,
+            _typed_secret(
+                "zjev_", "event", "https://target.example/api/integration/manifest"
+            ),
             algorithms=["HS256"],
             audience=target.slug,
         )

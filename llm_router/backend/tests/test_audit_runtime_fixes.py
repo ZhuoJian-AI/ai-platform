@@ -16,7 +16,6 @@ from app.models.user import User
 from app.schemas.memory import MemoryUpdate
 from app.services.task_service import soft_delete_task_turn
 
-
 # ── H3：编辑个人记忆时不得把 scope_type/scope_id 置 NULL ──────────────────
 
 

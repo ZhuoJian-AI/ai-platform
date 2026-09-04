@@ -63,10 +63,14 @@ class AgentState(TypedDict, total=False):
     referenced_file_ids: list[str]
     # 本轮结构化附件的服务端校验快照；写入 user TaskMessage.metadata 供历史回放。
     attachment_files: list[dict]
+    # Versioned, server-resolved file references. ``scope=task`` references are
+    # carried into later turns but are re-authorized on every run and tool use.
+    file_refs_v1: list[dict]
     # Effective roles/workspace capabilities contain no file names or content.
     effective_access: dict
-    # Server-resolved per-turn scope. Personal is always present; shared
-    # workspaces appear only after explicit natural-language or @file targeting.
+    # Server-resolved hints for the current request. They do not grant access:
+    # the Agent may list/search every workspace allowed by the user's live role
+    # capability union, without requiring an explicit workspace mention.
     workspace_intent: dict
 
     # ── 对话 ──
@@ -80,6 +84,11 @@ class AgentState(TypedDict, total=False):
     steps: list[dict]  # 逐步轨迹（llm 调用、工具调用、rag 命中等）
     usage: dict  # {"input_tokens": int, "output_tokens": int}
     tool_results: list[dict]
+    # Full, structured identities for files actually read or written by tools.
+    # This is intentionally separate from the bounded human-facing trace preview
+    # so persistence never has to reverse-parse truncated JSON.
+    tool_file_refs: list[dict]
+    file_accesses_v1: list[dict]
     # 五类资源调用痕迹（skill/ontology/rag/memory/data_interface），按执行顺序追加；
     # 经 stream_writer 下发 ``trace`` 事件实时展示，并随 save_memory 落 assistant
     # TaskMessage.metadata_ 供历史回放还原。技能仅在此落库、不重复发 trace 事件。

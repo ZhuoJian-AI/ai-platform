@@ -196,7 +196,7 @@ try {
     throw new Error(`Upload concurrency exceeded three: ${maxConcurrentUploadRequests}`);
   }
   const retainedFiles = await page.evaluate(async () => {
-    const token = localStorage.getItem('ai_infra_user_token') || '';
+    const token = sessionStorage.getItem('ai_infra_user_token') || '';
     const response = await fetch('/api/v1/terminal/workspace-files', {
       headers: { Authorization: `Bearer ${token}` },
     });

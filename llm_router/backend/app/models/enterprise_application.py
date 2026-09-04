@@ -153,8 +153,20 @@ class EnterpriseApplicationIntegration(UUIDPrimaryKeyMixin, TimestampMixin, Base
     __table_args__ = (
         UniqueConstraint("application_id", name="uq_enterprise_application_integration_app"),
         CheckConstraint(
-            "sync_status IN ('unconfigured','ready','syncing','healthy','error')",
+            "sync_status IN ('unconfigured','ready','syncing','healthy','pending_review','error')",
             name="ck_enterprise_application_integration_status",
+        ),
+        CheckConstraint(
+            "manifest_review_status IN ('approved','pending','rejected')",
+            name="ck_enterprise_application_integration_manifest_review",
+        ),
+        UniqueConstraint(
+            "sso_exchange_credential_prefix",
+            name="uq_enterprise_application_integration_sso_prefix",
+        ),
+        UniqueConstraint(
+            "sso_exchange_credential_hash",
+            name="uq_enterprise_application_integration_sso_hash",
         ),
     )
 
@@ -166,9 +178,27 @@ class EnterpriseApplicationIntegration(UUIDPrimaryKeyMixin, TimestampMixin, Base
     )
     manifest_url: Mapped[str] = mapped_column(Text, nullable=False)
     events_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Historical column name retained for a non-breaking migration.  From
+    # contract v2.5 onward this value is *only* the credential used to pull the
+    # manifest/event feed.  It must never sign SSO, Action or Event tokens.
     auth_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credential_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    sso_exchange_credential_prefix: Mapped[str | None] = mapped_column(
+        String(24), nullable=True
+    )
+    sso_exchange_credential_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    action_signing_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    event_signing_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     protocol_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     manifest: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    pending_manifest: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    manifest_diff: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    manifest_review_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="approved"
+    )
+    pending_contract_revision: Mapped[str | None] = mapped_column(String(20), nullable=True)
     cursor_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     sync_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     sync_status: Mapped[str] = mapped_column(String(20), nullable=False, default="ready")
@@ -177,6 +207,35 @@ class EnterpriseApplicationIntegration(UUIDPrimaryKeyMixin, TimestampMixin, Base
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     application = relationship("EnterpriseApplication", back_populates="integration")
+
+
+class EnterpriseApplicationSsoCode(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Single-use opaque launch code redeemed by exactly one subsystem."""
+
+    __tablename__ = "enterprise_application_sso_codes"
+    __table_args__ = (
+        UniqueConstraint("code_hash", name="uq_enterprise_application_sso_code_hash"),
+    )
+
+    application_id: Mapped[str] = mapped_column(
+        ForeignKey("enterprise_applications.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    organization_id: Mapped[str] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    module_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    redirect_path: Mapped[str] = mapped_column(Text, nullable=False)
+    session_binding_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    launch_nonce: Mapped[str] = mapped_column(String(128), nullable=False)
+    claims_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class EnterpriseApplicationAction(UUIDPrimaryKeyMixin, TimestampMixin, Base):

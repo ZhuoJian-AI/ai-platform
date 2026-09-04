@@ -524,7 +524,7 @@ async def generate_image(
     )
 
 
-async def embed(
+async def embed_with_usage(
     db: AsyncSession,
     org_id: UUID,
     model: str,
@@ -534,8 +534,8 @@ async def embed(
     team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
     model_override: str | None = None,
-) -> list[list[float]]:
-    """文本嵌入（OpenAI 兼容 /v1/embeddings）。返回与 texts 等长的向量列表。"""
+) -> tuple[list[list[float]], dict[str, int | None]]:
+    """Embedding call with provider-reported usage for mandatory settlement."""
     if provider_override is not None:
         provider, actual = provider_override, (model_override or model)
     else:
@@ -552,4 +552,40 @@ async def embed(
     data = resp.json()
     if resp.status_code >= 400:
         raise RuntimeError(f"upstream embed error {resp.status_code}: {data}")
-    return [item["embedding"] for item in sorted(data.get("data", []), key=lambda x: x.get("index", 0))]
+    vectors = [item["embedding"] for item in sorted(data.get("data", []), key=lambda x: x.get("index", 0))]
+    raw_usage = data.get("usage") or {}
+    prompt_tokens = raw_usage.get("prompt_tokens", raw_usage.get("input_tokens"))
+    total_tokens = raw_usage.get("total_tokens")
+    output_tokens = 0
+    if total_tokens is not None and prompt_tokens is not None:
+        output_tokens = max(0, int(total_tokens) - int(prompt_tokens))
+    return vectors, {
+        "input_tokens": prompt_tokens,
+        "output_tokens": output_tokens if prompt_tokens is not None else None,
+    }
+
+
+async def embed(
+    db: AsyncSession,
+    org_id: UUID,
+    model: str,
+    texts: list[str],
+    *,
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+    provider_override: LlmProvider | None = None,
+    model_override: str | None = None,
+) -> list[list[float]]:
+    """Backward-compatible vector-only embedding facade."""
+
+    vectors, _usage = await embed_with_usage(
+        db,
+        org_id,
+        model,
+        texts,
+        dept_id=dept_id,
+        team_id=team_id,
+        provider_override=provider_override,
+        model_override=model_override,
+    )
+    return vectors

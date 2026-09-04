@@ -364,7 +364,7 @@ async def test_rag_ontology_and_upload_session_are_physically_cleaned(
 ):
     organization = await _organization(db_session, "content-purge")
     workspace = await _workspace(db_session, organization, "content-purge")
-    admin = Admin(username="lifecycle-admin", password_hash="x", role="super_admin", is_active=True)
+    admin = Admin(username="lifecycle-admin", password_hash="x", role="platform_super_admin", is_active=True)
     collection = RagCollection(
         organization_id=organization.id,
         name="Expired RAG",

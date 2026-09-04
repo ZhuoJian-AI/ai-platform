@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.ecs_runtime import EcsRuntime
+from app.models.organization import Organization
 from app.utils.crypto import hash_api_key
 
 RUNTIME_CREDENTIAL_PREFIX = "zjrt_"
@@ -32,10 +33,13 @@ async def authenticate_ecs_runtime(
         raise HTTPException(status_code=401, detail="Invalid ECS runtime credential")
     row = (
         await db.execute(
-            select(EcsRuntime).where(
+            select(EcsRuntime).join(
+                Organization, Organization.id == EcsRuntime.organization_id
+            ).where(
                 EcsRuntime.credential_prefix == raw[:STORED_PREFIX_LENGTH],
                 EcsRuntime.credential_hash == hash_api_key(raw),
                 EcsRuntime.is_active.is_(True),
+                Organization.deleted_at.is_(None),
             )
         )
     ).scalar_one_or_none()

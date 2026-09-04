@@ -111,7 +111,11 @@ def _requires_skill_file_delivery(state: dict) -> bool:
 
 
 def _is_file_output_tool(state: dict, name: str, arguments: Any) -> bool:
-    if name in {"workspace_write_file", "image_generation_tool"}:
+    if name in {
+        "workspace_create_file", "workspace_write_file", "workspace_update_file",
+        "workspace_rename_file", "workspace_move_file", "workspace_copy_file",
+        "workspace_restore_version", "image_generation_tool",
+    }:
         return True
     entry = (state.get("_dsh_tool_registry") or {}).get(name) or {}
     if entry.get("kind") == "run_skill_script":
@@ -453,12 +457,14 @@ async def stream_agent(
 async def run_general_agent(
     *, org_id: str, user: CurrentUser, task: Any, message: str, config: dict,
     session_id: str | None, db: Any, request: Any,
-    attachment_files: list[dict] | None = None, invoked_skills: list[dict] | None = None,
+    attachment_files: list[dict] | None = None, file_refs_v1: list[dict] | None = None,
+    invoked_skills: list[dict] | None = None,
 ) -> dict:
     start = time.monotonic()
     state = general_initial_state(
         org_id=org_id, user=user, task_id=str(task.id), message=message,
         session_id=session_id, config=config, attachment_files=attachment_files,
+        file_refs_v1=file_refs_v1,
         invoked_skills=invoked_skills,
     )
     deps = general_context(db, request, user, task)
@@ -490,7 +496,8 @@ async def run_general_agent(
 async def stream_general_agent(
     *, org_id: str, user: CurrentUser, task: Any, message: str, config: dict,
     session_id: str | None, db: Any, request: Any,
-    attachment_files: list[dict] | None = None, invoked_skills: list[dict] | None = None,
+    attachment_files: list[dict] | None = None, file_refs_v1: list[dict] | None = None,
+    invoked_skills: list[dict] | None = None,
 ) -> Response:
     task_id = str(task.id)
     handle = run_registry.get(task_id)
@@ -499,7 +506,8 @@ async def stream_general_agent(
         state = general_initial_state(
             org_id=org_id, user=user, task_id=task_id, message=message,
             session_id=session_id or f"sess-{uuid.uuid4()}", config=config,
-            attachment_files=attachment_files, invoked_skills=invoked_skills,
+            attachment_files=attachment_files, file_refs_v1=file_refs_v1,
+            invoked_skills=invoked_skills,
         )
         handle.bg_task = asyncio.create_task(
             _run_bg(handle, state=state, user=user, task=task), name=f"dsh_agent_run:{task_id}",

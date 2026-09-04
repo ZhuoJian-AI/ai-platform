@@ -43,7 +43,7 @@ services:
     command:
       - /bin/sh
       - -c
-      - exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}" --bind 127.0.0.1 ${DATA_PLANE_PREFIX:-10.0.10}.11 --protected-mode yes
+      - exec redis-server --appendonly yes --appendfsync everysec --requirepass "$${REDIS_PASSWORD}" --bind 127.0.0.1 ${DATA_PLANE_PREFIX:-10.0.10}.11 --protected-mode yes
     volumes:
       - redis_data:/data
     healthcheck:
@@ -83,7 +83,7 @@ services:
         limits: { cpus: "0.20", memory: 256M }
 
   skill-runner:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-skill-runner-app@sha256:56994022bab8dbc55ab7d00b305e67e114b28191b90a28ba94b93290e89ae14b
+    image: 127.0.0.1:5000/zhuojian/ai-platform-skill-runner-app@sha256:9fb2c8b9ffc1e633d57eeba7473d0d614f74543b364679daea395b12d10c6ee5
     environment:
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
       # Standard Compose runtimes honor these empty overrides. The image
@@ -187,7 +187,7 @@ services:
         limits: { cpus: "1.00", memory: 1G, pids: 256 }
 
   backend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:53dd3cbb079f6f235c0b8bf06f943cbf48339cd6e0da2bbaebc8e0905cdd1d8b
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:ad5ebd0610e34f30aa1ec4af3dcd9c5a8d6ba0f7222d74c7bc63e2f47bf2dd75
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -196,6 +196,11 @@ services:
       DATABASE_URL: ${DATABASE_URL:?}
       REDIS_URL: ${REDIS_URL:?}
       PROXY_BASE_URL: ${PUBLIC_ORIGIN:?}
+      OAUTH_ISSUER: ${PUBLIC_ORIGIN:?}
+      OAUTH_PUBLIC_BASE_URL: ${PUBLIC_ORIGIN:?}
+      OAUTH_SIGNING_KEY: ${OAUTH_SIGNING_KEY:?}
+      BROWSER_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:?}
+      TRUSTED_PROXY_CIDRS: "${TRUSTED_PROXY_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
       API_KEY_CACHE_TTL: "${API_KEY_CACHE_TTL:-60}"
       DLP_EXPOSE_MATCHES_IN_ERROR: "${DLP_EXPOSE_MATCHES_IN_ERROR:-false}"
       CODE_SKILLS_ENABLED: "${CODE_SKILLS_ENABLED:-true}"
@@ -254,6 +259,8 @@ services:
       WORKSPACE_PROXY_UPLOAD_MAX_BYTES: "${WORKSPACE_PROXY_UPLOAD_MAX_BYTES:-1048576}"
       WORKSPACE_UPLOAD_SESSION_TTL_SECONDS: "${WORKSPACE_UPLOAD_SESSION_TTL_SECONDS:-86400}"
       WORKSPACE_WEBOFFICE_ENABLED: "${WORKSPACE_WEBOFFICE_ENABLED:-true}"
+      WORKSPACE_WEBOFFICE_EDIT_ENABLED: "${WORKSPACE_WEBOFFICE_EDIT_ENABLED:-false}"
+      WORKSPACE_OFFICE_EVENT_CALLBACK_SECRET: "${WORKSPACE_OFFICE_EVENT_CALLBACK_SECRET:-}"
       WORKSPACE_WEBOFFICE_MAX_BYTES: "${WORKSPACE_WEBOFFICE_MAX_BYTES:-209715200}"
       WORKSPACE_PDF_DIRECT_PREVIEW_MAX_BYTES: "${WORKSPACE_PDF_DIRECT_PREVIEW_MAX_BYTES:-20971520}"
       WORKSPACE_PREVIEW_JOB_POLL_SECONDS: "${WORKSPACE_PREVIEW_JOB_POLL_SECONDS:-1}"
@@ -301,7 +308,7 @@ services:
         limits: { cpus: "1.50", memory: 2560M }
 
   workspace-parser:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:53dd3cbb079f6f235c0b8bf06f943cbf48339cd6e0da2bbaebc8e0905cdd1d8b
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:ad5ebd0610e34f30aa1ec4af3dcd9c5a8d6ba0f7222d74c7bc63e2f47bf2dd75
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -352,7 +359,7 @@ services:
         limits: { cpus: "0.75", memory: 1536M }
 
   workspace-preview:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-workspace-preview-app@sha256:a04ac67db26bb212a632037c18d87c9ed0f50bdb4594ecb52ff53954ddec89ea
+    image: 127.0.0.1:5000/zhuojian/ai-platform-workspace-preview-app@sha256:0525978e7785b27cc2da3037f260ecf24ec6b1cbf26a5db718a32c839a760e0b
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -402,8 +409,58 @@ services:
       resources:
         limits: { cpus: "1.00", memory: 2G, pids: 256 }
 
+  office-edit-reconcile:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:ad5ebd0610e34f30aa1ec4af3dcd9c5a8d6ba0f7222d74c7bc63e2f47bf2dd75
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?}
+      DATABASE_URL: ${DATABASE_URL:?}
+      REDIS_URL: ${REDIS_URL:?}
+      WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-true}"
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
+      STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
+      STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-https://oss-cn-hongkong.aliyuncs.com}"
+      STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
+      STORAGE_ACCELERATE_ENDPOINT: "${STORAGE_ACCELERATE_ENDPOINT:-https://oss-accelerate.aliyuncs.com}"
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      WORKSPACE_WEBOFFICE_EDIT_ENABLED: "${WORKSPACE_WEBOFFICE_EDIT_ENABLED:-false}"
+      WORKSPACE_OFFICE_EVENT_CALLBACK_SECRET: "${WORKSPACE_OFFICE_EVENT_CALLBACK_SECRET:-}"
+      WORKSPACE_OFFICE_RECONCILE_POLL_SECONDS: "${WORKSPACE_OFFICE_RECONCILE_POLL_SECONDS:-1}"
+      WORKSPACE_OFFICE_RECONCILE_LEASE_SECONDS: "${WORKSPACE_OFFICE_RECONCILE_LEASE_SECONDS:-300}"
+    command: ["python", "-m", "app.workers.office_edit_reconcile"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import pathlib,sys;
+          sys.exit(0 if b'app.workers.office_edit_reconcile' in
+          pathlib.Path('/proc/1/cmdline').read_bytes() else 1)"
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    extra_hosts:
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.10}.11"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks:
+      default:
+      data_plane:
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.10}.25
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 384M, pids: 128 }
+
   storage-lifecycle:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:53dd3cbb079f6f235c0b8bf06f943cbf48339cd6e0da2bbaebc8e0905cdd1d8b
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:ad5ebd0610e34f30aa1ec4af3dcd9c5a8d6ba0f7222d74c7bc63e2f47bf2dd75
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -455,7 +512,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   multimodal-worker:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:53dd3cbb079f6f235c0b8bf06f943cbf48339cd6e0da2bbaebc8e0905cdd1d8b
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:ad5ebd0610e34f30aa1ec4af3dcd9c5a8d6ba0f7222d74c7bc63e2f47bf2dd75
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -509,7 +566,7 @@ services:
         limits: { cpus: "1.00", memory: 1536M, pids: 256 }
 
   frontend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:544cddc0cdb58ae3d197e5dccd755acb57eb6ccf1b8c6997fd1349ecfa03c3f5
+    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:60859ffb5f2ddaae7f8ff90eafe14d008b15cb567c1089c52eb82d72d3c998cc
     labels:
       # Coolify also attaches its public application network. Pin Traefik to
       # that network so it never selects the private Compose default network.

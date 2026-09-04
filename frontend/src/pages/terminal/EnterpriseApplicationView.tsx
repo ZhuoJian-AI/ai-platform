@@ -8,7 +8,34 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ApiError, terminal, type EnterpriseApplicationLaunch, type TerminalEnterpriseApplication,
 } from '../../api/client';
-import { isPlainObject, parseBridgeContext } from '../../utils/subsystemBridge';
+import {
+  buildHostReadyMessage, isBridgeReady, parseBridgeContext, type BridgeExpectation,
+} from '../../utils/subsystemBridge';
+
+function validatedLaunchOrigin(
+  launch: EnterpriseApplicationLaunch,
+  application: TerminalEnterpriseApplication,
+): { origin: string; expectation: BridgeExpectation } | null {
+  if (launch.application_id !== application.id) throw new Error('应用启动身份不匹配');
+  if (launch.application_slug && launch.application_slug !== application.slug) throw new Error('应用启动标识不匹配');
+  const launchUrl = new URL(launch.url);
+  const localDevelopment = import.meta.env.DEV && ['localhost', '127.0.0.1', '[::1]'].includes(launchUrl.hostname);
+  if (launchUrl.protocol !== 'https:' && !localDevelopment) throw new Error('应用入口必须使用 HTTPS');
+  if (launch.allowed_origin) {
+    const declaredOrigin = new URL(launch.allowed_origin).origin;
+    if (declaredOrigin !== launch.allowed_origin || declaredOrigin !== launchUrl.origin) {
+      throw new Error('应用入口与已审核 Origin 不一致');
+    }
+  }
+  if (launch.display_mode !== 'embedded') return null;
+  if (!launch.launch_nonce || !launch.allowed_origin || launch.application_slug !== application.slug) {
+    throw new Error('内嵌应用缺少隔离启动参数，请重新登记或联系管理员');
+  }
+  return {
+    origin: launch.allowed_origin,
+    expectation: { applicationSlug: application.slug, launchNonce: launch.launch_nonce },
+  };
+}
 
 function safeContextPageUrl(launchUrl: string | undefined, route: unknown): string | undefined {
   if (!launchUrl) return undefined;
@@ -64,9 +91,11 @@ export default function EnterpriseApplicationView({
     setLaunchLoading(true);
     setLaunchError(undefined);
     try {
+      if (application.is_active === false) throw new ApiError(403, '应用已停用，不能启动');
       // Launch URLs contain single-use SSO tickets. They must never enter the
       // shared React Query cache or be reused when an iframe is remounted.
       const freshLaunch = await terminal.launchApplication(application.id, moduleKey ?? undefined);
+      validatedLaunchOrigin(freshLaunch, application);
       if (launchRequestRef.current === requestId) {
         setLaunch(freshLaunch);
         setLaunchLoading(false);
@@ -79,7 +108,7 @@ export default function EnterpriseApplicationView({
       }
       throw launchRequestError;
     }
-  }, [application.id, moduleKey]);
+  }, [application.id, application.is_active, application.slug, moduleKey]);
   const confirmationsQuery = useQuery({
     queryKey: ['application-action-confirmations'],
     queryFn: () => terminal.applicationActionConfirmations(),
@@ -115,6 +144,7 @@ export default function EnterpriseApplicationView({
     if (popup) popup.opener = null;
     try {
       const freshLaunch = await terminal.launchApplication(application.id, moduleKey ?? undefined);
+      validatedLaunchOrigin(freshLaunch, application);
       if (freshLaunch.url && popup) popup.location.replace(freshLaunch.url);
       else {
         popup?.close();
@@ -143,28 +173,35 @@ export default function EnterpriseApplicationView({
 
   useEffect(() => {
     if (!launch?.url || launch.display_mode !== 'embedded') return;
-    let allowedOrigin: string;
-    try { allowedOrigin = new URL(launch.url).origin; } catch { return; }
+    let security: { origin: string; expectation: BridgeExpectation };
+    try {
+      const result = validatedLaunchOrigin(launch, application);
+      if (!result) return;
+      security = result;
+    } catch { return; }
     const onMessage = (event: MessageEvent) => {
-      if (event.source !== frameRef.current?.contentWindow || event.origin !== allowedOrigin) return;
-      if (isPlainObject(event.data) && event.data.type === 'zhuojian:ready' && event.data.version === 1) {
-        frameRef.current?.contentWindow?.postMessage({
-          type: 'zhuojian:host-ready', version: 1,
-          allowed_module_keys: launch.module_keys ?? [],
-        }, allowedOrigin);
+      if (event.source !== frameRef.current?.contentWindow || event.origin !== security.origin) return;
+      if (isBridgeReady(event.data, security.expectation)) {
+        frameRef.current?.contentWindow?.postMessage(
+          buildHostReadyMessage(security.expectation, launch.module_keys ?? [], launch.page_keys ?? []),
+          security.origin,
+        );
         return;
       }
-      const parsed = parseBridgeContext(event.data, application.slug);
+      const parsed = parseBridgeContext(event.data, security.expectation);
       if (parsed) {
-        const moduleKey = typeof parsed.module_key === 'string' ? parsed.module_key : null;
+        const receivedModuleKey = typeof parsed.module_key === 'string' ? parsed.module_key : null;
+        const pageKey = typeof parsed.page_key === 'string' ? parsed.page_key : null;
         const allowedModules = launch.module_keys ?? [];
-        if (moduleKey && allowedModules.length > 0 && !allowedModules.includes(moduleKey)) return;
+        const allowedPages = launch.page_keys ?? [];
+        if (!receivedModuleKey || !allowedModules.includes(receivedModuleKey)) return;
+        if (!pageKey || !allowedPages.includes(pageKey)) return;
         setBridgeContext(parsed);
       }
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [application.slug, launch?.display_mode, launch?.url, frameKey]);
+  }, [application, launch, frameKey]);
 
   const submit = async () => {
     const value = prompt.trim();
@@ -200,8 +237,8 @@ export default function EnterpriseApplicationView({
 
   if (launchLoading) return <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}><Spin tip="正在校验应用权限…" /></div>;
   if (launchError) {
-    const forbidden = launchError instanceof ApiError && launchError.status === 403;
-    return <Result status={forbidden ? '403' : 'error'} title={forbidden ? '该子模块尚未完成授权' : '应用加载失败'} subTitle={forbidden ? (launchError.message || '请联系企业管理员配置可见页面和允许操作。') : (launchError instanceof Error ? launchError.message : '无法获取新的应用入口')} extra={<Button onClick={() => void requestFreshLaunch().catch(() => undefined)}>重试</Button>} />;
+    const unavailable = launchError instanceof ApiError && (launchError.status === 403 || launchError.status === 404);
+    return <Result status={unavailable ? '403' : 'error'} title={unavailable ? '应用未授权或已停用' : '应用加载失败'} subTitle={unavailable ? (launchError.message || '请联系企业管理员审核应用、页面和允许操作。') : (launchError instanceof Error ? launchError.message : '无法获取新的应用入口')} extra={<Button onClick={() => void requestFreshLaunch().catch(() => undefined)}>重试</Button>} />;
   }
   if (!launch) return <Empty description="应用入口不可用" />;
   const activeModule = launch.modules.find((item) => item.module_key === launch.module_key);
@@ -254,17 +291,16 @@ export default function EnterpriseApplicationView({
             src={launch.url}
             title={activeModule?.name || application.name}
             sandbox="allow-downloads allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
-            referrerPolicy="strict-origin"
+            allow="camera 'none'; microphone 'none'; geolocation 'none'; payment 'none'; usb 'none'; serial 'none'; clipboard-read 'none'; clipboard-write 'none'; fullscreen"
+            referrerPolicy="origin"
             onLoad={() => {
               setFrameLoaded(true);
               setBridgeContext({});
               try {
-                frameRef.current?.contentWindow?.postMessage(
-                  {
-                    type: 'zhuojian:host-ready', version: 1,
-                    allowed_module_keys: launch.module_keys ?? [],
-                  },
-                  new URL(launch.url).origin,
+                const security = validatedLaunchOrigin(launch, application);
+                if (security) frameRef.current?.contentWindow?.postMessage(
+                  buildHostReadyMessage(security.expectation, launch.module_keys ?? [], launch.page_keys ?? []),
+                  security.origin,
                 );
               } catch { /* invalid launch URL is handled by the existing fallback */ }
             }}

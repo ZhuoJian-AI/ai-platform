@@ -43,6 +43,10 @@ class ProxyState(TypedDict, total=False):
     timeout_seconds: int
     max_retries: int
 
+    # ── Redis 原子额度预留（不含任何凭证）──
+    quota_reservation: dict
+    upstream_started: bool
+
     # ── 上游响应（非流式）──
     response_body: bytes
     status_code: int

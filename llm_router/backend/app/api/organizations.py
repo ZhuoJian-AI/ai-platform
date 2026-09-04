@@ -3,12 +3,13 @@
 import base64
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-import structlog
 
 from app.auth.admin_auth import (
+    PLATFORM_ROLE,
     CurrentAdmin,
     is_org_scoped,
     require_admin,
@@ -36,9 +37,31 @@ from app.services.organization_service import (
 router = APIRouter()
 logger = structlog.get_logger()
 
+_PLATFORM_QUOTA_FIELDS = frozenset({
+    "rate_limit_rpm",
+    "rate_limit_tpm",
+    "budget_cap_tokens",
+    "budget_cap_credits",
+})
+
+
+def _assert_platform_quota_write(auth: CurrentAdmin, data: OrganizationUpdate) -> None:
+    """Keep tenant-wide quota ceilings under platform-super-admin control."""
+
+    touched = _PLATFORM_QUOTA_FIELDS.intersection(data.model_fields_set)
+    if touched and auth.role != PLATFORM_ROLE:
+        raise HTTPException(
+            status_code=403,
+            detail="Only platform super administrators may change organization AI quotas",
+        )
+
 
 @router.post("/organizations", response_model=OrganizationRead, status_code=201)
-async def create_org(data: OrganizationCreate, _: CurrentAdmin = Depends(require_admin_role), db: AsyncSession = Depends(get_db)):
+async def create_org(
+    data: OrganizationCreate,
+    _: CurrentAdmin = Depends(require_admin_role),
+    db: AsyncSession = Depends(get_db),
+):
     try:
         return await create_organization(db, data)
     except IntegrityError:
@@ -78,7 +101,11 @@ async def get_org(org_id: UUID, _: CurrentAdmin = Depends(require_org_access), d
 
 
 @router.post("/organizations/{org_id}/default", response_model=OrganizationRead)
-async def set_default_org(org_id: UUID, _: CurrentAdmin = Depends(require_admin_role), db: AsyncSession = Depends(get_db)):
+async def set_default_org(
+    org_id: UUID,
+    _: CurrentAdmin = Depends(require_admin_role),
+    db: AsyncSession = Depends(get_db),
+):
     """将指定组织设为平台默认组织（仅平台级账号）。"""
     org = await get_organization(db, org_id)
     if not org:
@@ -87,7 +114,13 @@ async def set_default_org(org_id: UUID, _: CurrentAdmin = Depends(require_admin_
 
 
 @router.patch("/organizations/{org_id}", response_model=OrganizationRead)
-async def update_org(org_id: UUID, data: OrganizationUpdate, _: CurrentAdmin = Depends(require_org_access_write), db: AsyncSession = Depends(get_db)):
+async def update_org(
+    org_id: UUID,
+    data: OrganizationUpdate,
+    auth: CurrentAdmin = Depends(require_org_access_write),
+    db: AsyncSession = Depends(get_db),
+):
+    _assert_platform_quota_write(auth, data)
     org = await get_organization(db, org_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")

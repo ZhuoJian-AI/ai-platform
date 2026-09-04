@@ -12,27 +12,59 @@ try {
   const compiled = await transform(source, { loader: 'ts', format: 'esm', target: 'es2022' });
   const modulePath = join(tempDirectory, 'subsystemBridge.mjs');
   await writeFile(modulePath, compiled.code, 'utf8');
-  const { parseBridgeContext } = await import(`${pathToFileURL(modulePath).href}?v=${Date.now()}`);
+  const { buildHostReadyMessage, isBridgeReady, parseBridgeContext } = await import(`${pathToFileURL(modulePath).href}?v=${Date.now()}`);
+
+  const expected = { applicationSlug: 'sample-review', launchNonce: 'launch-0123456789abcdef' };
 
   const selected = parseBridgeContext({
     type: 'zhuojian:context', version: 1, application_slug: 'sample-review',
+    launch_nonce: expected.launchNonce,
     module_key: 'sample_review', page_key: 'sample_review.list',
     entity_id: 'SR-1', selection: { id: 'SR-1', status: 'approved' },
     filters: { status: '' }, data_version: 3,
-  }, 'sample-review');
+  }, expected);
   assert.equal(selected?.entity_id, 'SR-1');
   assert.equal(selected?.data_version, 3);
   assert.deepEqual(selected?.selection, { id: 'SR-1', status: 'approved' });
 
   assert.equal(parseBridgeContext({
-    type: 'zhuojian:context', version: 1, application_slug: 'other', data_version: 3,
-  }, 'sample-review'), null);
+    type: 'zhuojian:context', version: 1, application_slug: 'other',
+    launch_nonce: expected.launchNonce, data_version: 3,
+  }, expected), null);
   assert.equal(parseBridgeContext({
-    type: 'zhuojian:context', version: 1, application_slug: 'sample-review', data_version: Number.NaN,
-  }, 'sample-review'), null);
+    type: 'zhuojian:context', version: 1, application_slug: 'sample-review',
+    launch_nonce: expected.launchNonce, data_version: Number.NaN,
+  }, expected), null);
   assert.equal(parseBridgeContext({
-    type: 'zhuojian:context', version: 1, application_slug: 'sample-review', selection: [],
-  }, 'sample-review'), null);
+    type: 'zhuojian:context', version: 1, application_slug: 'sample-review',
+    launch_nonce: expected.launchNonce, selection: [],
+  }, expected), null);
+  assert.equal(parseBridgeContext({
+    type: 'zhuojian:context', version: 1, application_slug: 'sample-review',
+    launch_nonce: 'stale-launch', module_key: 'sample_review', page_key: 'sample_review.list',
+  }, expected), null, 'stale iframe messages must not cross launch boundaries');
+  assert.equal(parseBridgeContext({
+    type: 'zhuojian:context', version: 1, application_slug: 'sample-review',
+    launch_nonce: expected.launchNonce, module_key: 'sample_review', page_key: 'sample_review.list',
+    unexpected: 'ignored-by-old-parser',
+  }, expected), null, 'bridge envelopes use additionalProperties=false semantics');
+  assert.equal(parseBridgeContext({
+    type: 'zhuojian:context', version: 1, application_slug: 'sample-review',
+    launch_nonce: expected.launchNonce, module_key: 'sample_review', page_key: 'sample_review.list',
+    route: '//attacker.example/path',
+  }, expected), null, 'bridge routes must remain same-origin paths');
+
+  assert.equal(isBridgeReady({
+    type: 'zhuojian:ready', version: 1, application_slug: 'sample-review', launch_nonce: expected.launchNonce,
+  }, expected), true);
+  assert.equal(isBridgeReady({
+    type: 'zhuojian:ready', version: 1, application_slug: 'sample-review', launch_nonce: 'old',
+  }, expected), false);
+  assert.deepEqual(buildHostReadyMessage(expected, ['sample_review', 'bad key'], ['sample_review.list']), {
+    type: 'zhuojian:host-ready', version: 1, application_slug: 'sample-review',
+    launch_nonce: expected.launchNonce, allowed_module_keys: ['sample_review'],
+    allowed_page_keys: ['sample_review.list'],
+  });
 
   const applicationViewSource = await readFile(
     resolve('src/pages/terminal/EnterpriseApplicationView.tsx'),
@@ -43,6 +75,11 @@ try {
     /sandbox="[^"]*allow-modals[^"]*"/,
     'embedded enterprise applications must be allowed to show confirmation dialogs',
   );
+  assert.match(applicationViewSource, /event\.source !== frameRef\.current\?\.contentWindow/);
+  assert.match(applicationViewSource, /event\.origin !== security\.origin/);
+  assert.match(applicationViewSource, /launch\.launch_nonce/);
+  assert.match(applicationViewSource, /launch\.page_keys/);
+  assert.match(applicationViewSource, /referrerPolicy="origin"/);
   assert.match(
     applicationViewSource,
     /onAskAI: \(prompt: string, pageContext: Record<string, unknown>\) => Promise<string>/,

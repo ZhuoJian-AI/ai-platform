@@ -8,6 +8,7 @@ gateway for short-lived, project-scoped signed URLs and stores only an opaque
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -41,7 +42,7 @@ def object_key_from_ref(value: str) -> str:
 
 
 def _auth_headers() -> dict[str, str]:
-    token = settings.storage_project_token.strip()
+    token = settings.storage_project_token_value
     if not token:
         raise StorageGatewayError("Storage project token is not configured")
     return {
@@ -132,10 +133,16 @@ async def upload_bytes(raw: bytes, *, filename: str, content_type: str) -> str:
     timeout = settings.storage_gateway_timeout_seconds
     try:
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            content_hash = hashlib.sha256(raw).hexdigest()
             signed = await client.post(
                 _gateway_url("/v1/uploads/sign"),
                 headers=_auth_headers(),
-                json={"filename": filename, "content_type": content_type, "size_bytes": len(raw)},
+                json={
+                    "filename": filename,
+                    "content_type": content_type,
+                    "size_bytes": len(raw),
+                    "content_hash": content_hash,
+                },
             )
             signed.raise_for_status()
             payload = signed.json()
@@ -286,7 +293,15 @@ async def complete_multipart_upload(gateway_session_id: str, parts: list[dict]) 
             )
             response.raise_for_status()
             payload = response.json()
-            return {"status": str(payload["status"]), "etag": str(payload.get("etag") or "")}
+            return {
+                "status": str(payload["status"]),
+                "etag": str(payload.get("etag") or ""),
+                "version_id": str(payload.get("version_id") or "") or None,
+                "size": int(payload.get("size") or 0),
+                "content_type": str(payload.get("content_type") or ""),
+                "integrity_algorithm": str(payload.get("integrity_algorithm") or ""),
+                "integrity_value": str(payload.get("integrity_value") or ""),
+            }
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise StorageGatewayError("OSS multipart completion failed") from exc
 
@@ -313,7 +328,15 @@ async def finalize_policy_upload(object_key: str) -> dict:
             )
             response.raise_for_status()
             payload = response.json()
-            return {"status": str(payload["status"]), "etag": str(payload.get("etag") or "")}
+            return {
+                "status": str(payload["status"]),
+                "etag": str(payload.get("etag") or ""),
+                "version_id": str(payload.get("version_id") or "") or None,
+                "size": int(payload.get("size") or 0),
+                "content_type": str(payload.get("content_type") or ""),
+                "integrity_algorithm": str(payload.get("integrity_algorithm") or ""),
+                "integrity_value": str(payload.get("integrity_value") or ""),
+            }
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise StorageGatewayError("OSS upload finalization failed") from exc
 
@@ -414,7 +437,7 @@ async def upload_path(
     return content_ref
 
 
-async def inspect_object(content_ref: str) -> dict:
+async def inspect_object(content_ref: str, *, version_id: str | None = None) -> dict:
     """Verify an uploaded object through a signed ranged GET.
 
     A one-byte range avoids loading a 100MB object in backend memory. OSS
@@ -426,10 +449,14 @@ async def inspect_object(content_ref: str) -> dict:
             signed = await client.post(
                 _gateway_url("/v1/downloads/sign"),
                 headers=_auth_headers(),
-                json={"object_key": object_key},
+                json={
+                    "object_key": object_key,
+                    **({"version_id": version_id} if version_id else {}),
+                },
             )
             signed.raise_for_status()
-            url = _internal_signed_url(str(signed.json()["url"]))
+            signed_payload = signed.json()
+            url = _internal_signed_url(str(signed_payload["url"]))
             async with client.stream("GET", url, headers={"Range": "bytes=0-0"}) as response:
                 response.raise_for_status()
                 content_range = response.headers.get("content-range", "")
@@ -439,26 +466,57 @@ async def inspect_object(content_ref: str) -> dict:
                     size = int(response.headers.get("content-length", "0"))
                 return {
                     "size": size,
-                    "etag": response.headers.get("etag", "").strip('"'),
-                    "content_type": response.headers.get("content-type", "application/octet-stream").split(";", 1)[0],
+                    "etag": str(
+                        signed_payload.get("etag") or response.headers.get("etag", "")
+                    ).strip('"'),
+                    "content_type": str(
+                        signed_payload.get("content_type")
+                        or response.headers.get("content-type", "application/octet-stream")
+                    ).split(";", 1)[0],
+                    "version_id": str(signed_payload.get("version_id") or "") or version_id,
+                    "integrity_algorithm": str(
+                        signed_payload.get("integrity_algorithm") or ""
+                    ).lower(),
+                    "integrity_value": str(signed_payload.get("integrity_value") or ""),
+                    "content_hash": str(
+                        signed_payload.get("content_hash")
+                        or response.headers.get("x-oss-meta-sha256")
+                        or response.headers.get("x-oss-meta-content-sha256")
+                        or ""
+                    ).casefold(),
+                    # These values are produced by the trusted Gateway after
+                    # inspecting the stored bytes.  Callers must never infer
+                    # an artifact format from a browser-supplied filename or
+                    # Content-Type when replacing a stable logical file.
+                    "detected_format": (
+                        str(signed_payload.get("detected_format") or "").strip().lower()
+                        or None
+                    ),
+                    "format_verified": signed_payload.get("format_verified") is True,
                 }
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise StorageGatewayError("OSS uploaded object verification failed") from exc
 
 
-async def get_signed_download(content_ref: str) -> dict:
+async def get_signed_download(content_ref: str, *, version_id: str | None = None) -> dict:
     """Issue a signed download used by internal workers and the Skill Runner."""
     object_key = object_key_from_ref(content_ref)
     try:
         async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
             response = await client.post(
-                _gateway_url("/v1/downloads/sign"), headers=_auth_headers(), json={"object_key": object_key}
+                _gateway_url("/v1/downloads/sign"),
+                headers=_auth_headers(),
+                json={
+                    "object_key": object_key,
+                    **({"version_id": version_id} if version_id else {}),
+                },
             )
             response.raise_for_status()
             payload = response.json()
             return {
                 "url": _internal_signed_url(str(payload["url"])),
                 "headers": payload.get("headers") or {},
+                "version_id": str(payload.get("version_id") or "") or None,
             }
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise StorageGatewayError("OSS download signing failed") from exc
@@ -469,6 +527,7 @@ async def get_browser_signed_download(
     *,
     expires_in_seconds: int = 15 * 60,
     filename: str | None = None,
+    version_id: str | None = None,
 ) -> dict:
     """Issue a short-lived public URL for an authenticated browser preview.
 
@@ -487,6 +546,7 @@ async def get_browser_signed_download(
                     "object_key": object_key,
                     "expires_in_seconds": expires_in_seconds,
                     **({"filename": filename} if filename else {}),
+                    **({"version_id": version_id} if version_id else {}),
                 },
             )
             response.raise_for_status()
@@ -497,15 +557,23 @@ async def get_browser_signed_download(
                 "fallback_url": fallback_url,
                 "headers": {str(k): str(v) for k, v in (payload.get("headers") or {}).items()},
                 "expires_in": int(payload.get("expires_in") or expires_in_seconds),
+                "version_id": str(payload.get("version_id") or "") or None,
             }
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise StorageGatewayError("OSS browser preview signing failed") from exc
 
 
 async def generate_weboffice_token(
-    content_ref: str, *, filename: str, user_id: str, user_name: str = "WorkspaceUser",
+    content_ref: str,
+    *,
+    filename: str,
+    user_id: str,
+    user_name: str = "WorkspaceUser",
+    file_id: str | None = None,
+    room_id: str | None = None,
+    mode: str = "preview",
 ) -> dict:
-    """Generate one read-only IMM session for the already-authorized actor."""
+    """Generate a user-scoped IMM session after business authorization."""
     object_key = object_key_from_ref(content_ref)
     try:
         async with httpx.AsyncClient(
@@ -519,6 +587,9 @@ async def generate_weboffice_token(
                     "filename": filename,
                     "user_id": user_id,
                     "user_name": user_name,
+                    **({"file_id": file_id} if file_id else {}),
+                    **({"room_id": room_id} if room_id else {}),
+                    "mode": mode,
                 },
             )
             response.raise_for_status()
@@ -530,6 +601,10 @@ async def generate_weboffice_token(
                 "access_token_expired_time": str(payload["access_token_expired_time"]),
                 "refresh_token_expired_time": str(payload["refresh_token_expired_time"]),
                 "refresh_context": str(payload["refresh_context"]),
+                "file_id": str(payload.get("file_id") or "") or file_id,
+                "mode": str(payload.get("mode") or mode),
+                "source_version_id": str(payload.get("source_version_id") or "") or None,
+                "source_revision": str(payload.get("source_revision") or "") or None,
             }
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise StorageGatewayError("WebOffice session creation failed") from exc
@@ -538,6 +613,9 @@ async def generate_weboffice_token(
 async def refresh_weboffice_token(
     content_ref: str, *, access_token: str, refresh_token: str, refresh_context: str,
     user_id: str,
+    file_id: str | None = None,
+    room_id: str | None = None,
+    mode: str = "preview",
 ) -> dict:
     """Refresh an IMM session only after the business API reauthorizes the file."""
     object_key = object_key_from_ref(content_ref)
@@ -554,6 +632,9 @@ async def refresh_weboffice_token(
                     "refresh_token": refresh_token,
                     "refresh_context": refresh_context,
                     "user_id": user_id,
+                    **({"file_id": file_id} if file_id else {}),
+                    **({"room_id": room_id} if room_id else {}),
+                    "mode": mode,
                 },
             )
             response.raise_for_status()
@@ -565,9 +646,58 @@ async def refresh_weboffice_token(
                 "access_token_expired_time": str(payload["access_token_expired_time"]),
                 "refresh_token_expired_time": str(payload["refresh_token_expired_time"]),
                 "refresh_context": str(payload["refresh_context"]),
+                "file_id": str(payload.get("file_id") or "") or file_id,
+                "mode": str(payload.get("mode") or mode),
+                "source_version_id": str(payload.get("source_version_id") or "") or None,
+                "source_revision": str(payload.get("source_revision") or "") or None,
             }
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise StorageGatewayError("WebOffice session refresh failed") from exc
+
+
+async def resolve_weboffice_version(
+    content_ref: str,
+    *,
+    file_id: str,
+    version_id: str | None = None,
+) -> dict:
+    """Resolve an exact OSS version for a previously authorized WebOffice file.
+
+    The gateway performs a single scoped HEAD.  IMM's numeric ``version`` is
+    deliberately never accepted here because it is not an OSS VersionId.
+    """
+    object_key = object_key_from_ref(content_ref)
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.storage_gateway_timeout_seconds, trust_env=False,
+        ) as client:
+            response = await client.post(
+                _gateway_url("/v1/internal/weboffice/versions/resolve"),
+                headers=_auth_headers(),
+                json={
+                    "object_key": object_key,
+                    "file_id": file_id,
+                    **({"version_id": version_id} if version_id else {}),
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return {
+                "file_id": str(payload["file_id"]),
+                "object_key": str(payload["object_key"]),
+                "version_id": str(payload.get("version_id") or "") or None,
+                "etag": str(payload.get("etag") or "").strip('"'),
+                # Preserve the Gateway contract name.  Keep ``size`` as a
+                # compatibility alias for older internal callers.
+                "size_bytes": int(payload.get("size_bytes") or 0),
+                "size": int(payload.get("size_bytes") or 0),
+                "content_type": str(payload.get("content_type") or "application/octet-stream"),
+                "content_hash": str(payload.get("content_hash") or ""),
+                "integrity_algorithm": str(payload.get("integrity_algorithm") or "").lower(),
+                "integrity_value": str(payload.get("integrity_value") or ""),
+            }
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise StorageGatewayError("WebOffice saved version reconciliation failed") from exc
 
 
 async def stream_signed_download(
@@ -600,7 +730,7 @@ async def stream_signed_download(
         raise StorageGatewayError("OSS streaming download failed") from exc
 
 
-async def download_bytes(content_ref: str) -> bytes:
+async def download_bytes(content_ref: str, *, version_id: str | None = None) -> bytes:
     object_key = object_key_from_ref(content_ref)
     timeout = settings.storage_gateway_timeout_seconds
     try:
@@ -608,7 +738,10 @@ async def download_bytes(content_ref: str) -> bytes:
             signed = await client.post(
                 _gateway_url("/v1/downloads/sign"),
                 headers=_auth_headers(),
-                json={"object_key": object_key},
+                json={
+                    "object_key": object_key,
+                    **({"version_id": version_id} if version_id else {}),
+                },
             )
             signed.raise_for_status()
             payload = signed.json()
@@ -619,7 +752,13 @@ async def download_bytes(content_ref: str) -> bytes:
         raise StorageGatewayError("OSS download failed; check storage gateway status") from exc
 
 
-async def download_to_path(content_ref: str, target: Path, *, max_bytes: int) -> int:
+async def download_to_path(
+    content_ref: str,
+    target: Path,
+    *,
+    max_bytes: int,
+    version_id: str | None = None,
+) -> int:
     """Stream an OSS object to disk without buffering it in backend memory."""
     object_key = object_key_from_ref(content_ref)
     written = 0
@@ -628,7 +767,12 @@ async def download_to_path(content_ref: str, target: Path, *, max_bytes: int) ->
             timeout=httpx.Timeout(settings.storage_gateway_timeout_seconds, read=300), trust_env=False,
         ) as client:
             signed = await client.post(
-                _gateway_url("/v1/downloads/sign"), headers=_auth_headers(), json={"object_key": object_key},
+                _gateway_url("/v1/downloads/sign"),
+                headers=_auth_headers(),
+                json={
+                    "object_key": object_key,
+                    **({"version_id": version_id} if version_id else {}),
+                },
             )
             signed.raise_for_status()
             payload = signed.json()

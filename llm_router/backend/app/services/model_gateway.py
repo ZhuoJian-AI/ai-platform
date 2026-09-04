@@ -12,7 +12,7 @@ import base64
 import io
 import re
 import wave
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from typing import Any
 from uuid import UUID
 
@@ -24,6 +24,15 @@ from app.agents import llm_client as legacy_client
 from app.config import settings
 from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.models.organization import Organization
+from app.services.ai_quota_service import (
+    QuotaBackendUnavailableError,
+    QuotaConfigurationError,
+    QuotaExceededError,
+    QuotaReservation,
+    monotonic_request_id,
+    reserve_ai_quota,
+    settle_ai_quota,
+)
 from app.services.llm_provider_service import effective_provider, get_decrypted_api_key
 
 LlmResult = legacy_client.LlmResult
@@ -46,6 +55,74 @@ class GatewayError(RuntimeError):
         self.category = category
         self.retry_after_seconds = retry_after_seconds
         super().__init__(category)
+
+
+async def _reserve_gateway_quota(
+    db: AsyncSession,
+    org_id: UUID,
+    *,
+    payload: Any,
+    max_output_tokens: int = 0,
+    input_token_upper_bound: int | None = None,
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+    supports_token_metering: bool = True,
+    operation: str,
+    provider_id: str | UUID | None = None,
+    request_id: str | None = None,
+) -> QuotaReservation:
+    try:
+        return await reserve_ai_quota(
+            db,
+            org_id,
+            payload=payload,
+            max_output_tokens=max_output_tokens,
+            input_token_upper_bound=input_token_upper_bound,
+            department_id=dept_id,
+            team_id=team_id,
+            request_id=request_id or monotonic_request_id(operation),
+            supports_token_metering=supports_token_metering,
+            provider_id=provider_id,
+            operation=operation,
+        )
+    except QuotaExceededError as exc:
+        raise GatewayError(
+            "platform_quota_exceeded",
+            retry_after_seconds=exc.retry_after_seconds,
+        ) from exc
+    except QuotaBackendUnavailableError as exc:
+        raise GatewayError("quota_backend_unavailable") from exc
+    except QuotaConfigurationError as exc:
+        raise GatewayError("quota_configuration_error") from exc
+
+
+async def _metered_result(
+    db: AsyncSession,
+    reservation: QuotaReservation,
+    operation: Callable[[], Awaitable[Any]],
+    usage: Callable[[Any], dict[str, Any] | None],
+) -> Any:
+    try:
+        result = await operation()
+    except BaseException:
+        await settle_ai_quota(reservation, None, db=db, outcome="failed")
+        raise
+    await settle_ai_quota(reservation, usage(result), db=db, outcome="completed")
+    return result
+
+
+def _bounded_max_tokens(value: int | None) -> int:
+    try:
+        maximum = (
+            settings.ai_quota_default_max_output_tokens
+            if value is None
+            else int(value)
+        )
+    except (TypeError, ValueError) as exc:
+        raise GatewayError("quota_configuration_error") from exc
+    if maximum < 0:
+        raise GatewayError("quota_configuration_error")
+    return maximum
 
 
 def _openai_headers(api_key: str) -> dict[str, str]:
@@ -98,7 +175,7 @@ def _message_content(data: dict[str, Any]) -> tuple[dict[str, Any], dict[str, An
     return message, data.get("usage") or {}
 
 
-async def transcribe_audio(
+async def _transcribe_audio_unmetered(
     db: AsyncSession,
     org_id: UUID,
     audio: bytes,
@@ -137,6 +214,7 @@ async def transcribe_audio(
         }],
         "asr_options": {"language": language},
         "stream": False,
+        "max_tokens": settings.ai_quota_default_max_output_tokens,
     }
     data = await _post_chat_json(effective_provider(provider, deployment), deployment, body)
     message, usage = _message_content(data)
@@ -152,7 +230,91 @@ async def transcribe_audio(
     }
 
 
-async def understand_audio(
+def _combined_usage(results: list[dict[str, Any]]) -> dict[str, int] | None:
+    """Combine provider counters from one internally segmented operation."""
+
+    combined: dict[str, int] = {}
+    for result in results:
+        for key, value in (result.get("usage") or {}).items():
+            if isinstance(value, int) and not isinstance(value, bool):
+                combined[key] = combined.get(key, 0) + value
+    return combined or None
+
+
+async def transcribe_audio_segments(
+    db: AsyncSession,
+    org_id: UUID,
+    audio_segments: Iterable[bytes],
+    *,
+    audio_format: str,
+    language: str = "auto",
+    model_alias: str = "default",
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+    request_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Transcribe every internal segment under one logical quota reservation."""
+
+    reservation = await _reserve_gateway_quota(
+        db,
+        org_id,
+        payload={"capability": "speech_to_text", "model": model_alias},
+        dept_id=dept_id,
+        team_id=team_id,
+        supports_token_metering=False,
+        operation="speech-to-text",
+        request_id=request_id,
+    )
+
+    async def invoke() -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for audio in audio_segments:
+            results.append(
+                await _transcribe_audio_unmetered(
+                    db,
+                    org_id,
+                    audio,
+                    audio_format=audio_format,
+                    language=language,
+                    model_alias=model_alias,
+                    dept_id=dept_id,
+                    team_id=team_id,
+                )
+            )
+        if not results:
+            raise GatewayError("missing_audio_input")
+        return results
+
+    return await _metered_result(db, reservation, invoke, _combined_usage)
+
+
+async def transcribe_audio(
+    db: AsyncSession,
+    org_id: UUID,
+    audio: bytes,
+    *,
+    audio_format: str,
+    language: str = "auto",
+    model_alias: str = "default",
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    results = await transcribe_audio_segments(
+        db,
+        org_id,
+        (audio,),
+        audio_format=audio_format,
+        language=language,
+        model_alias=model_alias,
+        dept_id=dept_id,
+        team_id=team_id,
+        request_id=request_id,
+    )
+    return results[0]
+
+
+async def _understand_audio_unmetered(
     db: AsyncSession,
     org_id: UUID,
     audio_url: str,
@@ -183,11 +345,47 @@ async def understand_audio(
                 {"type": "text", "text": question},
             ],
         }],
+        max_tokens=settings.ai_quota_default_max_output_tokens,
     )
     return result
 
 
-async def stream_understand_audio(
+async def understand_audio(
+    db: AsyncSession,
+    org_id: UUID,
+    audio_url: str,
+    question: str,
+    *,
+    model_alias: str = "default",
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+    audio_size_bytes: int | None = None,
+) -> LlmResult:
+    reservation = await _reserve_gateway_quota(
+        db,
+        org_id,
+        payload={"capability": "audio_understanding", "question": question},
+        dept_id=dept_id,
+        team_id=team_id,
+        supports_token_metering=False,
+        operation="audio-understanding",
+    )
+
+    async def invoke() -> LlmResult:
+        return await _understand_audio_unmetered(
+            db,
+            org_id,
+            audio_url,
+            question,
+            model_alias=model_alias,
+            dept_id=dept_id,
+            team_id=team_id,
+        )
+
+    return await _metered_result(db, reservation, invoke, lambda result: result.usage)
+
+
+async def _stream_understand_audio_unmetered(
     db: AsyncSession,
     org_id: UUID,
     audio_url: str,
@@ -220,11 +418,60 @@ async def stream_understand_audio(
         messages,
         provider_override=effective_provider(provider, deployment),
         model_override=deployment.model_id,
+        max_tokens=settings.ai_quota_default_max_output_tokens,
     ):
         yield event
 
 
-async def synthesize_audio(
+async def stream_understand_audio(
+    db: AsyncSession,
+    org_id: UUID,
+    audio_url: str,
+    question: str,
+    *,
+    model_alias: str = "default",
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+    audio_size_bytes: int | None = None,
+) -> AsyncIterator[tuple[str, Any, Any]]:
+    reservation = await _reserve_gateway_quota(
+        db,
+        org_id,
+        payload={"capability": "audio_understanding", "question": question},
+        dept_id=dept_id,
+        team_id=team_id,
+        supports_token_metering=False,
+        operation="stream-audio-understanding",
+    )
+    usage: dict[str, int | None] = {"input_tokens": None, "output_tokens": None}
+    completed = False
+    try:
+        async for event in _stream_understand_audio_unmetered(
+            db,
+            org_id,
+            audio_url,
+            question,
+            model_alias=model_alias,
+            dept_id=dept_id,
+            team_id=team_id,
+        ):
+            if event[0] == "usage" and isinstance(event[2], dict):
+                if event[2].get("input_tokens") is not None:
+                    usage["input_tokens"] = int(event[2]["input_tokens"])
+                if event[2].get("output_tokens") is not None:
+                    usage["output_tokens"] = int(event[2]["output_tokens"])
+            yield event
+        completed = True
+    finally:
+        await settle_ai_quota(
+            reservation,
+            usage if completed else None,
+            db=db,
+            outcome="completed" if completed else "disconnected",
+        )
+
+
+async def _synthesize_audio_unmetered(
     db: AsyncSession,
     org_id: UUID,
     *,
@@ -273,7 +520,13 @@ async def synthesize_audio(
         audio["voice"] = voice
     if design_prompt:
         audio["optimize_text_preview"] = False
-    body = {"model": deployment.model_id, "messages": messages, "audio": audio, "stream": False}
+    body = {
+        "model": deployment.model_id,
+        "messages": messages,
+        "audio": audio,
+        "stream": False,
+        "max_tokens": settings.ai_quota_default_max_output_tokens,
+    }
     data = await _post_chat_json(effective_provider(provider, deployment), deployment, body)
     message, usage = _message_content(data)
     audio_payload = message.get("audio") or {}
@@ -294,6 +547,59 @@ async def synthesize_audio(
         "model": deployment.model_id,
         "provider_voice_id": audio_payload.get("voice"),
     }
+
+
+async def synthesize_audio(
+    db: AsyncSession,
+    org_id: UUID,
+    *,
+    text: str,
+    voice: str | None = None,
+    audio_format: str = "wav",
+    style: str | None = None,
+    speed: float = 1.0,
+    design_prompt: str | None = None,
+    clone_audio: bytes | None = None,
+    clone_format: str = "wav",
+    model_alias: str = "default",
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+    request_id: str | None = None,
+) -> dict[str, Any]:
+    reservation = await _reserve_gateway_quota(
+        db,
+        org_id,
+        payload={
+            "capability": "text_to_speech",
+            "text": text,
+            "style": style,
+            "design_prompt": design_prompt,
+        },
+        dept_id=dept_id,
+        team_id=team_id,
+        supports_token_metering=False,
+        operation="speech-synthesis",
+        request_id=request_id,
+    )
+
+    async def invoke() -> dict[str, Any]:
+        return await _synthesize_audio_unmetered(
+            db,
+            org_id,
+            text=text,
+            voice=voice,
+            audio_format=audio_format,
+            style=style,
+            speed=speed,
+            design_prompt=design_prompt,
+            clone_audio=clone_audio,
+            clone_format=clone_format,
+            model_alias=model_alias,
+            dept_id=dept_id,
+            team_id=team_id,
+        )
+
+    return await _metered_result(db, reservation, invoke, lambda result: result.get("usage"))
 
 
 def _upstream_error_category(status_code: int, payload: Any = None) -> str:
@@ -696,7 +1002,7 @@ async def _chat_with_deployment(
     )
 
 
-async def chat(
+async def _chat_unmetered(
     db: AsyncSession,
     org_id: UUID,
     model_alias: str,
@@ -754,7 +1060,58 @@ async def chat(
     raise last_error
 
 
-async def stream_chat(
+async def chat(
+    db: AsyncSession,
+    org_id: UUID,
+    model_alias: str,
+    messages: list[dict],
+    *,
+    system_prompt: str = "",
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    tools: list[dict] | None = None,
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+    provider_override: LlmProvider | None = None,
+    model_override: str | None = None,
+) -> LlmResult:
+    bounded_max = _bounded_max_tokens(max_tokens)
+    reservation = await _reserve_gateway_quota(
+        db,
+        org_id,
+        payload={
+            "model": model_alias,
+            "messages": messages,
+            "system": system_prompt,
+            "tools": tools,
+        },
+        max_output_tokens=bounded_max,
+        dept_id=dept_id,
+        team_id=team_id,
+        operation="chat",
+        provider_id=getattr(provider_override, "id", None),
+    )
+
+    async def invoke() -> LlmResult:
+        return await _chat_unmetered(
+            db,
+            org_id,
+            model_alias,
+            messages,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=bounded_max,
+            tools=tools,
+            dept_id=dept_id,
+            team_id=team_id,
+            provider_override=provider_override,
+            model_override=model_override,
+        )
+
+    return await _metered_result(db, reservation, invoke, lambda result: result.usage)
+
+
+async def _stream_chat_unmetered(
     db: AsyncSession,
     org_id: UUID,
     model_alias: str,
@@ -847,6 +1204,93 @@ async def stream_chat(
                 raise
 
 
+async def stream_chat(
+    db: AsyncSession,
+    org_id: UUID,
+    model_alias: str,
+    messages: list[dict],
+    *,
+    system_prompt: str = "",
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    tools: list[dict] | None = None,
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+    provider_override: LlmProvider | None = None,
+    model_override: str | None = None,
+) -> AsyncIterator[tuple[str, Any, Any]]:
+    bounded_max = _bounded_max_tokens(max_tokens)
+    reservation = await _reserve_gateway_quota(
+        db,
+        org_id,
+        payload={
+            "model": model_alias,
+            "messages": messages,
+            "system": system_prompt,
+            "tools": tools,
+        },
+        max_output_tokens=bounded_max,
+        dept_id=dept_id,
+        team_id=team_id,
+        operation="stream-chat",
+        provider_id=getattr(provider_override, "id", None),
+    )
+    usage: dict[str, int | None] = {"input_tokens": None, "output_tokens": None}
+    completed = False
+    try:
+        async for event in _stream_chat_unmetered(
+            db,
+            org_id,
+            model_alias,
+            messages,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=bounded_max,
+            tools=tools,
+            dept_id=dept_id,
+            team_id=team_id,
+            provider_override=provider_override,
+            model_override=model_override,
+        ):
+            if event[0] == "usage" and isinstance(event[2], dict):
+                if event[2].get("input_tokens") is not None:
+                    usage["input_tokens"] = int(event[2]["input_tokens"])
+                if event[2].get("output_tokens") is not None:
+                    usage["output_tokens"] = int(event[2]["output_tokens"])
+            yield event
+        completed = True
+    finally:
+        await settle_ai_quota(
+            reservation,
+            usage if completed else None,
+            db=db,
+            outcome="completed" if completed else "disconnected",
+        )
+
+
+async def _embed_unmetered(
+    db: AsyncSession,
+    org_id: UUID,
+    model: str,
+    texts: list[str],
+    *,
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+) -> tuple[list[list[float]], dict[str, Any]]:
+    resolved = await resolve_deployment(
+        db, org_id, model, "embedding", dept_id=dept_id, team_id=team_id,
+    )
+    if not resolved:
+        await _assert_legacy_fallback_allowed(
+            db, org_id, model, "embedding", dept_id=dept_id, team_id=team_id,
+        )
+        return await legacy_client.embed_with_usage(
+            db, org_id, model, texts, dept_id=dept_id, team_id=team_id,
+        )
+    provider, deployment = resolved
+    return await _embed_with_deployment(effective_provider(provider, deployment), deployment, texts)
+
+
 async def embed(
     db: AsyncSession,
     org_id: UUID,
@@ -856,25 +1300,34 @@ async def embed(
     dept_id: str | UUID | None = None,
     team_id: str | UUID | None = None,
 ) -> list[list[float]]:
-    resolved = await resolve_deployment(
-        db, org_id, model, "embedding", dept_id=dept_id, team_id=team_id,
+    reservation = await _reserve_gateway_quota(
+        db,
+        org_id,
+        payload={"model": model, "input": texts},
+        dept_id=dept_id,
+        team_id=team_id,
+        operation="embedding",
     )
-    if not resolved:
-        await _assert_legacy_fallback_allowed(
-            db, org_id, model, "embedding", dept_id=dept_id, team_id=team_id,
+
+    async def invoke() -> tuple[list[list[float]], dict[str, Any]]:
+        return await _embed_unmetered(
+            db,
+            org_id,
+            model,
+            texts,
+            dept_id=dept_id,
+            team_id=team_id,
         )
-        return await legacy_client.embed(
-            db, org_id, model, texts, dept_id=dept_id, team_id=team_id,
-        )
-    provider, deployment = resolved
-    return await _embed_with_deployment(effective_provider(provider, deployment), deployment, texts)
+
+    vectors, _usage = await _metered_result(db, reservation, invoke, lambda result: result[1])
+    return vectors
 
 
 async def _embed_with_deployment(
     provider: LlmProvider,
     deployment: ModelDeployment,
     texts: list[str],
-) -> list[list[float]]:
+) -> tuple[list[list[float]], dict[str, Any]]:
     """Call one explicit embedding deployment and enforce its declared dimensions."""
     if provider.provider_type == "anthropic":
         raise GatewayError("capability_mismatch")
@@ -913,10 +1366,19 @@ async def _embed_with_deployment(
         if deployment.embedding_dimensions and len(vector) != deployment.embedding_dimensions:
             raise GatewayError("capability_mismatch")
         vectors.append(vector)
-    return vectors
+    raw_usage = data.get("usage") or {}
+    prompt_tokens = raw_usage.get("prompt_tokens", raw_usage.get("input_tokens"))
+    total_tokens = raw_usage.get("total_tokens")
+    output_tokens = 0
+    if total_tokens is not None and prompt_tokens is not None:
+        output_tokens = max(0, int(total_tokens) - int(prompt_tokens))
+    return vectors, {
+        "input_tokens": prompt_tokens,
+        "output_tokens": output_tokens if prompt_tokens is not None else None,
+    }
 
 
-async def generate_image(
+async def _generate_image_unmetered(
     provider: LlmProvider,
     model: str,
     *,
@@ -952,6 +1414,57 @@ async def generate_image(
         prompt=prompt, size=size, quality=quality,
         endpoint_path=deployment.endpoint_path or endpoint_path, max_bytes=max_bytes,
     )
+
+
+async def generate_image(
+    provider: LlmProvider,
+    model: str,
+    *,
+    prompt: str,
+    size: str,
+    quality: str | None = None,
+    endpoint_path: str = "/images/generations",
+    max_bytes: int = 5 * 1024 * 1024,
+    db: AsyncSession | None = None,
+    org_id: UUID | None = None,
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
+) -> ImageGenerationResult:
+    if db is None or org_id is None:
+        if not settings.is_development:
+            raise GatewayError("quota_context_required")
+        return await _generate_image_unmetered(
+            provider,
+            model,
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            endpoint_path=endpoint_path,
+            max_bytes=max_bytes,
+        )
+    reservation = await _reserve_gateway_quota(
+        db,
+        org_id,
+        payload={"model": model, "prompt": prompt, "size": size, "quality": quality},
+        dept_id=dept_id,
+        team_id=team_id,
+        supports_token_metering=False,
+        operation="image-generation",
+        provider_id=getattr(provider, "id", None),
+    )
+
+    async def invoke() -> ImageGenerationResult:
+        return await _generate_image_unmetered(
+            provider,
+            model,
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            endpoint_path=endpoint_path,
+            max_bytes=max_bytes,
+        )
+
+    return await _metered_result(db, reservation, invoke, lambda _result: None)
 
 
 async def _bailian_generate_image(
@@ -1024,7 +1537,7 @@ async def _bailian_generate_image(
     )
 
 
-async def test_deployment(
+async def _test_deployment_unmetered(
     db: AsyncSession,
     provider: LlmProvider,
     deployment: ModelDeployment,
@@ -1052,10 +1565,21 @@ async def test_deployment(
         output = (result.content or "").strip()
         if not output:
             raise GatewayError("invalid_provider_response")
-        return {"output": output[:200], "provider_id": result.provider_id}
+        return {
+            "output": output[:200],
+            "provider_id": result.provider_id,
+            "usage": result.usage,
+        }
     if capability == "embedding":
-        vectors = await _embed_with_deployment(effective, deployment, ["gateway health check"])
-        return {"dimensions": len(vectors[0]) if vectors else 0}
+        vectors, usage = await _embed_with_deployment(
+            effective,
+            deployment,
+            ["gateway health check"],
+        )
+        return {
+            "dimensions": len(vectors[0]) if vectors else 0,
+            "usage": usage,
+        }
     if capability == "image_generation":
         if deployment.adapter == "bailian_multimodal_generation":
             image = await _bailian_generate_image(
@@ -1138,6 +1662,47 @@ async def test_deployment(
             raise GatewayError("invalid_provider_response")
         return {"bytes": len(raw), "usage": usage}
     raise ValueError(f"unsupported capability: {capability}")
+
+
+async def test_deployment(
+    db: AsyncSession,
+    provider: LlmProvider,
+    deployment: ModelDeployment,
+    capability: str,
+) -> dict[str, Any]:
+    """Billable verification calls use the tenant's normal quota boundary."""
+
+    reservation = await _reserve_gateway_quota(
+        db,
+        UUID(str(provider.organization_id)),
+        payload={
+            "capability": capability,
+            "model": deployment.model_id,
+            "purpose": "provider_verification",
+        },
+        max_output_tokens=(
+            512
+            if capability in {"chat", "vision", "audio_understanding"}
+            else settings.ai_quota_default_max_output_tokens
+        ),
+        dept_id=getattr(provider, "department_id", None),
+        team_id=getattr(provider, "team_id", None),
+        supports_token_metering=capability not in {
+            "image_generation",
+            "audio_understanding",
+            "speech_to_text",
+            "text_to_speech",
+            "voice_design",
+            "voice_clone",
+        },
+        operation="provider-verification",
+        provider_id=getattr(provider, "id", None),
+    )
+
+    async def invoke() -> dict[str, Any]:
+        return await _test_deployment_unmetered(db, provider, deployment, capability)
+
+    return await _metered_result(db, reservation, invoke, lambda result: result.get("usage"))
 
 
 def _test_wav_bytes() -> bytes:

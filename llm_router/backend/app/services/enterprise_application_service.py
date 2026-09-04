@@ -26,7 +26,7 @@ from app.schemas.enterprise_application import (
     EnterpriseApplicationToolBindingInput,
     EnterpriseApplicationUpdate,
 )
-from app.services import scope_service, skill_scope_service
+from app.services import role_service, scope_service, skill_scope_service
 
 PERMISSIONS = {"view", "ai_query", "ai_create", "ai_update", "ai_delete", "ai_approve", "export"}
 OPERATION_PERMISSION = {
@@ -44,6 +44,7 @@ def _application_options():
         selectinload(EnterpriseApplication.grants),
         selectinload(EnterpriseApplication.tool_bindings),
         selectinload(EnterpriseApplication.integration),
+        selectinload(EnterpriseApplication.actions),
         with_loader_criteria(
             EnterpriseApplicationGrant,
             EnterpriseApplicationGrant.deleted_at.is_(None),
@@ -58,7 +59,7 @@ def _application_options():
 
 
 def _uses_role_authorization(row: EnterpriseApplication) -> bool:
-    """Protocol 2.4 makes roles the only native authorization subject.
+    """Contract 2.4+ makes roles the only native authorization subject.
 
     Older integrations retain their historical department/team/user grants until an
     administrator upgrades the subsystem manifest and converts those grants.
@@ -66,23 +67,153 @@ def _uses_role_authorization(row: EnterpriseApplication) -> bool:
     integration = row.integration
     if integration is None or not isinstance(integration.manifest, dict):
         return False
-    return str(integration.manifest.get("contractRevision") or "") == "2.4"
+    revision = str(integration.manifest.get("contractRevision") or "")
+    try:
+        major, minor = (int(part) for part in revision.split(".", maxsplit=1))
+    except (TypeError, ValueError):
+        return False
+    return (major, minor) >= (2, 4)
 
 
 def _matching_grants(row: EnterpriseApplication, user: CurrentUser):
     if _uses_role_authorization(row):
         role_ids = {str(role_id) for role_id in user.role_ids}
         return [
-            grant for grant in row.grants
-            if grant.deleted_at is None
-            and grant.scope_type == "role"
-            and grant.scope_id in role_ids
+            grant
+            for grant in row.grants
+            if grant.deleted_at is None and grant.scope_type == "role" and grant.scope_id in role_ids
         ]
     scopes = set(scope_service.effective_scope_set(user))
     return [
-        grant for grant in row.grants
+        grant
+        for grant in row.grants
         if grant.deleted_at is None and (grant.scope_type, grant.scope_id or None) in scopes
     ]
+
+
+def _application_role_ids(row: EnterpriseApplication) -> set[str]:
+    return {
+        str(grant.scope_id)
+        for grant in row.grants
+        if grant.scope_type == "role" and grant.scope_id and grant.deleted_at is None
+    }
+
+
+def _grant_application_permissions(grant) -> set[str]:
+    permissions = {value for value in (grant.permissions or []) if value in PERMISSIONS}
+    if any(
+        "view" in (access.get("permissions") or [])
+        for access in (grant.module_access or {}).values()
+        if isinstance(access, dict)
+    ):
+        permissions.add("view")
+    return permissions
+
+
+def _grant_module_permissions(grant, module_key: str) -> set[str]:
+    access = (grant.module_access or {}).get(module_key)
+    if isinstance(access, dict):
+        return {value for value in (access.get("permissions") or []) if value in PERMISSIONS}
+    keys = grant.module_keys or []
+    if not keys or module_key in keys:
+        return {value for value in (grant.permissions or []) if value in PERMISSIONS}
+    return set()
+
+
+def _grant_page_permissions(grant, module_key: str, page_key: str | None) -> set[str]:
+    if not page_key:
+        return _grant_module_permissions(grant, module_key)
+    access = (grant.module_access or {}).get(module_key)
+    if isinstance(access, dict):
+        page_access = access.get("page_access")
+        if isinstance(page_access, dict) and page_access:
+            page = page_access.get(page_key)
+            if not isinstance(page, dict):
+                return set()
+            return {value for value in (page.get("permissions") or []) if value in PERMISSIONS}
+        return {value for value in (access.get("permissions") or []) if value in PERMISSIONS}
+    keys = grant.module_keys or []
+    if not keys or module_key in keys:
+        return {value for value in (grant.permissions or []) if value in PERMISSIONS}
+    return set()
+
+
+def _grant_allows_action(
+    grant,
+    module_key: str,
+    page_key: str | None,
+    action_key: str,
+    required_permission: str,
+) -> bool:
+    access = (grant.module_access or {}).get(module_key)
+    if not isinstance(access, dict):
+        keys = grant.module_keys or []
+        permissions = set(grant.permissions or [])
+        return (not keys or module_key in keys) and {"view", required_permission} <= permissions
+    permissions = set(access.get("permissions") or [])
+    module_actions = access.get("action_keys")
+    if isinstance(module_actions, list) and module_actions and action_key not in module_actions:
+        return False
+    page_access = access.get("page_access")
+    if page_key and isinstance(page_access, dict) and page_access:
+        page = page_access.get(page_key)
+        if not isinstance(page, dict) or page.get("ai_enabled", True) is not True:
+            return False
+        permissions = set(page.get("permissions") or [])
+        page_actions = page.get("action_keys")
+        if not isinstance(page_actions, list) or action_key not in page_actions:
+            return False
+    return {"view", required_permission} <= permissions
+
+
+def effective_data_scope(
+    row: EnterpriseApplication,
+    user: CurrentUser,
+    module_key: str | None = None,
+    page_key: str | None = None,
+    action_key: str | None = None,
+    required_permission: str = "view",
+) -> dict:
+    """Merge scopes only from roles that independently authorize this resource.
+
+    Legacy pre-2.4 integrations retain their historical principal-wide scope during
+    the compatibility window. Native role contracts fail closed when per-role scope
+    material is missing.
+    """
+    if not row.is_active or row.deleted_at is not None:
+        return role_service.merge_effective_data_scopes([])
+    if not _uses_role_authorization(row):
+        return dict(user.effective_data_scopes or role_service.merge_effective_data_scopes([]))
+
+    authorized_role_ids: set[str] = set()
+    for grant in _matching_grants(row, user):
+        if grant.scope_type != "role" or not grant.scope_id:
+            continue
+        if action_key is not None:
+            allowed = bool(module_key) and _grant_allows_action(
+                grant,
+                module_key,
+                page_key,
+                action_key,
+                required_permission,
+            )
+        elif page_key is not None:
+            page_permissions = _grant_page_permissions(grant, module_key, page_key)
+            required_page_permissions = {required_permission}
+            if required_permission != "view":
+                required_page_permissions.add("view")
+            allowed = bool(module_key) and required_page_permissions <= page_permissions
+        elif module_key is not None:
+            allowed = required_permission in _grant_module_permissions(grant, module_key)
+        else:
+            allowed = required_permission in _grant_application_permissions(grant)
+        if allowed:
+            authorized_role_ids.add(str(grant.scope_id))
+
+    role_scopes = user.role_data_scopes or {}
+    return role_service.merge_effective_data_scopes(
+        [role_scopes[role_id] for role_id in authorized_role_ids if role_id in role_scopes]
+    )
 
 
 async def create_application(
@@ -134,19 +265,24 @@ async def update_application(
     data: EnterpriseApplicationUpdate,
 ) -> EnterpriseApplication:
     values = data.model_dump(exclude_unset=True, mode="json")
+    access_changed = "is_active" in values and values["is_active"] != row.is_active
     for field, value in values.items():
         setattr(row, field, str(value) if field in {"entry_url", "icon_url"} and value else value)
+    if access_changed:
+        await role_service.touch_users_for_role_ids(db, _application_role_ids(row))
     await db.flush()
     return await get_application(db, row.id)  # type: ignore[return-value]
 
 
 async def soft_delete_application(db: AsyncSession, row: EnterpriseApplication) -> None:
     now = datetime.now(UTC)
+    affected_role_ids = _application_role_ids(row)
     row.deleted_at = now
     for grant in row.grants:
         grant.deleted_at = now
     for binding in row.tool_bindings:
         binding.deleted_at = now
+    await role_service.touch_users_for_role_ids(db, affected_role_ids)
     await db.flush()
 
 
@@ -182,7 +318,7 @@ async def replace_grants(
                 continue
             raise HTTPException(
                 status_code=422,
-                detail="Contract 2.4 native applications can only be granted to roles",
+                detail="Contract 2.4+ native applications can only be granted to roles",
             )
         try:
             sid = await skill_scope_service.validate_scope_target(
@@ -200,10 +336,7 @@ async def replace_grants(
                 continue
             raise
         permissions = [value for value in item.permissions if value in PERMISSIONS]
-        module_access = {
-            key: access.model_dump(mode="json")
-            for key, access in item.module_access.items()
-        }
+        module_access = {key: access.model_dump(mode="json") for key, access in item.module_access.items()}
         if permissions or module_access:
             normalized[(item.scope_type, sid)] = (
                 permissions,
@@ -231,6 +364,10 @@ async def replace_grants(
                     module_access=module_access,
                 )
             )
+    affected_role_ids = {
+        str(scope_id) for scope_type, scope_id in {*current, *normalized} if scope_type == "role" and scope_id
+    }
+    await role_service.touch_users_for_role_ids(db, affected_role_ids)
     await db.flush()
     return await get_application(db, row.id)  # type: ignore[return-value]
 
@@ -327,22 +464,14 @@ async def replace_tool_bindings(
 
 async def get_application_overview(db: AsyncSession, row: EnterpriseApplication) -> dict:
     """Resolve opaque application bindings into an administrator-facing read model."""
-    active_bindings = [
-        binding for binding in row.tool_bindings
-        if binding.deleted_at is None
-    ]
+    active_bindings = [binding for binding in row.tool_bindings if binding.deleted_at is None]
     endpoint_ids = {
-        UUID(str(binding.target_id)) for binding in active_bindings
-        if binding.target_type == "tool_endpoint"
+        UUID(str(binding.target_id)) for binding in active_bindings if binding.target_type == "tool_endpoint"
     }
     interface_ids = {
-        UUID(str(binding.target_id)) for binding in active_bindings
-        if binding.target_type == "data_interface"
+        UUID(str(binding.target_id)) for binding in active_bindings if binding.target_type == "data_interface"
     }
-    skill_ids = {
-        UUID(str(binding.target_id)) for binding in active_bindings
-        if binding.target_type == "skill_folder"
-    }
+    skill_ids = {UUID(str(binding.target_id)) for binding in active_bindings if binding.target_type == "skill_folder"}
 
     endpoints: dict[str, tuple[ToolEndpoint, ToolConnector]] = {}
     if endpoint_ids:
@@ -395,40 +524,46 @@ async def get_application_overview(db: AsyncSession, row: EnterpriseApplication)
         }
         if binding.target_type == "tool_endpoint" and target_id in endpoints:
             endpoint, connector = endpoints[target_id]
-            capabilities.append({
-                **common,
-                "name": endpoint.name,
-                "source_name": connector.name,
-                "description": endpoint.description,
-                "method": endpoint.method,
-                "path": endpoint.path,
-                "target_active": endpoint.is_active and connector.is_active,
-                "health_status": connector.health_status,
-            })
+            capabilities.append(
+                {
+                    **common,
+                    "name": endpoint.name,
+                    "source_name": connector.name,
+                    "description": endpoint.description,
+                    "method": endpoint.method,
+                    "path": endpoint.path,
+                    "target_active": endpoint.is_active and connector.is_active,
+                    "health_status": connector.health_status,
+                }
+            )
         elif binding.target_type == "data_interface" and target_id in interfaces:
             interface, system = interfaces[target_id]
-            capabilities.append({
-                **common,
-                "name": interface.name,
-                "source_name": system.name,
-                "description": interface.description,
-                "method": interface.method,
-                "path": interface.path,
-                "target_active": interface.is_active and system.is_active,
-                "health_status": None,
-            })
+            capabilities.append(
+                {
+                    **common,
+                    "name": interface.name,
+                    "source_name": system.name,
+                    "description": interface.description,
+                    "method": interface.method,
+                    "path": interface.path,
+                    "target_active": interface.is_active and system.is_active,
+                    "health_status": None,
+                }
+            )
         elif binding.target_type == "skill_folder" and target_id in skills:
             skill = skills[target_id]
-            capabilities.append({
-                **common,
-                "name": skill.name,
-                "source_name": "Skill 运行包",
-                "description": None,
-                "method": None,
-                "path": None,
-                "target_active": skill.is_active,
-                "health_status": "ready" if skill.is_installed else "unavailable",
-            })
+            capabilities.append(
+                {
+                    **common,
+                    "name": skill.name,
+                    "source_name": "Skill 运行包",
+                    "description": None,
+                    "method": None,
+                    "path": None,
+                    "target_active": skill.is_active,
+                    "health_status": "ready" if skill.is_installed else "unavailable",
+                }
+            )
 
     # Connector-generated Skill wrappers and their direct endpoints may coexist.
     # Count the direct business APIs when present so the administrator does not
@@ -460,22 +595,24 @@ async def get_application_overview(db: AsyncSession, row: EnterpriseApplication)
         skill_names = {key: value.name for key, value in skills.items()}
         for call in result.scalars().all():
             failed = bool(call.error) or bool(call.status_code and call.status_code >= 400)
-            recent_calls.append({
-                "id": call.id,
-                "capability_name": (
-                    endpoint_names.get(str(call.endpoint_id))
-                    or skill_names.get(str(call.skill_id))
-                    or call.path
-                    or "未知工具"
-                ),
-                "method": call.method,
-                "path": call.path,
-                "status": "failed" if failed else "success",
-                "status_code": call.status_code,
-                "latency_ms": call.latency_ms,
-                "error": call.error,
-                "created_at": call.created_at,
-            })
+            recent_calls.append(
+                {
+                    "id": call.id,
+                    "capability_name": (
+                        endpoint_names.get(str(call.endpoint_id))
+                        or skill_names.get(str(call.skill_id))
+                        or call.path
+                        or "未知工具"
+                    ),
+                    "method": call.method,
+                    "path": call.path,
+                    "status": "failed" if failed else "success",
+                    "status_code": call.status_code,
+                    "latency_ms": call.latency_ms,
+                    "error": call.error,
+                    "created_at": call.created_at,
+                }
+            )
 
     return {
         "application_id": row.id,
@@ -493,13 +630,7 @@ def effective_permissions(row: EnterpriseApplication, user: CurrentUser) -> set[
         return set()
     permissions: set[str] = set()
     for grant in _matching_grants(row, user):
-        permissions.update(value for value in (grant.permissions or []) if value in PERMISSIONS)
-        if any(
-            "view" in (access.get("permissions") or [])
-            for access in (grant.module_access or {}).values()
-            if isinstance(access, dict)
-        ):
-            permissions.add("view")
+        permissions.update(_grant_application_permissions(grant))
     return permissions
 
 
@@ -510,11 +641,9 @@ def effective_module_keys(row: EnterpriseApplication, user: CurrentUser) -> list
         return []
     if any(not (grant.module_keys or []) and not (grant.module_access or {}) for grant in matching):
         return []
-    return sorted({
-        key
-        for grant in matching
-        for key in [*(grant.module_keys or []), *(grant.module_access or {}).keys()]
-    })
+    return sorted(
+        {key for grant in matching for key in [*(grant.module_keys or []), *(grant.module_access or {}).keys()]}
+    )
 
 
 def _manifest_read_only_claims(
@@ -537,10 +666,7 @@ def _manifest_read_only_claims(
     if not isinstance(modules, list):
         return set(), {}
     module = next(
-        (
-            item for item in modules
-            if isinstance(item, dict) and item.get("moduleKey") == module_key
-        ),
+        (item for item in modules if isinstance(item, dict) and item.get("moduleKey") == module_key),
         None,
     )
     if not isinstance(module, dict):
@@ -555,11 +681,7 @@ def _manifest_read_only_claims(
         query_action = page.get("queryActionKey")
         declared_actions = page.get("actionKeys")
         page_actions = set()
-        if (
-            isinstance(query_action, str)
-            and isinstance(declared_actions, list)
-            and query_action in declared_actions
-        ):
+        if isinstance(query_action, str) and isinstance(declared_actions, list) and query_action in declared_actions:
             page_actions.add(query_action)
             action_keys.add(query_action)
         page_access[str(page["pageKey"])] = {
@@ -569,9 +691,7 @@ def _manifest_read_only_claims(
     return action_keys, page_access
 
 
-def visible_manifest_modules(
-    row: EnterpriseApplication, user: CurrentUser
-) -> list[dict[str, str]]:
+def visible_manifest_modules(row: EnterpriseApplication, user: CurrentUser) -> list[dict[str, str]]:
     """Return the protocol-v2 modules the current user may actually launch.
 
     The terminal navigation and launch endpoint intentionally share this
@@ -581,11 +701,7 @@ def visible_manifest_modules(
     integration = row.integration
     if integration is None or integration.protocol_version < 2:
         return []
-    manifest_modules = (
-        integration.manifest.get("modules")
-        if isinstance(integration.manifest, dict)
-        else []
-    )
+    manifest_modules = integration.manifest.get("modules") if isinstance(integration.manifest, dict) else []
     if not isinstance(manifest_modules, list):
         return []
     visible: list[dict[str, str]] = []
@@ -598,34 +714,26 @@ def visible_manifest_modules(
         claims = effective_module_claims(row, user, module_key)
         if not claims.get("page_access"):
             continue
-        visible.append({
-            "module_key": module_key,
-            "name": str(item.get("name") or module_key),
-        })
+        visible.append(
+            {
+                "module_key": module_key,
+                "name": str(item.get("name") or module_key),
+            }
+        )
     return visible
 
 
-def effective_module_permissions(
-    row: EnterpriseApplication, user: CurrentUser, module_key: str
-) -> set[str]:
+def effective_module_permissions(row: EnterpriseApplication, user: CurrentUser, module_key: str) -> set[str]:
     """Resolve v2 per-module permissions while preserving v1 grants."""
     if not row.is_active or row.deleted_at is not None:
         return set()
     permissions: set[str] = set()
     for grant in _matching_grants(row, user):
-        access = (grant.module_access or {}).get(module_key)
-        if isinstance(access, dict):
-            permissions.update(value for value in (access.get("permissions") or []) if value in PERMISSIONS)
-            continue
-        keys = grant.module_keys or []
-        if not keys or module_key in keys:
-            permissions.update(value for value in (grant.permissions or []) if value in PERMISSIONS)
+        permissions.update(_grant_module_permissions(grant, module_key))
     return permissions
 
 
-def effective_module_claims(
-    row: EnterpriseApplication, user: CurrentUser, module_key: str
-) -> dict:
+def effective_module_claims(row: EnterpriseApplication, user: CurrentUser, module_key: str) -> dict:
     """Build the least-privilege page/action scope embedded in an SSO ticket.
 
     Legacy grants are projected to read-only manifest pages instead of issuing
@@ -663,18 +771,12 @@ def effective_module_claims(
                 page_key,
                 {"permissions": set(), "action_keys": set(), "ai_enabled": False},
             )
-            merged["permissions"].update(
-                value for value in (page.get("permissions") or []) if value in PERMISSIONS
-            )
-            merged["action_keys"].update(
-                str(item) for item in (page.get("action_keys") or []) if isinstance(item, str)
-            )
+            merged["permissions"].update(value for value in (page.get("permissions") or []) if value in PERMISSIONS)
+            merged["action_keys"].update(str(item) for item in (page.get("action_keys") or []) if isinstance(item, str))
             # Multiple roles are merged by union.  Missing values belong to
             # grants created before the separate AI gate and remain enabled
             # for compatibility; new admin grants always persist the flag.
-            merged["ai_enabled"] = bool(merged["ai_enabled"]) or bool(
-                page.get("ai_enabled", True)
-            )
+            merged["ai_enabled"] = bool(merged["ai_enabled"]) or bool(page.get("ai_enabled", True))
             if not isinstance(actions, list):
                 action_keys.update(merged["action_keys"])
     if matched and (unrestricted_actions or unrestricted_pages):
@@ -691,26 +793,66 @@ def effective_module_claims(
             action_keys.update(fallback_actions)
 
     launchable_page_access = {
-        page_key: access
-        for page_key, access in page_access.items()
-        if "view" in access["permissions"]
+        page_key: access for page_key, access in page_access.items() if "view" in access["permissions"]
     }
 
     # A global action allowlist must be the union of page-scoped actions. This
     # keeps malformed legacy rows from placing an unbound mutation in a ticket.
-    scoped_action_keys = {
-        action_key
-        for page in launchable_page_access.values()
-        for action_key in page["action_keys"]
-    }
+    scoped_action_keys = {action_key for page in launchable_page_access.values() for action_key in page["action_keys"]}
     action_keys.intersection_update(scoped_action_keys)
+    action_permissions = {
+        action.action_key: OPERATION_PERMISSION[action.operation]
+        for action in (getattr(row, "actions", None) or ())
+        if action.module_key == module_key
+        and action.is_active
+        and action.operation in OPERATION_PERMISSION
+    }
+    manifest = row.integration.manifest if row.integration and isinstance(row.integration.manifest, dict) else {}
+    for module in manifest.get("modules") or []:
+        if not isinstance(module, dict) or module.get("moduleKey") != module_key:
+            continue
+        for action in module.get("actions") or []:
+            if not isinstance(action, dict):
+                continue
+            action_key = action.get("actionKey")
+            operation = action.get("operation")
+            if isinstance(action_key, str) and operation in OPERATION_PERMISSION:
+                action_permissions.setdefault(action_key, OPERATION_PERMISSION[operation])
+        for page in module.get("pages") or []:
+            if not isinstance(page, dict):
+                continue
+            query_action_key = page.get("queryActionKey")
+            if isinstance(query_action_key, str):
+                action_permissions.setdefault(query_action_key, "ai_query")
+    action_keys.intersection_update(action_permissions)
     return {
         "permissions": sorted(effective_module_permissions(row, user, module_key)),
         "action_keys": sorted(action_keys),
         "page_access": {
             key: {
                 "permissions": sorted(value["permissions"]),
-                "action_keys": sorted(value["action_keys"]),
+                "action_keys": sorted(value["action_keys"] & action_keys),
+                "data_scopes": {
+                    permission: effective_data_scope(
+                        row,
+                        user,
+                        module_key,
+                        key,
+                        required_permission=permission,
+                    )
+                    for permission in sorted(value["permissions"])
+                },
+                "action_data_scopes": {
+                    action_key: effective_data_scope(
+                        row,
+                        user,
+                        module_key,
+                        key,
+                        action_key,
+                        action_permissions[action_key],
+                    )
+                    for action_key in sorted(value["action_keys"] & action_keys)
+                },
             }
             for key, value in sorted(launchable_page_access.items())
         },
@@ -727,19 +869,7 @@ def effective_page_permissions(
         return set()
     permissions: set[str] = set()
     for grant in _matching_grants(row, user):
-        access = (grant.module_access or {}).get(module_key)
-        if isinstance(access, dict):
-            page_access = access.get("page_access")
-            if isinstance(page_access, dict) and page_access:
-                page = page_access.get(page_key)
-                if isinstance(page, dict):
-                    permissions.update(value for value in (page.get("permissions") or []) if value in PERMISSIONS)
-                continue
-            permissions.update(value for value in (access.get("permissions") or []) if value in PERMISSIONS)
-            continue
-        keys = grant.module_keys or []
-        if not keys or module_key in keys:
-            permissions.update(value for value in (grant.permissions or []) if value in PERMISSIONS)
+        permissions.update(_grant_page_permissions(grant, module_key, page_key))
     return permissions
 
 
@@ -754,32 +884,16 @@ def action_allowed_for_user(
     """Require one matching grant to authorize the page, operation and action catalog entry."""
     if not row.is_active or row.deleted_at is not None:
         return False
-    for grant in _matching_grants(row, user):
-        access = (grant.module_access or {}).get(module_key)
-        if not isinstance(access, dict):
-            keys = grant.module_keys or []
-            permissions = set(grant.permissions or [])
-            if (not keys or module_key in keys) and {"view", required_permission} <= permissions:
-                return True
-            continue
-        permissions = set(access.get("permissions") or [])
-        module_actions = access.get("action_keys")
-        if isinstance(module_actions, list) and module_actions and action_key not in module_actions:
-            continue
-        page_access = access.get("page_access")
-        if page_key and isinstance(page_access, dict) and page_access:
-            page = page_access.get(page_key)
-            if not isinstance(page, dict):
-                continue
-            if page.get("ai_enabled", True) is not True:
-                continue
-            permissions = set(page.get("permissions") or [])
-            page_actions = page.get("action_keys")
-            if not isinstance(page_actions, list) or action_key not in page_actions:
-                continue
-        if {"view", required_permission} <= permissions:
-            return True
-    return False
+    return any(
+        _grant_allows_action(
+            grant,
+            module_key,
+            page_key,
+            action_key,
+            required_permission,
+        )
+        for grant in _matching_grants(row, user)
+    )
 
 
 async def assert_page_permission(

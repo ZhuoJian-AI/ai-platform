@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import re
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urljoin, urlsplit
@@ -13,7 +16,7 @@ import jwt
 import structlog
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +24,7 @@ from app.auth.user_auth import CurrentUser
 from app.config import settings
 from app.database import async_session_factory
 from app.models.department import Department
+from app.models.ecs_runtime import EcsModuleRelease
 from app.models.enterprise_application import (
     CrossDepartmentWorkItem,
     EnterpriseApplication,
@@ -29,18 +33,24 @@ from app.models.enterprise_application import (
     EnterpriseApplicationEventDelivery,
     EnterpriseApplicationEventRoute,
     EnterpriseApplicationIntegration,
+    EnterpriseApplicationSsoCode,
 )
 from app.schemas.enterprise_application import (
     EnterpriseApplicationEventRouteInput,
     EnterpriseApplicationIntegrationInput,
 )
 from app.services import scope_service, skill_scope_service
-from app.utils.crypto import decrypt_provider_api_key, encrypt_provider_api_key
-from app.utils.public_url import assert_public_http_url, same_origin
+from app.services.subsystem_access_service import assert_application_available
+from app.utils.crypto import decrypt_provider_api_key, encrypt_provider_api_key, hash_api_key
+from app.utils.public_url import assert_public_http_url, request_public_http, same_origin
 
 logger = structlog.get_logger()
 
 STABLE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+SUPPORTED_V2_REVISIONS = {"2.0", "2.1", "2.2", "2.3", "2.4", "2.5"}
+PAGE_REVISIONS = {"2.1", "2.2", "2.3", "2.4", "2.5"}
+ROLE_REVISIONS = {"2.4", "2.5"}
+SSO_CREDENTIAL_PREFIX_LENGTH = 20
 
 
 def _validate_manifest_url(application: EnterpriseApplication, value: str) -> str:
@@ -59,6 +69,95 @@ def _headers(row: EnterpriseApplicationIntegration) -> dict[str, str]:
     if row.auth_token_encrypted:
         headers["authorization"] = f"Bearer {decrypt_provider_api_key(row.auth_token_encrypted)}"
     return headers
+
+
+def credentials_complete(row: EnterpriseApplicationIntegration) -> bool:
+    """Return true only when every protocol purpose has its own credential."""
+
+    return bool(
+        row.auth_token_encrypted
+        and row.sso_exchange_credential_hash
+        and row.action_signing_secret_encrypted
+        and row.event_signing_secret_encrypted
+        and row.credential_version >= 2
+    )
+
+
+def _canonical_digest(value: object) -> str:
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+INFORMATIONAL_MANIFEST_PATHS = (
+    re.compile(r"^\$\.(?:applicationName|description)$"),
+    re.compile(r"^\$\.enterprise\.name$"),
+    re.compile(r"^\$\.modules\[\d+\]\.(?:name|description)$"),
+    re.compile(r"^\$\.modules\[\d+\]\.pages\[\d+\]\.(?:name|description)$"),
+)
+
+
+def _is_informational_manifest_path(path: str) -> bool:
+    """Only display copy is auto-approved; nested schema keys remain protected."""
+
+    return any(pattern.fullmatch(path) for pattern in INFORMATIONAL_MANIFEST_PATHS)
+
+
+def _changed_paths(before: object, after: object, path: str = "$") -> list[str]:
+    if before == after:
+        return []
+    if isinstance(before, dict) and isinstance(after, dict):
+        paths: list[str] = []
+        for key in sorted(set(before) | set(after)):
+            paths.extend(_changed_paths(before.get(key), after.get(key), f"{path}.{key}"))
+        return paths
+    if isinstance(before, list) and isinstance(after, list):
+        paths: list[str] = []
+        for index in range(max(len(before), len(after))):
+            left = before[index] if index < len(before) else None
+            right = after[index] if index < len(after) else None
+            paths.extend(_changed_paths(left, right, f"{path}[{index}]"))
+        return paths
+    return [path]
+
+
+def manifest_change_summary(before: dict, after: dict) -> list[dict]:
+    if before == after:
+        return []
+    # Security classification must inspect the complete diff. Only the list
+    # returned to the browser is capped; otherwise a sensitive field placed
+    # after many harmless copy edits could evade administrator review.
+    all_changed_paths = _changed_paths(before, after)
+    sensitive = any(not _is_informational_manifest_path(path) for path in all_changed_paths)
+    changed_paths = all_changed_paths[:200]
+    return [{
+        "securitySensitive": sensitive,
+        "changedPaths": changed_paths,
+        "changedPathCount": len(all_changed_paths),
+        "changedPathsTruncated": len(all_changed_paths) > len(changed_paths),
+        "beforeDigest": _canonical_digest(before),
+        "afterDigest": _canonical_digest(after),
+    }]
+
+
+def _manifest_requires_review(
+    active_manifest: dict,
+    incoming_contract_revision: str,
+    manifest_diff: list[dict],
+) -> bool:
+    """Review sensitive v2 updates while preserving legacy v1 sync behavior."""
+
+    if not active_manifest:
+        return incoming_contract_revision == "2.5"
+    active_contract_revision = str(active_manifest.get("contractRevision") or "1.0")
+    uses_v2_contract = (
+        incoming_contract_revision in SUPPORTED_V2_REVISIONS
+        or active_contract_revision in SUPPORTED_V2_REVISIONS
+    )
+    return uses_v2_contract and any(
+        item.get("securitySensitive") for item in manifest_diff
+    )
 
 
 def _validate_manifest_payload(
@@ -87,7 +186,7 @@ def _validate_manifest_payload(
     normalized_modules: list[dict] = []
     contract_revision = str(payload.get("contractRevision") or "2.0") if version == 2 else "1.0"
     if version == 2:
-        if contract_revision not in {"2.0", "2.1", "2.2", "2.3", "2.4"}:
+        if contract_revision not in SUPPORTED_V2_REVISIONS:
             raise ValueError("Unsupported subsystem contractRevision")
         if not modules:
             raise ValueError("Manifest modules must not be empty for protocol v2")
@@ -103,7 +202,12 @@ def _validate_manifest_payload(
             raise ValueError("Manifest auth is required for protocol v2")
         if auth.get("ssoPath") != "/api/integration/sso":
             raise ValueError("Manifest auth.ssoPath must be '/api/integration/sso'")
-        if auth.get("algorithm") != "HS256":
+        if contract_revision == "2.5":
+            if auth.get("mode") != "authorization_code":
+                raise ValueError("Manifest auth.mode must be 'authorization_code' for contractRevision 2.5")
+            if "algorithm" in auth:
+                raise ValueError("Manifest auth.algorithm is not valid for one-time SSO code exchange")
+        elif auth.get("algorithm") != "HS256":
             raise ValueError("Manifest auth.algorithm must be 'HS256'")
     for module in modules:
         if not isinstance(module, dict):
@@ -184,13 +288,17 @@ def _validate_manifest_payload(
                 "name": str(action.get("name") or action_key)[:255],
                 "operation": operation,
                 "aiEnabled": bool(action.get("aiEnabled", False)),
-                "requiresConfirmation": bool(action.get("requiresConfirmation", False)),
+                # Delete and approval transitions are always high risk.  A
+                # subsystem manifest is untrusted input and cannot opt out of
+                # the SaaS confirmation boundary for these operations.
+                "requiresConfirmation": operation in {"delete", "approve"}
+                or bool(action.get("requiresConfirmation", False)),
                 "inputSchema": action.get("inputSchema") if isinstance(action.get("inputSchema"), dict) else {},
                 "resultSchema": action.get("resultSchema") if isinstance(action.get("resultSchema"), dict) else {},
             })
         normalized_pages: list[dict] = []
         pages = module.get("pages") if isinstance(module.get("pages"), list) else []
-        if contract_revision in {"2.1", "2.2", "2.3", "2.4"} and not pages:
+        if contract_revision in PAGE_REVISIONS and not pages:
             raise ValueError(f"Module '{key}' must declare pages for contractRevision {contract_revision}")
         module_action_keys = {item["actionKey"] for item in normalized_actions}
         for page in pages:
@@ -268,7 +376,7 @@ def _validate_manifest_payload(
                     f"Module '{key}' department pageKeys must reference pages in the same module"
                 )
             normalized_department = dict(department)
-            if contract_revision == "2.4":
+            if contract_revision in ROLE_REVISIONS:
                 # v2.4 departments describe delivery/data responsibility only.
                 # Access hints moved to accessRoles and must never leak back into
                 # the platform as implicit department grants.
@@ -280,8 +388,10 @@ def _validate_manifest_payload(
             normalized_departments.append(normalized_department)
         access_roles = module.get("accessRoles") if isinstance(module.get("accessRoles"), list) else []
         normalized_access_roles: list[dict] = []
-        if contract_revision == "2.4" and not access_roles:
-            raise ValueError(f"Module '{key}' must declare accessRoles for contractRevision 2.4")
+        if contract_revision in ROLE_REVISIONS and not access_roles:
+            raise ValueError(
+                f"Module '{key}' must declare accessRoles for contractRevision {contract_revision}"
+            )
         role_keys: set[str] = set()
         module_page_keys = {item["pageKey"] for item in normalized_pages}
         department_key_set = {
@@ -346,7 +456,7 @@ def _validate_manifest_payload(
         if not payload.get("eventsUrl"):
             raise ValueError("Manifest eventsUrl is required for protocol v2")
         events_url = urljoin(manifest_url, str(payload["eventsUrl"]))
-        if contract_revision in {"2.1", "2.2", "2.3", "2.4"}:
+        if contract_revision in PAGE_REVISIONS:
             deliveries_path = payload.get("eventDeliveriesUrl")
             if deliveries_path != "/api/integration/event-deliveries":
                 raise ValueError("Manifest eventDeliveriesUrl must be '/api/integration/event-deliveries'")
@@ -431,6 +541,100 @@ async def _sync_actions(
             row.is_active = False
 
 
+async def _activate_manifest(
+    db: AsyncSession,
+    application: EnterpriseApplication,
+    integration: EnterpriseApplicationIntegration,
+    manifest: dict,
+    events_url: str,
+    version: int,
+) -> None:
+    await _sync_actions(db, application, manifest)
+    integration.manifest = manifest
+    integration.events_url = events_url
+    integration.protocol_version = version
+    integration.pending_manifest = {}
+    integration.pending_contract_revision = None
+    integration.manifest_review_status = "approved"
+
+
+async def review_pending_manifest(
+    db: AsyncSession,
+    application: EnterpriseApplication,
+    decision: str,
+    expected_manifest_digest: str,
+) -> EnterpriseApplicationIntegration:
+    release = (
+        await db.execute(
+            select(EcsModuleRelease)
+            .where(EcsModuleRelease.application_id == application.id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    integration = (
+        await db.execute(
+            select(EnterpriseApplicationIntegration)
+            .where(EnterpriseApplicationIntegration.application_id == application.id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if integration is None or integration.manifest_review_status != "pending" or not integration.pending_manifest:
+        raise HTTPException(status_code=409, detail="No subsystem manifest is awaiting review")
+    current_digest = _canonical_digest(integration.pending_manifest)
+    if not hmac.compare_digest(current_digest, expected_manifest_digest):
+        raise HTTPException(
+            status_code=409,
+            detail="The pending manifest changed; review the latest diff before deciding",
+        )
+    if release is not None and (
+        release.status != "pending_review"
+        or not release.manifest_digest
+        or not hmac.compare_digest(release.manifest_digest, current_digest)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="The pending release changed; refresh before reviewing the manifest",
+        )
+    if decision == "reject":
+        integration.pending_manifest = {}
+        integration.pending_contract_revision = None
+        integration.manifest_review_status = "rejected"
+        integration.sync_status = "healthy" if integration.manifest else "ready"
+        if release is not None and release.status == "pending_review":
+            release.status = "failed"
+            release.last_error = "Subsystem manifest was rejected by an administrator"
+        await db.flush()
+        return integration
+    if decision != "approve":
+        raise HTTPException(status_code=422, detail="Unsupported manifest review decision")
+    if not credentials_complete(integration):
+        raise HTTPException(
+            status_code=409,
+            detail="Separated subsystem credentials must be configured before approval",
+        )
+    await assert_application_available(
+        db,
+        application,
+        require_application_active=False,
+        require_release_healthy=False,
+    )
+    manifest, events_url, version = _validate_manifest(
+        application, integration.pending_manifest, integration.manifest_url
+    )
+    await _match_departments(db, application.organization_id, manifest)
+    await _activate_manifest(db, application, integration, manifest, events_url, version)
+    integration.sync_status = "healthy"
+    integration.last_manifest_sync_at = datetime.now(UTC)
+    if release is not None:
+        release.contract_revision = str(manifest.get("contractRevision") or "2.0")
+        release.manifest_digest = _canonical_digest(manifest)
+        release.last_success_commit = release.requested_commit
+        release.status = "healthy"
+        release.last_error = None
+    await db.flush()
+    return integration
+
+
 async def get_integration(db: AsyncSession, application_id: UUID | str) -> EnterpriseApplicationIntegration | None:
     return (
         await db.execute(
@@ -448,6 +652,28 @@ async def configure_integration(
 ) -> EnterpriseApplicationIntegration:
     manifest_url = _validate_manifest_url(application, str(data.manifest_url))
     row = await get_integration(db, application.id)
+    active_revision = str((row.manifest or {}).get("contractRevision") or "") if row else ""
+    pending_revision = (
+        str((row.pending_manifest or {}).get("contractRevision") or "") if row else ""
+    )
+    protects_separated_credentials = "2.5" in {active_revision, pending_revision}
+    clear_flags = (
+        data.clear_auth_token,
+        data.clear_sso_exchange_token,
+        data.clear_action_signing_secret,
+        data.clear_event_signing_secret,
+    )
+    if protects_separated_credentials and any(clear_flags) and not all(clear_flags):
+        raise HTTPException(
+            status_code=422,
+            detail="Contract 2.5 credentials can only be revoked together",
+        )
+    if protects_separated_credentials and all(clear_flags) and data.sync_enabled:
+        raise HTTPException(
+            status_code=422,
+            detail="Disable subsystem sync when revoking Contract 2.5 credentials",
+        )
+
     if row is None:
         row = EnterpriseApplicationIntegration(
             application_id=application.id,
@@ -462,10 +688,67 @@ async def configure_integration(
         row.sync_enabled = data.sync_enabled
         row.sync_status = "ready"
         row.last_error = None
+
+    credentials_changed = False
+    manifest_token = data.manifest_access_token or data.auth_token
     if data.clear_auth_token:
         row.auth_token_encrypted = None
-    elif data.auth_token:
-        row.auth_token_encrypted = encrypt_provider_api_key(data.auth_token)
+        credentials_changed = True
+    elif manifest_token:
+        row.auth_token_encrypted = encrypt_provider_api_key(manifest_token)
+        credentials_changed = True
+    if data.clear_sso_exchange_token:
+        row.sso_exchange_credential_prefix = None
+        row.sso_exchange_credential_hash = None
+        credentials_changed = True
+    elif data.sso_exchange_token:
+        row.sso_exchange_credential_prefix = data.sso_exchange_token[:SSO_CREDENTIAL_PREFIX_LENGTH]
+        row.sso_exchange_credential_hash = hash_api_key(data.sso_exchange_token)
+        credentials_changed = True
+    if data.clear_action_signing_secret:
+        row.action_signing_secret_encrypted = None
+        credentials_changed = True
+    elif data.action_signing_secret:
+        row.action_signing_secret_encrypted = encrypt_provider_api_key(data.action_signing_secret)
+        credentials_changed = True
+    if data.clear_event_signing_secret:
+        row.event_signing_secret_encrypted = None
+        credentials_changed = True
+    elif data.event_signing_secret:
+        row.event_signing_secret_encrypted = encrypt_provider_api_key(data.event_signing_secret)
+        credentials_changed = True
+    typed_manifest_credential = bool(
+        data.manifest_access_token
+        or ((row.credential_version or 1) >= 2 and not data.auth_token)
+    )
+    has_all_separated_credentials = bool(
+        row.auth_token_encrypted
+        and row.sso_exchange_credential_hash
+        and row.action_signing_secret_encrypted
+        and row.event_signing_secret_encrypted
+    )
+    if protects_separated_credentials:
+        # Once a v2.5 manifest has been accepted, the integration must never
+        # fall back to the legacy shared credential. A full revocation remains
+        # version 2 and therefore fails closed until all credentials are set.
+        row.credential_version = 2
+        if not has_all_separated_credentials:
+            row.sync_enabled = False
+    else:
+        row.credential_version = 2 if (
+            typed_manifest_credential and has_all_separated_credentials
+        ) else 1
+    if credentials_changed:
+        # Rotating any application credential invalidates every launch code that
+        # has not yet been redeemed.
+        await db.execute(
+            update(EnterpriseApplicationSsoCode)
+            .where(
+                EnterpriseApplicationSsoCode.application_id == application.id,
+                EnterpriseApplicationSsoCode.consumed_at.is_(None),
+            )
+            .values(expires_at=datetime.now(UTC))
+        )
     await db.flush()
     return row
 
@@ -486,13 +769,27 @@ async def discover_subsystem(
         headers["authorization"] = f"Bearer {auth_token}"
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(15.0, connect=5.0), follow_redirects=False
+            timeout=httpx.Timeout(15.0, connect=5.0),
+            follow_redirects=False,
+            trust_env=False,
         ) as client:
-            health_response = await client.get(health_url, headers=headers)
+            health_response = await request_public_http(
+                client,
+                "GET",
+                health_url,
+                require_https=settings.app_env != "development",
+                headers=headers,
+            )
             if 300 <= health_response.status_code < 400:
                 raise ValueError("Health endpoint must not redirect")
             health_response.raise_for_status()
-            manifest_response = await client.get(manifest_url, headers=headers)
+            manifest_response = await request_public_http(
+                client,
+                "GET",
+                manifest_url,
+                require_https=settings.app_env != "development",
+                headers=headers,
+            )
             if 300 <= manifest_response.status_code < 400:
                 raise ValueError("Manifest endpoint must not redirect")
             manifest_response.raise_for_status()
@@ -522,6 +819,7 @@ async def discover_subsystem(
 
 def integration_read(row: EnterpriseApplicationIntegration) -> dict:
     manifest = row.manifest or {}
+    pending_manifest = row.pending_manifest if row.manifest_review_status == "pending" else {}
     return {
         "application_id": row.application_id,
         "manifest_url": row.manifest_url,
@@ -533,6 +831,17 @@ def integration_read(row: EnterpriseApplicationIntegration) -> dict:
         "sync_enabled": row.sync_enabled,
         "sync_status": row.sync_status,
         "token_configured": bool(row.auth_token_encrypted),
+        "credential_version": row.credential_version,
+        "manifest_token_configured": bool(row.auth_token_encrypted),
+        "sso_exchange_configured": bool(row.sso_exchange_credential_hash),
+        "action_signing_configured": bool(row.action_signing_secret_encrypted),
+        "event_signing_configured": bool(row.event_signing_secret_encrypted),
+        "credentials_complete": credentials_complete(row),
+        "manifest_review_status": row.manifest_review_status,
+        "manifest_diff": row.manifest_diff or [],
+        "pending_contract_revision": row.pending_contract_revision,
+        "pending_manifest": pending_manifest,
+        "pending_manifest_digest": _canonical_digest(pending_manifest) if pending_manifest else None,
         "last_manifest_sync_at": row.last_manifest_sync_at,
         "last_event_sync_at": row.last_event_sync_at,
         "last_error": row.last_error,
@@ -761,7 +1070,25 @@ async def deliver_pending_events(
         route = await db.get(EnterpriseApplicationEventRoute, delivery.route_id)
         target = await db.get(EnterpriseApplication, delivery.target_application_id)
         integration = await get_integration(db, delivery.target_application_id)
-        if not event or not route or not target or not integration or not integration.auth_token_encrypted:
+        event_secret_encrypted = (
+            integration.event_signing_secret_encrypted
+            if integration is not None
+            else None
+        )
+        if (
+            integration is not None
+            and not event_secret_encrypted
+            and integration.credential_version < 2
+        ):
+            event_secret_encrypted = integration.auth_token_encrypted
+        if (
+            not event
+            or not route
+            or not target
+            or not integration
+            or not integration.sync_enabled
+            or not event_secret_encrypted
+        ):
             delivery.status = "failed"
             delivery.last_error = "Target subsystem integration is unavailable"
             continue
@@ -773,9 +1100,16 @@ async def deliver_pending_events(
             continue
         url = urljoin(target.entry_url.rstrip("/") + "/", delivery_path.lstrip("/"))
         try:
+            source = await db.get(EnterpriseApplication, event.application_id)
+            if source is None:
+                raise ValueError("Source subsystem application is unavailable")
+            source_integration = await get_integration(db, source.id)
+            if source_integration is None or not source_integration.sync_enabled:
+                raise ValueError("Source subsystem integration is unavailable")
+            await assert_application_available(db, source)
+            await assert_application_available(db, target)
             if not same_origin(target.entry_url, url):
                 raise ValueError("Event delivery endpoint left the target application origin")
-            assert_public_http_url(url, require_https=True)
             now = datetime.now(UTC)
             token = jwt.encode({
                 "iss": "zhuojian-saas",
@@ -788,8 +1122,7 @@ async def deliver_pending_events(
                 "targetModuleKey": route.target_module_key,
                 "iat": now,
                 "exp": now + timedelta(seconds=60),
-            }, decrypt_provider_api_key(integration.auth_token_encrypted), algorithm="HS256")
-            source = await db.get(EnterpriseApplication, event.application_id)
+            }, decrypt_provider_api_key(event_secret_encrypted), algorithm="HS256")
             body = {
                 "deliveryId": delivery.delivery_id,
                 "sourceApplicationSlug": source.slug if source else "unknown",
@@ -804,11 +1137,22 @@ async def deliver_pending_events(
                     "payload": event.payload or {},
                 },
             }
-            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=8.0), follow_redirects=False) as client:
-                response = await client.post(url, json=body, headers={
-                    "authorization": f"Bearer {token}",
-                    "user-agent": "ZhuoJian-Subsystem-Event/2.1",
-                })
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(20.0, connect=8.0),
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = await request_public_http(
+                    client,
+                    "POST",
+                    url,
+                    require_https=True,
+                    json=body,
+                    headers={
+                        "authorization": f"Bearer {token}",
+                        "user-agent": "ZhuoJian-Subsystem-Event/2.1",
+                    },
+                )
             if 300 <= response.status_code < 400:
                 raise RuntimeError("Subsystem event delivery endpoint must not redirect")
             response.raise_for_status()
@@ -818,7 +1162,7 @@ async def deliver_pending_events(
             delivery.response = result if isinstance(result, dict) else {"value": result}
             delivery.last_error = None
             delivered += 1
-        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+        except (HTTPException, httpx.HTTPError, ValueError, RuntimeError) as exc:
             delivery.status = "failed"
             delivery.last_error = str(exc)[:1000]
         await db.flush()
@@ -830,20 +1174,43 @@ async def sync_integration(
     application: EnterpriseApplication,
     *,
     batch_limit: int = 200,
+    allow_initial_inactive_candidate: bool = False,
 ) -> dict:
     row = await get_integration(db, application.id)
     if row is None:
         raise HTTPException(status_code=409, detail="Subsystem integration is not configured")
+    if not row.sync_enabled:
+        raise HTTPException(status_code=409, detail="Subsystem integration is disabled")
+    is_initial_candidate = bool(
+        allow_initial_inactive_candidate
+        and not application.is_active
+        and not row.manifest
+    )
+    await assert_application_available(
+        db,
+        application,
+        require_application_active=not is_initial_candidate,
+        require_release_healthy=False,
+    )
     row.sync_status = "syncing"
     row.last_error = None
     await db.flush()
     received = 0
     work_items = 0
-    delivered_events = 0
     try:
         timeout = httpx.Timeout(20.0, connect=8.0)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            manifest_response = await client.get(row.manifest_url, headers=_headers(row))
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            manifest_response = await request_public_http(
+                client,
+                "GET",
+                row.manifest_url,
+                require_https=settings.app_env != "development",
+                headers=_headers(row),
+            )
             manifest_response.raise_for_status()
             if len(manifest_response.content) > 512 * 1024:
                 raise ValueError("Manifest exceeds 512KB")
@@ -851,16 +1218,47 @@ async def sync_integration(
                 application, manifest_response.json(), row.manifest_url
             )
             await _match_departments(db, application.organization_id, manifest)
-            await _sync_actions(db, application, manifest)
-            row.manifest = manifest
-            row.events_url = events_url
-            row.protocol_version = version
-            row.last_manifest_sync_at = datetime.now(UTC)
+            contract_revision = str(manifest.get("contractRevision") or "1.0")
+            if contract_revision == "2.5" and not credentials_complete(row):
+                raise ValueError(
+                    "contractRevision 2.5 requires separate manifest, SSO, Action and Event credentials"
+                )
+            manifest_diff = manifest_change_summary(row.manifest or {}, manifest)
 
-            while received < batch_limit:
-                response = await client.get(
+            needs_review = _manifest_requires_review(
+                row.manifest or {},
+                contract_revision,
+                manifest_diff,
+            )
+            if needs_review:
+                row.manifest_diff = manifest_diff
+                row.last_manifest_sync_at = datetime.now(UTC)
+                row.pending_manifest = manifest
+                row.pending_contract_revision = contract_revision
+                row.manifest_review_status = "pending"
+                row.sync_status = "pending_review"
+                await db.flush()
+                return {
+                    "status": "pending_review",
+                    "manifest_updated": False,
+                    "received_events": 0,
+                    "created_work_items": 0,
+                    "delivered_events": 0,
+                    "cursor_sequence": row.cursor_sequence,
+                    "detail": "Subsystem manifest requires administrator review",
+                }
+
+            candidate_events: list[dict] = []
+            candidate_cursor = row.cursor_sequence
+            fetched = 0
+            while application.is_active and fetched < batch_limit:
+                requested_limit = min(100, batch_limit - fetched)
+                response = await request_public_http(
+                    client,
+                    "GET",
                     events_url,
-                    params={"after": row.cursor_sequence, "limit": min(100, batch_limit - received)},
+                    require_https=settings.app_env != "development",
+                    params={"after": candidate_cursor, "limit": requested_limit},
                     headers=_headers(row),
                 )
                 response.raise_for_status()
@@ -870,37 +1268,56 @@ async def sync_integration(
                 if not isinstance(feed, dict) or not isinstance(feed.get("items"), list):
                     raise ValueError("Event feed must return an items list")
                 items = feed["items"]
-                previous = row.cursor_sequence
+                if len(items) > requested_limit:
+                    raise ValueError("Event feed returned more items than requested")
+                previous = candidate_cursor
                 for event in items:
                     if not isinstance(event, dict):
                         raise ValueError("Event feed contains a non-object item")
                     sequence = event.get("sequence")
                     if not isinstance(sequence, int) or sequence <= previous:
                         raise ValueError("Event sequence must be strictly ascending")
+                    event_id = str(event.get("eventId") or "")
+                    event_type = str(event.get("eventType") or "")
+                    if not event_id or not event_type:
+                        raise ValueError("Event requires eventId and eventType")
+                    if len(event_id) > 200 or len(event_type) > 160:
+                        raise ValueError("Event identifier is too long")
+                    candidate_events.append(event)
+                    fetched += 1
+                    previous = sequence
+                    candidate_cursor = sequence
+                if not items or not feed.get("hasMore") or fetched >= batch_limit:
+                    break
+
+            # Apply the validated candidate atomically. No active manifest,
+            # action catalog, event, work item or cursor can be left half-updated.
+            async with db.begin_nested():
+                await _activate_manifest(db, application, row, manifest, events_url, version)
+                row.manifest_diff = manifest_diff
+                row.last_manifest_sync_at = datetime.now(UTC)
+                for event in candidate_events:
                     stored, created = await _store_event(db, row, event)
                     received += int(stored)
                     work_items += created
-                    previous = sequence
-                    row.cursor_sequence = sequence
-                if not items or not feed.get("hasMore") or received >= batch_limit:
-                    break
-            row.last_event_sync_at = datetime.now(UTC)
-            delivered_events = await deliver_pending_events(
-                db, organization_id=application.organization_id
-            )
-            row.sync_status = "healthy"
-            row.last_error = None
-            await db.flush()
+                    row.cursor_sequence = int(event["sequence"])
+                if application.is_active:
+                    row.last_event_sync_at = datetime.now(UTC)
+                row.sync_status = "healthy"
+                row.last_error = None
+                await db.flush()
         return {
             "status": "healthy",
-            "manifest_updated": True,
+            "manifest_updated": bool(manifest_diff),
             "received_events": received,
             "created_work_items": work_items,
-            "delivered_events": delivered_events,
+            # Delivery is a separate committed outbox phase in the scheduler.
+            "delivered_events": 0,
             "cursor_sequence": row.cursor_sequence,
             "detail": None,
         }
     except (httpx.HTTPError, ValueError, ValidationError) as exc:
+        await db.refresh(row)
         row.sync_status = "error"
         row.last_error = str(exc)[:1000]
         await db.flush()
@@ -909,7 +1326,7 @@ async def sync_integration(
             "manifest_updated": False,
             "received_events": received,
             "created_work_items": work_items,
-            "delivered_events": delivered_events,
+            "delivered_events": 0,
             "cursor_sequence": row.cursor_sequence,
             "detail": row.last_error,
         }
@@ -986,8 +1403,18 @@ async def run_subsystem_sync_scheduler() -> None:
                             )
                         ).scalar_one_or_none()
                         if application is not None:
-                            await sync_integration(db, application)
+                            organization_id = application.organization_id
+                            result = await sync_integration(db, application)
                             await db.commit()
+                            if result.get("status") == "healthy":
+                                # Outbound delivery runs only after the ingest
+                                # transaction commits, preserving outbox semantics.
+                                async with async_session_factory() as delivery_db:
+                                    await deliver_pending_events(
+                                        delivery_db,
+                                        organization_id=organization_id,
+                                    )
+                                    await delivery_db.commit()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - one subsystem must not stop the scheduler

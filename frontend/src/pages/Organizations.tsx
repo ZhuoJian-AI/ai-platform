@@ -1,6 +1,6 @@
 import { useState, type CSSProperties, type ReactNode } from 'react';
 import {
-  Button, Col, Modal, Row, Form, Input, InputNumber, message, Tag,
+  Alert, Button, Col, Modal, Row, Form, Input, InputNumber, message, Tag,
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, ApartmentOutlined, StarOutlined,
@@ -213,13 +213,17 @@ export default function Organizations() {
   const submitEdit = (values: Partial<Organization & Department & Team>) => {
     if (!editTarget) return;
     // 空值转为 null，避免把 undefined 当作“未传”而无法清空字段
-    const payload = {
+    const profilePayload = {
       name: values.name,
       slug: values.slug,
       description: values.description ?? null,
+    };
+    const payload = isOrgScoped() && editTarget.kind === 'org' ? profilePayload : {
+      ...profilePayload,
       rate_limit_rpm: values.rate_limit_rpm ?? null,
       rate_limit_tpm: values.rate_limit_tpm ?? null,
       budget_cap_tokens: values.budget_cap_tokens ?? null,
+      budget_cap_credits: values.budget_cap_credits ?? null,
     };
     if (editTarget.kind === 'org') updateOrg.mutate(payload);
     else if (editTarget.kind === 'dept') updateDept.mutate(payload);
@@ -231,6 +235,7 @@ export default function Organizations() {
   // 注意：局部变量勿命名为 teams/departments，会遮蔽从 api/client 导入的同名客户端
   const deptItems = deptList ?? [];
   const teamItems = teamList ?? [];
+  const enterpriseTopLevelEdit = isOrgScoped() && editTarget?.kind === 'org';
 
   return (
     <FinderShell>
@@ -263,7 +268,7 @@ export default function Organizations() {
                         <span style={{ fontWeight: active ? 600 : 400, color: active ? WB.primary : WB.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{org.name}</span>
                         {org.is_default && <Tag color="gold" style={{ marginInlineEnd: 0 }}>默认</Tag>}
                       </div>
-                      <div style={{ fontSize: FS.micro, color: WB.textAux, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{org.slug}</div>
+                      <div style={{ fontSize: FS.micro, color: WB.textAux, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{org.slug} · 月调用额度 {org.budget_cap_credits?.toLocaleString() ?? '不限'}</div>
                     </div>
                     <div className="row-actions" style={{ display: 'flex', gap: 2, flex: '0 0 auto' }}>
                       {!isOrgScoped() && !org.is_default && (
@@ -318,7 +323,7 @@ export default function Organizations() {
                     <HolderOutlined title="拖动调整部门顺序" style={{ color: WB.textAux, cursor: 'grab', flex: '0 0 auto' }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: active ? 600 : 400, color: active ? WB.primary : WB.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dept.name}</div>
-                      <div style={{ fontSize: FS.micro, color: WB.textAux, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dept.slug}</div>
+                      <div style={{ fontSize: FS.micro, color: WB.textAux, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dept.slug} · 月调用额度 {dept.budget_cap_credits?.toLocaleString() ?? '继承'}</div>
                     </div>
                     <div className="row-actions" style={{ display: 'flex', gap: 2, flex: '0 0 auto' }}>
                       <IconActionButton
@@ -364,7 +369,7 @@ export default function Organizations() {
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: active ? 600 : 400, color: active ? WB.primary : WB.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{team.name}</div>
-                      <div style={{ fontSize: FS.micro, color: WB.textAux, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{team.slug}</div>
+                      <div style={{ fontSize: FS.micro, color: WB.textAux, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{team.slug} · 月调用额度 {team.budget_cap_credits?.toLocaleString() ?? '继承'}</div>
                     </div>
                     <div className="row-actions" style={{ display: 'flex', gap: 2, flex: '0 0 auto' }}>
                       <IconActionButton icon={<EditOutlined />} title="编辑" onClick={(e) => { e.stopPropagation(); openEdit('team', team); }} />
@@ -390,9 +395,10 @@ export default function Organizations() {
             <Input.TextArea rows={2} />
           </Form.Item>
           <Row gutter={16}>
-            <Col span={8}><Form.Item name="rate_limit_rpm" label="RPM 上限"><InputNumber min={1} style={{ width: '100%' }} placeholder="不限" /></Form.Item></Col>
-            <Col span={8}><Form.Item name="rate_limit_tpm" label="TPM 上限"><InputNumber min={1} style={{ width: '100%' }} placeholder="不限" /></Form.Item></Col>
-            <Col span={8}><Form.Item name="budget_cap_tokens" label="预算(token)"><InputNumber min={0} style={{ width: '100%' }} placeholder="不限" /></Form.Item></Col>
+            <Col span={12}><Form.Item name="rate_limit_rpm" label="RPM 上限"><InputNumber min={1} style={{ width: '100%' }} placeholder="不限" /></Form.Item></Col>
+            <Col span={12}><Form.Item name="rate_limit_tpm" label="TPM 上限"><InputNumber min={1} style={{ width: '100%' }} placeholder="不限" /></Form.Item></Col>
+            <Col span={12}><Form.Item name="budget_cap_tokens" label="每月 Token 上限"><InputNumber min={0} style={{ width: '100%' }} placeholder="不限" /></Form.Item></Col>
+            <Col span={12}><Form.Item name="budget_cap_credits" label="每月调用额度" extra="一次平台 AI 操作准入扣 1；失败不退；供应商重试或故障转移不重复扣"><InputNumber min={0} precision={0} style={{ width: '100%' }} placeholder="不限" /></Form.Item></Col>
           </Row>
         </Form>
       </Modal>
@@ -407,6 +413,12 @@ export default function Organizations() {
             <Input placeholder="如：rd" />
           </Form.Item>
           <Form.Item name="description" label="描述"><Input.TextArea rows={2} /></Form.Item>
+          <Row gutter={16}>
+            <Col span={12}><Form.Item name="rate_limit_rpm" label="RPM 上限"><InputNumber min={1} style={{ width: '100%' }} placeholder="继承" /></Form.Item></Col>
+            <Col span={12}><Form.Item name="rate_limit_tpm" label="TPM 上限"><InputNumber min={1} style={{ width: '100%' }} placeholder="继承" /></Form.Item></Col>
+            <Col span={12}><Form.Item name="budget_cap_tokens" label="每月 Token 上限"><InputNumber min={0} style={{ width: '100%' }} placeholder="继承" /></Form.Item></Col>
+            <Col span={12}><Form.Item name="budget_cap_credits" label="每月调用额度" extra="一次平台 AI 操作准入扣 1；失败不退；供应商重试或故障转移不重复扣"><InputNumber min={0} precision={0} style={{ width: '100%' }} placeholder="继承" /></Form.Item></Col>
+          </Row>
         </Form>
       </Modal>
 
@@ -420,6 +432,12 @@ export default function Organizations() {
             <Input placeholder="如：ai-platform" />
           </Form.Item>
           <Form.Item name="description" label="描述"><Input.TextArea rows={2} /></Form.Item>
+          <Row gutter={16}>
+            <Col span={12}><Form.Item name="rate_limit_rpm" label="RPM 上限"><InputNumber min={1} style={{ width: '100%' }} placeholder="继承" /></Form.Item></Col>
+            <Col span={12}><Form.Item name="rate_limit_tpm" label="TPM 上限"><InputNumber min={1} style={{ width: '100%' }} placeholder="继承" /></Form.Item></Col>
+            <Col span={12}><Form.Item name="budget_cap_tokens" label="每月 Token 上限"><InputNumber min={0} style={{ width: '100%' }} placeholder="继承" /></Form.Item></Col>
+            <Col span={12}><Form.Item name="budget_cap_credits" label="每月调用额度" extra="一次平台 AI 操作准入扣 1；失败不退；供应商重试或故障转移不重复扣"><InputNumber min={0} precision={0} style={{ width: '100%' }} placeholder="继承" /></Form.Item></Col>
+          </Row>
         </Form>
       </Modal>
 
@@ -456,6 +474,7 @@ export default function Organizations() {
             rate_limit_rpm: editRecord?.rate_limit_rpm ?? undefined,
             rate_limit_tpm: editRecord?.rate_limit_tpm ?? undefined,
             budget_cap_tokens: editRecord?.budget_cap_tokens ?? undefined,
+            budget_cap_credits: editRecord?.budget_cap_credits ?? undefined,
           }}
         >
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>
@@ -465,11 +484,25 @@ export default function Organizations() {
             <Input placeholder="如：zhipu-tech" />
           </Form.Item>
           <Form.Item name="description" label="描述"><Input.TextArea rows={2} /></Form.Item>
+          {enterpriseTopLevelEdit && (
+            <Alert
+              showIcon
+              type="info"
+              message="企业顶层额度由平台超级管理员设置；企业管理员只能分配部门、团队和 API Key 子额度。"
+              style={{ marginBottom: 16 }}
+            />
+          )}
           <Row gutter={16}>
-            <Col span={8}><Form.Item name="rate_limit_rpm" label="RPM 上限"><InputNumber min={1} style={{ width: '100%' }} placeholder="不限" /></Form.Item></Col>
-            <Col span={8}><Form.Item name="rate_limit_tpm" label="TPM 上限"><InputNumber min={1} style={{ width: '100%' }} placeholder="不限" /></Form.Item></Col>
-            <Col span={8}><Form.Item name="budget_cap_tokens" label="预算(token)"><InputNumber min={0} style={{ width: '100%' }} placeholder="不限" /></Form.Item></Col>
+            <Col span={12}><Form.Item name="rate_limit_rpm" label="RPM 上限"><InputNumber min={1} style={{ width: '100%' }} placeholder="不限" disabled={enterpriseTopLevelEdit} /></Form.Item></Col>
+            <Col span={12}><Form.Item name="rate_limit_tpm" label="TPM 上限"><InputNumber min={1} style={{ width: '100%' }} placeholder="不限" disabled={enterpriseTopLevelEdit} /></Form.Item></Col>
+            <Col span={12}><Form.Item name="budget_cap_tokens" label="每月 Token 上限"><InputNumber min={0} style={{ width: '100%' }} placeholder="不限" disabled={enterpriseTopLevelEdit} /></Form.Item></Col>
+            <Col span={12}><Form.Item name="budget_cap_credits" label="每月调用额度" extra="一次平台 AI 操作准入扣 1；失败不退；供应商重试或故障转移不重复扣"><InputNumber min={0} precision={0} style={{ width: '100%' }} placeholder="不限" disabled={enterpriseTopLevelEdit} /></Form.Item></Col>
           </Row>
+          {editRecord?.budget_cap_usd != null && (
+            <Form.Item label="历史 USD 预算（只读，不再执行）">
+              <Input value={`$${editRecord.budget_cap_usd}`} disabled />
+            </Form.Item>
+          )}
         </Form>
       </Modal>
 

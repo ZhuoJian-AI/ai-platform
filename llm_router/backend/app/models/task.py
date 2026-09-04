@@ -6,7 +6,7 @@ skills / ontology / rag）。TaskMessage 为线程内逐轮消息（user/assista
 （agent_id 为空、task_id 非空）供监控台复用。
 """
 
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -57,3 +57,27 @@ class TaskMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
 
     task = relationship("Task", back_populates="messages")
+
+
+class TaskFileRef(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Durable task context index; never an authorization credential."""
+
+    __tablename__ = "task_file_refs"
+    __table_args__ = (
+        UniqueConstraint("task_id", "workspace_file_id", name="uq_task_file_ref"),
+    )
+
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    workspace_file_id: Mapped[str] = mapped_column(
+        ForeignKey("workspace_files.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspace_file_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, default="turn", index=True)
+    follow_latest: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="message")
+    workspace_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    canonical_path: Mapped[str | None] = mapped_column(String(1400), nullable=True)

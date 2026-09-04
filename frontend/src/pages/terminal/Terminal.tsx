@@ -29,7 +29,7 @@ import {
   type TerminalResources, type TerminalMemoryItem, type TerminalModels, type TerminalAgent, type WorkspaceFileListItem,
   type TerminalTaskWithMessages,
   type SkillFolderSummary, type WorkspaceFileSummary, type TerminalEnterpriseApplication,
-  type VoiceProfile,
+   type VoiceProfile, type WorkspaceFileEvent, type WorkspaceFileRefV1,
   WORKSPACE_MAX_FILE_BYTES,
 } from '../../api/client';
 import { useUserAuth } from '../../context/UserAuthContext';
@@ -50,6 +50,8 @@ import {
   removeAttachmentReferenceTokens,
   workspaceDisplayName,
 } from '../../utils/workspacePresentation';
+import { parseWorkspaceInternalUrl, workspaceFileLabel, workspaceInternalPath } from '../../utils/workspaceFileLinks';
+import { useWorkspaceFileEvents } from '../../hooks/useWorkspaceFileEvents';
 
 /** WorkBuddy 配色（参考 HTML 的 tailwind theme）。 */
 const WB = {
@@ -116,6 +118,7 @@ interface ChatMsg {
   // 该轮用户消息发送时选中的智能体名（逐次覆盖，不落库；仅本轮 live 气泡展示，历史回放无）。
   agentName?: string | null;
   attachments?: MessageAttachment[];
+  fileRefs?: MessageFileRef[];
   invokedSkills?: InvokedSkill[];
   executionVerification?: TerminalTaskMessage['execution_verification'];
   artifacts?: ArtifactOutput[];
@@ -177,6 +180,15 @@ interface MessageAttachment {
   name: string;
 }
 
+interface MessageFileRef extends WorkspaceFileRefV1 {
+  workspace_id?: string;
+  workspace_name?: string;
+  workspace_slug?: string;
+  path?: string;
+  canonical_path?: string;
+  current_version_no?: number | null;
+}
+
 interface ChatFileLink {
   id: string;
   path: string;
@@ -213,8 +225,11 @@ interface ComposerAttachment extends MessageAttachment {
 }
 
 const MAX_ATTACHMENT_BYTES = WORKSPACE_MAX_FILE_BYTES;
-const MAX_ATTACHMENTS = 10;
-const MAX_UPLOAD_CONCURRENCY = 3;
+const MAX_ATTACHMENTS = 5;
+const MAX_UPLOAD_CONCURRENCY = 2;
+const MAX_ATTACHMENT_LABEL = WORKSPACE_MAX_FILE_BYTES >= 1024 ** 3
+  ? `${Math.round(WORKSPACE_MAX_FILE_BYTES / 1024 ** 3)}GB`
+  : `${Math.round(WORKSPACE_MAX_FILE_BYTES / 1024 ** 2)}MB`;
 
 function rawAttachmentTool(name: string): ComposerAttachment['raw_tool'] {
   const lower = name.trim().toLowerCase();
@@ -251,6 +266,38 @@ function messageAttachments(metadata: Record<string, unknown> | undefined): Mess
       name: typeof value.name === 'string' && value.name ? value.name : (path.split('/').pop() || path),
     }];
   });
+}
+
+function messageFileRefs(metadata: Record<string, unknown> | undefined): MessageFileRef[] {
+  const raw = metadata?.file_refs_v1;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const value = item as Record<string, unknown>;
+    const fileId = typeof value.file_id === 'string' ? value.file_id : '';
+    const scope = value.scope === 'task' ? 'task' : value.scope === 'turn' ? 'turn' : null;
+    if (!fileId || !scope) return [];
+    return [{
+      file_id: fileId,
+      scope,
+      version_id: typeof value.version_id === 'string' ? value.version_id : undefined,
+      follow_latest: typeof value.follow_latest === 'boolean' ? value.follow_latest : undefined,
+      workspace_id: typeof value.workspace_id === 'string' ? value.workspace_id : undefined,
+      workspace_name: typeof value.workspace_name === 'string' ? value.workspace_name : undefined,
+      workspace_slug: typeof value.workspace_slug === 'string' ? value.workspace_slug : undefined,
+      path: typeof value.path === 'string' ? value.path : undefined,
+      canonical_path: typeof value.canonical_path === 'string' ? value.canonical_path : undefined,
+      current_version_no: typeof value.current_version_no === 'number' ? value.current_version_no : undefined,
+    }];
+  });
+}
+
+function messageFileRefLabel(ref: MessageFileRef): string {
+  const path = ref.canonical_path || ref.path;
+  if (!path) return `文件 ${ref.file_id.slice(0, 8)}…`;
+  if (/^[^/]+:\//.test(path)) return path;
+  const workspaceName = ref.workspace_name || ref.workspace_slug;
+  return workspaceName ? `${workspaceName}:/${path.replace(/^\/+/, '')}` : path;
 }
 
 interface BrowserFileHandle {
@@ -338,6 +385,7 @@ function restoreChat(messages: TerminalTaskMessage[]): ChatMsg[] {
           role: 'user', content: m.content, id: m.id,
           createdAt: m.created_at,
           attachments: messageAttachments(m.metadata),
+          fileRefs: messageFileRefs(m.metadata),
           invokedSkills: messageInvokedSkills(m.metadata),
         };
       }
@@ -412,6 +460,7 @@ export default function Terminal() {
   const [composerOpen, setComposerOpen] = useState(() => !taskId);
   const [input, setInput] = useState('');
   const [inputSkills, setInputSkills] = useState<InvokedSkill[]>([]);
+  const [inputFileRefs, setInputFileRefs] = useState<WorkspaceFileRefV1[]>([]);
   const [inputAttachments, setInputAttachments] = useState<ComposerAttachment[]>([]);
   const [draftAttachmentKey, setDraftAttachmentKey] = useState(() => crypto.randomUUID());
   const [config, setConfig] = useState<TaskConfig>(DEFAULT_CONFIG);
@@ -447,13 +496,27 @@ export default function Terminal() {
   // 跟随输入（选中任务后的对话）
   const [followUp, setFollowUp] = useState('');
   const [followUpSkills, setFollowUpSkills] = useState<InvokedSkill[]>([]);
+  const [followUpFileRefs, setFollowUpFileRefs] = useState<WorkspaceFileRefV1[]>([]);
   const [followUpAttachments, setFollowUpAttachments] = useState<ComposerAttachment[]>([]);
 
   // 浏览器抽屉：点击对话内容中的文件/链接时弹出，内嵌浏览器可预览网页与文档
   const [browserOpen, setBrowserOpen] = useState(false);
   const [browserHref, setBrowserHref] = useState<string | null>(null);
-  // 每次打开自增，作为抽屉 key 强制重置内部历史栈（兼容连续点击同一链接）
-  const [browserSeq, setBrowserSeq] = useState(0);
+  const [browserFileId, setBrowserFileId] = useState<string | null>(null);
+  const [browserVersionId, setBrowserVersionId] = useState<string | null>(null);
+  const [fileEventsById, setFileEventsById] = useState<Record<string, WorkspaceFileEvent>>({});
+
+  const refreshWorkspaceFileSnapshots = useCallback(() => {
+    void qc.invalidateQueries({ queryKey: ['terminal-all-ws-files'] });
+    void qc.invalidateQueries({ queryKey: ['terminal-ws-files'] });
+    void qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+  }, [qc]);
+
+  useWorkspaceFileEvents(!!user, useCallback((event) => {
+    setFileEventsById((current) => ({ ...current, [event.file_id]: event }));
+    // 文件事件只负责失效缓存；正文和权限始终重新走当前用户鉴权接口。
+    refreshWorkspaceFileSnapshots();
+  }, [refreshWorkspaceFileSnapshots]), refreshWorkspaceFileSnapshots);
 
   const { data: resources } = useQuery<TerminalResources>({
     queryKey: ['terminal-resources'], queryFn: () => terminal.resources(),
@@ -574,7 +637,12 @@ export default function Terminal() {
       setComposerOpen(false);
       return;
     }
-    setChat(restoreChat(selectedTask.messages));
+    const restoredChat = restoreChat(selectedTask.messages);
+    setChat(restoredChat);
+    const persistedRefs = restoredChat
+      .flatMap((item) => item.role === 'user' ? (item.fileRefs ?? []) : [])
+      .filter((item) => item.scope === 'task');
+    setFollowUpFileRefs(Array.from(new Map(persistedRefs.map((item) => [item.file_id, item])).values()));
     setTraceLog([]);
     setComposerOpen(false);
     // 该任务有运行中的 run（后台 detach 执行）→ 自动重连：回放已产出事件 + 续接到 final。
@@ -789,6 +857,7 @@ export default function Terminal() {
   const runStream = useCallback(async (
     taskId: string, msg: string, attachments: MessageAttachment[] = [], invokedSkills: InvokedSkill[] = [],
     applicationId?: string | null, currentPageContext: Record<string, unknown> = {},
+    fileRefs: WorkspaceFileRefV1[] = [],
   ) => {
     // 乐观载入：立即显示用户消息 + 一个「思考中」回合，第一时间给反馈
     // 该轮若选了智能体，把智能体名挂到用户消息上，气泡内按技能 chip 同款展示（逐次覆盖、不落库）。
@@ -796,7 +865,7 @@ export default function Terminal() {
     const optimisticCreatedAt = new Date().toISOString();
     setChat((c) => [
       ...c,
-      { role: 'user', content: msg, createdAt: optimisticCreatedAt, agentName: turnAgentName, attachments, invokedSkills },
+      { role: 'user', content: msg, createdAt: optimisticCreatedAt, agentName: turnAgentName, attachments, fileRefs, invokedSkills },
       { role: 'assistant', content: '', createdAt: optimisticCreatedAt, blocks: [{ kind: 'phase', index: 0 }] },
     ]);
     setTraceLog([]);
@@ -805,10 +874,14 @@ export default function Terminal() {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
+      const requestRefs = Array.from(new Map([
+        ...attachments.map((item) => ({ file_id: item.file_id, scope: 'turn' as const, follow_latest: true })),
+        ...fileRefs,
+      ].map((item) => [item.file_id, item])).values());
       const resp = await terminal.runTaskStream(
         taskId, msg, controller.signal, selectedAgentId, attachments.map((item) => item.file_id),
         invokedSkills.map((item) => item.id),
-        applicationId, currentPageContext,
+        applicationId, currentPageContext, requestRefs,
       );
       if (!resp.ok || !resp.body) {
         const err = await resp.json().catch(() => ({}));
@@ -830,6 +903,7 @@ export default function Terminal() {
       qc.invalidateQueries({ queryKey: ['terminal-memory'] });
       // 刷新工作空间文件清单：让本轮新生成的文件在对话正文里变为可点击
       qc.invalidateQueries({ queryKey: ['terminal-ws-files'] });
+      qc.invalidateQueries({ queryKey: ['terminal-all-ws-files'] });
       // 流式结束后从 DB 回填消息 id 和服务端时间。保留 live blocks，只同步持久化字段。
       try {
         const fresh = await terminal.getTask(taskId);
@@ -909,6 +983,7 @@ export default function Terminal() {
     if (id !== selectedId) {
       setFollowUpAttachments([]);
       setFollowUpSkills([]);
+      setFollowUpFileRefs([]);
     }
     if (id) {
       // 强制抓最新任务数据再切换，避免用 react-query 旧缓存回放：
@@ -950,7 +1025,7 @@ export default function Terminal() {
 
   const startTask = async () => {
     const readyAttachments = inputAttachments.filter((item) => item.status === 'ready' && item.file_id);
-    if ((!input.trim() && !readyAttachments.length && !inputSkills.length) || streaming) return;
+    if ((!input.trim() && !readyAttachments.length && !inputSkills.length && !inputFileRefs.length) || streaming) return;
     if (!config.model_alias) {
       message.warning('请先选择模型后再执行');
       setCfgContext('composer'); setCfgOpen(true);
@@ -958,7 +1033,9 @@ export default function Terminal() {
     }
     const msg = input.trim() || (readyAttachments.length
       ? `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`
-      : `请使用本轮选择的技能：${inputSkills.map((item) => item.name).join('、')}`);
+      : inputSkills.length
+        ? `请使用本轮选择的技能：${inputSkills.map((item) => item.name).join('、')}`
+        : '请处理已引用的工作空间文件');
     const attachmentSnapshots: MessageAttachment[] = readyAttachments.map(({ file_id, workspace_id, path, name }) => ({
       file_id, workspace_id, path, name,
     }));
@@ -974,9 +1051,12 @@ export default function Terminal() {
       navigate(`${terminalBasePath}/tasks/${task.id}`);
       setInput('');
       const invokedSkills = [...inputSkills];
+      const selectedFileRefs = [...inputFileRefs];
+      setFollowUpFileRefs(selectedFileRefs.filter((item) => item.scope === 'task'));
       setInputSkills([]);
+      setInputFileRefs([]);
       setInputAttachments([]);
-      await runStream(task.id, msg, attachmentSnapshots, invokedSkills, config.application_id, pageContext);
+      await runStream(task.id, msg, attachmentSnapshots, invokedSkills, config.application_id, pageContext, selectedFileRefs);
       setPageContext({});
     } catch (e) {
       message.error((e as Error).message);
@@ -985,7 +1065,7 @@ export default function Terminal() {
 
   const sendFollowUp = async () => {
     const readyAttachments = followUpAttachments.filter((item) => item.status === 'ready' && item.file_id);
-    if (!selectedId || (!followUp.trim() && !readyAttachments.length && !followUpSkills.length) || streaming) return;
+    if (!selectedId || (!followUp.trim() && !readyAttachments.length && !followUpSkills.length && !followUpFileRefs.length) || streaming) return;
     if (!taskConfig.model_alias) {
       message.warning('请先选择模型后再执行');
       setCfgContext('chat'); setCfgOpen(true);
@@ -993,7 +1073,9 @@ export default function Terminal() {
     }
     const msg = followUp.trim() || (readyAttachments.length
       ? `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`
-      : `请使用本轮选择的技能：${followUpSkills.map((item) => item.name).join('、')}`);
+      : followUpSkills.length
+        ? `请使用本轮选择的技能：${followUpSkills.map((item) => item.name).join('、')}`
+        : '请继续处理任务中引用的工作空间文件');
     const attachmentSnapshots: MessageAttachment[] = readyAttachments.map(({ file_id, workspace_id, path, name }) => ({
       file_id, workspace_id, path, name,
     }));
@@ -1001,7 +1083,7 @@ export default function Terminal() {
     setFollowUp('');
     setFollowUpSkills([]);
     setFollowUpAttachments([]);
-    await runStream(selectedId, msg, attachmentSnapshots, invokedSkills, taskConfig.application_id, {});
+    await runStream(selectedId, msg, attachmentSnapshots, invokedSkills, taskConfig.application_id, {}, followUpFileRefs);
   };
 
   const newTask = () => {
@@ -1015,9 +1097,11 @@ export default function Terminal() {
     setComposerOpen(true);
     setInput('');
     setInputSkills([]);
+    setInputFileRefs([]);
     setInputAttachments([]);
     setFollowUpAttachments([]);
     setFollowUpSkills([]);
+    setFollowUpFileRefs([]);
     setDraftAttachmentKey(crypto.randomUUID());
     setConfig(DEFAULT_CONFIG);
     setPageContext({});
@@ -1104,10 +1188,26 @@ export default function Terminal() {
     queryFn: () => terminal.listAllWsFiles(),
   });
   const fileRefMap = useMemo(() => {
-    const m = new Map<string, string>();
-    (allWsFiles ?? []).forEach((f) => m.set(f.id, workspaceDisplayName(f)));
+    const m = new Map<string, WorkspaceFileSummary>();
+    (allWsFiles ?? []).forEach((f) => m.set(f.id, f));
     return m;
   }, [allWsFiles]);
+  const loadReferencedFile = useCallback(async (fileId: string) => {
+    const file = await terminal.getWsFile(fileId);
+    const summary = fileRefMap.get(fileId);
+    const workspace = resources?.workspaces.find((item) => item.id === file.workspace_id);
+    return {
+      ...file,
+      workspace_name: file.workspace_name || summary?.workspace_name || workspace?.name,
+      workspace_slug: file.workspace_slug || summary?.workspace_slug || workspace?.slug,
+      canonical_path: file.canonical_path || summary?.canonical_path,
+      current_version_id: file.current_version_id || summary?.current_version_id,
+      current_version_no: file.current_version_no ?? summary?.current_version_no,
+      capabilities: file.capabilities || file.effective_capabilities || summary?.capabilities
+        || summary?.effective_capabilities || workspace?.capabilities,
+      internal_url: file.internal_url || summary?.internal_url,
+    };
+  }, [fileRefMap, resources?.workspaces]);
   const userName = user?.display_name || user?.username || '用户';
   const userInitial = userName.slice(0, 1);
 
@@ -1131,25 +1231,46 @@ export default function Terminal() {
   // 把对话中的链接 href 解析为浏览器抽屉可渲染的 Source。
   // http(s) → 网页/PDF/Word（按扩展名）；其余视为工作空间文件路径，按当前任务工作空间解析内容。
   const resolveHref = useCallback(async (rawHref: string): Promise<Source> => {
+    const internalRef = parseWorkspaceInternalUrl(rawHref);
+    if (internalRef) {
+      if (internalRef.versionId) return { kind: 'unsupported', href: rawHref, versionId: internalRef.versionId, note: '该历史版本暂不支持在线读取；未回退到当前版本' };
+      try { return classifyFile(await loadReferencedFile(internalRef.fileId)); }
+      catch { return { kind: 'unsupported', href: rawHref, note: '文件不存在或你没有查看权限' }; }
+    }
     if (/^https?:\/\//i.test(rawHref)) return classifyUrl(rawHref);
     // react-markdown 会把含非 ASCII 的链接目标 percent-encode（如中文文件名），
     // 工空间路径匹配前需先解码回原始中文路径。
     let href = rawHref;
     try { href = decodeURIComponent(rawHref); } catch { /* 非法转义，保留原值 */ }
-    const wsId = taskConfig.workspace_id;
-    if (!wsId) return { kind: 'unsupported', href, note: '该任务未绑定工作空间，无法解析文件路径' };
-    let files: WorkspaceFileListItem[];
-    try { files = await terminal.listWsFiles(wsId); }
-    catch { return { kind: 'unsupported', href, note: '工作空间文件读取失败' }; }
-    const f = files.find((x) => x.path === href || x.path.endsWith('/' + href) || href.endsWith(x.path));
-    if (!f) return { kind: 'unsupported', href, note: `工作空间中未找到该文件：${href}` };
-    try { return classifyFile(await terminal.getWsFile(f.id)); }
+    const files = allWsFiles ?? [];
+    const exactMatches = files.filter((file) => (
+      file.path === href || file.canonical_path === href || workspaceFileLabel(file) === href
+    ));
+    const suffixMatches = exactMatches.length ? [] : files.filter((file) => (
+      file.path.endsWith(`/${href}`) || href.endsWith(`/${file.path}`)
+    ));
+    const matches = exactMatches.length ? exactMatches : suffixMatches;
+    if (matches.length > 1) {
+      return { kind: 'unsupported', href, note: `存在多个同名文件，请使用完整工作空间路径或“复制文件地址”：${href}` };
+    }
+    const f = matches[0];
+    if (!f) return { kind: 'unsupported', href, note: `已授权工作空间中未找到该文件：${href}` };
+    try { return classifyFile(await loadReferencedFile(f.id)); }
     catch { return { kind: 'unsupported', href, note: '文件详情读取失败' }; }
-  }, [taskConfig.workspace_id]);
+  }, [allWsFiles, loadReferencedFile]);
 
   const openLink = useCallback((href: string) => {
+    const internalRef = parseWorkspaceInternalUrl(href);
+    setBrowserFileId(internalRef?.fileId ?? null);
+    setBrowserVersionId(internalRef?.versionId ?? null);
     setBrowserHref(href);
-    setBrowserSeq((n) => n + 1);
+    setBrowserOpen(true);
+  }, []);
+
+  const openWorkspaceFile = useCallback((fileId: string, versionId?: string) => {
+    setBrowserFileId(fileId);
+    setBrowserVersionId(versionId ?? null);
+    setBrowserHref(null);
     setBrowserOpen(true);
   }, []);
 
@@ -1391,6 +1512,7 @@ export default function Terminal() {
                 resources={resources}
                 homeDepartmentId={user?.department_id}
                 homeTeamId={user?.team_id}
+                fileEventsById={fileEventsById}
               />
             ) : view === 'agents' ? (
               <AgentManagerView />
@@ -1435,6 +1557,7 @@ export default function Terminal() {
               <HomeView
                 input={input} setInput={setInput}
                 invokedSkills={inputSkills} setInvokedSkills={setInputSkills}
+                fileRefs={inputFileRefs} setFileRefs={setInputFileRefs}
                 attachments={inputAttachments} setAttachments={setInputAttachments}
                 attachmentScopeKey={`草稿-${draftAttachmentKey}`}
                 placeholder={COMPOSER_PLACEHOLDER}
@@ -1457,6 +1580,7 @@ export default function Terminal() {
                 chat={chat} streaming={streaming}
                 followUp={followUp} setFollowUp={setFollowUp}
                 invokedSkills={followUpSkills} setInvokedSkills={setFollowUpSkills}
+                fileRefs={followUpFileRefs} setFileRefs={setFollowUpFileRefs}
                 attachments={followUpAttachments} setAttachments={setFollowUpAttachments}
                 onSend={sendFollowUp} onStop={stopStream}
                 onTogglePanel={() => setDrawerOpen(true)}
@@ -1468,6 +1592,7 @@ export default function Terminal() {
                 onImportSkill={() => setView('skills')}
                 selectedId={selectedId}
                 onLink={openLink}
+                onOpenFile={openWorkspaceFile}
                 fileLinks={fileLinks}
                 fileRefMap={fileRefMap}
                 fileRefsLoaded={allWsFiles !== undefined}
@@ -1652,7 +1777,10 @@ export default function Terminal() {
               {
                 key: 'files',
                 label: <span><FileTextOutlined /> 文件</span>,
-                children: <FilePanel workspaceId={taskConfig.workspace_id} />,
+                children: <FilePanel
+                  workspaceId={taskConfig.workspace_id}
+                  workspaceName={resources?.workspaces.find((item) => item.id === taskConfig.workspace_id)?.name}
+                />,
               },
               {
                 key: 'memory',
@@ -1697,11 +1825,24 @@ export default function Terminal() {
       />
 
       <BrowserDrawer
-        key={browserSeq}
         open={browserOpen}
         initialHref={browserHref}
+        initialFileId={browserFileId}
+        initialVersionId={browserVersionId}
         onClose={() => setBrowserOpen(false)}
         resolveHref={resolveHref}
+        loadFileById={loadReferencedFile}
+        loadFileVersionById={terminal.getWsFileVersion}
+        fallbackCapabilities={resources?.workspaces.find((item) => item.id === taskConfig.workspace_id)?.capabilities}
+        fallbackWorkspaceName={resources?.workspaces.find((item) => item.id === taskConfig.workspace_id)?.name}
+        saveTextFile={terminal.updateWsFile}
+        listFileVersions={terminal.listWsFileVersions}
+        restoreFileVersion={terminal.restoreWsFileVersion}
+        onFileChanged={() => {
+          qc.invalidateQueries({ queryKey: ['terminal-ws-files'] });
+          qc.invalidateQueries({ queryKey: ['terminal-all-ws-files'] });
+          qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+        }}
         loadOriginalPreview={terminal.getWsFileOriginalPreview}
         loadOriginalPreviewSource={terminal.getWsFileOriginalPreviewSource}
         loadPdfPreviewInfo={terminal.getWsFilePdfPreviewInfo}
@@ -1715,6 +1856,11 @@ export default function Terminal() {
         getSpreadsheetPage={terminal.getWsFileSpreadsheetPage}
         loadDownloadTicket={terminal.getWsFileDownloadTicket}
         loadOriginalFile={terminal.downloadWsFile}
+        createEditSession={terminal.createWsFileEditSession}
+        refreshEditSession={terminal.refreshWsFileEditSession}
+        closeEditSession={terminal.closeWsFileEditSession}
+        getEditSessionStatus={terminal.getWsFileEditSessionStatus}
+        externalVersionEvent={browserFileId ? fileEventsById[browserFileId] ?? null : null}
       />
 
       {/* 删除任务确认：界面正中模态框 */}
@@ -1760,12 +1906,14 @@ type PendingMention = { node: Text; offset: number; ch: '/' | '@' };
 const MentionInput = forwardRef<ComposerInputHandle, {
   value: string; onChange: (v: string) => void; placeholder: string;
   onSkillIdsChange: (ids: string[]) => void;
+  onFileIdsChange: (ids: string[]) => void;
   onPasteFiles: (event: ReactClipboardEvent<HTMLDivElement>) => void;
   onSlashTrigger: () => void; onAtTrigger: () => void; onSubmit: () => void; canSend: boolean;
 }>(function MentionInput(props, ref) {
   const { value, placeholder } = props;
   const editorRef = useRef<HTMLDivElement>(null);
   const pendingRef = useRef<PendingMention | null>(null);
+  const composingRef = useRef(false);
   // 最新 props via ref，避免 useImperativeHandle 闭包陈旧
   const latest = useRef(props);
   latest.current = props;
@@ -1802,12 +1950,16 @@ const MentionInput = forwardRef<ComposerInputHandle, {
       el.querySelectorAll<HTMLElement>('[data-skill-id]'),
       (chip) => chip.getAttribute('data-skill-id') || '',
     ).filter((id, index, all) => !!id && all.indexOf(id) === index));
+    latest.current.onFileIdsChange(Array.from(
+      el.querySelectorAll<HTMLElement>('[data-file-id]'),
+      (chip) => chip.getAttribute('data-file-id') || '',
+    ).filter((id, index, all) => !!id && all.indexOf(id) === index));
   };
 
   // 外部 value 变化（如发送后清空）→ 重建 DOM
   useEffect(() => {
     const el = editorRef.current;
-    if (!el) return;
+    if (!el || composingRef.current) return;
     if (serialize(el) !== value) el.textContent = value;
   }, [value]);
 
@@ -1895,7 +2047,8 @@ const MentionInput = forwardRef<ComposerInputHandle, {
   };
 
   const handleInput = (e: FormEvent<HTMLDivElement>) => {
-    const ev = e.nativeEvent as InputEvent;
+    const ev = e.nativeEvent as InputEvent & { isComposing?: boolean };
+    if (composingRef.current || ev.isComposing) return;
     if (ev.inputType === 'insertText') {
       if (ev.data === '/') detectTrigger('/');
       else if (ev.data === '@') detectTrigger('@');
@@ -1904,6 +2057,7 @@ const MentionInput = forwardRef<ComposerInputHandle, {
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (composingRef.current || (e.nativeEvent as { isComposing?: boolean }).isComposing) return;
     if (e.key === 'Backspace') {
       // 光标紧贴 chip 之前时，整体删除该 chip（跨浏览器确定性，技能/文件皆然）
       const sel = window.getSelection();
@@ -1941,6 +2095,11 @@ const MentionInput = forwardRef<ComposerInputHandle, {
       onInput={handleInput}
       onKeyDown={handleKeyDown}
       onPaste={props.onPasteFiles}
+      onCompositionStart={() => { composingRef.current = true; }}
+      onCompositionEnd={() => {
+        composingRef.current = false;
+        syncToState();
+      }}
       onFocus={() => {
         const el = editorRef.current;
         if (el && el.childNodes.length === 1 && el.firstChild?.nodeName === 'BR') el.textContent = '';
@@ -1956,6 +2115,8 @@ function TaskInputBox(props: {
   value: string; setValue: (v: string) => void;
   invokedSkills: InvokedSkill[];
   setInvokedSkills: Dispatch<SetStateAction<InvokedSkill[]>>;
+  fileRefs: WorkspaceFileRefV1[];
+  setFileRefs: Dispatch<SetStateAction<WorkspaceFileRefV1[]>>;
   attachments: ComposerAttachment[];
   setAttachments: Dispatch<SetStateAction<ComposerAttachment[]>>;
   attachmentScopeKey: string;
@@ -1971,7 +2132,7 @@ function TaskInputBox(props: {
   maxWidth?: number; sendLabel?: string;
 }) {
   const {
-    value, setValue, invokedSkills, setInvokedSkills, attachments, setAttachments, attachmentScopeKey,
+    value, setValue, invokedSkills, setInvokedSkills, fileRefs, setFileRefs, attachments, setAttachments, attachmentScopeKey,
     onSend, onStop, streaming, placeholder, config, resources,
     onSetExecMode, onSetWorkspace, onOpenConfig, onImportSkill, agentLabel, maxWidth = 800, sendLabel = '开始执行',
   } = props;
@@ -1981,7 +2142,7 @@ function TaskInputBox(props: {
   const wsName = (effectiveWorkspaceId && resources?.workspaces.find((w) => w.id === effectiveWorkspaceId)?.name) || null;
   const hasReadyAttachment = attachments.some((item) => item.status === 'ready');
   const attachmentsReady = attachments.every((item) => item.status === 'ready');
-  const canSend = (!!value.trim() || hasReadyAttachment || invokedSkills.length > 0) && attachmentsReady && !streaming;
+  const canSend = (!!value.trim() || hasReadyAttachment || invokedSkills.length > 0 || fileRefs.length > 0) && attachmentsReady && !streaming;
 
   // ── 引用下拉（向上）：技能（/ 或 chip）/ 工作空间文件（@）共用一个 Popover ──
   const inputRef = useRef<ComposerInputHandle>(null);
@@ -2028,8 +2189,11 @@ function TaskInputBox(props: {
     ? skills.filter((s) => s.name.toLowerCase().includes(qstr) || s.slug.toLowerCase().includes(qstr))
     : skills;
   const filteredFiles = qstr
-    ? files.filter((f) => workspaceDisplayName(f).toLowerCase().includes(qstr) || f.workspace_name.toLowerCase().includes(qstr))
+    ? files.filter((f) => workspaceFileLabel(f).toLowerCase().includes(qstr)
+      || workspaceDisplayName(f).toLowerCase().includes(qstr)
+      || f.workspace_name.toLowerCase().includes(qstr))
     : files;
+  const detachedFileRefs = fileRefs.filter((ref) => !value.includes(`@${ref.file_id}`));
 
   const closePicker = useCallback((picked: boolean) => {
     if (!picked) inputRef.current?.clearPendingMention();
@@ -2075,7 +2239,11 @@ function TaskInputBox(props: {
   };
   const onPickFile = (f: WorkspaceFileSummary) => {
     setQuery(''); setPickerOpen(false);
-    inputRef.current?.insertFileChip(f.id, f.path);
+    setFileRefs((current) => Array.from(new Map([
+      ...current,
+      { file_id: f.id, scope: 'task' as const, follow_latest: true },
+    ].map((item) => [item.file_id, item])).values()));
+    inputRef.current?.insertFileChip(f.id, workspaceFileLabel(f));
   };
 
   const updateAttachment = useCallback((clientId: string, patch: Partial<ComposerAttachment>) => {
@@ -2231,7 +2399,25 @@ function TaskInputBox(props: {
       .filter((item) => item.kind === 'file')
       .map((item) => item.getAsFile())
       .filter((file): file is File => Boolean(file));
-    if (!clipboardFiles.length) return;
+    if (!clipboardFiles.length) {
+      const internalRef = parseWorkspaceInternalUrl(event.clipboardData.getData('text/plain'));
+      if (!internalRef) return;
+      const { fileId, versionId } = internalRef;
+      event.preventDefault();
+      const known = files.find((item) => item.id === fileId);
+      const add = (label: string) => {
+        setFileRefs((current) => Array.from(new Map([
+          ...current,
+          { file_id: fileId, scope: 'task' as const, ...(versionId ? { version_id: versionId, follow_latest: false } : { follow_latest: true }) },
+        ].map((item) => [item.file_id, item])).values()));
+        inputRef.current?.insertFileChip(fileId, label);
+      };
+      if (known) add(workspaceFileLabel(known));
+      else void terminal.getWsFile(fileId)
+        .then((file) => add(workspaceFileLabel(file)))
+        .catch(() => message.error('文件不存在或没有查看权限'));
+      return;
+    }
     event.preventDefault();
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const normalized = clipboardFiles.map((file, index) => {
@@ -2242,7 +2428,7 @@ function TaskInputBox(props: {
       });
     });
     void queueFiles(normalized);
-  }, [queueFiles]);
+  }, [files, queueFiles, setFileRefs]);
 
   const openAttachmentPicker = useCallback(async () => {
     const browserWindow = window as BrowserWindowWithFilePicker;
@@ -2458,7 +2644,7 @@ function TaskInputBox(props: {
                 <FileTextOutlined style={{ color: WB.primary }} />
                 {workspaceDisplayName(f)}{f.is_binary && <Tag color="default" style={{ marginLeft: 6, fontSize: 10 }}>二进制</Tag>}
               </div>
-              <div style={{ fontSize: 11, color: '#9ca3af' }}>{f.workspace_name}</div>
+              <div title={workspaceFileLabel(f)} style={{ fontSize: 11, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{workspaceFileLabel(f)}</div>
             </div>
           )) : (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -2540,6 +2726,21 @@ function TaskInputBox(props: {
             ))}
           </div>
         )}
+        {!!detachedFileRefs.length && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: attachments.length ? '6px 12px 0' : '10px 12px 0' }}>
+            {detachedFileRefs.map((ref) => {
+              const file = files.find((item) => item.id === ref.file_id);
+              const label = file ? workspaceFileLabel(file) : `文件 ${ref.file_id.slice(0, 8)}…`;
+              return (
+                <Tooltip key={ref.file_id} title={`${label}（任务持续引用，无需每轮重新 @）`}>
+                  <Tag icon={<FileTextOutlined />} color="blue" style={{ margin: 0, maxWidth: '100%' }}>
+                    <span style={{ display: 'inline-block', maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', verticalAlign: 'bottom' }}>{label}</span>
+                  </Tag>
+                </Tooltip>
+              );
+            })}
+          </div>
+        )}
         <MentionInput
           ref={inputRef}
           value={value} onChange={setValue}
@@ -2547,6 +2748,12 @@ function TaskInputBox(props: {
             const skill = skills.find((item) => item.id === id);
             return skill ? [{ id: skill.id, name: skill.name, slug: skill.slug, scope_type: skill.scope_type }] : [];
           }))}
+          onFileIdsChange={(ids) => setFileRefs((current) => {
+            const kept = current.filter((item) => !value.includes(`@${item.file_id}`) || ids.includes(item.file_id));
+            const added = ids.map((fileId) => current.find((item) => item.file_id === fileId)
+              ?? { file_id: fileId, scope: 'task' as const, follow_latest: true });
+            return Array.from(new Map([...kept, ...added].map((item) => [item.file_id, item])).values());
+          })}
           placeholder={placeholder}
           onPasteFiles={pasteFiles}
           onSlashTrigger={() => openPicker('skill')}
@@ -2627,7 +2834,7 @@ function TaskInputBox(props: {
               title="支持 Word、Excel、PPT、PDF、Markdown 等常用文件"
               style={{ fontSize: 11, whiteSpace: 'nowrap' }}
             >
-              单文件最大 100MB
+              单次最多 {MAX_ATTACHMENTS} 个 · 单文件最大 {MAX_ATTACHMENT_LABEL}
             </Typography.Text>
             <input
               ref={attachmentInputRef}
@@ -2688,6 +2895,8 @@ function HomeView(props: {
   input: string; setInput: (v: string) => void; placeholder: string;
   invokedSkills: InvokedSkill[];
   setInvokedSkills: Dispatch<SetStateAction<InvokedSkill[]>>;
+  fileRefs: WorkspaceFileRefV1[];
+  setFileRefs: Dispatch<SetStateAction<WorkspaceFileRefV1[]>>;
   attachments: ComposerAttachment[];
   setAttachments: Dispatch<SetStateAction<ComposerAttachment[]>>;
   attachmentScopeKey: string;
@@ -2699,7 +2908,7 @@ function HomeView(props: {
   agentLabel: string;
 }) {
   const {
-    input, setInput, invokedSkills, setInvokedSkills, attachments, setAttachments, attachmentScopeKey, placeholder,
+    input, setInput, invokedSkills, setInvokedSkills, fileRefs, setFileRefs, attachments, setAttachments, attachmentScopeKey, placeholder,
     config, resources, onSetExecMode, onSetWorkspace, onOpenConfig, onImportSkill, onStart, streaming, agentLabel,
   } = props;
   return (
@@ -2726,6 +2935,7 @@ function HomeView(props: {
         <TaskInputBox
           value={input} setValue={setInput}
           invokedSkills={invokedSkills} setInvokedSkills={setInvokedSkills}
+          fileRefs={fileRefs} setFileRefs={setFileRefs}
           attachments={attachments} setAttachments={setAttachments}
           attachmentScopeKey={attachmentScopeKey}
           onSend={onStart} streaming={streaming}
@@ -2752,7 +2962,7 @@ function HomeView(props: {
 function renderUserContent(
   content: string,
   skillMap: Map<string, string>,
-  fileMap: Map<string, string>,
+  fileMap: Map<string, WorkspaceFileSummary>,
   agentName?: string | null,
 ): ReactNode[] {
   // 文本片段里出现的技能名 → chip（长名优先，避免短名误命中）
@@ -2779,7 +2989,8 @@ function renderUserContent(
     out.push(<span key="agent" className="agent-ref-chip" title="智能体">{agentName}</span>);
   }
   if (!content) return out;
-  const re = /(^|\s)([/@])([A-Za-z0-9][A-Za-z0-9_-]*)/g;
+  // 兼容旧消息里紧跟中英文标点的 @UUID（过去会因只认空白边界而退化成裸 UUID）。
+  const re = /(^|[\s([{"'“‘，。！？；：、])([/@])([A-Za-z0-9][A-Za-z0-9_-]*)/g;
   let last = 0;
   let key = 0;
   let m: RegExpExecArray | null;
@@ -2790,13 +3001,12 @@ function renderUserContent(
     const token = m[3];
     const idx = m.index + pre.length; // chip 起始（不含前导空白）
     if (idx > last) out.push(...chipNames(content.slice(last, idx), `t${key++}`));
-    const resolved = ch === '/' ? skillMap.get(token) : fileMap.get(token);
-    if (resolved) {
-      out.push(
-        ch === '/'
-          ? <span key={`s${key++}`} className="skill-ref-chip" title={`技能：${resolved} (/${token})`}>{resolved}</span>
-          : <span key={`f${key++}`} className="file-ref-chip" title={`工作空间文件：${resolved}`}>{resolved}</span>,
-      );
+    const skill = ch === '/' ? skillMap.get(token) : undefined;
+    const file = ch === '@' ? fileMap.get(token) : undefined;
+    if (skill || file) {
+      out.push(skill
+        ? <span key={`s${key++}`} className="skill-ref-chip" title={`技能：${skill} (/${token})`}>{skill}</span>
+        : <span key={`f${key++}`} className="file-ref-chip" title={`工作空间文件：${workspaceFileLabel(file!)}`}>{workspaceFileLabel(file!)}</span>);
     } else {
       out.push(ch + token);
     }
@@ -2812,6 +3022,8 @@ function ChatView(props: {
   followUp: string; setFollowUp: (v: string) => void;
   invokedSkills: InvokedSkill[];
   setInvokedSkills: Dispatch<SetStateAction<InvokedSkill[]>>;
+  fileRefs: WorkspaceFileRefV1[];
+  setFileRefs: Dispatch<SetStateAction<WorkspaceFileRefV1[]>>;
   attachments: ComposerAttachment[];
   setAttachments: Dispatch<SetStateAction<ComposerAttachment[]>>;
   onSend: () => void; onStop: () => void;
@@ -2823,17 +3035,18 @@ function ChatView(props: {
   onImportSkill: () => void;
   selectedId: string | null;
   onLink: (href: string) => void;
+  onOpenFile: (fileId: string, versionId?: string) => void;
   fileLinks: ChatFileLink[];
-  fileRefMap: Map<string, string>;
+  fileRefMap: Map<string, WorkspaceFileSummary>;
   fileRefsLoaded: boolean;
   onDeleteTurn: (messageId: string) => void;
   agentLabel: string;
 }) {
   const {
-    taskTitle, chat, streaming, followUp, setFollowUp, invokedSkills, setInvokedSkills,
+    taskTitle, chat, streaming, followUp, setFollowUp, invokedSkills, setInvokedSkills, fileRefs, setFileRefs,
     attachments, setAttachments,
     onSend, onStop, onNew, config, resources, onSetExecMode, onSetWorkspace, onOpenConfig,
-    onImportSkill, selectedId, onLink, fileLinks, fileRefMap, fileRefsLoaded, onDeleteTurn, agentLabel,
+    onImportSkill, selectedId, onLink, onOpenFile, fileLinks, fileRefMap, fileRefsLoaded, onDeleteTurn, agentLabel,
   } = props;
   // slug → 技能名称，供用户消息气泡把 /slug 还原为技能名 chip（样式与输入框一致）
   const skillRefMap = useMemo(() => {
@@ -2868,6 +3081,18 @@ function ChatView(props: {
             const isLast = i === chat.length - 1;
             const messageSkillMap = new Map(skillRefMap);
             (m.invokedSkills ?? []).forEach((skill) => messageSkillMap.set(skill.slug, skill.name));
+            const attachmentIds = new Set((m.attachments ?? []).map((item) => item.file_id));
+            const messageFileCards = [
+              ...(m.attachments ?? []).map((item) => ({ fileId: item.file_id, fallbackLabel: item.name, scope: 'turn' as const, versionId: undefined as string | undefined })),
+              ...(m.fileRefs ?? [])
+                .filter((item) => !attachmentIds.has(item.file_id))
+                .map((item) => ({
+                  fileId: item.file_id,
+                  fallbackLabel: messageFileRefLabel(item),
+                  scope: item.scope,
+                  versionId: item.version_id,
+                })),
+            ];
             // 仅 user 消息且非流式进行中、且携带 DB id（历史回放或流式结束后回填）的轮次可删
             const canDelete = isUser && !!m.id && !streaming;
             const showDel = canDelete && hoveredTurn === i;
@@ -2894,23 +3119,24 @@ function ChatView(props: {
                         <span style={{ fontSize: 12, color: '#6b7280' }}>我</span>
                         <MessageTimestamp value={m.createdAt} />
                       </div>
-                      {!!m.attachments?.length && (
+                      {!!messageFileCards.length && (
                         <div style={{ display: 'grid', gap: 6, marginBottom: m.content ? 8 : 0 }}>
-                          {m.attachments.map((attachment) => {
-                            const availablePath = fileRefMap.get(attachment.file_id);
-                            const unavailable = fileRefsLoaded && !availablePath;
+                          {messageFileCards.map((item) => {
+                            const availableFile = fileRefMap.get(item.fileId);
+                            const unavailable = fileRefsLoaded && !availableFile;
+                            const label = availableFile ? workspaceFileLabel(availableFile) : item.fallbackLabel;
                             return (
                               <button
-                                key={attachment.file_id}
+                                key={`${item.scope}:${item.fileId}`}
                                 type="button"
                                 disabled={unavailable}
-                                onClick={() => onLink(availablePath || attachment.path)}
-                                title={unavailable ? '文件已不存在或不可访问' : `打开 ${attachment.name}`}
+                                onClick={() => onOpenFile(item.fileId, item.versionId)}
+                                title={unavailable ? '文件已不存在或不可访问' : `打开 ${label}`}
                                 style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', border: `1px solid ${unavailable ? '#e5e7eb' : '#d8dcf4'}`, background: unavailable ? '#f3f4f6' : '#fff', borderRadius: 8, padding: '7px 9px', cursor: unavailable ? 'not-allowed' : 'pointer', color: unavailable ? '#9ca3af' : '#374151', textAlign: 'left' }}
                               >
                                 <FileTextOutlined style={{ color: unavailable ? '#9ca3af' : WB.primary }} />
-                                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>{attachment.name}</span>
-                                <span style={{ fontSize: 10, flexShrink: 0 }}>{unavailable ? '不可访问' : '已引用'}</span>
+                                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12 }}>{label}</span>
+                                <span style={{ fontSize: 10, flexShrink: 0 }}>{unavailable ? '不可访问' : item.versionId ? '历史版本' : item.scope === 'task' ? '任务引用' : '本轮引用'}</span>
                               </button>
                             );
                           })}
@@ -2941,6 +3167,7 @@ function ChatView(props: {
           <TaskInputBox
             value={followUp} setValue={setFollowUp}
             invokedSkills={invokedSkills} setInvokedSkills={setInvokedSkills}
+            fileRefs={fileRefs} setFileRefs={setFileRefs}
             attachments={attachments} setAttachments={setAttachments}
             attachmentScopeKey={selectedId || '任务未选择'}
             onSend={onSend} onStop={onStop} streaming={streaming}
@@ -3196,7 +3423,7 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
           streaming={streaming}
           onLink={onLink}
         />
-        <ChangesBox files={legacyChanges} onLink={onLink} />
+        <ChangesBox files={legacyChanges} fileLinks={fileLinks} onLink={onLink} />
         <SpeechPlaybackButton text={spokenText} disabled={streaming} />
       </div>
     </div>
@@ -3394,7 +3621,8 @@ function InlineArtifactCard({
   }, [fileId, isImage, reloadToken, streaming, resolved?.updatedAt]);
 
   const openPreview = () => {
-    if (path) onLink(path);
+    if (fileId) onLink(workspaceInternalPath(fileId));
+    else if (path) onLink(path);
     else message.warning('文件路径尚未保存，请稍后重试');
   };
 
@@ -3423,14 +3651,14 @@ function InlineArtifactCard({
       <article style={{ width: 'min(480px, 100%)', overflow: 'hidden', border: '1px solid #dfe3ee', borderRadius: 12, background: '#fff', boxShadow: '0 1px 3px rgba(15,23,42,0.06)' }}>
         <div
           role="button"
-          tabIndex={path ? 0 : -1}
+          tabIndex={fileId || path ? 0 : -1}
           onClick={openPreview}
           onKeyDown={(event) => {
-            if (!path || (event.key !== 'Enter' && event.key !== ' ')) return;
+            if ((!fileId && !path) || (event.key !== 'Enter' && event.key !== ' ')) return;
             event.preventDefault();
             openPreview();
           }}
-          style={{ display: 'block', width: '100%', minHeight: 180, maxHeight: 420, padding: 0, border: 0, background: '#f3f4f6', cursor: path ? 'zoom-in' : 'default', overflow: 'hidden' }}
+          style={{ display: 'block', width: '100%', minHeight: 180, maxHeight: 420, padding: 0, border: 0, background: '#f3f4f6', cursor: fileId || path ? 'zoom-in' : 'default', overflow: 'hidden' }}
         >
           {streaming ? (
             <div style={{ height: 220, display: 'grid', placeItems: 'center', color: '#6b7280', fontSize: 12 }}><Spin size="small" /> 正在保存图片…</div>
@@ -3529,7 +3757,7 @@ function extractFileChanges(blocks?: Block[]): { path: string; generated: boolea
   return dedup.filter((file) => !deletedPaths.has(file.path));
 }
 
-function ChangesBox({ files, onLink }: { files: { path: string; generated: boolean }[]; onLink: (href: string) => void }) {
+function ChangesBox({ files, fileLinks, onLink }: { files: { path: string; generated: boolean }[]; fileLinks: ChatFileLink[]; onLink: (href: string) => void }) {
   const [open, setOpen] = useState(false);
   if (!files.length) return null;
   return (
@@ -3553,7 +3781,11 @@ function ChangesBox({ files, onLink }: { files: { path: string; generated: boole
                 ? <FileTextOutlined style={{ color: '#0ea5e9' }} />
                 : <CheckCircleOutlined style={{ color: '#22c55e' }} />}
               <a
-                onClick={(e) => { e.preventDefault(); onLink(f.path); }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  const resolved = fileLinks.find((item) => item.path === f.path);
+                  onLink(resolved ? workspaceInternalPath(resolved.id) : f.path);
+                }}
                 style={{ color: WB.primary, cursor: 'pointer', wordBreak: 'break-all' }}
               >{f.path.replace(/^(?:技能输出|平台工具输出)\/[0-9a-f-]{36}\//i, '').replace(/^\d{8}-\d{6}-[0-9a-f]{8}-/i, '')}</a>
             </div>
@@ -3726,11 +3958,15 @@ function Md({
 
 /** 把 markdown 正文中裸出现的工作空间文件名包成 [name](<path>) 链接。
  *  跳过代码块/行内代码/已有链接，避免破坏原有结构；用前后非 \w 边界降低误匹配。 */
-function linkifyFiles(md: string, files: { path: string; name: string }[]): string {
+function linkifyFiles(md: string, files: { id?: string; path: string; name: string }[]): string {
   if (!files.length) return md;
+  const nameCounts = new Map<string, number>();
+  for (const file of files) nameCounts.set(file.name, (nameCounts.get(file.name) ?? 0) + 1);
   const byName = new Map<string, string>();
   for (const f of files) {
-    if (f.name && f.name.length >= 2 && !byName.has(f.name)) byName.set(f.name, f.path);
+    if (f.name && f.name.length >= 2 && nameCounts.get(f.name) === 1) {
+      byName.set(f.name, f.id ? workspaceInternalPath(f.id) : f.path);
+    }
   }
   const names = [...byName.keys()].sort((a, b) => b.length - a.length);
   if (!names.length) return md;
@@ -3792,12 +4028,12 @@ function ResourcePanel({ taskConfig, resources, agent }: {
   );
 }
 
-function FilePanel({ workspaceId }: { workspaceId: string | null }) {
+function FilePanel({ workspaceId, workspaceName }: { workspaceId: string | null; workspaceName?: string }) {
+  const qc = useQueryClient();
   const [files, setFiles] = useState<WorkspaceFileListItem[]>([]);
   // 复用 BrowserDrawer 预览（与「工作空间管理」页同一组件，消除两处功能差异）
   const [browserOpen, setBrowserOpen] = useState(false);
-  const [browserHref, setBrowserHref] = useState<string | null>(null);
-  const [browserSeq, setBrowserSeq] = useState(0);
+  const [browserFileId, setBrowserFileId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!workspaceId) { setFiles([]); return; }
@@ -3815,7 +4051,9 @@ function FilePanel({ workspaceId }: { workspaceId: string | null }) {
     let list: WorkspaceFileListItem[];
     try { list = await terminal.listWsFiles(workspaceId); }
     catch { return { kind: 'unsupported', href, note: '工作空间文件读取失败' }; }
-    const f = list.find((x) => x.path === href || x.path.endsWith('/' + href) || href.endsWith(x.path));
+    const exact = list.find((x) => x.path === href);
+    const suffixMatches = exact ? [] : list.filter((x) => x.path.endsWith('/' + href) || href.endsWith('/' + x.path));
+    const f = exact ?? (suffixMatches.length === 1 ? suffixMatches[0] : undefined);
     if (!f) return { kind: 'unsupported', href, note: `未找到该文件：${href}` };
     try { return classifyFile(await terminal.getWsFile(f.id)); }
     catch { return { kind: 'unsupported', href, note: '文件详情读取失败' }; }
@@ -3827,22 +4065,31 @@ function FilePanel({ workspaceId }: { workspaceId: string | null }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <Typography.Text type="secondary">工作空间文件（点击预览，智能体可读写）</Typography.Text>
       <Tree
-        treeData={files.map((f) => ({ key: f.path, title: workspaceDisplayName(f), icon: <FileTextOutlined /> }))}
+        treeData={files.map((f) => ({ key: f.id, title: workspaceFileLabel(f), icon: <FileTextOutlined /> }))}
         height={200}
         onSelect={(keys) => {
-          const p = keys[0] as string | undefined;
-          if (!p) return;
-          setBrowserHref(p);
-          setBrowserSeq((n) => n + 1);
+          const fileId = keys[0] as string | undefined;
+          if (!fileId) return;
+          setBrowserFileId(fileId);
           setBrowserOpen(true);
         }}
       />
       <BrowserDrawer
-        key={browserSeq}
         open={browserOpen}
-        initialHref={browserHref}
+        initialFileId={browserFileId}
         onClose={() => setBrowserOpen(false)}
         resolveHref={resolveHref}
+        loadFileById={terminal.getWsFile}
+        loadFileVersionById={terminal.getWsFileVersion}
+        fallbackWorkspaceName={workspaceName}
+        saveTextFile={terminal.updateWsFile}
+        listFileVersions={terminal.listWsFileVersions}
+        restoreFileVersion={terminal.restoreWsFileVersion}
+        onFileChanged={() => {
+          void load();
+          qc.invalidateQueries({ queryKey: ['terminal-all-ws-files'] });
+          qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+        }}
         loadOriginalPreview={terminal.getWsFileOriginalPreview}
         loadOriginalPreviewSource={terminal.getWsFileOriginalPreviewSource}
         loadPdfPreviewInfo={terminal.getWsFilePdfPreviewInfo}
@@ -3856,6 +4103,10 @@ function FilePanel({ workspaceId }: { workspaceId: string | null }) {
         getSpreadsheetPage={terminal.getWsFileSpreadsheetPage}
         loadDownloadTicket={terminal.getWsFileDownloadTicket}
         loadOriginalFile={terminal.downloadWsFile}
+        createEditSession={terminal.createWsFileEditSession}
+        refreshEditSession={terminal.refreshWsFileEditSession}
+        closeEditSession={terminal.closeWsFileEditSession}
+        getEditSessionStatus={terminal.getWsFileEditSessionStatus}
       />
     </div>
   );

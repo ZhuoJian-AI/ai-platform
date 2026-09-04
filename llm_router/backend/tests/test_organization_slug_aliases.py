@@ -1,13 +1,16 @@
 """Regression coverage for canonical organization slugs and legacy aliases."""
 
-from uuid import UUID
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import hash_password
 from app.models.admin import Admin
+from app.models.oauth import OAuthRefreshToken
 from app.models.user import User
 
 
@@ -107,7 +110,7 @@ async def test_admin_and_user_login_accept_legacy_slug_and_return_canonical_iden
             Admin(
                 username="alias-admin",
                 password_hash=hash_password("admin-password"),
-                role="org_admin",
+                role="enterprise_admin",
                 organization_id=organization_id,
                 is_active=True,
             ),
@@ -144,3 +147,39 @@ async def test_admin_and_user_login_accept_legacy_slug_and_return_canonical_iden
     )
     assert user_login.status_code == 200, user_login.text
     assert user_login.json()["user"]["organization_id"] == organization["id"]
+    user = (
+        await db_session.execute(
+            select(User).where(
+                User.organization_id == organization_id,
+                User.username == "alias-user",
+            )
+        )
+    ).scalar_one()
+    now = datetime.now(UTC)
+    refresh_token = OAuthRefreshToken(
+        token_hash="f" * 64,
+        family_id=uuid4(),
+        client_id="logout-test-client",
+        user_id=user.id,
+        organization_id=organization_id,
+        resource="https://platform.example.test/api/v1/mcp",
+        scope="mcp:tools",
+        expires_at=now + timedelta(days=1),
+        absolute_expires_at=now + timedelta(days=7),
+    )
+    db_session.add(refresh_token)
+    await db_session.flush()
+    logout = await client.post(
+        "/api/v1/users/logout",
+        headers={"Authorization": f"Bearer {user_login.json()['access_token']}"},
+    )
+    assert logout.status_code == 204, logout.text
+    assert "ai_infra_user_session" in logout.headers.get("set-cookie", "")
+    assert "Max-Age=0" in logout.headers.get("set-cookie", "")
+    revoked = await client.get(
+        "/api/v1/terminal/me",
+        headers={"Authorization": f"Bearer {user_login.json()['access_token']}"},
+    )
+    assert revoked.status_code == 401, revoked.text
+    await db_session.refresh(refresh_token)
+    assert refresh_token.revoked_at is not None

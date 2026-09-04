@@ -32,7 +32,7 @@ import fitz
 from docx import Document
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, range_boundaries
 from PIL import Image, ImageOps
 from pptx import Presentation
 from pptx.util import Inches
@@ -119,7 +119,11 @@ def _load_tabular(path: Path):
         book = load_workbook(converted, data_only=False)
         shutil.rmtree(converted_dir, ignore_errors=True)
         return book
-    return load_workbook(path, data_only=False)
+    return load_workbook(
+        path,
+        data_only=False,
+        keep_vba=path.suffix.lower() in {".xlsm", ".xltm"},
+    )
 
 
 def _style_sheet(sheet) -> None:
@@ -152,17 +156,64 @@ def _spreadsheet(action: str, inputs: list[Path], params: dict, output_dir: Path
         if not inputs:
             raise BuiltinToolError("spreadsheet inspect requires one input file")
         book = _load_tabular(inputs[0])
-        max_rows = min(max(int(params.get("max_rows", 50)), 1), 200)
+        requested_sheet = str(params.get("sheet") or "").strip()
+        if requested_sheet and requested_sheet not in book.sheetnames:
+            raise BuiltinToolError(f"spreadsheet sheet does not exist: {requested_sheet}")
+        selected_sheets = [book[requested_sheet]] if requested_sheet else list(book.worksheets)
         max_cols = min(max(int(params.get("max_columns", 30)), 1), 100)
+        cell_range = str(params.get("range") or "").strip().upper()
+        offset = max(int(params.get("offset", 0)), 0)
+        limit = min(max(int(params.get("limit", params.get("max_rows", 50))), 1), 1000)
         sheets = []
-        for sheet in book.worksheets:
+        any_more = False
+        next_offsets: list[int] = []
+        for sheet in selected_sheets:
+            if cell_range:
+                try:
+                    min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+                except ValueError as exc:
+                    raise BuiltinToolError("spreadsheet range must be an A1 range such as A2:F200") from exc
+                if max_col - min_col + 1 > 100 or max_row - min_row + 1 > 1000:
+                    raise BuiltinToolError("spreadsheet range exceeds 100 columns or 1000 rows")
+                effective_max_col = min(max_col, min_col + max_cols - 1)
+                row_start = min_row
+                row_end = min(max_row, sheet.max_row)
+            else:
+                min_col = 1
+                effective_max_col = min(sheet.max_column, max_cols)
+                row_start = offset + 1
+                row_end = min(sheet.max_row, offset + limit)
             rows = [
-                [_value(cell.value) for cell in row[:max_cols]]
-                for row in sheet.iter_rows(min_row=1, max_row=min(sheet.max_row, max_rows))
+                [_value(cell.value) for cell in row]
+                for row in sheet.iter_rows(
+                    min_row=row_start,
+                    max_row=max(row_start - 1, row_end),
+                    min_col=min_col,
+                    max_col=max(min_col, effective_max_col),
+                )
             ]
-            sheets.append({"name": sheet.title, "rows": rows, "total_rows": sheet.max_row,
-                           "total_columns": sheet.max_column})
-        return {"summary": {"kind": "spreadsheet", "sheets": sheets}, "outputs": []}
+            has_more = not cell_range and row_end < sheet.max_row
+            next_offset = row_end if has_more else None
+            any_more = any_more or has_more
+            if next_offset is not None:
+                next_offsets.append(next_offset)
+            sheets.append({
+                "name": sheet.title,
+                "rows": rows,
+                "total_rows": sheet.max_row,
+                "total_columns": sheet.max_column,
+                "offset": (row_start - 1),
+                "limit": (row_end - row_start + 1) if row_end >= row_start else 0,
+                "range": cell_range or None,
+                "has_more": has_more,
+                "next_offset": next_offset,
+            })
+        return {"summary": {
+            "kind": "spreadsheet",
+            "sheets": sheets,
+            "has_more": any_more,
+            "next_offset": min(next_offsets) if next_offsets else None,
+        }, "outputs": []}
 
     if action == "create":
         book = Workbook()
@@ -170,6 +221,11 @@ def _spreadsheet(action: str, inputs: list[Path], params: dict, output_dir: Path
     elif action == "edit":
         if not inputs:
             raise BuiltinToolError("spreadsheet edit requires one input file")
+        source_suffix = inputs[0].suffix.lower()
+        if source_suffix not in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
+            raise BuiltinToolError(
+                "in-place spreadsheet edit requires XLSX/XLSM/XLTX/XLTM; convert legacy or text sheets to a new file first"
+            )
         book = _load_tabular(inputs[0])
         for operation in params.get("operations") or []:
             op = operation.get("type")
@@ -190,8 +246,6 @@ def _spreadsheet(action: str, inputs: list[Path], params: dict, output_dir: Path
                 sheet.title = str(operation.get("new_name") or sheet.title)[:31]
             else:
                 raise BuiltinToolError(f"Unsupported spreadsheet edit operation: {op}")
-        for sheet in book.worksheets:
-            _style_sheet(sheet)
     elif action == "convert":
         if not inputs:
             raise BuiltinToolError("spreadsheet convert requires one input file")
@@ -218,7 +272,13 @@ def _spreadsheet(action: str, inputs: list[Path], params: dict, output_dir: Path
     else:
         raise BuiltinToolError(f"Unsupported spreadsheet action: {action}")
 
-    output = output_dir / _safe_output_name(params.get("output_name"), "workbook.xlsx", ".xlsx")
+    if action == "edit":
+        source_suffix = inputs[0].suffix.lower()
+        output = output_dir / _safe_output_name(
+            params.get("output_name"), inputs[0].name, source_suffix,
+        )
+    else:
+        output = output_dir / _safe_output_name(params.get("output_name"), "workbook.xlsx", ".xlsx")
     book.save(output)
     return {"summary": f"{action}d spreadsheet", "outputs": [output]}
 

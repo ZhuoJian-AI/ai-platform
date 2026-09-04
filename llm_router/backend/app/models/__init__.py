@@ -6,7 +6,7 @@ from app.models.agent_memory import AgentMessage
 from app.models.agent_run import AgentRun, AgentRunEvent
 from app.models.api_key import ApiKey
 from app.models.audit_log import AuditLog
-from app.models.budget import BudgetUsage
+from app.models.budget import AiQuotaEvent, BudgetUsage
 from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.data_interface import DataInterface, DataSystem
 from app.models.department import Department
@@ -22,6 +22,7 @@ from app.models.enterprise_application import (
     EnterpriseApplicationEventRoute,
     EnterpriseApplicationGrant,
     EnterpriseApplicationIntegration,
+    EnterpriseApplicationSsoCode,
     EnterpriseApplicationToolBinding,
 )
 from app.models.judge import JudgeTemplate
@@ -29,6 +30,7 @@ from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.models.memory import Memory
 from app.models.module_deployment import ModuleDeployment, ModuleDeploymentProfile
 from app.models.multimodal import MultimodalJob, VoiceAuthorizationRecord, VoiceProfile, VoiceProfileGrant
+from app.models.oauth import OAuthAuthorizationCode, OAuthClient, OAuthRefreshToken
 from app.models.ontology import Ontology, OntologyFile, OntologyFolder
 from app.models.organization import Organization, OrganizationSlugAlias
 from app.models.platform_extension import (
@@ -41,14 +43,18 @@ from app.models.rag import RagChunk, RagCollection, RagDocument, RagFolder
 from app.models.role import Role, RoleDataDepartment, RolePermission, UserRole
 from app.models.routing_policy import RoutingPolicy
 from app.models.skill import ScopeManagerAssignment, Skill, SkillExecution, SkillFile, SkillFolder, SkillVersion
-from app.models.task import Task, TaskMessage
+from app.models.task import Task, TaskFileRef, TaskMessage
 from app.models.team import Team
 from app.models.tool_call_log import ToolCallLog
 from app.models.user import User, user_department_memberships
 from app.models.workspace import (
+    OfficeEditRoom,
+    OfficeSaveEvent,
     Workspace,
     WorkspaceAuditEvent,
     WorkspaceFile,
+    WorkspaceFileEventOutbox,
+    WorkspaceFileMutation,
     WorkspaceFileVersion,
     WorkspaceFolder,
     WorkspacePreviewJob,
@@ -74,6 +80,7 @@ __all__ = [
     "EnterpriseApplicationAction",
     "EnterpriseApplicationActionRequest",
     "EnterpriseApplicationIntegration",
+    "EnterpriseApplicationSsoCode",
     "EnterpriseApplicationEvent",
     "EnterpriseApplicationEventDelivery",
     "EnterpriseApplicationEventRoute",
@@ -87,19 +94,24 @@ __all__ = [
     "RoleDataDepartment",
     "AuditLog",
     "BudgetUsage",
+    "AiQuotaEvent",
     "PlatformExtensionSource",
     "PlatformExtensionCatalogEntry",
     "PlatformExtensionRelease",
     "PlatformExtensionReleaseEvent",
     # 智能体平台
     "Workspace",
+    "OfficeEditRoom",
+    "OfficeSaveEvent",
     "WorkspaceFile",
+    "WorkspaceFileMutation",
     "WorkspaceFolder",
     "WorkspaceFileVersion",
     "WorkspacePreviewJob",
     "WorkspaceUploadSession",
     "WorkspaceAuditEvent",
     "WorkspaceShareLink",
+    "WorkspaceFileEventOutbox",
     "Agent",
     "AgentRun",
     "AgentRunEvent",
@@ -126,6 +138,7 @@ __all__ = [
     "ToolCallLog",
     # 终端用户端
     "Task",
+    "TaskFileRef",
     "TaskMessage",
     "Memory",
     "ModuleDeployment",
@@ -134,4 +147,7 @@ __all__ = [
     "VoiceProfile",
     "VoiceProfileGrant",
     "VoiceAuthorizationRecord",
+    "OAuthClient",
+    "OAuthAuthorizationCode",
+    "OAuthRefreshToken",
 ]

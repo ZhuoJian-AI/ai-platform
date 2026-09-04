@@ -4,6 +4,8 @@ services:
       APP_ENV: development
       DEBUG: "true"
       PROXY_BASE_URL: http://localhost:8000
+      OAUTH_ISSUER: http://localhost:8000
+      OAUTH_PUBLIC_BASE_URL: http://localhost:8000
       MULTIMODAL_VISION_ENABLED: "${MULTIMODAL_VISION_ENABLED:-true}"
       MULTIMODAL_VISION_ORG_ALLOWLIST: "${MULTIMODAL_VISION_ORG_ALLOWLIST:-aifabei}"
       IMAGE_GENERATION_ENABLED: "${IMAGE_GENERATION_ENABLED:-true}"

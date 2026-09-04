@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def _dns_suffix(value: str) -> str:
@@ -63,17 +63,59 @@ class EcsRuntimeStateInput(BaseModel):
     is_active: bool
 
 
+class EcsModuleReleaseIntentInput(BaseModel):
+    target_commit: str = Field(..., min_length=40, max_length=40, pattern=r"^[0-9a-fA-F]{40}$")
+
+
+class EcsModuleCredentialsInput(BaseModel):
+    """Four non-interchangeable credentials generated once by the ECS Runtime."""
+
+    manifest_access_token: str = Field(..., min_length=40, max_length=512)
+    sso_exchange_token: str = Field(..., min_length=40, max_length=512)
+    action_signing_secret: str = Field(..., min_length=40, max_length=512)
+    event_signing_secret: str = Field(..., min_length=40, max_length=512)
+
+    @model_validator(mode="after")
+    def validate_types_and_separation(self):
+        expected = {
+            "manifest_access_token": "zjmf_",
+            "sso_exchange_token": "zjss_",
+            "action_signing_secret": "zjac_",
+            "event_signing_secret": "zjev_",
+        }
+        values: list[str] = []
+        for field_name, prefix in expected.items():
+            value = getattr(self, field_name)
+            if not value.startswith(prefix):
+                raise ValueError(f"{field_name} must use the {prefix} credential type")
+            values.append(value)
+        if len(values) != len(set(values)):
+            raise ValueError("Subsystem credentials must be distinct for every purpose")
+        return self
+
+
 class EcsModulePublishInput(BaseModel):
     application_slug: str = Field(
         ..., min_length=1, max_length=80, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
     )
     application_name: str = Field(..., min_length=1, max_length=255)
     base_url: str = Field(..., min_length=10, max_length=2048)
-    integration_secret: str = Field(..., min_length=32, max_length=512)
-    source_commit: str = Field(..., min_length=7, max_length=64, pattern=r"^[0-9a-fA-F]+$")
-    image_ref: str | None = Field(None, max_length=2048)
+    # Compatibility input for v2.4 Runtime clients.  It authenticates manifest
+    # and event-feed pulls only and can never sign SSO, Action or Event tokens.
+    integration_secret: str | None = Field(None, min_length=32, max_length=512)
+    credentials: EcsModuleCredentialsInput | None = None
+    source_commit: str = Field(..., min_length=40, max_length=40, pattern=r"^[0-9a-fA-F]{40}$")
+    image_ref: str = Field(..., min_length=1, max_length=2048)
     deployed_at: datetime | None = None
     release_metadata: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def require_registration_credentials(self):
+        if self.integration_secret and self.credentials:
+            raise ValueError("Use credentials instead of the legacy integration_secret")
+        if not self.integration_secret and self.credentials is None:
+            raise ValueError("Subsystem registration credentials are required")
+        return self
 
 
 class EcsModuleReleaseRead(BaseModel):
@@ -89,7 +131,7 @@ class EcsModuleReleaseRead(BaseModel):
     image_ref: str | None
     contract_revision: str | None
     manifest_digest: str | None
-    status: Literal["verifying", "healthy", "failed"]
+    status: Literal["verifying", "pending_review", "healthy", "failed"]
     release_metadata: dict
     last_error: str | None
     deployed_at: datetime | None

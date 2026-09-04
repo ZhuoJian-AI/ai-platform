@@ -12,10 +12,13 @@ class OrganizationCreate(BaseModel):
     slug: str = Field(..., max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str | None = None
     settings: dict = Field(default_factory=dict)
-    rate_limit_rpm: int | None = None
-    rate_limit_tpm: int | None = None
-    budget_cap_usd: Decimal | None = None
-    budget_cap_tokens: int | None = None
+    rate_limit_rpm: int | None = Field(None, ge=0)
+    rate_limit_tpm: int | None = Field(None, ge=0)
+    # USD caps are legacy read-only data until a versioned provider-price
+    # ledger exists.  New writes must use token and/or credit budgets.
+    budget_cap_usd: None = None
+    budget_cap_tokens: int | None = Field(None, ge=0)
+    budget_cap_credits: int | None = Field(None, ge=0)
 
 
 class OrganizationUpdate(BaseModel):
@@ -23,10 +26,11 @@ class OrganizationUpdate(BaseModel):
     slug: str | None = Field(None, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str | None = None
     settings: dict | None = None
-    rate_limit_rpm: int | None = None
-    rate_limit_tpm: int | None = None
-    budget_cap_usd: Decimal | None = None
-    budget_cap_tokens: int | None = None
+    rate_limit_rpm: int | None = Field(None, ge=0)
+    rate_limit_tpm: int | None = Field(None, ge=0)
+    budget_cap_usd: None = None
+    budget_cap_tokens: int | None = Field(None, ge=0)
+    budget_cap_credits: int | None = Field(None, ge=0)
 
 
 class OrganizationRead(BaseModel):
@@ -39,6 +43,7 @@ class OrganizationRead(BaseModel):
     rate_limit_tpm: int | None
     budget_cap_usd: Decimal | None
     budget_cap_tokens: int | None
+    budget_cap_credits: int | None
     is_default: bool = False
     created_at: datetime
     updated_at: datetime
@@ -52,10 +57,11 @@ class DepartmentCreate(BaseModel):
     slug: str = Field(..., max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str | None = None
     settings: dict = Field(default_factory=dict)
-    rate_limit_rpm: int | None = None
-    rate_limit_tpm: int | None = None
-    budget_cap_usd: Decimal | None = None
-    budget_cap_tokens: int | None = None
+    rate_limit_rpm: int | None = Field(None, ge=0)
+    rate_limit_tpm: int | None = Field(None, ge=0)
+    budget_cap_usd: None = None
+    budget_cap_tokens: int | None = Field(None, ge=0)
+    budget_cap_credits: int | None = Field(None, ge=0)
 
 
 class DepartmentUpdate(BaseModel):
@@ -64,10 +70,11 @@ class DepartmentUpdate(BaseModel):
     slug: str | None = Field(None, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str | None = None
     settings: dict | None = None
-    rate_limit_rpm: int | None = None
-    rate_limit_tpm: int | None = None
-    budget_cap_usd: Decimal | None = None
-    budget_cap_tokens: int | None = None
+    rate_limit_rpm: int | None = Field(None, ge=0)
+    rate_limit_tpm: int | None = Field(None, ge=0)
+    budget_cap_usd: None = None
+    budget_cap_tokens: int | None = Field(None, ge=0)
+    budget_cap_credits: int | None = Field(None, ge=0)
 
 
 class DepartmentRead(BaseModel):
@@ -82,6 +89,7 @@ class DepartmentRead(BaseModel):
     rate_limit_tpm: int | None
     budget_cap_usd: Decimal | None
     budget_cap_tokens: int | None
+    budget_cap_credits: int | None
     sort_order: int
     created_at: datetime
     updated_at: datetime
@@ -98,10 +106,11 @@ class TeamCreate(BaseModel):
     slug: str = Field(..., max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str | None = None
     settings: dict = Field(default_factory=dict)
-    rate_limit_rpm: int | None = None
-    rate_limit_tpm: int | None = None
-    budget_cap_usd: Decimal | None = None
-    budget_cap_tokens: int | None = None
+    rate_limit_rpm: int | None = Field(None, ge=0)
+    rate_limit_tpm: int | None = Field(None, ge=0)
+    budget_cap_usd: None = None
+    budget_cap_tokens: int | None = Field(None, ge=0)
+    budget_cap_credits: int | None = Field(None, ge=0)
 
 
 class TeamUpdate(BaseModel):
@@ -109,10 +118,11 @@ class TeamUpdate(BaseModel):
     slug: str | None = Field(None, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str | None = None
     settings: dict | None = None
-    rate_limit_rpm: int | None = None
-    rate_limit_tpm: int | None = None
-    budget_cap_usd: Decimal | None = None
-    budget_cap_tokens: int | None = None
+    rate_limit_rpm: int | None = Field(None, ge=0)
+    rate_limit_tpm: int | None = Field(None, ge=0)
+    budget_cap_usd: None = None
+    budget_cap_tokens: int | None = Field(None, ge=0)
+    budget_cap_credits: int | None = Field(None, ge=0)
 
 
 class TeamRead(BaseModel):
@@ -127,6 +137,7 @@ class TeamRead(BaseModel):
     rate_limit_tpm: int | None
     budget_cap_usd: Decimal | None
     budget_cap_tokens: int | None
+    budget_cap_credits: int | None
     created_at: datetime
     updated_at: datetime
 

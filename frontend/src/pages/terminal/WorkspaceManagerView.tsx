@@ -8,18 +8,21 @@ import {
   HomeOutlined, UploadOutlined, EyeOutlined, RightOutlined,
   AppstoreOutlined, UnorderedListOutlined, SearchOutlined, CheckSquareOutlined,
   HistoryOutlined, RestOutlined, ShareAltOutlined, SendOutlined, AuditOutlined, MoreOutlined,
+  LinkOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import {
-  terminal, WORKSPACE_MAX_FILE_BYTES, type Workspace, type WorkspaceFile, type WorkspaceFileListItem, type WorkspaceFolder, type TerminalResources,
+  terminal, WORKSPACE_MAX_FILE_BYTES, type Workspace, type WorkspaceFile, type WorkspaceFileEvent, type WorkspaceFileListItem, type WorkspaceFolder, type TerminalResources,
 } from '../../api/client';
 import { ApiError } from '../../api/client';
 import BrowserDrawer, { classifyFile, classifyUrl, type Source } from './BrowserDrawer';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import { auditSummary, auditTitle, workspaceDisplayName, workspaceSourceLabel, workspaceVisiblePath } from '../../utils/workspacePresentation';
+import { workspaceInternalUrl } from '../../utils/workspaceFileLinks';
 import {
   useWorkspaceUploadQueue, WorkspaceUploadPicker, WorkspaceUploadQueueStatus,
+  workspaceUploadErrorText, type WorkspaceUploadRequest,
 } from '../../components/files/WorkspaceUploadQueue';
 // extOf 已由 classifyFile 内部使用，此处不再直接引用
 
@@ -126,13 +129,18 @@ export default function WorkspaceManagerView({
   resources,
   homeDepartmentId,
   homeTeamId,
+  fileEventsById,
 }: {
   resources: TerminalResources | undefined;
   homeDepartmentId?: string | null;
   homeTeamId?: string | null;
+  fileEventsById?: Record<string, WorkspaceFileEvent>;
 }) {
   const qc = useQueryClient();
   const [urlParams, setUrlParams] = useSearchParams();
+  const linkedWorkspaceId = urlParams.get('workspace');
+  const linkedFileId = urlParams.get('file');
+  const linkedVersionId = urlParams.get('version');
   const workspaces = resources?.workspaces ?? [];
   const { treeData, wsById } = useMemo(
     () => buildTree(workspaces, homeDepartmentId, homeTeamId),
@@ -173,14 +181,16 @@ export default function WorkspaceManagerView({
   const [trashOpen, setTrashOpen] = useState(false);
   const [auditOpen, setAuditOpen] = useState(false);
   const [versionFile, setVersionFile] = useState<WorkspaceFileListItem | null>(null);
+  const restoreAttemptRef = useRef<{ fingerprint: string; key: string } | null>(null);
+  const trashRestoreAttemptRef = useRef(new Map<string, string>());
   const [publishFile, setPublishFile] = useState<WorkspaceFileListItem | null>(null);
   const [publishTarget, setPublishTarget] = useState<string | undefined>();
   const composingRef = useRef(false);
 
   // 浏览器抽屉：点击文件后右侧弹出，复用 BrowserDrawer
   const [browserOpen, setBrowserOpen] = useState(false);
-  const [browserHref, setBrowserHref] = useState<string | null>(null);
-  const [browserSeq, setBrowserSeq] = useState(0);
+  const [browserFileId, setBrowserFileId] = useState<string | null>(null);
+  const [browserVersionId, setBrowserVersionId] = useState<string | null>(null);
 
   const wsId = selectedWs?.id ?? null;
   const { data: files, isLoading: filesLoading } = useQuery({
@@ -209,6 +219,39 @@ export default function WorkspaceManagerView({
     if (cwd.length) next.set('path', cwd.join('/')); else next.delete('path');
     if (next.toString() !== urlParams.toString()) setUrlParams(next, { replace: true });
   }, [cwd, setUrlParams, urlParams, wsId]);
+
+  // 稳定内部地址进入终端后，在正常工作空间页面内按 file ID 打开抽屉。
+  // 直接访问 query URL 时也重新验证文件、历史版本与工作空间归属。
+  useEffect(() => {
+    if (!linkedFileId) return;
+    let disposed = false;
+    const resolve = async () => {
+      const [file] = await Promise.all([
+        terminal.getWsFile(linkedFileId),
+        linkedVersionId ? terminal.getWsFileVersion(linkedFileId, linkedVersionId) : Promise.resolve(null),
+      ]);
+      if (linkedWorkspaceId && file.workspace_id !== linkedWorkspaceId) throw new Error('workspace mismatch');
+      if (disposed) return;
+      setSelectedWsId(file.workspace_id);
+      setBrowserFileId(file.id);
+      setBrowserVersionId(linkedVersionId);
+      setBrowserOpen(true);
+    };
+    void resolve().catch(() => {
+      if (!disposed) message.error('文件不存在或没有查看权限');
+    });
+    return () => { disposed = true; };
+  }, [linkedFileId, linkedVersionId, linkedWorkspaceId]);
+
+  const replaceWorkspaceLocation = (workspaceId?: string | null, fileId?: string | null, versionId?: string | null) => {
+    const next = new URLSearchParams(urlParams);
+    next.set('view', 'workspace');
+    if (workspaceId) next.set('workspace', workspaceId); else next.delete('workspace');
+    if (fileId) next.set('file', fileId); else next.delete('file');
+    if (fileId && versionId) next.set('version', versionId); else next.delete('version');
+    if (!workspaceId) next.delete('path');
+    setUrlParams(next, { replace: true });
+  };
 
   // 无搜索时展示当前层直系子项；搜索时覆盖整个工作空间并保留完整路径。
   const { folderItems, fileItems } = useMemo(() => {
@@ -389,19 +432,79 @@ export default function WorkspaceManagerView({
   });
 
   const uploadQueue = useWorkspaceUploadQueue<WorkspaceFile>({
-    upload: (request, options) => terminal.uploadWsFile(
-      request.workspaceId, request.file, request.path, options,
-    ),
+    upload: (request, options) => terminal.uploadWsFile(request.workspaceId, request.file, request.path, {
+      ...options,
+      targetFileId: request.targetFileId,
+      baseVersionId: request.baseVersionId,
+      idempotencyKey: request.idempotencyKey,
+    }),
     onSuccess: (file, request) => {
       qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+      const action = request.targetFileId ? '已作为新版本上传' : '已上传';
       message.success(file.parse_status === 'ready'
-        ? `${request.file.name} 已上传，可使用`
-        : `${request.file.name} 已上传，正在后台解析`);
+        ? `${request.file.name} ${action}，可使用`
+        : `${request.file.name} ${action}，正在后台解析`);
     },
     onError: (error, request) => {
-      message.error(`${request.file.name}：${error instanceof ApiError ? error.message : '上传失败'}`);
+      message.error(`${request.file.name}：${workspaceUploadErrorText(error)}`);
     },
   });
+
+  const enqueueSelectedUploads = (selected: File[]) => {
+    if (!wsId) return;
+    const accepted = selected.filter((file) => {
+      if (file.size <= WORKSPACE_MAX_FILE_BYTES) return true;
+      message.warning(`${file.name} 超过 5GB 存储上限，未加入上传队列`);
+      return false;
+    });
+    const existingByPath = new Map((files ?? []).map((file) => [file.path, file]));
+    const seen = new Set<string>();
+    const creates: WorkspaceUploadRequest[] = [];
+    const versions: WorkspaceUploadRequest[] = [];
+    let duplicateSelections = 0;
+    let deniedCreates = 0;
+    let deniedVersions = 0;
+    for (const file of accepted) {
+      const path = [...cwd, file.name].join('/');
+      if (seen.has(path)) { duplicateSelections += 1; continue; }
+      seen.add(path);
+      const existing = existingByPath.get(path);
+      if (!existing) {
+        if (canCreate) creates.push({ workspaceId: wsId, path, file });
+        else deniedCreates += 1;
+        continue;
+      }
+      const fileCanUpdate = existing.capabilities?.update ?? existing.effective_capabilities?.update ?? canUpdate;
+      if (!canUpdate || !fileCanUpdate || !existing.current_version_id) { deniedVersions += 1; continue; }
+      versions.push({
+        workspaceId: wsId,
+        path,
+        file,
+        targetFileId: existing.id,
+        baseVersionId: existing.current_version_id,
+        idempotencyKey: crypto.randomUUID(),
+      });
+    }
+    if (creates.length) uploadQueue.enqueue(creates);
+    if (duplicateSelections) message.warning(`选择中有 ${duplicateSelections} 个重名文件，已只保留每个名称的第一个`);
+    if (deniedCreates) message.error(`${deniedCreates} 个新文件未上传：当前角色没有新建权限`);
+    if (deniedVersions) message.error(`${deniedVersions} 个同名文件未上传：缺少更新权限或当前版本不可用`);
+    if (!versions.length) return;
+    Modal.confirm({
+      title: `将 ${versions.length} 个同名文件作为新版本上传？`,
+      content: (
+        <div>
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+            同名文件不会自动覆盖。确认后将保留原文件地址和历史版本，并创建可恢复的新版本。
+          </Typography.Paragraph>
+          <List size="small" dataSource={versions} renderItem={(item) => <List.Item>{item.path}</List.Item>} />
+        </div>
+      ),
+      okText: '作为新版本上传',
+      cancelText: '取消同名文件',
+      onOk: () => uploadQueue.enqueue(versions),
+    });
+  };
 
   const reparseFile = async (fileId: string) => {
     const updated = await terminal.reparseWsFile(fileId);
@@ -412,14 +515,43 @@ export default function WorkspaceManagerView({
   };
 
   const delFile = useMutation({
-    mutationFn: (id: string) => terminal.deleteWsFile(id),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['ws-mgr-files'] }); message.success('文件已删除'); },
-    onError: () => message.error('删除失败'),
+    mutationFn: (request: { id: string; baseVersionId: string; idempotencyKey: string }) => terminal.deleteWsFile(request.id, {
+      base_version_id: request.baseVersionId,
+      idempotency_key: request.idempotencyKey,
+    }),
+    onSuccess: (_result, request) => {
+      qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+      if (browserFileId === request.id) {
+        setBrowserOpen(false);
+        setBrowserFileId(null);
+        setBrowserVersionId(null);
+        replaceWorkspaceLocation(wsId);
+      }
+      message.success('文件已删除');
+    },
+    onError: (e: unknown) => message.error(e instanceof ApiError ? e.message : '删除失败'),
   });
 
   const restoreTrash = useMutation({
-    mutationFn: (fileId: string) => terminal.restoreWsTrash(wsId!, fileId),
-    onSuccess: () => {
+    mutationFn: (file: WorkspaceFile) => {
+      if (!file.current_version_id) {
+        return Promise.reject(new Error('回收站文件版本信息已过期，请刷新后重试'));
+      }
+      const fingerprint = `${file.id}\u0000${file.current_version_id}`;
+      let idempotencyKey = trashRestoreAttemptRef.current.get(fingerprint);
+      if (!idempotencyKey) {
+        idempotencyKey = crypto.randomUUID();
+        trashRestoreAttemptRef.current.set(fingerprint, idempotencyKey);
+      }
+      return terminal.restoreWsTrash(wsId!, file.id, {
+        base_version_id: file.current_version_id,
+        idempotency_key: idempotencyKey,
+      });
+    },
+    onSuccess: (_result, file) => {
+      if (file.current_version_id) {
+        trashRestoreAttemptRef.current.delete(`${file.id}\u0000${file.current_version_id}`);
+      }
       qc.invalidateQueries({ queryKey: ['ws-mgr-trash'] });
       qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
       message.success('文件已从回收站恢复');
@@ -428,8 +560,21 @@ export default function WorkspaceManagerView({
   });
 
   const restoreVersion = useMutation({
-    mutationFn: (versionId: string) => terminal.restoreWsFileVersion(versionFile!.id, versionId),
+    mutationFn: (versionId: string) => {
+      const fingerprint = `${versionFile!.id}\u0000${versionFile?.current_version_id || ''}\u0000${versionId}`;
+      if (restoreAttemptRef.current?.fingerprint !== fingerprint) {
+        restoreAttemptRef.current = { fingerprint, key: crypto.randomUUID() };
+      }
+      if (!versionFile?.current_version_id) {
+        return Promise.reject(new Error('当前文件版本信息已过期，请刷新后重试'));
+      }
+      return terminal.restoreWsFileVersion(versionFile.id, versionId, {
+        base_version_id: versionFile.current_version_id,
+        idempotency_key: restoreAttemptRef.current.key,
+      });
+    },
     onSuccess: () => {
+      restoreAttemptRef.current = null;
       qc.invalidateQueries({ queryKey: ['ws-mgr-versions'] });
       qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
       message.success('已恢复为一个新的当前版本');
@@ -476,6 +621,7 @@ export default function WorkspaceManagerView({
   // 删除确认弹窗：不再用悬浮 Popconfirm，改为界面正中的模态框（字体与终端一致）。
   const [confirm, setConfirm] = useState<{
     kind: 'folder' | 'folderPath' | 'file' | 'bulk'; id: string; title: string; desc?: string;
+    baseVersionId?: string; idempotencyKey?: string;
   } | null>(null);
   const confirmLoading = confirm?.kind === 'folder'
     ? delFolder.isPending
@@ -486,7 +632,15 @@ export default function WorkspaceManagerView({
     if (!confirm) return;
     if (confirm.kind === 'folder') delFolder.mutate(confirm.id);
     else if (confirm.kind === 'folderPath') delFolderPath.mutate(confirm.id);
-    else if (confirm.kind === 'file') delFile.mutate(confirm.id);
+    else if (confirm.kind === 'file') {
+      if (!confirm.baseVersionId || !confirm.idempotencyKey) {
+        message.error('当前文件版本信息已过期，请刷新后重试');
+        void qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+        setConfirm(null);
+        return;
+      }
+      delFile.mutate({ id: confirm.id, baseVersionId: confirm.baseVersionId, idempotencyKey: confirm.idempotencyKey });
+    }
     else bulkDelete.mutate();
     setConfirm(null);
   };
@@ -501,16 +655,44 @@ export default function WorkspaceManagerView({
     let list: WorkspaceFileListItem[];
     try { list = await terminal.listWsFiles(wsId); }
     catch { return { kind: 'unsupported', href, note: '工作空间文件读取失败' }; }
-    const f = list.find((x) => x.path === href || x.path.endsWith('/' + href) || href.endsWith(x.path));
+    const exact = list.find((x) => x.path === href);
+    const suffixMatches = exact ? [] : list.filter((x) => x.path.endsWith('/' + href) || href.endsWith('/' + x.path));
+    const f = exact ?? (suffixMatches.length === 1 ? suffixMatches[0] : undefined);
     if (!f) return { kind: 'unsupported', href, note: `未找到该文件：${href}` };
     try { return classifyFile(await terminal.getWsFile(f.id)); }
     catch { return { kind: 'unsupported', href, note: '文件详情读取失败' }; }
   }, [wsId]);
 
-  const openFile = (path: string) => {
-    setBrowserHref(path);
-    setBrowserSeq((n) => n + 1);
+  const openFile = (fileId: string) => {
+    setBrowserFileId(fileId);
+    setBrowserVersionId(null);
     setBrowserOpen(true);
+    replaceWorkspaceLocation(wsId, fileId);
+  };
+
+  const copyFileAddress = async (file: WorkspaceFileListItem) => {
+    const url = workspaceInternalUrl({ ...file, workspace_name: file.workspace_name || selectedWs?.name }, window.location.origin);
+    try {
+      await navigator.clipboard.writeText(url);
+      message.success('文件地址已复制；有权限的成员可打开');
+    } catch {
+      Modal.info({
+        title: '复制文件地址',
+        content: <Input readOnly value={url} onFocus={(event) => event.currentTarget.select()} />,
+        okText: '关闭',
+      });
+    }
+  };
+
+  const copyVersionAddress = async (versionId: string) => {
+    if (!versionFile) return;
+    const url = workspaceInternalUrl({ ...versionFile, workspace_name: versionFile.workspace_name || selectedWs?.name }, window.location.origin, versionId);
+    try {
+      await navigator.clipboard.writeText(url);
+      message.success('历史版本地址已复制');
+    } catch {
+      Modal.info({ title: '复制历史版本地址', content: <Input readOnly value={url} onFocus={(event) => event.currentTarget.select()} />, okText: '关闭' });
+    }
   };
 
   const submitFolder = () => {
@@ -541,7 +723,13 @@ export default function WorkspaceManagerView({
             <MacTree
               nodes={treeData}
               selectedKey={selectedWsId ? `ws:${selectedWsId}` : null}
-              onSelect={(wsIdSel) => setSelectedWsId(wsIdSel)}
+              onSelect={(wsIdSel) => {
+                setSelectedWsId(wsIdSel);
+                setBrowserOpen(false);
+                setBrowserFileId(null);
+                setBrowserVersionId(null);
+                replaceWorkspaceLocation(wsIdSel);
+              }}
             />
           )}
         </aside>
@@ -630,27 +818,11 @@ export default function WorkspaceManagerView({
                     <FolderAddOutlined style={{ fontSize: 13 }} /> 新建文件夹
                   </button>
                   <WorkspaceUploadPicker
-                    disabled={!canCreate}
+                    disabled={!canCreate && !canUpdate}
                     onLimitExceeded={(count) => message.warning(`一次最多上传 5 个文件；已选择 ${count} 个，本次只加入前 5 个`)}
-                    onSelect={(selected) => {
-                      if (!canCreate) {
-                        message.warning('当前工作空间为只读');
-                        return;
-                      }
-                      if (!wsId) return;
-                      const accepted = selected.filter((file) => {
-                        if (file.size <= WORKSPACE_MAX_FILE_BYTES) return true;
-                        message.warning(`${file.name} 超过 5GB 存储上限，未加入上传队列`);
-                        return false;
-                      });
-                      uploadQueue.enqueue(accepted.map((file) => ({
-                        workspaceId: wsId,
-                        path: [...cwd, file.name].join('/'),
-                        file,
-                      })));
-                    }}
+                    onSelect={enqueueSelectedUploads}
                   >
-                    <button style={toolBtnStyle} disabled={!canCreate}>
+                    <button style={toolBtnStyle} disabled={!canCreate && !canUpdate}>
                       <UploadOutlined style={{ fontSize: 13 }} /> 上传文件（可多选）
                     </button>
                   </WorkspaceUploadPicker>
@@ -769,11 +941,11 @@ export default function WorkspaceManagerView({
                           onBlur={(event) => {
                             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(null);
                           }}
-                          onClick={() => selecting ? toggleSelected(key) : openFile(it.file.path)}
+                          onClick={() => selecting ? toggleSelected(key) : openFile(it.file.id)}
                           onKeyDown={(event) => {
                             if (event.key !== 'Enter' && event.key !== ' ') return;
                             event.preventDefault();
-                            selecting ? toggleSelected(key) : openFile(it.file.path);
+                            selecting ? toggleSelected(key) : openFile(it.file.id);
                           }}
                           style={viewMode === 'grid' ? { ...iconCardStyle(isActive), background: selected ? '#e8eafe' : (isActive ? '#f0f1f4' : 'transparent') } : listRowStyle(selected || isActive)}
                         >
@@ -794,6 +966,7 @@ export default function WorkspaceManagerView({
                                 menu={{
                                   items: [
                                     { key: 'open', label: '查看文件', icon: <EyeOutlined /> },
+                                    { key: 'copy-address', label: '复制文件地址', icon: <LinkOutlined /> },
                                     ...(canUpdate ? [
                                       { key: 'versions', label: '版本历史', icon: <HistoryOutlined /> },
                                       { key: 'share', label: '创建限时分享', icon: <ShareAltOutlined /> },
@@ -803,11 +976,25 @@ export default function WorkspaceManagerView({
                                   ],
                                   onClick: ({ key: action, domEvent }) => {
                                     domEvent.stopPropagation();
-                                    if (action === 'open') openFile(it.file.path);
+                                    if (action === 'open') openFile(it.file.id);
+                                    else if (action === 'copy-address') void copyFileAddress(it.file);
                                     else if (action === 'versions') setVersionFile(it.file);
                                     else if (action === 'share') void shareFile(it.file);
                                     else if (action === 'publish') setPublishFile(it.file);
-                                    else if (action === 'delete') setConfirm({ kind: 'file', id: it.file.id, title: '将该文件移至回收站？', desc: '文件将在回收站保留 30 天，可由负责人恢复。' });
+                                    else if (action === 'delete') {
+                                      if (!it.file.current_version_id) {
+                                        message.error('当前文件版本信息不可用，请刷新后重试');
+                                        void qc.invalidateQueries({ queryKey: ['ws-mgr-files'] });
+                                        return;
+                                      }
+                                      setConfirm({
+                                        kind: 'file', id: it.file.id,
+                                        baseVersionId: it.file.current_version_id,
+                                        idempotencyKey: crypto.randomUUID(),
+                                        title: '将该文件移至回收站？',
+                                        desc: '文件将在回收站保留 30 天，可由负责人恢复。',
+                                      });
+                                    }
                                   },
                                 }}
                               >
@@ -827,7 +1014,7 @@ export default function WorkspaceManagerView({
                 )}
                 {folderItems.length === 0 && fileItems.length === 0 && !filesLoading && (
                   <Typography.Text style={{ display: 'block', marginTop: 16, fontSize: 11, color: '#aeaeb2', textAlign: 'center' }}>
-                    点击文件夹进入 · 点击文件查看 · 同名上传将建立不可变新版本
+                    点击文件夹进入 · 点击文件查看 · 同名文件需确认后才会保存为新版本
                   </Typography.Text>
                 )}
               </div>
@@ -838,11 +1025,28 @@ export default function WorkspaceManagerView({
 
       {/* 查看文件：复用任务消息区右侧浏览器抽屉 */}
       <BrowserDrawer
-        key={browserSeq}
         open={browserOpen}
-        initialHref={browserHref}
-        onClose={() => setBrowserOpen(false)}
+        initialFileId={browserFileId}
+        initialVersionId={browserVersionId}
+        onClose={() => {
+          setBrowserOpen(false);
+          setBrowserFileId(null);
+          setBrowserVersionId(null);
+          replaceWorkspaceLocation(wsId);
+        }}
         resolveHref={resolveHref}
+        loadFileById={terminal.getWsFile}
+        loadFileVersionById={terminal.getWsFileVersion}
+        fallbackCapabilities={selectedWs?.capabilities}
+        fallbackWorkspaceName={selectedWs?.name}
+        saveTextFile={terminal.updateWsFile}
+        listFileVersions={terminal.listWsFileVersions}
+        restoreFileVersion={terminal.restoreWsFileVersion}
+        onFileChanged={() => {
+          qc.invalidateQueries({ queryKey: ['ws-mgr-files', wsId] });
+          qc.invalidateQueries({ queryKey: ['terminal-all-ws-files'] });
+          qc.invalidateQueries({ queryKey: ['terminal-ws-files'] });
+        }}
         onReparse={reparseFile}
         loadOriginalPreview={terminal.getWsFileOriginalPreview}
         loadOriginalPreviewSource={terminal.getWsFileOriginalPreviewSource}
@@ -857,6 +1061,11 @@ export default function WorkspaceManagerView({
         startSpreadsheetPreview={terminal.startWsFileSpreadsheetPreview}
         getSpreadsheetPreview={terminal.getWsFileSpreadsheetPreview}
         getSpreadsheetPage={terminal.getWsFileSpreadsheetPage}
+        createEditSession={terminal.createWsFileEditSession}
+        refreshEditSession={terminal.refreshWsFileEditSession}
+        closeEditSession={terminal.closeWsFileEditSession}
+        getEditSessionStatus={terminal.getWsFileEditSessionStatus}
+        externalVersionEvent={browserFileId ? fileEventsById?.[browserFileId] ?? null : null}
       />
 
       {/* 新建文件夹 */}
@@ -883,7 +1092,7 @@ export default function WorkspaceManagerView({
 
       <Modal title="回收站（保留 30 天）" open={trashOpen} footer={null} onCancel={() => setTrashOpen(false)} width={720}>
         <List loading={trashLoading} dataSource={trash} locale={{ emptyText: '回收站为空' }} renderItem={(file) => (
-          <List.Item actions={[<a key="restore" onClick={() => restoreTrash.mutate(file.id)}>恢复</a>]}>
+          <List.Item actions={[<a key="restore" onClick={() => restoreTrash.mutate(file)}>恢复</a>]}>
             <List.Item.Meta title={workspaceDisplayName(file)} description={[workspaceSourceLabel(file), formatBytes(file.size)].filter(Boolean).join(' · ')} />
           </List.Item>
         )} />
@@ -891,7 +1100,10 @@ export default function WorkspaceManagerView({
 
       <Modal title={`版本历史${versionFile ? ` · ${workspaceDisplayName(versionFile)}` : ''}`} open={!!versionFile} footer={null} onCancel={() => setVersionFile(null)} width={720}>
         <List loading={versionsLoading} dataSource={versions} locale={{ emptyText: '暂无版本' }} renderItem={(version, index) => (
-          <List.Item actions={index === 0 ? [] : [<a key="restore" onClick={() => restoreVersion.mutate(version.id)}>恢复此版本</a>]}>
+          <List.Item actions={[
+            <a key="copy" onClick={() => { void copyVersionAddress(version.id); }}>复制版本地址</a>,
+            ...(index === 0 ? [] : [<a key="restore" onClick={() => restoreVersion.mutate(version.id)}>恢复此版本</a>]),
+          ]}>
             <List.Item.Meta title={`版本 ${version.version_no}${index === 0 ? '（当前）' : ''}`} description={`${formatBytes(version.size)} · ${new Date(version.created_at).toLocaleString()} · ${PARSE_LABEL[version.parse_status] ?? version.parse_status}`} />
           </List.Item>
         )} />

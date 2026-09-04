@@ -35,7 +35,7 @@ from app.services.coolify_module_client import (
 )
 from app.services.github_module_publisher_service import ModulePublisherError, repository_name
 from app.utils.crypto import decrypt_provider_api_key, encrypt_provider_api_key
-from app.utils.public_url import same_origin
+from app.utils.public_url import request_public_http, same_origin
 
 ACTIVE_STATES = {"queued", "deploying", "verifying", "rollback_queued", "rolling_back"}
 SUCCESS_STATES = {"finished", "success", "successful", "completed"}
@@ -295,7 +295,9 @@ async def _ensure_platform_registration(
                 description="由企业 AI 按灼见原生协议开发并独立部署",
                 entry_url=row.entry_url,
                 display_mode="embedded",
-                is_active=True,
+                # A deployment may create a candidate, but only an
+                # administrator may make it employee-visible.
+                is_active=False,
                 assistant_enabled=True,
                 assistant_config={
                     "deploymentManaged": True,
@@ -310,8 +312,6 @@ async def _ensure_platform_registration(
             EnterpriseApplicationUpdate(
                 name=row.module_name,
                 entry_url=row.entry_url,
-                is_active=True,
-                assistant_enabled=True,
                 assistant_config={
                     **(application.assistant_config or {}),
                     "deploymentManaged": True,
@@ -319,18 +319,29 @@ async def _ensure_platform_registration(
                 },
             ),
         )
+    existing_integration = await subsystem_integration_service.get_integration(db, application.id)
+    if existing_integration is not None and (
+        not application.is_active
+        or not existing_integration.sync_enabled
+        or not existing_integration.auth_token_encrypted
+    ):
+        return False, "Administrator approval is required before this application can reconnect"
     integration_secret = decrypt_provider_api_key(row.integration_secret_encrypted)
     await subsystem_integration_service.configure_integration(
         db,
         application,
         EnterpriseApplicationIntegrationInput(
             manifest_url=urljoin(row.entry_url, "/api/integration/manifest"),
-            auth_token=integration_secret,
-            sync_enabled=True,
+            auth_token=integration_secret if existing_integration is None else None,
+            sync_enabled=existing_integration.sync_enabled if existing_integration is not None else True,
         ),
     )
-    sync = await subsystem_integration_service.sync_integration(db, application)
-    if sync.get("status") != "healthy":
+    sync = await subsystem_integration_service.sync_integration(
+        db,
+        application,
+        allow_initial_inactive_candidate=existing_integration is None,
+    )
+    if sync.get("status") not in {"healthy", "pending_review"}:
         return False, str(sync.get("detail") or "Manifest sync failed")
     application.health_status = "healthy"
     row.application_id = application.id
@@ -341,9 +352,16 @@ async def _ensure_platform_registration(
 async def _probe_health(row: ModuleDeployment) -> None:
     try:
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(15.0, connect=6.0), follow_redirects=False
+            timeout=httpx.Timeout(15.0, connect=6.0),
+            follow_redirects=False,
+            trust_env=False,
         ) as client:
-            response = await client.get(urljoin(row.entry_url, "/health"))
+            response = await request_public_http(
+                client,
+                "GET",
+                urljoin(row.entry_url, "/health"),
+                require_https=settings.app_env != "development",
+            )
             if response.status_code != 200:
                 raise ValueError(f"GET /health returned HTTP {response.status_code}")
             payload = response.json()

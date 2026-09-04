@@ -33,8 +33,9 @@ def _file(name: str, size: int, *, object_storage: bool = True):
 async def test_small_pdf_uses_signed_pdfjs_range_source(monkeypatch):
     monkeypatch.setattr(settings, "workspace_weboffice_enabled", True)
 
-    async def signed(_ref, *, filename):
+    async def signed(_ref, *, filename, version_id):
         assert filename == "manual.pdf"
+        assert version_id is None
         return {"url": "https://oss.example/manual.pdf", "fallback_url": None, "headers": {}}
 
     monkeypatch.setattr(preview.storage_gateway_service, "get_browser_signed_download", signed)

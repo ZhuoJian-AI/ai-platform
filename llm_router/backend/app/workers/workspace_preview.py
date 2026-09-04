@@ -239,6 +239,11 @@ async def process_one(job_id: str) -> None:
                     str(version.content_ref),
                     source,
                     max_bytes=settings.workspace_weboffice_max_bytes,
+                    version_id=(
+                        str(version.storage_version_id)
+                        if version.storage_version_id
+                        else str(metadata.get("storage_version_id") or "") or None
+                    ),
                 )
                 if job.conversion_type == "spreadsheet_rows":
                     output = await _spreadsheet_rows(source, directory)

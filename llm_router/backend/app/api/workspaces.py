@@ -38,11 +38,16 @@ from app.schemas.workspace import (
     WorkspaceBulkDeleteResult,
     WorkspaceCreate,
     WorkspaceDownloadTicketRead,
+    WorkspaceEditRoomStatusRead,
+    WorkspaceEditSessionClose,
+    WorkspaceEditSessionCreate,
     WorkspaceFallbackPreviewRead,
     WorkspaceFileCreate,
+    WorkspaceFileDeleteRequest,
     WorkspaceFilePage,
     WorkspaceFilePreviewRead,
     WorkspaceFileRead,
+    WorkspaceFileRestoreRequest,
     WorkspaceFileUpdate,
     WorkspaceFileVersionRead,
     WorkspaceFolderCreate,
@@ -64,8 +69,10 @@ from app.schemas.workspace import (
 from app.services import (
     storage_gateway_service,
     workspace_governance_service,
+    workspace_office_edit_service,
     workspace_pdf_preview_service,
     workspace_preview_session_service,
+    workspace_service,
 )
 from app.services.organization_service import list_organizations
 from app.services.workspace_preview_service import (
@@ -74,6 +81,9 @@ from app.services.workspace_preview_service import (
     source_metadata,
 )
 from app.services.workspace_service import (
+    WorkspaceFileInvalidPath,
+    WorkspaceFilePathConflict,
+    WorkspaceFileUnsupportedTextUpdate,
     WorkspaceFileUploadError,
     build_workspace_tree,
     bulk_soft_delete_items,
@@ -106,6 +116,69 @@ async def _ws_org_id(db: AsyncSession, ws_id: UUID) -> UUID:
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
     return ws.organization_id
+
+
+async def _admin_file_read(db: AsyncSession, ws, file) -> WorkspaceFileRead:
+    version_numbers = await workspace_service.current_version_numbers(db, [file.id])
+    _, previous_version_id = await workspace_service.version_lineage(db, file)
+    caps = {"read": True, "create": True, "update": True, "delete": True}
+    return WorkspaceFileRead.model_validate(file).model_copy(update={
+        "workspace_name": ws.name,
+        "workspace_slug": ws.slug,
+        "canonical_path": f"{ws.name}:/{str(file.path).lstrip('/')}",
+        "current_version_no": version_numbers.get(str(file.id)),
+        "previous_version_id": previous_version_id,
+        "mutation_result_version_id": getattr(file, "mutation_result_version_id", None),
+        "capabilities": caps,
+        "effective_capabilities": caps,
+        "internal_url": f"/f/{file.id}",
+        "office_edit_enabled": workspace_service.office_edit_enabled(file, can_update=True),
+    })
+
+
+async def _admin_file_version_read(
+    db: AsyncSession, ws, file, version: WorkspaceFileVersion,
+) -> WorkspaceFileRead:
+    current_numbers = await workspace_service.current_version_numbers(db, [file.id])
+    _, previous_version_id = await workspace_service.version_lineage(db, file)
+    caps = {"read": True, "create": False, "update": False, "delete": False}
+    return WorkspaceFileRead(
+        id=file.id,
+        workspace_id=file.workspace_id,
+        path=file.path,
+        size=version.size,
+        content_hash=version.content_hash,
+        content=version.content,
+        extracted_text=version.extracted_text,
+        parse_status=version.parse_status,
+        parse_kind=version.parse_kind,
+        parse_error=version.parse_error,
+        metadata=dict(version.metadata_ or {}),
+        created_at=file.created_at,
+        updated_at=version.created_at,
+        current_version_id=file.current_version_id,
+        previous_version_id=previous_version_id,
+        resolved_version_id=version.id,
+        resolved_version_no=int(version.version_no),
+        is_historical=str(version.id) != str(file.current_version_id),
+        workspace_name=ws.name,
+        workspace_slug=ws.slug,
+        canonical_path=f"{ws.name}:/{str(file.path).lstrip('/')}",
+        current_version_no=current_numbers.get(str(file.id)),
+        capabilities=caps,
+        effective_capabilities=caps,
+        internal_url=f"/f/{file.id}?version={version.id}",
+        office_edit_enabled=False,
+    )
+
+
+async def _admin_file_snapshot_at_version(
+    db: AsyncSession, file, version_id: UUID | None,
+):
+    try:
+        return await workspace_service.file_snapshot_at_version(db, file, version_id)
+    except workspace_service.WorkspaceFileVersionNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 # ── Workspace Tree（随组织架构逐级嵌套）──
@@ -197,7 +270,25 @@ async def upsert_file_endpoint(
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
     assert_org_write_access(auth, ws.organization_id)
-    saved = await upsert_file(db, ws, data, created_by_admin_id=auth.id)
+    try:
+        saved = await upsert_file(db, ws, data, created_by_admin_id=auth.id)
+    except WorkspaceFileInvalidPath as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "workspace_file_invalid_path",
+            "message": str(exc),
+        }) from exc
+    except WorkspaceFileUnsupportedTextUpdate as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "workspace_file_unsupported_text_create",
+            "message": str(exc),
+        }) from exc
+    except WorkspaceFilePathConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_path_conflict",
+            "message": str(exc),
+            "file_id": exc.file_id,
+            "current_version_id": exc.current_version_id,
+        }) from exc
     await workspace_governance_service.audit(
         db,
         ws,
@@ -242,6 +333,13 @@ async def upload_file_endpoint(
             metadata={"size": saved.size, "transport": "backend_proxy"},
         )
         return saved
+    except WorkspaceFilePathConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_path_conflict",
+            "message": str(exc),
+            "file_id": exc.file_id,
+            "current_version_id": exc.current_version_id,
+        }) from exc
     except WorkspaceFileUploadError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -260,12 +358,16 @@ async def initiate_admin_upload_endpoint(
     assert_org_write_access(auth, ws.organization_id)
     session = await workspace_governance_service.initiate_admin_direct_upload(db, ws, auth, data)
     upload_meta = dict(session.upload_headers or {})
+    upload_auth = workspace_governance_service.transient_upload_authorization(session)
     return WorkspaceUploadSessionRead(
         id=session.id,
         method=str(upload_meta.get("transport") or "put").upper(),
-        url=str(session.upload_url) if session.upload_url else None,
-        fallback_url=str(upload_meta.get("fallback_url")) if upload_meta.get("fallback_url") else None,
-        headers=dict(upload_meta.get("headers") or {}),
+        url=str(upload_auth.get("url")) if upload_auth.get("url") else None,
+        fallback_url=(
+            str(upload_auth.get("fallback_url"))
+            if upload_auth.get("fallback_url") else None
+        ),
+        headers=dict(upload_auth.get("headers") or {}),
         part_size=upload_meta.get("part_size"),
         expected_parts=upload_meta.get("expected_parts"),
         expires_at=session.expires_at, max_file_bytes=settings.workspace_max_file_bytes,
@@ -346,7 +448,20 @@ async def list_files_endpoint(
         raise HTTPException(status_code=404, detail="Workspace not found")
     assert_org_access(auth, ws.organization_id)
     items, total = await list_files_page(db, ws.id, page=page, page_size=page_size)
-    return WorkspaceFilePage(items=items, total=total, page=page, page_size=page_size)
+    version_numbers = await workspace_service.current_version_numbers(
+        db, [item.id for item in items],
+    )
+    enriched = [item.model_copy(update={
+        "workspace_name": ws.name,
+        "workspace_slug": ws.slug,
+        "canonical_path": f"{ws.name}:/{str(item.path).lstrip('/')}",
+        "current_version_no": version_numbers.get(str(item.id)),
+        "capabilities": {"read": True, "create": True, "update": True, "delete": True},
+        "effective_capabilities": {"read": True, "create": True, "update": True, "delete": True},
+        "internal_url": f"/f/{item.id}",
+        "office_edit_enabled": bool(item.office_edit_enabled),
+    }) for item in items]
+    return WorkspaceFilePage(items=enriched, total=total, page=page, page_size=page_size)
 
 
 @router.get("/files/{file_id}", response_model=WorkspaceFileRead)
@@ -356,8 +471,11 @@ async def get_file_endpoint(
     f = await get_file(db, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
-    assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
-    return f
+    ws = await get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_access(auth, ws.organization_id)
+    return await _admin_file_read(db, ws, f)
 
 
 @router.get("/files/{file_id}/preview", response_model=WorkspaceFilePreviewRead)
@@ -373,7 +491,8 @@ async def preview_file_endpoint(
 
 @router.get("/files/{file_id}/original-preview")
 async def original_preview_file_endpoint(
-    file_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+    file_id: UUID, version_id: UUID | None = Query(None),
+    auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
     f = await get_file(db, file_id)
     if not f:
@@ -382,6 +501,7 @@ async def original_preview_file_endpoint(
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
     assert_org_access(auth, ws.organization_id)
+    f, _ = await _admin_file_snapshot_at_version(db, f, version_id)
     organization = await db.get(Organization, ws.organization_id)
     if organization is None or not settings.original_preview_enabled_for(organization.slug):
         raise HTTPException(status_code=404, detail="Original preview is not enabled")
@@ -404,7 +524,8 @@ async def original_preview_file_endpoint(
     response_model=WorkspaceOriginalPreviewSourceRead,
 )
 async def original_preview_source_endpoint(
-    file_id: UUID, response: Response, auth: CurrentAdmin = Depends(require_admin),
+    file_id: UUID, response: Response, version_id: UUID | None = Query(None),
+    auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """Return a browser-safe source without proxying a large object twice."""
@@ -416,13 +537,16 @@ async def original_preview_source_endpoint(
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
     assert_org_access(auth, ws.organization_id)
+    f, version = await _admin_file_snapshot_at_version(db, f, version_id)
     organization = await db.get(Organization, ws.organization_id)
     if organization is None or not settings.original_preview_enabled_for(organization.slug):
         raise HTTPException(status_code=404, detail="Original preview is not enabled")
     try:
         filename, mime_type = source_metadata(f)
         if storage_gateway_service.is_object_ref(f.content_ref):
-            signed = await storage_gateway_service.get_browser_signed_download(str(f.content_ref))
+            signed = await storage_gateway_service.get_browser_signed_download(
+                str(f.content_ref), version_id=workspace_service.storage_version_id(f, version),
+            )
             return WorkspaceOriginalPreviewSourceRead(
                 mode="url",
                 url=str(signed["url"]),
@@ -442,12 +566,14 @@ async def original_preview_source_endpoint(
 
 @router.get("/files/{file_id}/pdf-preview/info")
 async def pdf_preview_info_endpoint(
-    file_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+    file_id: UUID, version_id: UUID | None = Query(None),
+    auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
     f = await get_file(db, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
+    f, _ = await _admin_file_snapshot_at_version(db, f, version_id)
     try:
         return await workspace_pdf_preview_service.get_pdf_info(db, f)
     except workspace_pdf_preview_service.WorkspacePdfPreviewError as exc:
@@ -467,6 +593,7 @@ async def preview_session_endpoint(
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
+    f, _ = await _admin_file_snapshot_at_version(db, f, data.version_id)
     try:
         actor = hashlib.sha256(f"admin:{auth.id}".encode()).hexdigest()[:15]
         result = await workspace_preview_session_service.create_preview_session(
@@ -510,14 +637,151 @@ async def refresh_preview_session_endpoint(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@router.post("/files/{file_id}/edit-session", response_model=WorkspacePreviewSessionRead)
+async def edit_session_endpoint(
+    file_id: UUID,
+    data: WorkspaceEditSessionCreate,
+    response: Response,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    f = await get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_write_access(auth, ws.organization_id)
+    try:
+        result = await workspace_office_edit_service.create_edit_session(
+            db,
+            f,
+            actor_type="admin",
+            actor_id=str(auth.id),
+            client_open_id=data.client_open_id,
+        )
+        await db.commit()
+        return WorkspacePreviewSessionRead(**result)
+    except OriginalPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except storage_gateway_service.StorageGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post(
+    "/files/{file_id}/edit-session/refresh",
+    response_model=WorkspacePreviewSessionRead,
+)
+async def refresh_edit_session_endpoint(
+    file_id: UUID,
+    data: WorkspacePreviewSessionRefresh,
+    response: Response,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    f = await get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_write_access(auth, ws.organization_id)
+    if data.room_id is None:
+        raise HTTPException(status_code=422, detail="room_id is required for edit refresh")
+    try:
+        result = await workspace_office_edit_service.refresh_edit_session(
+            db,
+            f,
+            actor_type="admin",
+            actor_id=str(auth.id),
+            access_token=data.access_token,
+            refresh_token=data.refresh_token,
+            refresh_context=data.refresh_context,
+            room_id=data.room_id,
+        )
+        await db.commit()
+        return WorkspacePreviewSessionRead(**result)
+    except OriginalPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except storage_gateway_service.StorageGatewayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get(
+    "/files/{file_id}/edit-session/{room_id}",
+    response_model=WorkspaceEditRoomStatusRead,
+)
+async def edit_session_status_endpoint(
+    file_id: UUID,
+    room_id: UUID,
+    response: Response,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    f = await get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_write_access(auth, ws.organization_id)
+    room = await workspace_office_edit_service.get_edit_room(
+        db, f, room_id=room_id, actor_type="admin", actor_id=str(auth.id),
+    )
+    if room is None:
+        raise HTTPException(status_code=404, detail="Edit session not found")
+    return WorkspaceEditRoomStatusRead(
+        **await workspace_office_edit_service.edit_room_status_payload(db, f, room)
+    )
+
+
+@router.post(
+    "/files/{file_id}/edit-session/close",
+    response_model=WorkspaceEditRoomStatusRead,
+)
+async def close_edit_session_endpoint(
+    file_id: UUID,
+    data: WorkspaceEditSessionClose,
+    response: Response,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    f = await get_file(db, file_id)
+    if f is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    ws = await get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_write_access(auth, ws.organization_id)
+    room = await workspace_office_edit_service.close_edit_session(
+        db,
+        f,
+        actor_type="admin",
+        actor_id=str(auth.id),
+        client_open_id=data.client_open_id,
+    )
+    if room is None:
+        raise HTTPException(status_code=404, detail="Edit session not found")
+    await db.commit()
+    return WorkspaceEditRoomStatusRead(
+        **await workspace_office_edit_service.edit_room_status_payload(db, f, room)
+    )
+
+
 async def _fallback_preview(
-    file_id: UUID, response: Response, auth: CurrentAdmin, db: AsyncSession, *, create: bool,
+    file_id: UUID, response: Response, auth: CurrentAdmin, db: AsyncSession, *,
+    create: bool, version_id: UUID | None = None,
 ):
     response.headers["Cache-Control"] = "private, no-store"
     f = await get_file(db, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
+    f, _ = await _admin_file_snapshot_at_version(db, f, version_id)
     try:
         result = await workspace_preview_session_service.fallback_status(db, f, create=create)
         if create:
@@ -531,28 +795,36 @@ async def _fallback_preview(
 
 @router.post("/files/{file_id}/fallback-preview", response_model=WorkspaceFallbackPreviewRead)
 async def start_fallback_preview_endpoint(
-    file_id: UUID, response: Response, auth: CurrentAdmin = Depends(require_admin),
+    file_id: UUID, response: Response, version_id: UUID | None = Query(None),
+    auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await _fallback_preview(file_id, response, auth, db, create=True)
+    return await _fallback_preview(
+        file_id, response, auth, db, create=True, version_id=version_id,
+    )
 
 
 @router.get("/files/{file_id}/fallback-preview", response_model=WorkspaceFallbackPreviewRead)
 async def get_fallback_preview_endpoint(
-    file_id: UUID, response: Response, auth: CurrentAdmin = Depends(require_admin),
+    file_id: UUID, response: Response, version_id: UUID | None = Query(None),
+    auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await _fallback_preview(file_id, response, auth, db, create=False)
+    return await _fallback_preview(
+        file_id, response, auth, db, create=False, version_id=version_id,
+    )
 
 
 async def _spreadsheet_preview(
-    file_id: UUID, response: Response, auth: CurrentAdmin, db: AsyncSession, *, create: bool,
+    file_id: UUID, response: Response, auth: CurrentAdmin, db: AsyncSession, *,
+    create: bool, version_id: UUID | None = None,
 ):
     response.headers["Cache-Control"] = "private, no-store"
     f = await get_file(db, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
+    f, _ = await _admin_file_snapshot_at_version(db, f, version_id)
     try:
         result = await workspace_preview_session_service.spreadsheet_status(db, f, create=create)
         if create:
@@ -564,18 +836,24 @@ async def _spreadsheet_preview(
 
 @router.post("/files/{file_id}/spreadsheet-preview", response_model=WorkspaceSpreadsheetPreviewRead)
 async def start_spreadsheet_preview_endpoint(
-    file_id: UUID, response: Response, auth: CurrentAdmin = Depends(require_admin),
+    file_id: UUID, response: Response, version_id: UUID | None = Query(None),
+    auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await _spreadsheet_preview(file_id, response, auth, db, create=True)
+    return await _spreadsheet_preview(
+        file_id, response, auth, db, create=True, version_id=version_id,
+    )
 
 
 @router.get("/files/{file_id}/spreadsheet-preview", response_model=WorkspaceSpreadsheetPreviewRead)
 async def get_spreadsheet_preview_endpoint(
-    file_id: UUID, response: Response, auth: CurrentAdmin = Depends(require_admin),
+    file_id: UUID, response: Response, version_id: UUID | None = Query(None),
+    auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await _spreadsheet_preview(file_id, response, auth, db, create=False)
+    return await _spreadsheet_preview(
+        file_id, response, auth, db, create=False, version_id=version_id,
+    )
 
 
 @router.get(
@@ -584,6 +862,7 @@ async def get_spreadsheet_preview_endpoint(
 )
 async def spreadsheet_preview_page_endpoint(
     file_id: UUID, sheet: str, page: int, response: Response,
+    version_id: UUID | None = Query(None),
     auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
     response.headers["Cache-Control"] = "private, no-store"
@@ -591,6 +870,7 @@ async def spreadsheet_preview_page_endpoint(
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
+    f, _ = await _admin_file_snapshot_at_version(db, f, version_id)
     try:
         return WorkspaceSpreadsheetPageRead(**await workspace_preview_session_service.spreadsheet_page(
             db, f, sheet_name=sheet, page=page,
@@ -601,13 +881,15 @@ async def spreadsheet_preview_page_endpoint(
 
 @router.get("/files/{file_id}/pdf-preview/pages/{page_number}")
 async def pdf_preview_page_endpoint(
-    file_id: UUID, page_number: int, auth: CurrentAdmin = Depends(require_admin),
+    file_id: UUID, page_number: int, version_id: UUID | None = Query(None),
+    auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     f = await get_file(db, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
+    f, _ = await _admin_file_snapshot_at_version(db, f, version_id)
     try:
         content, media_type = await workspace_pdf_preview_service.get_pdf_page(db, f, page_number)
     except workspace_pdf_preview_service.WorkspacePdfPreviewError as exc:
@@ -622,18 +904,22 @@ async def pdf_preview_page_endpoint(
 
 @router.get("/files/{file_id}/download")
 async def download_file_endpoint(
-    file_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+    file_id: UUID, version_id: UUID | None = Query(None),
+    auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
     f = await get_file(db, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
+    f, version = await _admin_file_snapshot_at_version(db, f, version_id)
     metadata = f.metadata_ or {}
     filename = str(metadata.get("name") or f.path.rsplit("/", 1)[-1])
     media_type = str(metadata.get("mime") or "application/octet-stream")
     if storage_gateway_service.is_object_ref(f.content_ref):
         try:
-            signed = await storage_gateway_service.get_signed_download(str(f.content_ref))
+            signed = await storage_gateway_service.get_signed_download(
+                str(f.content_ref), version_id=workspace_service.storage_version_id(f, version),
+            )
         except storage_gateway_service.StorageGatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return StreamingResponse(
@@ -660,7 +946,8 @@ async def download_file_endpoint(
 
 @router.post("/files/{file_id}/download-ticket", response_model=WorkspaceDownloadTicketRead)
 async def download_ticket_endpoint(
-    file_id: UUID, response: Response, auth: CurrentAdmin = Depends(require_admin),
+    file_id: UUID, response: Response, version_id: UUID | None = Query(None),
+    auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     response.headers["Cache-Control"] = "private, no-store"
@@ -668,12 +955,14 @@ async def download_ticket_endpoint(
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
+    f, version = await _admin_file_snapshot_at_version(db, f, version_id)
     if not storage_gateway_service.is_object_ref(f.content_ref):
         raise HTTPException(status_code=409, detail="该历史文件尚未迁移到 OSS，请使用兼容下载")
     try:
         filename, mime_type = source_metadata(f)
         signed = await storage_gateway_service.get_browser_signed_download(
             str(f.content_ref), expires_in_seconds=15 * 60, filename=filename,
+            version_id=workspace_service.storage_version_id(f, version),
         )
     except OriginalPreviewError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -704,6 +993,7 @@ async def reparse_file_endpoint(
     return await reparse_file(db, f)
 
 
+@router.post("/files/{file_id}/versions", response_model=WorkspaceFileRead)
 @router.patch("/files/{file_id}", response_model=WorkspaceFileRead)
 async def update_file_endpoint(
     file_id: UUID, data: WorkspaceFileUpdate,
@@ -712,19 +1002,97 @@ async def update_file_endpoint(
     f = await get_file(db, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
-    assert_org_write_access(auth, await _ws_org_id(db, f.workspace_id))
-    return await update_file(db, f, data)
+    ws = await get_workspace(db, f.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_write_access(auth, ws.organization_id)
+    if data.base_version_id is None or not data.idempotency_key:
+        raise HTTPException(
+            status_code=422,
+            detail="base_version_id and idempotency_key are required",
+        )
+    try:
+        updated = await update_file(db, f, data, created_by_admin_id=auth.id)
+    except workspace_service.WorkspaceFileVersionConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_version_conflict",
+            "message": str(exc),
+            "current_version_id": exc.current_version_id,
+            "latest_version_id": exc.current_version_id,
+        }) from exc
+    except WorkspaceFileUnsupportedTextUpdate as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "workspace_file_unsupported_text_update",
+            "message": str(exc),
+        }) from exc
+    except workspace_service.WorkspaceFileMetadataConflict as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "workspace_file_reserved_metadata",
+            "message": str(exc),
+        }) from exc
+    except workspace_service.WorkspaceFileIdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_idempotency_conflict",
+            "message": str(exc),
+            "current_version_id": str(f.current_version_id) if f.current_version_id else None,
+            "latest_version_id": str(f.current_version_id) if f.current_version_id else None,
+        }) from exc
+    except workspace_service.WorkspaceFileActiveEditConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_active_edit_conflict",
+            "message": str(exc),
+            "room_id": exc.room_id,
+            "current_version_id": exc.current_version_id,
+            "latest_version_id": exc.current_version_id,
+        }) from exc
+    except WorkspaceFileUploadError as exc:
+        raise HTTPException(status_code=502, detail={
+            "code": "workspace_file_storage_write_failed",
+            "message": str(exc),
+        }) from exc
+    return await _admin_file_read(db, ws, updated)
 
 
 @router.delete("/files/{file_id}", status_code=204)
 async def delete_file_endpoint(
-    file_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+    file_id: UUID,
+    data: WorkspaceFileDeleteRequest,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    f = await get_file(db, file_id)
+    f = await workspace_service.get_file_including_deleted(db, file_id)
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_write_access(auth, await _ws_org_id(db, f.workspace_id))
-    await soft_delete_file(db, f, admin_id=auth.id)
+    try:
+        await soft_delete_file(
+            db,
+            f,
+            admin_id=auth.id,
+            base_version_id=data.base_version_id,
+            idempotency_key=data.idempotency_key,
+            mutation_actor_type="admin",
+            mutation_actor_id=str(auth.id),
+        )
+    except workspace_service.WorkspaceFileVersionConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_version_conflict",
+            "message": str(exc),
+            "current_version_id": exc.current_version_id,
+            "latest_version_id": exc.current_version_id,
+        }) from exc
+    except workspace_service.WorkspaceFileIdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_idempotency_conflict", "message": str(exc),
+        }) from exc
+    except workspace_service.WorkspaceFileActiveEditConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_active_edit_conflict",
+            "message": str(exc),
+            "room_id": exc.room_id,
+            "current_version_id": exc.current_version_id,
+            "latest_version_id": exc.current_version_id,
+        }) from exc
 
 
 @router.get("/files/{file_id}/versions", response_model=list[WorkspaceFileVersionRead])
@@ -737,7 +1105,31 @@ async def list_file_versions_endpoint(
     if not f:
         raise HTTPException(status_code=404, detail="File not found")
     assert_org_access(auth, await _ws_org_id(db, f.workspace_id))
-    return await workspace_governance_service.list_versions(db, f)
+    versions = await workspace_governance_service.list_versions(db, f)
+    return [
+        WorkspaceFileVersionRead.model_validate(version).model_copy(update={
+            "internal_url": f"/f/{f.id}?version={version.id}",
+        })
+        for version in versions
+    ]
+
+
+@router.get("/files/{file_id}/versions/{version_id}", response_model=WorkspaceFileRead)
+async def get_file_version_endpoint(
+    file_id: UUID,
+    version_id: UUID,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    file = await get_file(db, file_id)
+    version = await db.get(WorkspaceFileVersion, version_id)
+    if file is None or version is None or str(version.workspace_file_id) != str(file.id):
+        raise HTTPException(status_code=404, detail="文件版本不存在")
+    ws = await get_workspace(db, file.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    assert_org_access(auth, ws.organization_id)
+    return await _admin_file_version_read(db, ws, file, version)
 
 
 @router.post(
@@ -747,6 +1139,7 @@ async def list_file_versions_endpoint(
 async def restore_file_version_endpoint(
     file_id: UUID,
     version_id: UUID,
+    data: WorkspaceFileRestoreRequest,
     auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -758,7 +1151,34 @@ async def restore_file_version_endpoint(
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     assert_org_write_access(auth, ws.organization_id)
-    return await workspace_governance_service.restore_version_admin(db, ws, f, version, auth)
+    try:
+        restored = await workspace_service.restore_file_version(
+            db, f, version,
+            base_version_id=data.base_version_id,
+            idempotency_key=data.idempotency_key,
+            created_by_admin_id=auth.id,
+        )
+    except workspace_service.WorkspaceFileVersionConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_version_conflict", "message": str(exc),
+            "current_version_id": exc.current_version_id,
+            "latest_version_id": exc.current_version_id,
+        }) from exc
+    except workspace_service.WorkspaceFileIdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_idempotency_conflict", "message": str(exc),
+        }) from exc
+    except workspace_service.WorkspaceFileActiveEditConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_active_edit_conflict", "message": str(exc),
+            "room_id": exc.room_id, "current_version_id": exc.current_version_id,
+        }) from exc
+    await workspace_governance_service.audit(
+        db, ws, "version_restored", admin_id=auth.id, file=restored,
+        version_id=restored.current_version_id,
+        metadata={"restored_from": str(version.id)},
+    )
+    return await _admin_file_read(db, ws, restored)
 
 
 @router.get("/workspaces/{ws_id}/trash", response_model=list[WorkspaceFileRead])
@@ -792,6 +1212,7 @@ async def list_workspace_audit_endpoint(
 async def restore_trash_endpoint(
     ws_id: UUID,
     file_id: UUID,
+    data: WorkspaceFileRestoreRequest,
     auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -799,7 +1220,14 @@ async def restore_trash_endpoint(
     if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
     assert_org_write_access(auth, ws.organization_id)
-    return await workspace_governance_service.restore_from_trash_admin(db, ws, file_id, auth)
+    return await workspace_governance_service.restore_from_trash_admin(
+        db,
+        ws,
+        file_id,
+        auth,
+        base_version_id=data.base_version_id,
+        idempotency_key=data.idempotency_key,
+    )
 
 
 @router.delete("/workspaces/{ws_id}/folder-path")
@@ -815,6 +1243,13 @@ async def delete_folder_path_endpoint(
     assert_org_write_access(auth, ws.organization_id)
     try:
         deleted = await soft_delete_folder_path(db, ws.id, path, admin_id=auth.id)
+    except workspace_service.WorkspaceFileActiveEditConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_active_edit_conflict",
+            "message": str(exc),
+            "room_id": exc.room_id,
+            "current_version_id": exc.current_version_id,
+        }) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await workspace_governance_service.audit(
@@ -845,6 +1280,13 @@ async def bulk_delete_items_endpoint(
             folder_paths=data.folder_paths,
             admin_id=auth.id,
         )
+    except workspace_service.WorkspaceFileActiveEditConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_active_edit_conflict",
+            "message": str(exc),
+            "room_id": exc.room_id,
+            "current_version_id": exc.current_version_id,
+        }) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await workspace_governance_service.audit(
@@ -890,7 +1332,15 @@ async def delete_folder_endpoint(
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
     assert_org_write_access(auth, await _ws_org_id(db, folder.workspace_id))
-    await soft_delete_folder(db, folder, admin_id=auth.id)
+    try:
+        await soft_delete_folder(db, folder, admin_id=auth.id)
+    except workspace_service.WorkspaceFileActiveEditConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "workspace_file_active_edit_conflict",
+            "message": str(exc),
+            "room_id": exc.room_id,
+            "current_version_id": exc.current_version_id,
+        }) from exc
     ws = await get_workspace(db, folder.workspace_id)
     if ws is not None:
         await workspace_governance_service.audit(

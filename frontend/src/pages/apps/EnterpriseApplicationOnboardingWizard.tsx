@@ -19,6 +19,7 @@ import {
 } from '../../api/client';
 import type { OrgNodeInfo } from '../../hooks/useOrgTree';
 import './EnterpriseApplicationOnboardingWizard.css';
+import { validateHttpsApplicationUrl } from '../../utils/applicationUrl';
 
 const OPERATION_PERMISSION: Record<EnterpriseApplicationOperation, EnterpriseApplicationPermission> = {
   query: 'ai_query', create: 'ai_create', update: 'ai_update', delete: 'ai_delete',
@@ -111,7 +112,9 @@ export default function EnterpriseApplicationOnboardingWizard({
           entry_url: discovery.entry_url,
           display_mode: 'embedded',
           sort_order: 0,
-          is_active: true,
+          // Keep the application non-launchable until discovery, sync and all
+          // administrator-selected grants have committed successfully.
+          is_active: false,
           assistant_enabled: true,
         });
         createdId = created.id;
@@ -207,6 +210,7 @@ export default function EnterpriseApplicationOnboardingWizard({
           module_keys: Array.from(grant.module_keys),
           module_access: grant.module_access,
         })));
+        await enterpriseApplications.update(created.id, { is_active: true });
         return created.id;
       } catch (error) {
         if (createdId) await enterpriseApplications.delete(createdId).catch(() => undefined);
@@ -228,7 +232,7 @@ export default function EnterpriseApplicationOnboardingWizard({
   ] : step === 2 ? [
     <Button key="back" onClick={() => setStep(1)}>上一步</Button>,
     <Button key="register" type="primary" loading={register.isPending} onClick={() => register.mutate()}>
-      确认登记并授权
+      确认审核、授权并启用
     </Button>,
   ] : [<Button key="done" type="primary" onClick={onClose}>完成</Button>];
 
@@ -255,7 +259,7 @@ export default function EnterpriseApplicationOnboardingWizard({
           <div><Typography.Title level={4}>只需要系统域名和连接密钥</Typography.Title><Typography.Text type="secondary">平台会自动检查 HTTPS、健康状态、子模块、参与部门和 AI 操作，不读取业务数据库。</Typography.Text></div>
         </div>
         <Form form={connectionForm} layout="vertical" onFinish={(values) => discover.mutate(values)}>
-          <Form.Item name="base_url" label="模块系统地址" rules={[{ required: true }, { type: 'url' }]} extra="例如：https://sample-review.aifabei.staging.zhuojianai.com">
+          <Form.Item name="base_url" label="模块系统地址" rules={[{ required: true }, { validator: validateHttpsApplicationUrl }]} extra="例如：https://sample-review.aifabei.staging.zhuojianai.com">
             <Input size="large" prefix={<ApiOutlined />} placeholder="https://..." />
           </Form.Item>
           <Form.Item name="auth_token" label="连接密钥" rules={[{ required: true }, { min: 16 }]} extra="密钥只在保存时发送，并由平台加密保存，不会在页面回显。">

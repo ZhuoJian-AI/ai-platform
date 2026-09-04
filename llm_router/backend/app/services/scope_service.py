@@ -269,8 +269,6 @@ def is_workspace_visible(ws: Workspace, cu: CurrentUser) -> bool:
         or not getattr(ws, "is_active", True)
     ):
         return False
-    if ws.scope_type == "organization":
-        return True
     if ws.scope_type == "department":
         codes = set(getattr(cu, "permission_codes", ()) or ())
         return (
@@ -278,8 +276,6 @@ def is_workspace_visible(ws: Workspace, cu: CurrentUser) -> bool:
             or "*" in codes
             or str(ws.scope_id) in workspace_permission_service.department_workspace_scope_ids(cu)
         )
-    if ws.scope_type == "team" and cu.team_id and ws.scope_id == cu.team_id:
-        return True
     if ws.scope_type == "user" and ws.scope_id == cu.id:
         return True
     return False

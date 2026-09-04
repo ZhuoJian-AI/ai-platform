@@ -12,20 +12,24 @@ class ApiKeyCreate(BaseModel):
     scope_type: str = Field(..., pattern=r"^(organization|department|team)$")
     organization_id: UUID | None = None  # 用于 dept/team 级别的 key 创建
     allowed_models: list[str] = Field(default_factory=list)  # 空=全部
-    rate_limit_rpm: int | None = None
-    rate_limit_tpm: int | None = None
-    budget_cap_usd: Decimal | None = None
-    budget_cap_tokens: int | None = None
+    rate_limit_rpm: int | None = Field(None, ge=0)
+    rate_limit_tpm: int | None = Field(None, ge=0)
+    # USD caps are retained only for legacy reporting until versioned provider
+    # prices exist; new keys must use token and/or credit budgets.
+    budget_cap_usd: None = None
+    budget_cap_tokens: int | None = Field(None, ge=0)
+    budget_cap_credits: int | None = Field(None, ge=0)
     expires_at: datetime | None = None
 
 
 class ApiKeyUpdate(BaseModel):
     key_name: str | None = Field(None, max_length=255)
     allowed_models: list[str] | None = None
-    rate_limit_rpm: int | None = None
-    rate_limit_tpm: int | None = None
-    budget_cap_usd: Decimal | None = None
-    budget_cap_tokens: int | None = None
+    rate_limit_rpm: int | None = Field(None, ge=0)
+    rate_limit_tpm: int | None = Field(None, ge=0)
+    budget_cap_usd: None = None
+    budget_cap_tokens: int | None = Field(None, ge=0)
+    budget_cap_credits: int | None = Field(None, ge=0)
     is_active: bool | None = None
     expires_at: datetime | None = None
 
@@ -44,6 +48,7 @@ class _ApiKeyReadInner(BaseModel):
     rate_limit_tpm: int | None
     budget_cap_usd: Decimal | None
     budget_cap_tokens: int | None
+    budget_cap_credits: int | None
     is_active: bool
     expires_at: datetime | None
     last_used_at: datetime | None
@@ -54,7 +59,7 @@ class _ApiKeyReadInner(BaseModel):
 
 
 class ApiKeyRead(BaseModel):
-    """API Key 元数据 + 可解密的完整 Key。"""
+    """API Key metadata.  Bearer plaintext is never returned after creation."""
     id: UUID
     key_prefix: str
     key_name: str
@@ -67,16 +72,15 @@ class ApiKeyRead(BaseModel):
     rate_limit_tpm: int | None
     budget_cap_usd: Decimal | None
     budget_cap_tokens: int | None
+    budget_cap_credits: int | None
     is_active: bool
     expires_at: datetime | None
     last_used_at: datetime | None
     created_at: datetime
     revoked_at: datetime | None
-    key_plain: str  # 解密后的完整明文，旧 Key 为空串
-
     model_config = {"from_attributes": True}
 
 
 class ApiKeyCreateResponse(ApiKeyRead):
-    """创建时返回完整密钥（向后兼容保留 key 字段）。"""
-    key: str  # 等同于 key_plain，保留向后兼容
+    """Creation-only response containing the one-time bearer plaintext."""
+    key: str
