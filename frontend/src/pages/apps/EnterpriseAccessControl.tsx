@@ -162,6 +162,9 @@ export default function EnterpriseAccessControl() {
       (left.sortOrder ?? Number.MAX_SAFE_INTEGER) - (right.sortOrder ?? Number.MAX_SAFE_INTEGER)
     )),
   [nodeMap, orgId]);
+  // 用部门 id 串作为稳定 key 驱动下方 reset effect，避免数组引用变化（组织树加载中 / 出错时）
+  // 反复触发 setState 造成渲染循环。
+  const organizationDepartmentKey = organizationDepartments.map(department => department.id).join(',');
 
   useEffect(() => {
     if (role && role.id !== selectedRoleId) setSelectedRoleId(role.id);
@@ -191,7 +194,8 @@ export default function EnterpriseAccessControl() {
       upload: permissions.has(`${DEPARTMENT_UPLOAD_PREFIX}${department.id}`),
     }])));
     setLegacyVisible(nextLegacy);
-  }, [role?.id, role?.permission_codes, appList, integrationVersion, organizationDepartments]);
+    // organizationDepartments 以 organizationDepartmentKey（部门 id 串）作为稳定依赖代理
+  }, [role?.id, role?.permission_codes, appList, integrationVersion, organizationDepartmentKey]);
 
   useEffect(() => {
     const requestedUser = searchParams.get('user');
@@ -231,31 +235,42 @@ export default function EnterpriseAccessControl() {
         if (access.upload) return [`${DEPARTMENT_READ_PREFIX}${departmentId}`, `${DEPARTMENT_UPLOAD_PREFIX}${departmentId}`];
         return access.read ? [`${DEPARTMENT_READ_PREFIX}${departmentId}`] : [];
       });
-      await Promise.all([...appList.map(application => {
-        const activeRoleIds = new Set(roleList.filter(item => item.is_active).map(item => item.id));
-        // 本页是唯一的企业模块授权入口：无论子系统仍报告 2.3 还是已经升级
-        // 到 2.4，都只提交角色授权。历史部门/团队/用户授权会在管理员保存时
-        // 被收敛掉，部门不再暗中扩大页面权限。
-        const retained = application.grants
-          .filter(grant => !(grant.scope_type === 'role' && grant.scope_id === role.id))
-          .filter(grant => grant.scope_type === 'role' && grant.scope_id && activeRoleIds.has(grant.scope_id))
-          .map(grant => ({
-            scope_type: grant.scope_type, scope_id: grant.scope_id,
-            permissions: grant.permissions, module_keys: grant.module_keys,
-            module_access: grant.module_access,
-          }));
+      const activeRoleIds = new Set(roleList.filter(item => item.is_active).map(item => item.id));
+      await Promise.all([...appList.flatMap(application => {
+        const currentGrant = roleGrant(application, role.id);
         const applicationDraft = drafts[application.id] ?? {};
         const moduleKeys = Object.keys(applicationDraft).filter(key => pageCount(applicationDraft[key]) > 0);
         const permissions = Array.from(new Set<EnterpriseApplicationPermission>(
           moduleKeys.flatMap(key => applicationDraft[key].permissions),
         ));
         if (moduleKeys.length || legacyVisible[application.id]) permissions.push('view');
-        if (permissions.length || moduleKeys.length) retained.push({
-          scope_type: 'role', scope_id: role.id,
+        const nextGrant = (permissions.length || moduleKeys.length) ? {
+          scope_type: 'role' as const, scope_id: role.id,
           permissions: Array.from(new Set(permissions)), module_keys: moduleKeys,
           module_access: Object.fromEntries(moduleKeys.map(key => [key, applicationDraft[key]])),
-        });
-        return enterpriseApplications.replaceGrants(application.id, retained);
+        } : null;
+        // 只对本角色授权真的有变化的应用提交，避免对未改动的应用做无意义的整体重写。
+        const currentSnapshot = currentGrant ? JSON.stringify({
+          permissions: [...currentGrant.permissions].sort(), module_keys: [...currentGrant.module_keys].sort(),
+          module_access: currentGrant.module_access ?? {},
+        }) : null;
+        const nextSnapshot = nextGrant ? JSON.stringify({
+          permissions: [...nextGrant.permissions].sort(), module_keys: [...nextGrant.module_keys].sort(),
+          module_access: nextGrant.module_access,
+        }) : null;
+        if (currentSnapshot === nextSnapshot) return [];
+        // 本页只替换当前角色的授权：其他角色（仍启用的）授权原样保留；
+        // 部门/团队/用户授权后端对非 2.4 契约的子系统仍然生效，同样原样保留，不能被悄悄清掉。
+        const retained = application.grants
+          .filter(grant => !(grant.scope_type === 'role' && grant.scope_id === role.id))
+          .filter(grant => grant.scope_type !== 'role' || (grant.scope_id && activeRoleIds.has(grant.scope_id)))
+          .map(grant => ({
+            scope_type: grant.scope_type, scope_id: grant.scope_id,
+            permissions: grant.permissions, module_keys: grant.module_keys,
+            module_access: grant.module_access,
+          }));
+        if (nextGrant) retained.push(nextGrant);
+        return [enterpriseApplications.replaceGrants(application.id, retained)];
       }), roles.replacePermissions(role.id, Array.from(new Set([
         ...retainedPermissionCodes, ...workspacePermissionCodes,
       ])))]);

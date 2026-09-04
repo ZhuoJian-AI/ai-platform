@@ -7,6 +7,7 @@ import json
 from typing import Any
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
@@ -17,6 +18,7 @@ from app.agents.graph.nodes import _execute_tool_call
 from app.config import settings
 from app.services import model_gateway as llm_client
 
+logger = structlog.get_logger()
 router = APIRouter(prefix="/internal/dsh")
 
 
@@ -202,6 +204,35 @@ async def model_stream(
         raise HTTPException(status_code=401, detail="expired run token")
 
     async def events():
+        # 上游 stream_chat 中途抛错时，NDJSON 流不能只是静默断掉——DSH runtime 会当成
+        # 「无效流」而无法给用户任何解释。首个事件之前的异常原样抛出，交给下方的预取逻辑
+        # 转成结构化 HTTP 错误；已经开始输出后才兜底成 dsh-llm 的终止事件
+        # ``{"type":"finish","reason":{"kind":"error","failure":{message, code}}}``。
+        started = False
+        try:
+            async for line in _produce():
+                started = True
+                yield line
+        except Exception as exc:  # noqa: BLE001
+            if not started:
+                raise
+            category = llm_client.classify_gateway_error(exc)
+            message = _MODEL_BRIDGE_ERROR_DETAILS.get(category, "模型服务调用失败，请稍后重试。")
+            logger.error(
+                "dsh_model_stream_failed", run_token=body.run_token[:12],
+                category=category, error=str(exc), exc_info=True,
+            )
+            yield json.dumps({
+                "type": "finish",
+                "reason": {
+                    "kind": "error",
+                    "failure": {"message": message, "code": category},
+                    # 兼容只读 ``reason.error.message`` 的消费者
+                    "error": {"message": message},
+                },
+            }, ensure_ascii=False) + "\n"
+
+    async def _produce():
         messages = _to_platform_messages(body.messages, context.image_inputs)
         tools = _to_platform_tools(body.tools)
         text = ""
@@ -352,6 +383,12 @@ async def execute_tool(
         return {"ok": False, "content": preview, "value": {"content": preview, "ok": False}}
     call = {"id": f"dsh-{body.name}", "name": body.name, "arguments": body.arguments}
     with bind_runtime(context.deps):
-        _message, preview, ok = await _execute_tool_call(context.state, call, context.tool_registry)
+        message, preview, ok = await _execute_tool_call(context.state, call, context.tool_registry)
     _record_tool_outcome(context.state, body.name, body.arguments, ok=ok)
-    return {"ok": ok, "content": preview, "value": {"content": preview, "ok": ok}}
+    # 这里的返回值是 DSH runtime 喂给模型的 tool result——必须给完整内容。
+    # ``preview`` 是 nodes._execute_tool_call 为事件/trace 做的 4000 字截断版，
+    # 之前误把它当 content 返回，导致 workspace_read_file 分页、list_files、skill stdout 被截断。
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str):
+        content = preview
+    return {"ok": ok, "content": content, "value": {"content": content, "ok": ok}, "preview": preview}

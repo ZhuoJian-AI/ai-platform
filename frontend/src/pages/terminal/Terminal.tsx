@@ -406,7 +406,9 @@ function dropTurnFromChat(chat: ChatMsg[], userMsgId: string): ChatMsg[] {
   const idx = chat.findIndex((m) => m.role === 'user' && m.id === userMsgId);
   if (idx < 0) return chat;
   const next = chat.slice();
-  next.splice(idx, 2); // user 消息 + 其后紧跟的 assistant 消息
+  // user 消息 + 其后紧跟的 assistant 消息；若该轮没有 assistant 回复（取消/失败），
+  // 只删 user 消息，避免误删下一轮的 user 消息。
+  next.splice(idx, next[idx + 1]?.role === 'assistant' ? 2 : 1);
   return next;
 }
 

@@ -2090,19 +2090,28 @@ def paginate_file_content(
 # ── WorkspaceFolder ────────────────────────────────────────────────────
 
 async def create_folder(db: AsyncSession, ws: Workspace, data: WorkspaceFolderCreate) -> WorkspaceFolder:
-    """新建文件夹（幂等）：path 经规范化后按 (workspace_id, path) 去重，已存在则原样返回。"""
+    """新建文件夹（幂等）：path 经规范化后按 (workspace_id, path) 去重，已存在则原样返回；
+    同路径记录若已软删则复活（理由同文件路径的墓碑处理）。"""
     path = _normalize_path(data.path)
+    # 注意：此处**不**按 ``deleted_at IS NULL`` 过滤。唯一约束 ``uq_wsfolder_path`` 是
+    # ``(workspace_id, path)`` 且**不含** deleted_at——软删记录仍占用槽位，若过滤掉会走
+    # INSERT → UniqueViolation → 500（回收站保留期内重建同名文件夹必现）。
     result = await db.execute(
         select(WorkspaceFolder).where(
             WorkspaceFolder.workspace_id == ws.id,
             WorkspaceFolder.path == path,
-            WorkspaceFolder.deleted_at.is_(None),
         )
     )
     folder = result.scalar_one_or_none()
     if folder is None:
         folder = WorkspaceFolder(workspace_id=ws.id, path=path)
         db.add(folder)
+        await db.flush()
+        await db.refresh(folder)
+    elif folder.deleted_at is not None:
+        # 复活软删的同路径文件夹（清掉墓碑与待清理时间）
+        folder.deleted_at = None
+        folder.purge_after = None
         await db.flush()
         await db.refresh(folder)
     return folder

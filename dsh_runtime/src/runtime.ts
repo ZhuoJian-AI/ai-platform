@@ -20,6 +20,8 @@ interface ActiveRun {
   toolCalls: number
   finalText: string
   budgetExceeded: boolean
+  /** Turn-level failure recorded from `turn/end` / `agent/error`; the loop swallows it, so we must surface it. */
+  lastError?: { code: string; message: string }
   agent?: Awaited<ReturnType<Context['agents']['create']>>['agent']
 }
 
@@ -40,6 +42,17 @@ function renderHistory(messages: RunRequest['messages']): string {
 function toolResultText(event: Extract<SessionEvent, { type: 'tool/result' }>): string {
   const result = event.data.message.content.find(block => block.type === 'tool-result')
   return result ? contentText(result.content) : contentText(event.data.message.content)
+}
+
+/** An error that carries a stable machine code into the terminal `error` event. */
+class RunError extends Error {
+  constructor(message: string, readonly code: string) {
+    super(message)
+  }
+}
+
+function errorMessageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function safeToolSchema(schema: Record<string, unknown>): Record<string, unknown> {
@@ -237,7 +250,16 @@ export class DshRuntime {
           name: call?.type === 'tool/call' ? call.data.name : 'tool',
           content: toolResultText(event), ok: !result.isError,
         })
+      } else if (event.type === 'turn/end' && event.data.reason.kind === 'error') {
+        // The agent loop's driver (`kick`) swallows turn exceptions, so `whenIdle()`
+        // resolves normally after an LLM/adapter failure.  Record it here so the run
+        // ends with a real `error` instead of an empty `done`.
+        active.lastError = { code: event.data.reason.error.code, message: event.data.reason.error.message }
       }
+    })
+    const errorListener = ctx.on('agent/error', payload => {
+      if (String(payload.agent.id) !== sessionId || active.lastError) return
+      active.lastError = { code: 'AGENT_ERROR', message: errorMessageOf(payload.error) }
     })
 
     let handle: AgentHandle | undefined
@@ -272,17 +294,20 @@ export class DshRuntime {
       }))
       await handle.agent.whenIdle()
       if (active.budgetExceeded) throw new Error('MAX_STEPS_EXCEEDED')
+      if (active.lastError) throw new RunError(active.lastError.message, active.lastError.code)
       emit({ type: 'status', status: 'completed' })
       emit({
         type: 'done', text: active.finalText, steps: active.modelSteps, tool_calls: active.toolCalls,
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const message = errorMessageOf(error)
       const cancelled = message === 'cancelled' || message.toLowerCase().includes('abort')
       if (cancelled) emit({ type: 'status', status: 'cancelled' })
-      emit({ type: 'error', message, code: message === 'MAX_STEPS_EXCEEDED' ? message : undefined })
+      const code = error instanceof RunError ? error.code : message === 'MAX_STEPS_EXCEEDED' ? message : undefined
+      emit({ type: 'error', message, code })
     } finally {
       listener()
+      errorListener()
       this.activeByRun.delete(request.run_id)
       this.activeBySession.delete(sessionId)
       // The terminal event is the request boundary.  DSH's lifecycle disposal

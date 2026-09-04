@@ -32,6 +32,14 @@ def _assert_admin_scope_writable(scope_type: str) -> None:
         raise HTTPException(status_code=403, detail="Personal memory is auto-managed; edit instead of create")
 
 
+def _strip_scope_fields(data: MemoryUpdate) -> MemoryUpdate:
+    """去掉 scope_type/scope_id（含「显式传了 None」的情况），且不把它们标成已设置。"""
+    return MemoryUpdate(**{
+        key: value for key, value in data.model_dump(exclude_unset=True).items()
+        if key not in {"scope_type", "scope_id"}
+    })
+
+
 # ── Memory Tree（随组织架构逐级嵌套）──
 
 @router.get("/memory/tree")
@@ -88,8 +96,11 @@ async def update_memory_endpoint(
         raise HTTPException(status_code=404, detail="Memory not found")
     assert_org_write_access(auth, mem.organization_id)
     if mem.scope_type == "user":
-        # 个人记忆：仅可改内容/分类/元数据，禁止改 scope 归属（保持「每用户一份」）
-        data = data.model_copy(update={"scope_type": None, "scope_id": None})
+        # 个人记忆：仅可改内容/分类/元数据，禁止改 scope 归属（保持「每用户一份」）。
+        # 注意不能用 model_copy(update={...: None})——那会把 scope_type/scope_id 记进 fields_set，
+        # update_memory 的 model_dump(exclude_unset=True) 就会把 NULL 写进 NOT NULL 列 → 500。
+        # 这里重建一个不含这两个字段的 MemoryUpdate（其余字段保持「显式传了什么就更新什么」）。
+        data = _strip_scope_fields(data)
     elif data.scope_type is not None:
         _assert_admin_scope_writable(data.scope_type)
     updated = await memory_service.update_memory(db, mem, data)

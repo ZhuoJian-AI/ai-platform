@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from app.dlp.engine import DLPEngine, DLPMatch, DLPResult
 from app.models.dlp_rule import DlpRule
@@ -42,13 +42,18 @@ class DLPStreamScanner:
         # 扫描状态
         self._buffer: str = ""
         self._confirmed_offset: int = 0  # 已确认可安全转发的偏移
-        self._last_flush_time: float = time.monotonic()
+        # 首个 chunk 到达时才开始计时：若在构造时计时，上游 TTFT 等待会被算作超时，
+        # 首个 chunk 直接走超时分支被原样放行。
+        self._last_flush_time: float | None = None
         self._chunk_count: int = 0
 
     async def feed_chunk(self, text: str, direction: str = "response") -> StreamScanResult:
         """输入新的文本 chunk，返回可安全转发的内容。"""
         self._buffer += text
         self._chunk_count += 1
+        now = time.monotonic()
+        if self._last_flush_time is None:
+            self._last_flush_time = now
 
         # 运行 DLP 扫描
         result = await self.engine.scan(self._buffer, direction=direction)
@@ -62,28 +67,26 @@ class DLPStreamScanner:
             )
 
         # 计算安全的转发边界
-        safe_end = self._compute_safe_boundary(result)
-        emit_text = self._apply_redactions(
-            self._buffer[self._confirmed_offset : safe_end],
-            result.violations,
-        )
-        self._confirmed_offset = safe_end
+        emit_end = self._compute_safe_boundary(result)
 
         # 超时检查：强制 flush 缓冲区
-        now = time.monotonic()
         elapsed_ms = (now - self._last_flush_time) * 1000
-        if elapsed_ms > self.flush_timeout_ms and len(self._buffer) > self._confirmed_offset:
-            # 超时未确认的部分直接转发
-            remaining = self._buffer[self._confirmed_offset :]
-            emit_text += remaining
-            self._confirmed_offset = len(self._buffer)
+        if elapsed_ms > self.flush_timeout_ms and len(self._buffer) > emit_end:
+            emit_end = len(self._buffer)
             self._last_flush_time = now
 
-        # 修剪缓冲区
-        if len(self._buffer) - self._confirmed_offset > self.buffer_window:
-            excess = len(self._buffer) - self._confirmed_offset - self.buffer_window
-            emit_text += self._buffer[self._confirmed_offset : self._confirmed_offset + excess]
-            self._confirmed_offset += excess
+        # 缓冲区超窗：多出的部分也要转发（同样经过脱敏）
+        pending_len = len(self._buffer) - emit_end
+        if pending_len > self.buffer_window:
+            emit_end += pending_len - self.buffer_window
+
+        # 不在一个已确认的 REDACT 匹配中间切开，否则两半都无法被替换
+        for violation in result.violations:
+            if violation.action == "redact" and violation.start < emit_end < violation.end:
+                emit_end = max(emit_end, violation.end)
+
+        emit_text = self._emit_range(self._confirmed_offset, emit_end, result.violations)
+        self._confirmed_offset = emit_end
 
         # 保持滑动窗口
         trim_point = max(0, self._confirmed_offset - self.buffer_window)
@@ -93,7 +96,7 @@ class DLPStreamScanner:
         return StreamScanResult(
             emit_text=emit_text,
             violations=result.violations,
-            pending=safe_end < len(self._buffer),
+            pending=self._confirmed_offset < len(self._buffer),
         )
 
     async def flush(self, direction: str = "response") -> StreamScanResult:
@@ -111,6 +114,22 @@ class DLPStreamScanner:
             blocked=result.blocked,
             violations=result.violations,
         )
+
+    def _emit_range(self, start: int, end: int, violations: list[DLPMatch]) -> str:
+        """取出 ``_buffer[start:end]`` 并应用脱敏。
+
+        ``engine.scan`` 返回的偏移相对于整个缓冲区（含已转发的历史窗口），
+        而脱敏作用在切片上，因此必须先减去 ``start`` 再替换；落在切片之前的匹配丢弃，
+        跨切片起点的匹配只脱敏落在切片内的部分。
+        """
+        if end <= start:
+            return ""
+        shifted = [
+            replace(v, start=max(v.start - start, 0), end=v.end - start)
+            for v in violations
+            if v.action == "redact" and v.end > start and v.start < end
+        ]
+        return self._apply_redactions(self._buffer[start:end], shifted)
 
     def _compute_safe_boundary(self, result: DLPResult) -> int:
         """计算安全转发边界：总长度减去最长规则的 lookahead。"""
@@ -139,7 +158,7 @@ class DLPStreamScanner:
 
     @staticmethod
     def _apply_redactions(text: str, violations: list[DLPMatch]) -> str:
-        """对文本应用 REDACT 动作。"""
+        """对文本应用 REDACT 动作（偏移必须相对于 ``text``）。"""
         redact_matches = [v for v in violations if v.action == "redact"]
         if not redact_matches:
             return text
