@@ -92,6 +92,11 @@ try {
   );
   assert.match(
     applicationViewSource,
+    /aria-label="选择业务小助手模型"[\s\S]*placeholder="请选择模型"/,
+    'business assistant must expose the selected model instead of silently choosing one',
+  );
+  assert.match(
+    applicationViewSource,
     /在当前页面执行/,
     'business assistant must keep the user on the embedded application page',
   );

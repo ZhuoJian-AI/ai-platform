@@ -54,6 +54,9 @@ export default function EnterpriseApplicationView({
   moduleKey,
   onModuleChange,
   onAskAI,
+  models,
+  modelAlias,
+  onModelAliasChange,
   immersive,
   onOpenNavigation,
   onToggleImmersive,
@@ -62,6 +65,9 @@ export default function EnterpriseApplicationView({
   moduleKey: string | null;
   onModuleChange: (moduleKey: string) => void;
   onAskAI: (prompt: string, pageContext: Record<string, unknown>) => Promise<string>;
+  models: string[];
+  modelAlias: string | null;
+  onModelAliasChange: (modelAlias: string) => void;
   immersive: boolean;
   onOpenNavigation: () => void;
   onToggleImmersive: () => void;
@@ -325,6 +331,18 @@ export default function EnterpriseApplicationView({
           description={typeof bridgeContext.entity_id === 'string' ? `当前业务对象：${bridgeContext.entity_id}` : '只会注册你在该应用中获准的查询、新增、更新、删除工具。旧版应用会自动使用应用首页上下文。'}
           style={{ marginBottom: 18 }}
         />
+        <div style={{ marginBottom: 18 }}>
+          <Typography.Text strong>本次使用模型</Typography.Text>
+          <Select
+            aria-label="选择业务小助手模型"
+            value={modelAlias ?? undefined}
+            options={models.map((model) => ({ value: model, label: model }))}
+            onChange={onModelAliasChange}
+            disabled={assistantRunning}
+            placeholder="请选择模型"
+            style={{ width: '100%', marginTop: 8 }}
+          />
+        </div>
         {pendingConfirmations.length > 0 && <div style={{ marginBottom: 18 }}>
           <Typography.Title level={5}>等待你确认的操作</Typography.Title>
           <Space direction="vertical" style={{ width: '100%' }}>

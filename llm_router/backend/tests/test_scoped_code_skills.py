@@ -25,7 +25,7 @@ from app.models.team import Team
 from app.models.user import User
 from app.models.workspace import Workspace
 from app.schemas.user import ManagerScopeGrant
-from app.services import skill_import_service, workspace_service
+from app.services import platform_tool_registry, skill_import_service, workspace_service
 from app.services.scope_service import assert_bound_rags_visible
 from app.services.skill_scope_service import (
     assert_bound_skills_visible,
@@ -587,6 +587,41 @@ async def test_web_tool_is_available_and_executable_without_workspace(db_session
     assert result["status"] == "success"
     assert result["summary"]["results"][0]["title"] == "Result"
     assert runner.await_args.kwargs["inputs"] == []
+
+
+@pytest.mark.asyncio
+async def test_business_application_turn_excludes_global_external_tools(db_session, monkeypatch):
+    """应用助手只拿契约 Action；普通聊天仍可使用平台启用的外部扩展工具。"""
+    _, _, _, _, _, _, cu = await _hierarchy(db_session)
+
+    external_tool = {
+        "type": "function",
+        "function": {
+            "name": "legacy_production_query",
+            "description": "旧生产接口",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    external_defs = AsyncMock(return_value=[external_tool])
+    monkeypatch.setattr(platform_tool_registry, "active_external_tool_defs", external_defs)
+
+    normal_tools, _ = await _build_tools(db_session, [], None, user=cu)
+    assert "legacy_production_query" in {
+        item["function"]["name"] for item in normal_tools
+    }
+
+    application_tools, _ = await _build_tools(
+        db_session,
+        [],
+        None,
+        user=cu,
+        application_id=str(uuid4()),
+        page_context={"module_key": "progress_dashboard"},
+    )
+    assert "legacy_production_query" not in {
+        item["function"]["name"] for item in application_tools
+    }
+    external_defs.assert_awaited_once()
 
 
 @pytest.mark.asyncio
