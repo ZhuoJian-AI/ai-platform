@@ -17,13 +17,13 @@ from app.agents.dsh.client import runtime_health
 from app.auth.admin_auth import CurrentAdmin, require_super_admin
 from app.config import settings
 from app.database import get_db
+from app.models.agent_run import AgentRun, AgentRunEvent
 from app.models.platform_extension import (
     PlatformExtensionCatalogEntry,
     PlatformExtensionRelease,
     PlatformExtensionReleaseEvent,
     PlatformExtensionSource,
 )
-from app.models.agent_run import AgentRun, AgentRunEvent
 from app.schemas.platform_extension import (
     ExtensionApproveRequest,
     ExtensionArtifactSign,
@@ -37,10 +37,11 @@ from app.schemas.platform_extension import (
     ExtensionReleaseEventRead,
     ExtensionReleaseRead,
     ExtensionSourceRead,
-    ExtensionToolInstallRequest,
     ExtensionToolExecutionRead,
+    ExtensionToolInstallRequest,
 )
 from app.services import platform_extension_service, storage_gateway_service
+from app.services.platform_extension_catalog import DSH_VERSION, NODE_VERSION
 from app.services.platform_extension_discovery import sync_discovery_catalog
 
 router = APIRouter(prefix="/platform/extensions")
@@ -229,7 +230,7 @@ async def adaptation_brief(
 - GitHub：{entry.repository or '无'}
 - 目标能力层：{entry.layer}
 - 操作类型：{entry.operation}
-- 当前平台：DSH 0.1.0-rc.8 / Node 22.19.0
+- 当前平台：DSH {DSH_VERSION} / Node {NODE_VERSION}
 
 ## 当前兼容性结论
 
@@ -356,6 +357,11 @@ def _adaptation_package_markdown(source: PlatformExtensionSource) -> str:
     manifest = source.manifest or {}
     build = source.build_report or {}
     compatibility = source.compatibility or {}
+    diagnostics = json.dumps(
+        {"build_report": build, "compatibility": compatibility, "error": source.error},
+        ensure_ascii=False,
+        indent=2,
+    )
     return f"""# AI Platform Runtime Codex 适配任务包
 
 ## 固定输入
@@ -366,7 +372,7 @@ def _adaptation_package_markdown(source: PlatformExtensionSource) -> str:
 - 解析版本：{source.resolved_version or '无'}
 - Commit：{source.commit_sha or '无'}
 - SHA-256：{source.artifact_sha256 or '构建尚未成功'}
-- 当前平台：DSH 0.1.0-rc.8 / Node 22.19.0
+- 当前平台：DSH {DSH_VERSION} / Node {NODE_VERSION}
 
 ## 自动识别结果
 
@@ -377,7 +383,7 @@ def _adaptation_package_markdown(source: PlatformExtensionSource) -> str:
 ## 隔离构建与兼容报告
 
 ```json
-{json.dumps({'build_report': build, 'compatibility': compatibility, 'error': source.error}, ensure_ascii=False, indent=2)}
+{diagnostics}
 ```
 
 ## 平台保护边界

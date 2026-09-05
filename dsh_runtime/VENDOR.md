@@ -18,11 +18,18 @@ cd dsh_runtime/vendor && sha256sum -c SHA256SUMS
 
 The single source of truth for the version string inside the runtime is
 `src/extensions.ts::DSH_VERSION`; `health()` reports it and `verifyRelease`
-rejects any release manifest naming another version.  Platform-side copies of
-the same literal live in `extension_builder/src/builder.ts::compatibleDsh`,
-`llm_router/backend/app/services/platform_extension_catalog.py`,
-`platform_extension_discovery.py`, `platform_extension_service.py`,
-`app/api/platform_extensions.py` and `extension-sdk/templates/*/ai-platform.extension.json`.
+rejects any release manifest naming another version.  The Python backend has
+one matching constant, `llm_router/backend/app/services/platform_extension_catalog.py::DSH_VERSION`
+(the baseline manifest, catalog rows, adaptation briefs and the release
+self-heal all read it).  Remaining literal copies: `extension_builder/src/builder.ts::compatibleDsh`
+(three sites) and `extension-sdk/templates/*/ai-platform.extension.json`.
+
+Stored releases follow the constant automatically: at backend startup
+`platform_extension_service.sync_active_release_to_runtime` regenerates a
+stale platform baseline (or re-versions a compatible custom release) before
+pushing it to the runtime, and alembic `0069_dsh_release_rc8` rewrites rc.5
+history rows.  A later bump needs a similar data migration only if history
+rows must stay activatable as rollback targets; the active row heals itself.
 
 ## Vendored packages
 
@@ -121,16 +128,28 @@ for the handful of registry dependencies above.
 
    A new dependency with an install script surfaces here; decide it in
    `pnpm-workspace.yaml#allowBuilds`.
-6. Bump `src/extensions.ts::DSH_VERSION` and the platform-side literals listed
-   at the top (`grep -rn "0\.1\.0-rc\." --exclude-dir=node_modules --exclude-dir=vendor --exclude-dir=dist`).
+6. Bump `src/extensions.ts::DSH_VERSION`, `platform_extension_catalog.py::DSH_VERSION`
+   and the remaining literals listed at the top
+   (`grep -rn "0\.1\.0-rc\." --exclude-dir=node_modules --exclude-dir=vendor --exclude-dir=dist`).
+   Add an alembic data migration modelled on `0069_dsh_release_rc8.py` if
+   stored history rows should follow (the active row self-heals regardless).
 7. `npx tsc --noEmit -p tsconfig.json && npm run build && npm test`; repeat
    `npx tsc --noEmit` in `extension_builder/`.
 8. Diff the old and new `lib/types/**/*.d.ts` of every package `src/` imports
    (extract the old tarball, `diff -r -x '*.js' -x '*.map'` against upstream
    `lib/types`) and record breaking changes in the table above.
-9. Rebuild `infra/base-images/dsh-runtime-deps.Dockerfile` before deploying:
+9. Rebuild the dependency base image before deploying:
    `Dockerfile.coolify` starts `FROM ${AI_PLATFORM_DSH_RUNTIME_DEPS_BASE}`,
-   whose `node_modules` were installed from the previous lockfile.
+   whose `node_modules` were installed from the previous lockfile.  On the
+   release server run `scripts/build-dsh-runtime-deps.sh` from the checkout
+   being released; it builds `infra/base-images/dsh-runtime-deps.Dockerfile`
+   with the repo root as context, verifies `vendor/SHA256SUMS` and the
+   installed `@deepseek-ai/dsh-*` version, pushes
+   `127.0.0.1:5000/zhuojian/ai-platform-dsh-runtime-deps:<short sha>` and
+   prints the `AI_PLATFORM_DSH_RUNTIME_DEPS_BASE=` line for the app image
+   build.  The full release order (deps image → app images → digest pin →
+   deploy → confirm the baseline self-healed in the backend log) is in
+   `COOLIFY_DEPLOYMENT.md`, section “升级 DSH 版本后的发版步骤”.
 
 ## rc.5 → rc.8 change summary (2026-09-05)
 

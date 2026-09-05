@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+# Single Python-side source of truth for the vendored DeepSeek Harness release.
+# Mirrors ``dsh_runtime/src/extensions.ts::DSH_VERSION`` (the runtime rejects a release
+# manifest naming any other version) and ``extension_builder/src/builder.ts::compatibleDsh``.
+# Bump all three together; see ``dsh_runtime/VENDOR.md`` for the upgrade procedure.
+DSH_VERSION = "0.1.0-rc.8"
+NODE_VERSION = "22.19.0"
+PLATFORM_VERSION = "0.1.0"
+
 CORE_PLUGINS = [
     {
         "slug": "dsh-llm-runtime",
         "name": "LLM Runtime",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "runtime_plugin",
         "required": True,
         "capabilities": ["llm_runtime"],
@@ -14,7 +22,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-session",
         "name": "Session Store",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "runtime_plugin",
         "required": True,
         "capabilities": ["session"],
@@ -22,7 +30,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-system-prompt",
         "name": "System Prompt",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "runtime_plugin",
         "required": True,
         "capabilities": ["system_prompt"],
@@ -30,7 +38,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-tools",
         "name": "Tool Runtime",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "runtime_plugin",
         "required": True,
         "capabilities": ["tool_runtime"],
@@ -38,7 +46,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-agent",
         "name": "Agent Registry",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "runtime_plugin",
         "required": True,
         "capabilities": ["agent_registry"],
@@ -46,7 +54,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-agent-loop",
         "name": "Agent Loop",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "runtime_plugin",
         "required": True,
         "capabilities": ["coordinator"],
@@ -55,7 +63,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-invariants",
         "name": "Invariant Registry",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "runtime_plugin",
         "required": False,
         "enabled": False,
@@ -64,7 +72,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-timeout",
         "name": "DSH Timeout",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "library",
         "required": False,
         "enabled": True,
@@ -77,7 +85,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-user-approval",
         "name": "User Approval",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "adapter_required",
         "required": False,
         "enabled": True,
@@ -95,7 +103,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-session-persistence-jsonl",
         "name": "Session Persistence (JSONL)",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "runtime_plugin",
         "required": False,
         "enabled": False,
@@ -105,7 +113,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-code-runtime-worker-thread",
         "name": "Code Runtime (Worker Thread)",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "runtime_plugin",
         "required": False,
         "enabled": False,
@@ -115,7 +123,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-repeat-tool-reminder",
         "name": "Repeat Tool Reminder",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "runtime_plugin",
         "required": False,
         "enabled": False,
@@ -125,7 +133,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-tool-call-timeout-policy",
         "name": "Tool Call Timeout Policy",
-        "version": "0.1.0-rc.8",
+        "version": DSH_VERSION,
         "kind": "runtime_plugin",
         "required": False,
         "enabled": False,
@@ -210,9 +218,9 @@ SYSTEM_TOOL_GROUPS = [
 def baseline_manifest() -> dict:
     return {
         "schema_version": 1,
-        "platform_version": "0.1.0",
-        "node_version": "22.19.0",
-        "dsh_version": "0.1.0-rc.8",
+        "platform_version": PLATFORM_VERSION,
+        "node_version": NODE_VERSION,
+        "dsh_version": DSH_VERSION,
         # ``description`` is catalog-only display text; the runtime release manifest keeps its shape.
         "plugins": [{key: value for key, value in item.items() if key != "description"} for item in CORE_PLUGINS],
         "system_tools": [{**item, "kind": "system_tool", "enabled": True} for item in SYSTEM_TOOL_GROUPS],
