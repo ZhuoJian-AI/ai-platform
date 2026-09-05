@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from typing import Any
 from uuid import UUID
@@ -37,7 +36,6 @@ class ToolBridgeRequest(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
 
-_IDENTICAL_TOOL_FAILURE_LIMIT = 2
 _MODEL_BRIDGE_ERROR_DETAILS = {
     "deployment_not_verified": "当前模型尚未完成全部能力验证，请管理员在“模型提供商”中完成该模型声明的全部能力测试。",
     "model_gateway_not_enabled": "当前组织尚未启用已验证模型网关，请管理员检查模型网关开关。",
@@ -49,34 +47,6 @@ _MODEL_BRIDGE_ERROR_DETAILS = {
     "provider_service_unavailable": "模型服务暂时不可用，请稍后重试。",
     "invalid_provider_response": "模型服务没有返回有效的最终响应。",
 }
-
-
-def _tool_call_fingerprint(name: str, arguments: dict[str, Any]) -> str:
-    normalized = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(f"{name}\0{normalized}".encode()).hexdigest()
-
-
-def _identical_failure_blocked(state: dict[str, Any], name: str, arguments: dict[str, Any]) -> bool:
-    fingerprint = _tool_call_fingerprint(name, arguments)
-    return (
-        state.get("_dsh_last_failed_tool_fingerprint") == fingerprint
-        and int(state.get("_dsh_consecutive_tool_failures") or 0) >= _IDENTICAL_TOOL_FAILURE_LIMIT
-    )
-
-
-def _record_tool_outcome(
-    state: dict[str, Any], name: str, arguments: dict[str, Any], *, ok: bool,
-) -> None:
-    if ok:
-        state.pop("_dsh_last_failed_tool_fingerprint", None)
-        state.pop("_dsh_consecutive_tool_failures", None)
-        return
-    fingerprint = _tool_call_fingerprint(name, arguments)
-    previous = int(state.get("_dsh_consecutive_tool_failures") or 0)
-    state["_dsh_consecutive_tool_failures"] = (
-        previous + 1 if state.get("_dsh_last_failed_tool_fingerprint") == fingerprint else 1
-    )
-    state["_dsh_last_failed_tool_fingerprint"] = fingerprint
 
 
 def _require_service(authorization: str | None) -> None:
@@ -374,17 +344,11 @@ async def execute_tool(
     context = run_registry.get(body.run_token)
     if context is None:
         raise HTTPException(status_code=401, detail="expired run token")
-    if _identical_failure_blocked(context.state, body.name, body.arguments):
-        preview = json.dumps({
-            "status": "error",
-            "error": "相同工具和参数已连续失败两次，请改用其他验证方式或如实说明失败。",
-            "retryable": False,
-        }, ensure_ascii=False)
-        return {"ok": False, "content": preview, "value": {"content": preview, "ok": False}}
+    # Identical-failure blocking moved into the DSH tool pipeline (``policy:repeat_failure_block``);
+    # this bridge only authorizes and executes.
     call = {"id": f"dsh-{body.name}", "name": body.name, "arguments": body.arguments}
     with bind_runtime(context.deps):
         message, preview, ok = await _execute_tool_call(context.state, call, context.tool_registry)
-    _record_tool_outcome(context.state, body.name, body.arguments, ok=ok)
     # 这里的返回值是 DSH runtime 喂给模型的 tool result——必须给完整内容。
     # ``preview`` 是 nodes._execute_tool_call 为事件/trace 做的 4000 字截断版，
     # 之前误把它当 content 返回，导致 workspace_read_file 分页、list_files、skill stdout 被截断。

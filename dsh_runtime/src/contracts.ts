@@ -4,6 +4,22 @@ export interface ToolSpec {
   name: string
   description: string
   input_schema: Record<string, unknown>
+  /** Backend classification (workspace_file / platform_tool / skill / ...); informational for the runtime. */
+  kind?: string
+  /** Hard per-call deadline enforced by the runtime; the backend HTTP call is aborted when it elapses. */
+  timeout_ms?: number
+  /** Only an exact `true` lets the call overlap with sibling calls in one model step. */
+  concurrency_safe?: boolean
+  /** Model-facing text budget; longer tool results are truncated with a Chinese notice appended. */
+  max_model_chars?: number
+}
+
+/** Loop-completion policy the backend attaches to a run (owned by DSH, not the Python bridge). */
+export interface CompletionPolicy {
+  require_file_output: boolean
+  file_output_tools: string[]
+  max_nudges: number
+  nudge_text?: string
 }
 
 export interface RunRequest {
@@ -19,6 +35,7 @@ export interface RunRequest {
   exec_mode: 'ask' | 'plan' | 'craft'
   tools: ToolSpec[]
   max_steps: number
+  completion_policy?: CompletionPolicy
 }
 
 export type RuntimeEvent =
@@ -30,6 +47,13 @@ export type RuntimeEvent =
   | { type: 'usage'; input_tokens: number; output_tokens: number }
   | { type: 'done'; text: string; steps: number; tool_calls: number }
   | { type: 'error'; message: string; code?: string }
+  | {
+    type: 'policy'
+    action: 'continuation' | 'repeat_failure_block' | 'tool_timeout'
+    tool?: string
+    detail?: string
+    nudge?: number
+  }
 
 export interface PlatformModelRequest {
   run_token: string

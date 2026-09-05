@@ -16,6 +16,7 @@ from app.agents.dsh.registry import DshRunContext
 from app.agents.graph import run_registry
 from app.agents.graph.context import bind_runtime
 from app.agents.graph.nodes import (
+    dsh_tool_specs,
     extract_memory,
     judge,
     load_config,
@@ -46,19 +47,40 @@ logger = structlog.get_logger()
 _SSE_HEADERS = {
     "cache-control": "no-cache", "connection": "keep-alive", "x-accel-buffering": "no",
 }
-_FILE_OUTPUT_ACTIONS = {
-    "spreadsheet_tool": {"create", "edit", "convert"},
-    "document_tool": {"create", "edit", "convert"},
-    "presentation_tool": {"create", "edit", "convert"},
-    "pdf_tool": {"create", "edit", "convert"},
-    "text_tool": {"create", "edit", "convert"},
-    "image_tool": {"convert", "resize", "crop", "compress"},
-    "archive_tool": {"create", "extract"},
-}
-_FILE_DELIVERY_TERMS = (
-    "处理", "生成", "创建", "导出", "转换", "保存", "修改", "编辑",
-    "process", "generate", "create", "export", "convert", "save", "edit",
+# Tools whose successful ``tool_result`` counts as "a file was produced" for the runtime's
+# completion policy.  The contract is name-level: the runtime cannot see per-action semantics
+# (e.g. ``spreadsheet_tool action=inspect``), so this list only names tools that can write files.
+_FILE_OUTPUT_TOOL_NAMES = (
+    "spreadsheet_tool", "document_tool", "presentation_tool", "pdf_tool", "text_tool",
+    "image_tool", "archive_tool",
+    "workspace_create_file", "workspace_write_file", "workspace_update_file",
+    "workspace_rename_file", "workspace_move_file", "workspace_copy_file",
+    "workspace_restore_version", "image_generation_tool", "run_skill_script",
 )
+# Registry kinds whose dynamically named tools materialize Runner outputs as workspace files.
+_FILE_OUTPUT_REGISTRY_KINDS = {"code", "run_skill_script"}
+# A file-delivery request needs BOTH an explicit production verb AND an artifact noun
+# (audit M4): "处理一下" + attachment or "看看这个表里合计多少" must not arm the policy.
+_FILE_PRODUCTION_VERBS = (
+    "生成", "创建", "制作", "导出", "转换", "转成", "转为", "保存", "另存", "输出", "做一份", "做成",
+    "写一份", "整理成", "汇总成", "编辑", "修改", "新建", "产出", "交付",
+    "generate", "create", "make", "produce", "export", "convert", "save", "write", "build", "deliver",
+)
+_FILE_ARTIFACT_NOUNS = (
+    "文件", "表格", "excel", "xlsx", "xls", "csv", "word", "docx", "文档", "ppt", "pptx", "幻灯片",
+    "演示文稿", "pdf", "报告", "报表", "压缩包", "zip", "附件", "产物", "交付物",
+    "spreadsheet", "sheet", "document", "report", "slide", "deck", "presentation", "archive",
+    "deliverable", "file",
+)
+# Runtime-side continuation budget (``settings.agent_completion_max_nudges`` overrides if defined).
+_COMPLETION_MAX_NUDGES = 1
+_COMPLETION_NUDGE_TEXT = (
+    "[系统续执行要求] 上一次只完成了技能加载或说明读取，尚未产生用户要求的文件。"
+    "请重新调用必要的 Skill/文件工具并实际生成产物；只有真实 tool_result 返回输出文件后才能结束。"
+)
+_POLICY_TITLES = {
+    "continuation": "续执行要求", "repeat_failure_block": "重复失败拦截", "tool_timeout": "工具超时",
+}
 
 
 class DshRunError(RuntimeError):
@@ -72,6 +94,9 @@ class DshRunError(RuntimeError):
 def _public_failure_message(exc: Exception) -> str:
     if isinstance(exc, DshRunError) and exc.code == "MAX_STEPS_EXCEEDED":
         return "达到最大步数，未产生最终回答。"
+    if isinstance(exc, DshRunError) and exc.code == "CANCELLED":
+        # The runtime now closes a cancelled run with error(code=CANCELLED) instead of done.
+        return "本次运行已停止。"
     if isinstance(exc, DshRunError):
         message = str(exc)
         if "尚未完成全部能力验证" in message:
@@ -86,46 +111,43 @@ def _merge(state: dict, patch: dict | None) -> None:
         state.update(patch)
 
 
-def _tool_specs(tools: list[dict]) -> list[dict]:
-    result: list[dict] = []
-    for tool in tools:
-        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
-        name = str(function.get("name") or "")
-        if name:
-            result.append({
-                "name": name, "description": str(function.get("description") or ""),
-                "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
-            })
-    return result
+def _tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -> list[dict]:
+    """DSH ToolSpecs (name/description/input_schema + runtime metadata) for the RunRequest."""
+    return dsh_tool_specs(tools, registry or {})
 
 
-def _requires_skill_file_delivery(state: dict) -> bool:
-    """Return whether this turn explicitly asks an invoked Skill to deliver a file."""
-    request = str(state.get("request") or "").lower()
-    return bool(
-        (state.get("exec_mode") or "craft") == "craft"
-        and state.get("attachment_files")
-        and state.get("invoked_skill_ids")
-        and any(term in request for term in _FILE_DELIVERY_TERMS)
+def _requests_file_delivery(request: str) -> bool:
+    """Return whether the user explicitly asked for a file / document / table deliverable."""
+    text = (request or "").lower()
+    return bool(text) and any(verb in text for verb in _FILE_PRODUCTION_VERBS) and any(
+        noun in text for noun in _FILE_ARTIFACT_NOUNS
     )
 
 
-def _is_file_output_tool(state: dict, name: str, arguments: Any) -> bool:
-    if name in {
-        "workspace_create_file", "workspace_write_file", "workspace_update_file",
-        "workspace_rename_file", "workspace_move_file", "workspace_copy_file",
-        "workspace_restore_version", "image_generation_tool",
-    }:
-        return True
-    entry = (state.get("_dsh_tool_registry") or {}).get(name) or {}
-    if entry.get("kind") == "run_skill_script":
-        return True
-    if not isinstance(arguments, dict):
-        try:
-            arguments = json.loads(str(arguments or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            arguments = {}
-    return str(arguments.get("action") or "") in _FILE_OUTPUT_ACTIONS.get(name, set())
+def _file_output_tools(state: dict) -> list[str]:
+    names = list(_FILE_OUTPUT_TOOL_NAMES)
+    for name, entry in (state.get("_dsh_tool_registry") or {}).items():
+        if isinstance(entry, dict) and entry.get("kind") in _FILE_OUTPUT_REGISTRY_KINDS and name not in names:
+            names.append(name)
+    return names
+
+
+def _completion_policy(state: dict) -> dict[str, Any]:
+    """Build the runtime-owned ``completion_policy`` for this run.
+
+    The DSH runtime enforces it (nudging the model at most ``max_nudges`` times when no
+    file-producing tool succeeded); Python only reports the resulting ``policy`` events.
+    """
+    require_file = (
+        (state.get("exec_mode") or "craft") == "craft"
+        and _requests_file_delivery(str(state.get("request") or ""))
+    )
+    return {
+        "require_file_output": require_file,
+        "file_output_tools": _file_output_tools(state),
+        "max_nudges": int(getattr(settings, "agent_completion_max_nudges", _COMPLETION_MAX_NUDGES)),
+        "nudge_text": _COMPLETION_NUDGE_TEXT,
+    }
 
 
 def _history(state: dict) -> list[dict[str, str]]:
@@ -172,12 +194,36 @@ def _trace_for_tool(state: dict, name: str, call_id: str, arguments: str, result
         category, title = "skill", "Skill自动匹配"
     elif kind == "rag_search":
         category, title = "rag", "知识库按需检索"
+    elif kind == "memory":
+        category, title = "memory", "长期记忆"
     else:
         category, title = "skill", name
     state.setdefault("traces", []).append({
         "category": category, "title": title, "id": call_id, "name": name,
         "arguments": arguments, "result": result[:4000], "ok": ok,
     })
+
+
+def _apply_policy_event(
+    state: dict, event: dict, text: str, handle: run_registry.RunHandle | None, staged: list[dict],
+) -> str:
+    """Record a runtime ``policy`` decision and return the text still standing on the UI.
+
+    ``continuation`` means the runtime nudged the model to keep working, so the half answer
+    streamed so far is retracted (the UI drops it) and the text buffer restarts. The other
+    actions (``repeat_failure_block`` / ``tool_timeout``) are informational: steps + trace only.
+    """
+    action = str(event.get("action") or "")
+    detail = {key: event[key] for key in ("tool", "detail", "nudge") if event.get(key) is not None}
+    state.setdefault("steps", []).append({"step": "policy", "action": action, **detail})
+    trace = {"category": "policy", "title": _POLICY_TITLES.get(action, action), "action": action, **detail}
+    state.setdefault("traces", []).append(trace)
+    _publish(handle, staged, {"type": "trace", **trace})
+    if action == "continuation":
+        if text:
+            _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
+        return ""
+    return text
 
 
 async def _prepare(state: dict, deps: dict, writer: Any) -> tuple[dict, str]:
@@ -209,84 +255,57 @@ async def _consume_dsh(
             "temperature": state.get("temperature"),
         },
         "memory_context": prepared.get("memory_context") or None,
-        "exec_mode": state.get("exec_mode") or "craft", "tools": _tool_specs(prepared["tools"]),
+        "exec_mode": state.get("exec_mode") or "craft",
+        "tools": _tool_specs(
+            prepared["tools"], prepared.get("registry") or state.get("_dsh_tool_registry") or {},
+        ),
         "max_steps": settings.agent_max_steps,
+        # Continuation nudges and repeat-failure blocking live in the DSH pipeline now;
+        # Python never re-runs the request under a "-continuation" id.
+        "completion_policy": _completion_policy(state),
     }
     text = ""
     successful_tools = 0
-    successful_output_tools: set[str] = set()
     failed_tools: list[tuple[str, str]] = []
     tool_arguments: dict[str, str] = {}
-    tool_argument_values: dict[str, Any] = {}
     usage = {"input_tokens": 0, "output_tokens": 0}
-    async def consume(current_request: dict) -> None:
-        nonlocal text, successful_tools
-        async for event in client.stream_run(current_request):
-            kind = event.get("type")
-            if kind == "text_delta":
-                delta = str(event.get("delta") or "")
-                text += delta
-                _publish(handle, staged, {"type": "text", "delta": delta})
-            elif kind in {"phase", "tool_call"}:
-                _publish(handle, staged, event)
-                if kind == "tool_call":
-                    call_id = str(event.get("id") or "")
-                    tool_argument_values[call_id] = event.get("arguments")
-                    tool_arguments[call_id] = str(event.get("arguments") or "")
-                    state.setdefault("steps", []).append({"step": "llm", "tool_calls": [event.get("name")]})
-            elif kind == "tool_result":
-                _publish(handle, staged, event)
-                ok = bool(event.get("ok"))
-                name = str(event.get("name") or "tool")
-                successful_tools += int(ok)
+    async for event in client.stream_run(request):
+        kind = event.get("type")
+        if kind == "text_delta":
+            delta = str(event.get("delta") or "")
+            text += delta
+            _publish(handle, staged, {"type": "text", "delta": delta})
+        elif kind in {"phase", "tool_call"}:
+            _publish(handle, staged, event)
+            if kind == "tool_call":
                 call_id = str(event.get("id") or "")
-                if ok and _is_file_output_tool(state, name, tool_argument_values.get(call_id)):
-                    successful_output_tools.add(name)
-                else:
-                    if not ok:
-                        failed_tools.append((name, str(event.get("content") or "工具未返回错误详情")))
-                state.setdefault("steps", []).append({"step": "tool", "name": name, "ok": ok})
-                _trace_for_tool(
-                    state, name, call_id, tool_arguments.get(call_id, ""),
-                    str(event.get("content") or ""), ok,
-                )
-            elif kind == "usage":
-                usage["input_tokens"] += int(event.get("input_tokens") or 0)
-                usage["output_tokens"] += int(event.get("output_tokens") or 0)
-            elif kind == "error":
-                raise DshRunError(
-                    str(event.get("message") or "DSH runtime failed"),
-                    code=str(event.get("code") or "") or None,
-                )
-            elif kind == "done":
-                text = str(event.get("text") or text)
-
-    await consume(request)
-
-    requires_file = _requires_skill_file_delivery(state)
-    delivered_file = bool(successful_output_tools)
-    if requires_file and not delivered_file:
-        if text:
-            _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
-        text = ""
-        state.setdefault("steps", []).append({"step": "skill_file_delivery_continuation"})
-        retry_request = {
-            **request,
-            "run_id": f"{request['run_id']}-continuation",
-            "message": (
-                f"{request['message']}\n\n[系统续执行要求] 上一次只完成了技能加载或说明读取，尚未产生用户要求的文件。"
-                "请重新调用必要的 Skill/文件工具并实际生成产物；只有真实 tool_result 返回输出文件后才能结束。"
-            ),
-        }
-        await consume(retry_request)
-        delivered_file = bool(successful_output_tools)
-
-    if requires_file and not delivered_file:
-        if text:
-            _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
-        state["error"] = "Skill execution completed without producing the requested file"
-        text = "技能已加载，但本轮未生成用户要求的文件，请重试或检查该 Skill 的可执行资源。"
-        _publish(handle, staged, {"type": "text", "delta": text})
+                tool_arguments[call_id] = str(event.get("arguments") or "")
+                state.setdefault("steps", []).append({"step": "llm", "tool_calls": [event.get("name")]})
+        elif kind == "tool_result":
+            _publish(handle, staged, event)
+            ok = bool(event.get("ok"))
+            name = str(event.get("name") or "tool")
+            successful_tools += int(ok)
+            call_id = str(event.get("id") or "")
+            if not ok:
+                failed_tools.append((name, str(event.get("content") or "工具未返回错误详情")))
+            state.setdefault("steps", []).append({"step": "tool", "name": name, "ok": ok})
+            _trace_for_tool(
+                state, name, call_id, tool_arguments.get(call_id, ""),
+                str(event.get("content") or ""), ok,
+            )
+        elif kind == "policy":
+            text = _apply_policy_event(state, event, text, handle, staged)
+        elif kind == "usage":
+            usage["input_tokens"] += int(event.get("input_tokens") or 0)
+            usage["output_tokens"] += int(event.get("output_tokens") or 0)
+        elif kind == "error":
+            raise DshRunError(
+                str(event.get("message") or "DSH runtime failed"),
+                code=str(event.get("code") or "") or None,
+            )
+        elif kind == "done":
+            text = str(event.get("text") or text)
 
     if successful_tools == 0 and contains_unverified_tool_success_claim(text):
         if text:

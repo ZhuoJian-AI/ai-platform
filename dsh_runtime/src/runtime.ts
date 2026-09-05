@@ -4,10 +4,14 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime, { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
+import ToolRuntime, { type ToolExecution, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { RunRequest, RuntimeEvent, ToolSpec } from './contracts.js'
 import { contentText } from './contracts.js'
 import { executePlatformTool, PlatformLlmAdapter } from './platform.js'
+import {
+  installRunPolicies, toolTimeoutMessage, TOOL_TIMEOUT_CODE, truncateModelContent, untilAborted,
+} from './policies.js'
 import {
   loadExternalExtensions, verifyRelease,
   type ExternalToolHandler, type ReleaseManifest, type ReleaseRequest,
@@ -22,6 +26,9 @@ interface ActiveRun {
   budgetExceeded: boolean
   /** Turn-level failure recorded from `turn/end` / `agent/error`; the loop swallows it, so we must surface it. */
   lastError?: { code: string; message: string }
+  /** Set when `turn/end` reports `aborted`; the run then ends with `CANCELLED` instead of `done`. */
+  cancelled: boolean
+  emit: (event: RuntimeEvent) => void
   agent?: Awaited<ReturnType<Context['agents']['create']>>['agent']
 }
 
@@ -32,6 +39,20 @@ export interface RuntimeOptions {
   serviceToken: string
   extensionCacheRoot?: string
   maxConcurrentRuns?: number
+  /** Parallel-safe tool calls per model step; defaults to `DSH_MAX_PARALLEL_TOOL_CALLS` (4), clamped to 1-8. */
+  maxParallelToolCalls?: number
+}
+
+export const DEFAULT_MAX_PARALLEL_TOOL_CALLS = 4
+
+/** Resolve the per-step parallel tool-call cap from an explicit option or the environment, clamped to 1-8. */
+export function resolveMaxParallelToolCalls(
+  explicit?: number,
+  env: string | undefined = process.env.DSH_MAX_PARALLEL_TOOL_CALLS,
+): number {
+  const raw = explicit ?? (env !== undefined && env.trim() !== '' ? Number(env) : DEFAULT_MAX_PARALLEL_TOOL_CALLS)
+  if (!Number.isFinite(raw)) return DEFAULT_MAX_PARALLEL_TOOL_CALLS
+  return Math.min(8, Math.max(1, Math.trunc(raw)))
 }
 
 function renderHistory(messages: RunRequest['messages']): string {
@@ -74,8 +95,11 @@ export class DshRuntime {
   private draining = false
   private activating = false
   private readonly pendingDisposals = new Set<Promise<void>>()
+  private readonly maxParallelToolCalls: number
 
-  constructor(private readonly options: RuntimeOptions) {}
+  constructor(private readonly options: RuntimeOptions) {
+    this.maxParallelToolCalls = resolveMaxParallelToolCalls(options.maxParallelToolCalls)
+  }
 
   async start(): Promise<void> {
     if (this.ready) return
@@ -101,7 +125,9 @@ export class DshRuntime {
       if (enabled('dsh-system-prompt')) await ctx.plugin(SystemPrompt, {})
       if (enabled('dsh-tools')) await ctx.plugin(ToolRuntime, {})
       if (enabled('dsh-agent')) await ctx.plugin(AgentRegistry)
-      if (enabled('dsh-agent-loop')) await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 1 })
+      if (enabled('dsh-agent-loop')) {
+        await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: this.maxParallelToolCalls })
+      }
       const extensions = manifest
         ? await loadExternalExtensions(ctx, manifest, this.options.extensionCacheRoot ?? '/tmp/dsh-extensions')
         : { items: [], tools: new Map<string, ExternalToolHandler>() }
@@ -135,7 +161,7 @@ export class DshRuntime {
       active_runs: this.activeByRun.size,
       hard_concurrency_limit: this.options.maxConcurrentRuns ?? 14,
       draining: this.draining,
-      max_parallel_tool_calls: 1,
+      max_parallel_tool_calls: this.maxParallelToolCalls,
       release_id: this.releaseId,
       release_checksum: this.releaseChecksum,
       loaded_extensions: this.loadedExtensions,
@@ -214,6 +240,7 @@ export class DshRuntime {
     const sessionId = `platform-${request.run_id}`
     const active: ActiveRun = {
       request, sessionId, modelSteps: 0, toolCalls: 0, finalText: '', budgetExceeded: false,
+      cancelled: false, emit,
     }
     this.activeByRun.set(request.run_id, active)
     this.activeBySession.set(sessionId, active)
@@ -250,11 +277,18 @@ export class DshRuntime {
           name: call?.type === 'tool/call' ? call.data.name : 'tool',
           content: toolResultText(event), ok: !result.isError,
         })
-      } else if (event.type === 'turn/end' && event.data.reason.kind === 'error') {
-        // The agent loop's driver (`kick`) swallows turn exceptions, so `whenIdle()`
-        // resolves normally after an LLM/adapter failure.  Record it here so the run
-        // ends with a real `error` instead of an empty `done`.
-        active.lastError = { code: event.data.reason.error.code, message: event.data.reason.error.message }
+      } else if (event.type === 'turn/end') {
+        const reason = event.data.reason
+        if (reason.kind === 'error') {
+          // The agent loop's driver (`kick`) swallows turn exceptions, so `whenIdle()`
+          // resolves normally after an LLM/adapter failure.  Record it here so the run
+          // ends with a real `error` instead of an empty `done`.
+          active.lastError = { code: reason.error.code, message: reason.error.message }
+        } else if (reason.kind === 'aborted' && !active.cancelled) {
+          // Cancellation is a durable turn fact; do not wait to infer it from an error string.
+          active.cancelled = true
+          emit({ type: 'status', status: 'cancelled' })
+        }
       }
     })
     const errorListener = ctx.on('agent/error', payload => {
@@ -285,6 +319,13 @@ export class DshRuntime {
             name: 'long-term-memory', order: 30, text: request.memory_context,
           })
           for (const spec of request.tools) this.registerTool(agentCtx, active, spec)
+          installRunPolicies(agentCtx, {
+            completionPolicy: request.completion_policy,
+            emit,
+            canContinue: () => active.modelSteps < request.max_steps,
+            // `done.text` must be the post-nudge answer only: the bridge retracts what was streamed before.
+            onContinuation: () => { active.finalText = '' },
+          })
         },
       })
       active.agent = handle.agent
@@ -293,6 +334,7 @@ export class DshRuntime {
         source: { kind: 'user' },
       }))
       await handle.agent.whenIdle()
+      if (active.cancelled) throw new RunError('cancelled', 'CANCELLED')
       if (active.budgetExceeded) throw new Error('MAX_STEPS_EXCEEDED')
       if (active.lastError) throw new RunError(active.lastError.message, active.lastError.code)
       emit({ type: 'status', status: 'completed' })
@@ -301,8 +343,8 @@ export class DshRuntime {
       })
     } catch (error) {
       const message = errorMessageOf(error)
-      const cancelled = message === 'cancelled' || message.toLowerCase().includes('abort')
-      if (cancelled) emit({ type: 'status', status: 'cancelled' })
+      const cancelled = active.cancelled || message === 'cancelled' || message.toLowerCase().includes('abort')
+      if (cancelled && !active.cancelled) emit({ type: 'status', status: 'cancelled' })
       const code = error instanceof RunError ? error.code : message === 'MAX_STEPS_EXCEEDED' ? message : undefined
       emit({ type: 'error', message, code })
     } finally {
@@ -325,48 +367,85 @@ export class DshRuntime {
   }
 
   private registerTool(agentCtx: Context, active: ActiveRun, spec: ToolSpec): void {
+    const timeoutMs = typeof spec.timeout_ms === 'number' && Number.isFinite(spec.timeout_ms) && spec.timeout_ms > 0
+      ? spec.timeout_ms
+      : undefined
+    const maxModelChars = typeof spec.max_model_chars === 'number' && spec.max_model_chars > 0
+      ? spec.max_model_chars
+      : undefined
+    const finalizeContent = maxModelChars === undefined
+      ? undefined
+      : (_exec: Readonly<ToolExecution>, result: Readonly<ToolExecutionResult>): ContentBlock[] | undefined =>
+        truncateModelContent(result.content, maxModelChars)
     agentCtx.tools.register({
       name: spec.name,
       description: spec.description,
       parameters: safeToolSchema(spec.input_schema),
+      // Declared for the pipeline's own bookkeeping; the hard deadline is enforced in `executeTool`.
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      // Only an exact `true` may overlap with sibling calls (fail-closed, per the dsh-tools contract).
+      isConcurrencySafe: () => spec.concurrency_safe === true,
+      ...(finalizeContent ? { finalizeContent } : {}),
       output: {
         schema: {},
         render: (_args, value): ContentBlock[] => [{
           type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value),
         }],
       },
-      execute: async (args, exec) => {
-        const localHandler = this.externalTools.get(spec.name)
-        if (localHandler) {
-          return await localHandler(args, {
-            signal: exec.signal,
-            runId: active.request.run_id,
-            taskId: active.request.task_id,
-            invokePlatformTool: async (name, bridgeArgs) => {
-              const result = await executePlatformTool({
-                backendUrl: this.options.backendUrl,
-                serviceToken: this.options.serviceToken,
-                runToken: active.request.run_token,
-                name,
-                arguments: bridgeArgs,
-                signal: exec.signal,
-              })
-              if (!result.ok) throw new Error(result.content || `platform bridge tool ${name} failed`)
-              return result.value ?? { ok: true, content: result.content }
-            },
-          })
-        }
-        const result = await executePlatformTool({
-          backendUrl: this.options.backendUrl,
-          serviceToken: this.options.serviceToken,
-          runToken: active.request.run_token,
-          name: spec.name,
-          arguments: args,
-          signal: exec.signal,
-        })
-        if (!result.ok) throw new Error(result.content || `tool ${spec.name} failed`)
-        return result.value ?? { ok: true, content: result.content }
-      },
+      execute: (args, exec) => this.executeTool(active, spec, args, exec.signal, timeoutMs),
     })
+  }
+
+  /** Run one tool call under an optional hard deadline; a timeout becomes an error result and a `policy` event. */
+  private async executeTool(
+    active: ActiveRun, spec: ToolSpec, args: unknown, callerSignal: AbortSignal, timeoutMs: number | undefined,
+  ): Promise<unknown> {
+    if (timeoutMs === undefined) return await this.dispatchTool(active, spec, args, callerSignal)
+    const guard = deadline(callerSignal, timeoutMs, TOOL_TIMEOUT_CODE)
+    try {
+      return await untilAborted(this.dispatchTool(active, spec, args, guard.signal), guard.signal)
+    } catch (error) {
+      const timeout = timeoutOf(guard.signal, TOOL_TIMEOUT_CODE)
+      if (!timeout) throw error
+      active.emit({
+        type: 'policy', action: 'tool_timeout', tool: spec.name, detail: `timeout_ms=${timeout.timeoutMs}`,
+      })
+      throw new Error(toolTimeoutMessage(timeout.timeoutMs))
+    } finally {
+      guard[Symbol.dispose]()
+    }
+  }
+
+  private async dispatchTool(active: ActiveRun, spec: ToolSpec, args: unknown, signal: AbortSignal): Promise<unknown> {
+    const localHandler = this.externalTools.get(spec.name)
+    if (localHandler) {
+      return await localHandler(args, {
+        signal,
+        runId: active.request.run_id,
+        taskId: active.request.task_id,
+        invokePlatformTool: async (name, bridgeArgs) => {
+          const result = await executePlatformTool({
+            backendUrl: this.options.backendUrl,
+            serviceToken: this.options.serviceToken,
+            runToken: active.request.run_token,
+            name,
+            arguments: bridgeArgs,
+            signal,
+          })
+          if (!result.ok) throw new Error(result.content || `platform bridge tool ${name} failed`)
+          return result.value ?? { ok: true, content: result.content }
+        },
+      })
+    }
+    const result = await executePlatformTool({
+      backendUrl: this.options.backendUrl,
+      serviceToken: this.options.serviceToken,
+      runToken: active.request.run_token,
+      name: spec.name,
+      arguments: args,
+      signal,
+    })
+    if (!result.ok) throw new Error(result.content || `tool ${spec.name} failed`)
+    return result.value ?? { ok: true, content: result.content }
   }
 }

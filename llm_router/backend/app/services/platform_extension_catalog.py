@@ -69,6 +69,10 @@ CORE_PLUGINS = [
         "required": False,
         "enabled": True,
         "capabilities": ["timeout_library"],
+        # Used by the runtime tool pipeline: each ToolSpec carries ``timeout_ms`` from the
+        # platform (read tools 60s, scripts / enterprise actions / web 300s, default 120s) and
+        # the runtime enforces that deadline, emitting ``policy:tool_timeout`` when it fires.
+        "description": "工具调用截止时间：按平台下发的 ToolSpec.timeout_ms 中断超时工具并上报 tool_timeout 策略事件",
     },
     {
         "slug": "dsh-user-approval",
@@ -161,7 +165,8 @@ def baseline_manifest() -> dict:
         "platform_version": "0.1.0",
         "node_version": "22.19.0",
         "dsh_version": "0.1.0-rc.5",
-        "plugins": [{**item} for item in CORE_PLUGINS],
+        # ``description`` is catalog-only display text; the runtime release manifest keeps its shape.
+        "plugins": [{key: value for key, value in item.items() if key != "description"} for item in CORE_PLUGINS],
         "system_tools": [{**item, "kind": "system_tool", "enabled": True} for item in SYSTEM_TOOL_GROUPS],
         "external_extensions": [],
     }
@@ -175,7 +180,7 @@ def catalog_items() -> list[dict]:
                 "slug": item["slug"],
                 "name": item["name"],
                 "version": item["version"],
-                "description": "平台基线 DSH 能力",
+                "description": item.get("description") or "平台基线 DSH 能力",
                 "kind": item["kind"],
                 "source": "core",
                 "status": "enabled" if item.get("enabled", True) else "available",
