@@ -14,6 +14,7 @@ from app.agents.graph.nodes import _skill_catalog_prompt
 from app.api import dsh_internal
 from app.api.dsh_internal import (
     ModelBridgeRequest,
+    _authorized_model_tools,
     _authorized_tool_calls,
     _to_platform_messages,
     _to_platform_tools,
@@ -175,6 +176,17 @@ def test_model_bridge_rejects_tool_calls_not_advertised_for_the_run():
     assert _authorized_tool_calls(
         calls, {"current_application_query"}, run_token="run-token",
     ) == [calls[0]]
+
+
+def test_model_bridge_removes_stale_dsh_context_tools_before_provider_call():
+    tools = [
+        {"name": "current_application_query", "description": "当前应用", "parameters": {}},
+        {"name": "legacy_global_query", "description": "旧工具", "parameters": {}},
+    ]
+
+    assert _authorized_model_tools(
+        tools, {"current_application_query"}, run_token="run-token",
+    ) == [tools[0]]
 
 
 def test_dsh_tool_bridge_no_longer_owns_the_identical_failure_guard():
