@@ -29,7 +29,7 @@ function request(manifest: ReleaseManifest) {
 function baseline(): ReleaseManifest {
   return {
     node_version: '22.19.0',
-    dsh_version: '0.1.0-rc.5',
+    dsh_version: '0.1.0-rc.8',
     plugins: [
       { slug: 'dsh-llm-runtime', enabled: true },
       { slug: 'dsh-session', enabled: true },

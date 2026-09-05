@@ -10,15 +10,17 @@ from app.models.admin import Admin
 from app.models.platform_extension import (
     PlatformExtensionCatalogEntry,
     PlatformExtensionRelease,
+    PlatformExtensionReleaseEvent,
     PlatformExtensionSource,
 )
 from app.services import platform_extension_discovery, platform_extension_service, platform_tool_registry
+from app.services.platform_extension_catalog import DSH_VERSION
 
 
 @pytest.mark.asyncio
 async def test_overview_creates_truthful_baseline(client: AsyncClient, monkeypatch):
     async def healthy():
-        return {"status": "ok", "dsh_version": "0.1.0-rc.5", "node": "v22.19.0"}
+        return {"status": "ok", "dsh_version": "0.1.0-rc.8", "node": "v22.19.0"}
 
     monkeypatch.setattr(extension_api, "runtime_health", healthy)
     response = await client.get("/api/v1/platform/extensions/overview")
@@ -37,6 +39,54 @@ async def test_overview_creates_truthful_baseline(client: AsyncClient, monkeypat
     by_slug = {item["slug"]: item for item in payload["core_plugins"]}
     assert by_slug["dsh-timeout"]["kind"] == "library"
     assert by_slug["dsh-user-approval"]["kind"] == "adapter_required"
+
+
+@pytest.mark.asyncio
+async def test_stale_baseline_release_is_healed_to_current_dsh_version(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """A baseline row left behind by an older DSH build is superseded by a regenerated one."""
+    await client.get("/api/v1/platform/extensions/overview")
+    stale = (
+        await db_session.execute(select(PlatformExtensionRelease).where(PlatformExtensionRelease.is_active.is_(True)))
+    ).scalar_one()
+    manifest = {
+        **stale.manifest,
+        "dsh_version": "0.1.0-rc.5",
+        "plugins": [{**item, "version": "0.1.0-rc.5"} for item in stale.manifest["plugins"]],
+    }
+    stale.manifest = manifest
+    stale.checksum = platform_extension_service.manifest_checksum(manifest)
+    await db_session.flush()
+    stale_id = stale.id
+    admin_id = (await db_session.execute(select(Admin.id))).scalar_one()
+
+    healed = await platform_extension_service.ensure_baseline(db_session, admin_id)
+
+    assert healed.id != stale_id
+    assert healed.is_active is True and healed.status == "active"
+    assert healed.manifest["dsh_version"] == DSH_VERSION
+    assert healed.checksum == platform_extension_service.manifest_checksum(healed.manifest)
+    assert healed.base_release_id == stale_id
+    assert healed.validation_report["status"] == "baseline"
+    superseded = await db_session.get(PlatformExtensionRelease, stale_id)
+    assert superseded.is_active is False and superseded.status == "superseded"
+    events = list((await db_session.execute(
+        select(PlatformExtensionReleaseEvent).where(
+            PlatformExtensionReleaseEvent.event_type == "release_version_healed"
+        )
+    )).scalars().all())
+    assert len(events) == 1
+    assert events[0].release_id == healed.id
+    assert events[0].details["previous_release_id"] == str(stale_id)
+    assert events[0].details["mode"] == "baseline_regenerated"
+    # Idempotent: a second pass finds nothing to do.
+    assert (await platform_extension_service.ensure_baseline(db_session, admin_id)).id == healed.id
+
+    overview = await client.get("/api/v1/platform/extensions/overview")
+    assert overview.json()["active_release"]["manifest"]["dsh_version"] == DSH_VERSION
+    assert overview.json()["active_release"]["version_no"] == healed.version_no
 
 
 @pytest.mark.asyncio
@@ -86,7 +136,7 @@ async def test_npm_import_requires_exact_version(client: AsyncClient, monkeypatc
     monkeypatch.setattr(platform_extension_service, "process_source_build", no_build)
     response = await client.post(
         "/api/v1/platform/extensions/import/npm",
-        json={"package": "@deepseek-ai/dsh-agent-loop", "version": "0.1.0-rc.5"},
+        json={"package": "@deepseek-ai/dsh-agent-loop", "version": "0.1.0-rc.8"},
     )
     assert response.status_code == 202
     assert response.json()["status"] == "importing"
