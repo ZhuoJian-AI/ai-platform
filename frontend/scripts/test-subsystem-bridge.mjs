@@ -79,6 +79,11 @@ try {
   assert.match(applicationViewSource, /event\.origin !== security\.origin/);
   assert.match(applicationViewSource, /launch\.launch_nonce/);
   assert.match(applicationViewSource, /launch\.page_keys/);
+  assert.match(
+    applicationViewSource,
+    /module_key: fallbackModuleKey,[\s\S]*page_key: fallbackPageKey,[\s\S]*\.\.\.bridgeContext/,
+    'business assistant must fall back to the authorized launch module and page until bridge context arrives',
+  );
   assert.match(applicationViewSource, /referrerPolicy="origin"/);
   assert.match(
     applicationViewSource,
