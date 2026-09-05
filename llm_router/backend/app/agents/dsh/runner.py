@@ -244,6 +244,11 @@ async def _prepare(
     # channel and into the persisted event log exactly like the runner's own events.
     context = DshRunContext(
         state=state, db=deps["db"], deps=deps, tool_registry=prepared["registry"],
+        allowed_tool_names={
+            str((item.get("function") or {}).get("name") or "")
+            for item in (prepared.get("tools") or [])
+            if str((item.get("function") or {}).get("name") or "")
+        },
         image_inputs=_image_inputs(prepared.get("messages") or []),
         provider_override=prepared["provider_override"], model_override=prepared["model_override"],
         handle=handle, staged=staged,

@@ -14,6 +14,7 @@ from app.agents.graph.nodes import _skill_catalog_prompt
 from app.api import dsh_internal
 from app.api.dsh_internal import (
     ModelBridgeRequest,
+    _authorized_tool_calls,
     _to_platform_messages,
     _to_platform_tools,
 )
@@ -163,6 +164,17 @@ def test_dsh_tools_convert_to_existing_gateway_schema():
             "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
         },
     }]
+
+
+def test_model_bridge_rejects_tool_calls_not_advertised_for_the_run():
+    calls = [
+        {"id": "ok", "name": "current_application_query", "arguments": "{}"},
+        {"id": "stale", "name": "legacy_global_query", "arguments": "{}"},
+    ]
+
+    assert _authorized_tool_calls(
+        calls, {"current_application_query"}, run_token="run-token",
+    ) == [calls[0]]
 
 
 def test_dsh_tool_bridge_no_longer_owns_the_identical_failure_guard():
@@ -375,7 +387,7 @@ async def test_execute_tool_returns_full_content_not_truncated_preview(monkeypat
     async def fake_execute(_state, _call, _registry):
         return ({"role": "tool", "tool_call_id": "dsh-list_files", "content": full}, preview, True)
 
-    context = SimpleNamespace(state={}, deps={}, tool_registry={})
+    context = SimpleNamespace(state={}, deps={}, tool_registry={}, allowed_tool_names={"list_files"})
     monkeypatch.setattr(dsh_internal.run_registry, "get", lambda _token: context)
     monkeypatch.setattr(dsh_internal, "bind_runtime", lambda _deps: nullcontext())
     monkeypatch.setattr(dsh_internal, "_execute_tool_call", fake_execute)

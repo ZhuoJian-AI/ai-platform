@@ -118,7 +118,8 @@ def _context(task_id: str | None = "task-approval", *, with_handle: bool = True)
     if task_id:
         state["task_id"] = task_id
     context = registry.DshRunContext(
-        state=state, db=None, deps={}, tool_registry={}, image_inputs=[], handle=handle, staged=staged,
+        state=state, db=None, deps={}, tool_registry={}, allowed_tool_names=set(),
+        image_inputs=[], handle=handle, staged=staged,
     )
     return context, registry.register(context), handle, staged
 

@@ -53,6 +53,10 @@ class DshRunContext:
     db: Any
     deps: dict[str, Any]
     tool_registry: dict[str, dict]
+    # Complete per-run allowlist, including built-in tools that intentionally
+    # have no execution-registry entry. The private tool bridge checks this
+    # before dispatch so a provider cannot execute a hallucinated/stale name.
+    allowed_tool_names: set[str]
     image_inputs: list[dict[str, str]]
     provider_override: Any = None
     model_override: str | None = None
