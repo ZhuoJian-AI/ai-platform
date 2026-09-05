@@ -698,6 +698,62 @@ async def test_history_restores_available_and_unavailable_attachment_refs(
 
 
 @pytest.mark.asyncio
+async def test_business_assistant_does_not_read_long_term_memory(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    org, ws, _ = await _make_workspace_with_file(
+        db_session, path="business-assistant/current.txt", content="current",
+    )
+    user = await _make_personal_principal(
+        db_session, org, ws, prefix="business-assistant-memory",
+    )
+    task = Task(
+        organization_id=org.id,
+        user_id=user.id,
+        session_id=f"business-assistant-{uuid4().hex}",
+        title="当前业务查询",
+        message="查询当前页面记录",
+        config={"application_id": str(uuid4())},
+    )
+    db_session.add(task)
+    await db_session.flush()
+    db_session.add(TaskMessage(
+        task_id=task.id,
+        role="user",
+        content="查询当前页面记录",
+        metadata_={},
+    ))
+    await db_session.flush()
+
+    async def fail_if_memory_is_read(*_args, **_kwargs):
+        raise AssertionError("业务小助手不得读取长期记忆")
+
+    monkeypatch.setattr(nodes.memory_service, "load_memory_for_scopes", fail_if_memory_is_read)
+    cu = SimpleNamespace(
+        id=str(user.id), organization_id=org.id, department_id=None, team_id=None,
+    )
+    result = await nodes._load_memory_general(
+        {
+            "task_id": str(task.id),
+            "application_id": str(uuid4()),
+            "workspace_id": str(ws.id),
+            "org_id": str(org.id),
+            "messages": [{"role": "user", "content": "查询当前页面记录"}],
+            "steps": [],
+            "traces": [],
+        },
+        {"user": cu},
+        db_session,
+        select,
+    )
+
+    assert result["memory_context"] == []
+    assert result["traces"][-1]["title"] == "当前任务上下文载入"
+    assert result["traces"][-1]["facts"] == 0
+
+
+@pytest.mark.asyncio
 async def test_agent_searches_and_reads_authorized_shared_space_without_reference(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

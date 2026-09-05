@@ -2489,9 +2489,11 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
             past.append({"role": message.role, "content": content})
 
     # 4 级长期记忆：按用户权限自动载入全集（组织 + 部门 + 团队 + 个人），无需任务配置。
+    # 业务小助手只允许使用当前应用/页面授权的实时 Action；即使后续提示词逻辑不注入
+    # memory_context，也不要提前读取与当前业务页面无关的长期记忆。
     user = deps.get("user")
     mem_context: list[dict] = []
-    if user is not None:
+    if user is not None and not state.get("application_id"):
         scopes = scope_service.effective_scope_set(user)  # [(type, id|None)]
         try:
             mem_context = await memory_service.load_memory_for_scopes(
@@ -2499,7 +2501,8 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
         except Exception as exc:  # noqa: BLE001
             logger.warning("load_memory_failed", error=str(exc))
 
-    trace = {"category": "memory", "subtype": "load", "title": "长期记忆载入",
+    trace_title = "当前任务上下文载入" if state.get("application_id") else "长期记忆载入"
+    trace = {"category": "memory", "subtype": "load", "title": trace_title,
              "history": len(past), "facts": len(mem_context)}
     _emit({"type": "trace", **trace})
     return {
