@@ -93,10 +93,9 @@ class AgentState(TypedDict, total=False):
     # 经 stream_writer 下发 ``trace`` 事件实时展示，并随 save_memory 落 assistant
     # TaskMessage.metadata_ 供历史回放还原。技能仅在此落库、不重复发 trace 事件。
     traces: list[dict]
-    # DSH bridge retry guard. The platform permits one retry for an identical
-    # failing call, then forces the model to choose a fallback path.
-    _dsh_last_failed_tool_fingerprint: str
-    _dsh_consecutive_tool_failures: int
+    # Repeat-failure blocking now lives in the DSH tool pipeline (dsh_runtime/src/policies.ts);
+    # the bridge only records whether this run persisted memory itself.
+    _dsh_memory_written: bool  # 本轮模型已通过 write_memory 落库，extract_memory 跳过
 
     # ── 判官 ──
     judge_result: dict | None

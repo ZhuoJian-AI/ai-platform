@@ -74,6 +74,15 @@ logger = structlog.get_logger()
 RUNNER_INLINE_FILE_BYTES = 10 * 1024 * 1024
 RUNNER_MAX_FILE_BYTES = 100 * 1024 * 1024
 
+# ── DSH ToolSpec 元数据（运行时按此执行工具截止、并行安全与输出上限）──────
+DSH_TOOL_TIMEOUT_READ_MS = 60_000
+DSH_TOOL_TIMEOUT_DEFAULT_MS = 120_000
+DSH_TOOL_TIMEOUT_LONG_MS = 300_000
+# The model must receive full tool output (audit H2); this cap only stops runaway payloads.
+DSH_TOOL_MAX_MODEL_CHARS = 60_000
+MEMORY_TOOL_NAMES = {"read_memory", "write_memory"}
+MEMORY_WRITE_MAX_CHARS = 2000
+
 
 async def _task_source_fields(db: Any, state: AgentState) -> dict[str, str | None]:
     task_id = str(state.get("task_id") or "").strip()
@@ -3524,6 +3533,10 @@ async def _execute_tool_call(
         params = dict(params)
         params["_mutation_key"] = server_mutation_key
 
+    if entry.get("kind") == "memory":
+        content, ok = await _execute_memory_tool(state, entry, params)
+        return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
+
     if entry.get("kind") == "rag_search":
         query = str(params.get("query") or state.get("request") or "").strip()
         top_k = max(1, min(int(params.get("top_k") or 5), 8))
@@ -3760,6 +3773,129 @@ def _workspace_access_prompt(access: dict, intent: dict) -> str:
         "每次读取、更新、移动、复制、删除或版本恢复均由服务端按当前用户角色重新校验；"
         "不得把历史 file_id、路径或旧 capabilities 快照当作当前权限。"
     )
+
+
+# ── DSH ToolSpec 装配 ────────────────────────────────────────────────────
+
+_DSH_READ_ONLY_TOOL_NAMES = {
+    "workspace_list", "workspace_search", "workspace_get_file", "workspace_list_files",
+    "workspace_read_file", "workspace_list_versions", "rag_search", "load_skill",
+    "read_skill_resource", "read_memory", "web_tool",
+}
+_DSH_READ_ONLY_REGISTRY_KINDS = {"prompt", "load_skill", "read_skill_resource", "rag_search"}
+_DSH_LONG_RUNNING_TOOL_NAMES = {"run_skill_script", "web_tool", "image_generation_tool"}
+_DSH_LONG_RUNNING_REGISTRY_KINDS = {"code", "run_skill_script", "enterprise_action"}
+_DSH_SKILL_REGISTRY_KINDS = {"code", "prompt", "load_skill", "read_skill_resource", "run_skill_script"}
+
+
+def _dsh_tool_kind(name: str, entry: dict | None) -> str:
+    kind = str((entry or {}).get("kind") or "")
+    if name.startswith("workspace_"):
+        return "workspace_file"
+    if name == "web_tool":
+        return "web"
+    if name in PLATFORM_TOOL_NAMES or name in LEGACY_BUILTIN_TOOL_NAMES or name == "image_generation_tool":
+        return "platform_tool"
+    if kind in _DSH_SKILL_REGISTRY_KINDS:
+        return "skill"
+    if kind == "rag_search":
+        return "rag"
+    if kind in {"enterprise_action", "memory"}:
+        return kind
+    if entry is not None and entry.get("endpoint") is not None:
+        return "connector"
+    # Approved Node extension tools (platform_tool_registry) execute inside the runtime itself.
+    return "external_tool"
+
+
+def _dsh_tool_metadata(name: str, entry: dict | None) -> dict:
+    """timeout / parallel-safety / output cap the runtime enforces for one tool."""
+    kind = str((entry or {}).get("kind") or "")
+    read_only = name in _DSH_READ_ONLY_TOOL_NAMES or kind in _DSH_READ_ONLY_REGISTRY_KINDS
+    if name in _DSH_LONG_RUNNING_TOOL_NAMES or kind in _DSH_LONG_RUNNING_REGISTRY_KINDS:
+        timeout_ms = DSH_TOOL_TIMEOUT_LONG_MS
+    elif read_only:
+        timeout_ms = DSH_TOOL_TIMEOUT_READ_MS
+    else:
+        timeout_ms = DSH_TOOL_TIMEOUT_DEFAULT_MS
+    return {
+        "kind": _dsh_tool_kind(name, entry),
+        "timeout_ms": timeout_ms,
+        "concurrency_safe": read_only,
+        "max_model_chars": DSH_TOOL_MAX_MODEL_CHARS,
+    }
+
+
+def dsh_tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -> list[dict]:
+    """OpenAI function tools → DSH ToolSpecs, tagged with the metadata the runtime enforces."""
+    registry = registry or {}
+    specs: list[dict] = []
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        name = str(function.get("name") or "")
+        if not name:
+            continue
+        entry = registry.get(name)
+        specs.append({
+            "name": name,
+            "description": str(function.get("description") or ""),
+            "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
+            **_dsh_tool_metadata(name, entry if isinstance(entry, dict) else None),
+        })
+    return specs
+
+
+def _memory_tool_defs() -> list[dict]:
+    """read_memory / write_memory for the DSH turn; schemas mirror ``app.mcp.server``."""
+    return [
+        {"type": "function", "function": {
+            "name": "read_memory",
+            "description": "读取当前用户 4 级 scope（组织/部门/团队/个人）聚合的长期记忆全文。",
+            "parameters": {"type": "object", "properties": {}},
+        }},
+        {"type": "function", "function": {
+            "name": "write_memory",
+            "description": (
+                "沉淀一条可跨任务复用的结论性事实到当前用户个人级长期记忆（逐条追加、去重）。"
+                "用「实体 → 属性 → 值」短句；不要写入一次性数据、中间推理或本轮临时数值。"
+            ),
+            "parameters": {"type": "object", "properties": {
+                "content": {"type": "string", "description": "要沉淀的事实，一条一句"},
+            }, "required": ["content"]},
+        }},
+    ]
+
+
+async def _execute_memory_tool(state: AgentState, entry: dict, params: dict) -> tuple[str, bool]:
+    """Serve read_memory / write_memory with the same scope rules as the MCP capability tools."""
+    from app.tools import capability_tools
+
+    deps = get_deps()
+    db = deps["db"]
+    user = deps.get("user")
+    if user is None:
+        return json.dumps({"status": "error", "error": "memory tools require a terminal user"}), False
+    principal = await _fresh_user_principal(db, user)
+    operation = str(entry.get("operation") or "read")
+    try:
+        if operation == "write":
+            content = str(params.get("content") or "").strip()
+            if not content:
+                return json.dumps({"status": "error", "error": "content is required"}), False
+            if len(content) > MEMORY_WRITE_MAX_CHARS:
+                return json.dumps({
+                    "status": "error", "error": f"content exceeds {MEMORY_WRITE_MAX_CHARS} chars",
+                }), False
+            async with db.begin_nested():
+                result = await capability_tools._write_memory(db, principal, content)
+            # extract_memory skips its LLM pass when the run already persisted facts itself.
+            state["_dsh_memory_written"] = True
+            return json.dumps({"status": "success", "result": result}, ensure_ascii=False), True
+        memory = await capability_tools._read_memory(db, principal)
+        return json.dumps({"status": "success", "memory": memory}, ensure_ascii=False), True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("memory_tool_failed", operation=operation, error=str(exc))
+        return json.dumps({"status": "error", "error": f"memory {operation} failed"}), False
 
 
 async def prepare_dsh_turn(state: AgentState) -> dict:
@@ -4000,6 +4136,11 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
                 },
             })
             registry["rag_search"] = {"kind": "rag_search", "collection_ids": rag_ids}
+        if user is not None:
+            # Long-term memory is a per-user capability; the admin playground has no principal.
+            tools.extend(_memory_tool_defs())
+            registry["read_memory"] = {"kind": "memory", "operation": "read"}
+            registry["write_memory"] = {"kind": "memory", "operation": "write"}
         system_prompt = f"{system_prompt}{TOOL_STRATEGY_PROMPT}{OUTPUT_PROTOCOL_PROMPT}"
         referenced = state.get("referenced_skills") or []
         if referenced:
@@ -4183,6 +4324,18 @@ async def extract_memory(state: AgentState) -> dict:
     org_id = state.get("org_id")
     if not user_id or not org_id:
         return {}
+    if state.get("_dsh_memory_written"):
+        # The model already persisted its facts through write_memory this run; a second
+        # LLM extraction pass would only duplicate them and cost a model call.
+        trace = {
+            "category": "memory", "subtype": "extract", "title": "记忆沉淀",
+            "facts": 0, "skipped": "write_memory",
+        }
+        _emit({"type": "trace", **trace})
+        return {
+            "steps": [*state.get("steps", []), {"step": "extract_memory", "facts": 0, "skipped": "write_memory"}],
+            "traces": [*state.get("traces", []), trace],
+        }
 
     deps = get_deps()
     db = deps["db"]

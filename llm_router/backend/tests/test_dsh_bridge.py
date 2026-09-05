@@ -14,8 +14,6 @@ from app.agents.graph.nodes import _skill_catalog_prompt
 from app.api import dsh_internal
 from app.api.dsh_internal import (
     ModelBridgeRequest,
-    _identical_failure_blocked,
-    _record_tool_outcome,
     _to_platform_messages,
     _to_platform_tools,
 )
@@ -167,23 +165,10 @@ def test_dsh_tools_convert_to_existing_gateway_schema():
     }]
 
 
-def test_dsh_identical_tool_failure_guard_allows_one_retry_then_blocks():
-    state: dict = {}
-    arguments = {"input_file_ids": ["file-1"], "action": "inspect"}
-
-    assert _identical_failure_blocked(state, "spreadsheet_tool", arguments) is False
-    _record_tool_outcome(state, "spreadsheet_tool", arguments, ok=False)
-    assert _identical_failure_blocked(state, "spreadsheet_tool", arguments) is False
-    _record_tool_outcome(
-        state,
-        "spreadsheet_tool",
-        {"action": "inspect", "input_file_ids": ["file-1"]},
-        ok=False,
-    )
-    assert _identical_failure_blocked(state, "spreadsheet_tool", arguments) is True
-
-    _record_tool_outcome(state, "spreadsheet_tool", arguments, ok=True)
-    assert _identical_failure_blocked(state, "spreadsheet_tool", arguments) is False
+def test_dsh_tool_bridge_no_longer_owns_the_identical_failure_guard():
+    """A1：相同工具+参数的重复失败拦截已移入 DSH 工具管线，Python 桥不再持有该状态。"""
+    for name in ("_identical_failure_blocked", "_record_tool_outcome", "_tool_call_fingerprint"):
+        assert not hasattr(dsh_internal, name)
 
 
 def test_skill_catalog_never_advertises_an_unavailable_load_tool():
@@ -281,34 +266,24 @@ async def test_failed_tool_without_final_text_is_an_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_skill_file_delivery_continues_after_load_only_completion(monkeypatch):
+async def test_skill_file_delivery_runs_once_with_a_runtime_completion_policy(monkeypatch):
+    """A1：Python 不再以 ``-continuation`` 重跑；续执行交给 RunRequest.completion_policy 的运行时。"""
     requests: list[dict] = []
 
     async def stream_run(request):
         requests.append(request)
-        if len(requests) == 1:
-            yield {"type": "tool_call", "id": "load-1", "name": "load_skill", "arguments": "{}"}
-            yield {
-                "type": "tool_result", "id": "load-1", "name": "load_skill",
-                "content": "loaded", "ok": True,
-            }
-            yield {"type": "done", "text": "我先加载技能。", "steps": 1, "tool_calls": 1}
-            return
+        yield {"type": "tool_call", "id": "load-1", "name": "load_skill", "arguments": "{}"}
         yield {
-            "type": "tool_call", "id": "sheet-1", "name": "spreadsheet_tool",
-            "arguments": {"action": "create", "output_name": "output.xlsx"},
+            "type": "tool_result", "id": "load-1", "name": "load_skill",
+            "content": "loaded", "ok": True,
         }
-        yield {
-            "type": "tool_result", "id": "sheet-1", "name": "spreadsheet_tool",
-            "content": "output.xlsx", "ok": True,
-        }
-        yield {"type": "done", "text": "处理完成，文件已生成。", "steps": 1, "tool_calls": 1}
+        yield {"type": "done", "text": "技能已加载。", "steps": 1, "tool_calls": 1}
 
     monkeypatch.setattr(runner.client, "stream_run", stream_run)
     state = {
-        "run_id": 4, "request": "请使用技能处理附件并保存结果", "messages": [], "steps": [],
+        "run_id": 4, "request": "请使用技能处理附件并生成一份 Excel 表格", "messages": [], "steps": [],
         "exec_mode": "craft", "attachment_files": [{"file_id": "file-1"}],
-        "invoked_skill_ids": ["skill-1"], "_dsh_tool_registry": {},
+        "invoked_skill_ids": ["skill-1"], "_dsh_tool_registry": {"bank_flow": {"kind": "code"}},
     }
     staged: list[dict] = []
 
@@ -320,47 +295,21 @@ async def test_skill_file_delivery_continues_after_load_only_completion(monkeypa
         staged,
     )
 
-    assert len(requests) == 2
-    assert requests[1]["run_id"] == "4-continuation"
-    assert state.get("error") is None
-    assert state["assistant_final"] == "处理完成，文件已生成。"
-    assert {step["step"] for step in state["steps"]} >= {
-        "skill_file_delivery_continuation", "llm_final",
-    }
-    assert any(event.get("type") == "text_retract" for event in staged)
-
-
-@pytest.mark.asyncio
-async def test_skill_file_delivery_without_output_is_an_error_after_one_continuation(monkeypatch):
-    requests: list[dict] = []
-
-    async def stream_run(request):
-        requests.append(request)
-        yield {"type": "tool_call", "id": f"load-{len(requests)}", "name": "load_skill", "arguments": "{}"}
-        yield {
-            "type": "tool_result", "id": f"load-{len(requests)}", "name": "load_skill",
-            "content": "loaded", "ok": True,
-        }
-        yield {"type": "done", "text": "技能已加载。", "steps": 1, "tool_calls": 1}
-
-    monkeypatch.setattr(runner.client, "stream_run", stream_run)
-    state = {
-        "run_id": 5, "request": "请使用技能处理附件并保存结果", "messages": [], "steps": [],
-        "exec_mode": "craft", "attachment_files": [{"file_id": "file-1"}],
-        "invoked_skill_ids": ["skill-1"], "_dsh_tool_registry": {},
-    }
-
-    await runner._consume_dsh(
-        state,
-        {"system_prompt": "", "tools": []},
-        "run-token",
-        None,
-        [],
+    assert len(requests) == 1
+    assert requests[0]["run_id"] == "4"
+    policy = requests[0]["completion_policy"]
+    assert set(policy) == {"require_file_output", "file_output_tools", "max_nudges", "nudge_text"}
+    assert policy["require_file_output"] is True
+    assert policy["max_nudges"] == 1
+    assert {"spreadsheet_tool", "run_skill_script", "workspace_write_file", "bank_flow"} <= set(
+        policy["file_output_tools"]
     )
-
-    assert len(requests) == 2
-    assert state["error"] == "Skill execution completed without producing the requested file"
-    assert "未生成用户要求的文件" in state["assistant_final"]
+    assert "load_skill" not in policy["file_output_tools"]
+    # Python no longer judges delivery itself: the runtime's final answer stands as-is.
+    assert state.get("error") is None
+    assert state["assistant_final"] == "技能已加载。"
+    assert not any(step["step"] == "skill_file_delivery_continuation" for step in state["steps"])
+    assert not any(event.get("type") == "text_retract" for event in staged)
 
 
 @pytest.mark.asyncio

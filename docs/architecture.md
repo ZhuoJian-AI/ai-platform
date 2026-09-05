@@ -292,3 +292,114 @@ platform_extension_sources / catalog_entries / releases / release_events（平�
 - prod（academy）当前 SHA `4bd27bf` 与其 Coolify 环境变量来自 hist1 考古，未直接访问服务器。
 - `dsh_runtime/vendor` 里 `@deepseek-ai/dsh-*` 0.1.0-rc.5 的内部行为（agent loop 终止条件）未读源码。
 - 本文写作时 `fix/audit-2026-09-03-high` 分支有 16 个文件在并行修改（含 `dsh_internal.py`、`workspace_permission_service.py`、`runner.py`），§8 引用的行号以 `main@3435cb8` 为准。
+
+## DSH（DeepSeek Harness）接入现状与路线图（2026-09-05）
+
+> 基线：分支 `feat/dsh-native-policies`。`dsh_internal.py` / `runner.py` / `dsh_runtime/src` 正在并行修改，本节优先给 `::函数` 引用，行号只在函数名不够时给。上游事实来自本地克隆 `D:\claude project\deepseek harness\deepseek-harness`（HEAD `141eb6f`，release/dsh-0.1.0-rc.8，浅克隆）。
+
+### 现状
+
+**版本与包**
+- 平台 vendored `@deepseek-ai/dsh-*` 0.1.0-rc.5：`dsh_runtime/package.json:16-34`，19 个 tgz（含 cordis 4.0.1、schemastery 3.18.1），清单 `dsh_runtime/VENDOR.md` + `dsh_runtime/vendor/SHA256SUMS`。上游克隆是 rc.8，比 vendored 新 3 个 rc。
+- rc.5 硬编码 4 处，升级时全要改：`dsh_runtime/src/runtime.ts:133`（上报 dsh_version）、`dsh_runtime/src/extensions.ts:121-122`（manifest.dsh_version 不等即拒绝激活）、`extension_builder/src/builder.ts::compatibleDsh`（:247，:250/:321/:379 三处字面量）、`platform_extension_catalog.py:9-76,163`。
+
+**运行拓扑**
+- `runtime.ts:99-104` 只加载 6 个 cordis 插件：LlmRuntime / SessionStore / SystemPrompt / ToolRuntime / AgentRegistry / AgentLoop（`maxParallelToolCalls: 1`）。dsh-timeout 等其余 vendored 包一个都没 import。
+- 模型桥：`dsh_runtime/src/platform.ts::PlatformLlmAdapter.stream` → POST `/api/v1/internal/dsh/model/stream`（`app/api/dsh_internal.py::model_stream`）→ `model_gateway.stream_chat`。DSH 内部没有任何 provider，模型永远经平台网关。
+- 工具桥：`agentCtx.tools.register` 逐个注册 `RunRequest.tools`（`contracts.ts::ToolSpec`，现只有 name / description / input_schema）→ `platform.ts::executePlatformTool` → POST `/internal/dsh/tools/execute`（`dsh_internal.py::execute_tool`）→ `app/agents/graph/nodes.py::_execute_tool_call`。
+- 会话：每 run 一个 session `platform-${run_id}`，不跨轮复用；历史消息（`RunRequest.messages`）每轮由 Python 重渲染进 system prompt；系统提示词由 `nodes.py::prepare_dsh_turn` 拼好后作为单一 section 注入 SystemPrompt 插件。DSH 自己的持久化 / compaction / settings 都没启用。
+- 入口：`runner.py::_consume_dsh` POST `dsh_runtime/src/server.ts` 的 `/v1/runs`（:50），并发闸 `DSH_RUNTIME_HARD_CONCURRENCY`=14（`server.ts:14`）。
+
+**谁走 DSH、谁不走**
+- 走：终端对话、智能体测试广场、企业应用助手——三者都收口到 `runner.py::stream_general_agent`。
+- 不走：`nodes.py::judge`、`nodes.py::extract_memory`（两者直接 `llm_client.chat`）、多模态 worker、skill_runner 沙箱、MCP 工具层（`app/mcp/server.py` 12 个 `@mcp.tool()`，DSH 看不到；§2 写的「9 个平台能力」已过期）。
+
+**vendored 但未接线**
+- dsh-code-runtime、dsh-session-persistence、dsh-user-approval（`platform_extension_catalog.py:74-81` 标「平台审批事件与应答通道尚未适配，禁止发布」）、dsh-attachment、dsh-settings、dsh-scope、dsh-timeout（catalog `:65-71` 声明 `enabled: True`，但 runtime.ts 从未 import）、dsh-typert-protocol / dsh-typert-registry、dsh-invariants。
+- rc.5 tgz 全是接口层：`tar tzf` 只见 `lib/index.js` / `invariant.js` / `types/`，**没有任何 provider 实现**。jsonl 持久化（`packages/session/session-persistence-jsonl`）、worker-thread 代码运行时（`packages/code-runtime/code-runtime-worker-thread`）、repeat-tool-reminder / timeout-policy（`packages/guard/`）、subagent（`packages/subagent/`）、mcp-client（`packages/mcp/mcp-client`）只在上游 rc.8。
+
+### Phase A（本分支实施）：把循环策略搬进 DSH 事件管道
+
+动机：§8.2 的循环控制全在 Python 桥接层堆关键词。Phase A 把「重复失败怎么拦 / 没产出怎么续 / 取消怎么算」搬到 DSH 事件钩子里，Python 只下发策略参数。
+
+| 改了什么 | 替掉了什么 | 怎么验 |
+|---|---|---|
+| 新 `dsh_runtime/src/policies.ts`：`tools/post-execute` 钩子按 (name, arguments) 指纹记连续相同失败并 block；跟踪文件产出工具成功次数 | `dsh_internal.py::_identical_failure_blocked / _record_tool_outcome`（原 `:54-80` 指纹计数器，已删） | 同一失败工具连调 → 第 N 次 `tool_result.ok=false` 且事件流出 `policy{kind: repeat_failure_block}`；`node --test dist/tests/*.test.js` |
+| `agent/turn-stopping` 钩子 + `agent.steer()`：`require_file_output` 且未产出文件时，在**同一 session 同一轮**注入 nudge 续跑，最多 `max_nudges` 次 | `runner.py:266-283` 的 `run_id+"-continuation"` 二次 run（Stop 无法取消，且要把已流出文本整段 `text_retract` 重跑） | 选技能只 load_skill 不写文件 → SSE 出 `policy{kind: continuation}`，无 `text_retract`；nudge 期间 Stop 立即生效 |
+| `turn/end` 收到 aborted → 事件 `status: cancelled` | Python 侧靠异常推断取消 | Stop 后 `agent_runs.status=cancelled` 而非 error |
+| `ToolSpec` 新字段 `timeout_ms / concurrency_safe / max_model_chars / kind`；`registerTool` 透传 `timeoutMs / isConcurrencySafe / finalizeContent` | 截断只在 Python `preview`（§9.5）、无超时、全串行 | 超时工具返回 ok=false + `policy{kind: tool_timeout}`；`max_model_chars` 截断在 DSH 侧生效 |
+| 工具执行硬超时接入 dsh-timeout；`maxParallelToolCalls` 由 `DSH_MAX_PARALLEL_TOOL_CALLS` 控制（默认 4） | `runtime.ts:104` 硬编码 `maxParallelToolCalls: 1` | 一轮多个 `concurrency_safe` 读工具并发执行；写工具仍串行 |
+| `RunRequest` 新字段 `completion_policy {require_file_output, file_output_tools, max_nudges, nudge_text}`；`RuntimeEvent` 新增 `policy`（continuation / repeat_failure_block / tool_timeout） | Python 侧关键词启发式决定是否续跑 | `persist_run_events` 落库可见 `policy` 事件；`Terminal.tsx` 单事件派发对未知类型不报错 |
+| `runner.py::_requires_skill_file_delivery` 只算策略：仅用户明确要文件时 `require_file_output=true` | hist2 区域 3.1：分析类请求被撤回文本 | 分析类提问 + 技能 → 正常出文本，无 `text_retract` |
+| `read_memory / write_memory` 作为 `kind=memory` 平台工具喂给 DSH；本轮已 write_memory 则 `_finish` 跳过 `extract_memory` | 每轮无条件跑一次 `nodes.py::extract_memory`（一次 LLM 调用） | 模型本轮调了 write_memory → run 事件无 extract_memory step，`memories` 表有新行 |
+
+新契约速查（字段名以 `dsh_runtime/src/contracts.ts` 为准，此处只列增量）：
+
+```
+ToolSpec      += timeout_ms?: number          // 硬超时，走 dsh-timeout
+                 concurrency_safe?: boolean   // true 才允许与其他工具并发
+                 max_model_chars?: number     // 喂给模型的 content 上限，DSH 侧截断
+                 kind?: 'file_output' | 'memory' | ...   // policies.ts 按 kind 识别产出/记忆工具
+RunRequest    += completion_policy?: { require_file_output, file_output_tools, max_nudges, nudge_text }
+RuntimeEvent  += { type: 'policy'; kind: 'continuation' | 'repeat_failure_block' | 'tool_timeout'; ... }
+env           += DSH_MAX_PARALLEL_TOOL_CALLS（默认 4）
+```
+
+契约同步点（改任一处要同时看）：`contracts.ts` ↔ `runner.py` 组装 `RunRequest` 处（`:208` 附近）↔ `dsh_internal.py::execute_tool` 返回形状 ↔ `persist_run_events` ↔ `Terminal.tsx` 事件派发 ↔ `tests/test_dsh_bridge.py`（指纹计数器断言要删）。
+
+Phase A 验证清单：
+1. `cd dsh_runtime && npm run build && node --test dist/tests/*.test.js`——policies 单测跟 `runtime.test.ts` / `extensions.test.ts` 同目录。
+2. `cd llm_router/backend && pytest tests/test_dsh_bridge.py -v`（需 Postgres 5434 + pgvector，§7）。
+3. 终端手测三例：① 技能 + 明确要文件 → 出 `policy{continuation}`，最终有 `tool_result` 产出文件；② 技能 + 分析类提问 → 只出文本，无 `text_retract`；③ 续跑途中点 Stop → `status: cancelled`，`agent_runs.status=cancelled`。
+4. 事件落库：`agent_run_events` 里能查到 `policy` 事件；GET `/tasks/{id}/stream` 回放不丢。
+5. 回归：`test_dsh_bridge.py` 不再引用 `_identical_failure_blocked`；`grep -rn "\-continuation" app/agents/dsh/runner.py` 为空。
+
+### Phase B / C（路线图，未实施）
+
+| 项 | 内容 | 前置 | 替换掉什么 | 风险 |
+|---|---|---|---|---|
+| B1 接 dsh-user-approval | 后端 `/internal/dsh/approval/request` 挂起 Future；SSE 新事件 `approval_request`；POST `/terminal/tasks/{id}/approvals/{approval_id}` 应答；Future 120s 超时视为拒绝 | 前端审批卡（`terminal.py` 现 0 处 approval） | `workspace_permission_service.resolve_workspace_intent` 的权限提问启发式（§3.2 第 8 步） | Future 在发起 run 的 backend 进程内存里，多副本必丢（同 §9.6/9.7）；120s 内不答 = 工具失败 |
+| B2 rc.5→rc.8 升级 spike | 用上游 `scripts/release/pack.ts` 打 tgz 进 `dsh_runtime/vendor/`；同步「现状」列的 4 处硬编码 + `VENDOR.md` + `SHA256SUMS` | 先读克隆 `docs/rescope.md`（cordis 等基础库在上游已 rescope 到 `@deepseek-ai/*`，包名与 rc.5 的 `vendor/deepseek-ai-cordis-4.0.1.tgz` 对不上） | — | AgentLoop / SessionStore 钩子签名变化未评估；已发布扩展的 `manifest.dsh_version` 全部失配（`extensions.ts:121`） |
+| C1 dsh-session-persistence（jsonl） | sessionId=`platform-task-${task_id}`，`ctx.agents.resume` + followup 续会话；PostgreSQL 仍是事实源 | B2（jsonl provider 只在 rc.8）；dsh-runtime 容器挂持久卷 | 每轮把 `RunRequest.messages` 重渲染进 system prompt | jsonl 丢/坏要从 `task_messages` 重建的 digest 回退；`/sessions` 卷无人清理；多副本 dsh-runtime 会话不共享 |
+| C2 Code Mode | `WorkerThreadCodeRuntime` + tools mode `both`；**不替换** skill_runner | B2；重算堆上限 | 无（新增能力） | 1536M 容器（§6.1）× 14 并发 worker，各自独立 heap，`--max-old-space-size` 要重算；worker 内可直接打 backend 网络 |
+
+已否决（一句话理由）：
+- typert（protocol / registry）：工具 schema 由 Python 生成，DSH 侧再套一层类型无消费者。
+- invariants：断言库，无业务面。
+- scope / settings：租户配置在 PostgreSQL 与 Coolify 环境变量（§6.4），不再加第三处配置源。
+- subagent 改造 judge / extract_memory：两者各是一次 `llm_client.chat`，套 agent loop 只加延迟。
+- attachment：附件已在 Python 侧解析成文本进 prompt（§3.3 解析链）。
+- compaction：会话每 run 一个，没有长会话可压；C1 落地后再议。
+- llm-retry：模型调用经 `model_gateway`，重试归平台侧，DSH 内再套一层会双重重试。
+- sandbox-local：沙箱是 skill_runner（read_only + cap_drop ALL，§6.1），不引第二套。
+
+### 对外兼容 DSH（客户本地 dsh CLI 接平台，未实施）
+
+**已核实阻塞**
+- 上游 mcp-client 只支持静态 headers 鉴权：`packages/mcp/mcp-client/src/transport.ts:45-48` 把 `config.headers` 原样放进 `requestInit`，无 OAuth 流程。
+- 平台 MCP 只挂 OAuth-only：`app/main.py:170` 挂 `/mcp/organizations`（`mcp/server.py::organization_mcp_app`）；API-key 版 `mcp/server.py::mcp_app()` 未挂载，`main.py:168-169` 注明刻意为之——员工角色变更必须即时吊销个人 AI 访问。
+- 两条叠加：dsh CLI 现在接不上平台 MCP，不是配置问题。
+
+**今天就能用的**
+- 上游 `llm-deepseek` 的 `baseURL`（`packages/llm/llm-deepseek/src/index.ts:70`，请求打 `${baseURL}/chat/completions`，`adapter.ts:341`）指向平台 `/v1`。平台端点：POST `/v1/chat/completions`、POST `/v1/messages`、GET `/v1/models`（`app/proxy/router.py:42,61,80`）；key 形如 `lr_sk_team_…`（`api_key_auth.py:15` 正则只认 organization / department / team）。
+- 平台侧会改请求：OpenAI 流式注入 `stream_options.include_usage=true`（`app/graph/nodes/routing.py:59-65`）；max_tokens 受 `permission_resolver` 上限约束（代理层直接注入点本文未核到）。无 `/v1/responses`、无 `count_tokens`。
+
+**路线（按成本递增）**
+1. 文档 + `cordis.patch.yml` 样例（格式见上游 `docs/architecture.md`）：llm-deepseek 的 baseURL / apiKey 指向平台。零代码。
+2. 技能包导出多写 `.agents/skills/` 与 `.dsh/skills/`：`skills_pack_service.py:80` 现只写 `.claude/skills/<slug>/SKILL.md`；dsh 扫描根见上游 `packages/skill/skill-filesystem/src/index.ts:246-247`。
+3. 个人访问令牌 `lr_sk_user_…`：`api_key_auth.py:15` 正则加 `user` scope + `mcp/auth.py::resolve_principal_from_key`（:200）新分支，让模型身份 = 工具身份；token 绑 user，角色变更即失效，才能解掉 `main.py:168` 的顾虑再挂 API-key MCP。
+4. MCP 增 `search_memory`（现只有 `read_memory` 整读 / `write_memory`）。
+5. 代理层归一 `max_completion_tokens` / `developer` role（`app/proxy/` 目前不处理）；DLP block 后补 `finish_reason` 终态帧，否则客户端流挂起。
+6. MCP 增 `run_agent` / `get_run_result`，把 §3.2 的「后台 run + 回放」暴露给外部 agent。
+7. ACP stdio 桥（上游 `packages/acp/`），dsh 作客户端接平台智能体。
+
+**否决**：直接挂 API-key MCP（违背 `main.py:168` 吊销要求，③ 之前不做）；`/v1/responses`（上游 llm-deepseek 不用）；`count_tokens`（上游无调用方）；OAuth token 打 `/v1`（代理鉴权是 `authenticate_request` API-key 单轨，不认 JWT）。
+
+### 改 DSH 相关代码前看这里（补 §9）
+
+11. **循环策略只在 `dsh_runtime/src/policies.ts` 一处**。再遇到「模型只 load_skill 不干活 / 重复调失败工具 / 该停不停」，改 policies.ts 或下发 `completion_policy`，不要回到 `runner.py` / `dsh_internal.py` 加关键词（§8.2 的教训）。
+12. **catalog 的 `enabled: True` ≠ 已接线**。`platform_extension_catalog.py` 只是给超管看的目录；一个包有没有生效以 `runtime.ts:99-104` 的 `ctx.plugin(...)` 为准。
+13. **vendored rc.5 只有接口层**。想用 jsonl 持久化 / worker-thread / mcp-client / subagent 任何 provider，先做 B2 升级，别在 rc.5 上等一个不存在的实现。
+14. **DSH 版本号 4 处硬编码 + `VENDOR.md` + `SHA256SUMS`**（见「现状·版本与包」），升级漏一处 = 扩展全部拒绝激活（`extensions.ts:121`）或构建器误报不兼容（`builder.ts:321`）。
+15. **`RunRequest` / `RuntimeEvent` 是跨语言契约**，改字段走「契约同步点」六处；`policy` 这类新事件类型要先确认 `Terminal.tsx` 对未知 type 不会抛。
+16. **对外接 dsh CLI 目前只有 `/v1` 一条路**，MCP 那条被 `transport.ts:45-48`（静态 headers）× `main.py:168-170`（OAuth-only）双重锁死；不要给客户承诺「配个 URL 就能用平台工具」。
