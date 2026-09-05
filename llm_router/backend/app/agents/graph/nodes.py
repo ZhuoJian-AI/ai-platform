@@ -38,6 +38,7 @@ from app.models.audit_log import AuditLog
 from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.ontology import OntologyFile
 from app.models.organization import Organization
+from app.models.platform_extension import PlatformExtensionRelease
 from app.models.skill import SkillExecution, SkillFolder, SkillVersion
 from app.models.task import Task
 from app.models.workspace import WorkspaceFile, WorkspaceFileMutation, WorkspaceFileVersion
@@ -2972,14 +2973,39 @@ async def _build_tools(
         ]
         for name in disabled_managed_names:
             registry.pop(name, None)
-    builtin_defs.extend(await active_external_tool_defs(
+    external_defs = await active_external_tool_defs(
         db,
         organization_id=str(user.organization_id) if user is not None else "",
         user_role=str(user.role) if user is not None else None,
         exec_mode=exec_mode,
-    ))
+    )
+    if external_defs:
+        # Extension tools execute inside the runtime, so they get no execution registry entry;
+        # their manifest risk flags ride on the tool definition for ``dsh_tool_specs`` only.
+        risk_flags = await _external_tool_risk_flags(db)
+        for item in external_defs:
+            flags = risk_flags.get(str(item.get("function", {}).get("name") or ""))
+            if flags:
+                item["risk"] = flags
+    builtin_defs.extend(external_defs)
     tools.extend(builtin_defs)
     return tools, registry
+
+
+async def _external_tool_risk_flags(db) -> dict[str, dict]:
+    """``risk_level`` / ``side_effects`` declared by approved extension tools in the active release."""
+    release = (
+        await db.execute(select(PlatformExtensionRelease).where(PlatformExtensionRelease.is_active.is_(True)))
+    ).scalar_one_or_none()
+    flags: dict[str, dict] = {}
+    for extension in ((release.manifest if release is not None else None) or {}).get("external_extensions") or []:
+        if extension.get("type") != "system_tool":
+            continue
+        for tool in extension.get("tools") or []:
+            name = str(tool.get("name") or "")
+            if name:
+                flags[name] = {"risk_level": tool.get("risk_level"), "side_effects": tool.get("side_effects")}
+    return flags
 
 
 async def _execute_code_skill(
@@ -3786,6 +3812,32 @@ _DSH_READ_ONLY_REGISTRY_KINDS = {"prompt", "load_skill", "read_skill_resource", 
 _DSH_LONG_RUNNING_TOOL_NAMES = {"run_skill_script", "web_tool", "image_generation_tool"}
 _DSH_LONG_RUNNING_REGISTRY_KINDS = {"code", "run_skill_script", "enterprise_action"}
 _DSH_SKILL_REGISTRY_KINDS = {"code", "prompt", "load_skill", "read_skill_resource", "run_skill_script"}
+# ``ToolSpec.approval="ask"``: the runtime parks these calls until the terminal user decides
+# (bridge: POST /internal/dsh/approval/request).  Hard deletes by name; mutating enterprise
+# actions by manifest operation; connector / extension tools by their declared risk flags.
+_DSH_APPROVAL_TOOL_NAMES = {"workspace_delete_file", "workspace_delete_folder"}
+_DSH_APPROVAL_RISK_LEVELS = {"high", "critical"}
+_DSH_APPROVAL_ENTERPRISE_OPERATIONS = {"create", "update", "delete", "approve"}
+_DSH_APPROVAL_CONNECTOR_METHODS = {"DELETE"}
+
+
+def _dsh_tool_requires_approval(name: str, entry: dict | None) -> bool:
+    """Whether one call of this tool must wait for an explicit user decision before executing."""
+    if name in _DSH_APPROVAL_TOOL_NAMES:
+        return True
+    if not entry:
+        return False
+    kind = str(entry.get("kind") or "")
+    if name in _DSH_READ_ONLY_TOOL_NAMES or kind in _DSH_READ_ONLY_REGISTRY_KINDS:
+        return False
+    if str(entry.get("risk_level") or "").lower() in _DSH_APPROVAL_RISK_LEVELS or bool(entry.get("side_effects")):
+        return True
+    if kind == "enterprise_action":
+        action = entry.get("action")
+        operation = str(getattr(action, "operation", "") or "").lower()
+        return bool(getattr(action, "requires_confirmation", False)) or operation in _DSH_APPROVAL_ENTERPRISE_OPERATIONS
+    endpoint = entry.get("endpoint")
+    return str(getattr(endpoint, "method", "") or "").upper() in _DSH_APPROVAL_CONNECTOR_METHODS
 
 
 def _dsh_tool_kind(name: str, entry: dict | None) -> str:
@@ -3809,7 +3861,7 @@ def _dsh_tool_kind(name: str, entry: dict | None) -> str:
 
 
 def _dsh_tool_metadata(name: str, entry: dict | None) -> dict:
-    """timeout / parallel-safety / output cap the runtime enforces for one tool."""
+    """timeout / parallel-safety / output cap / approval gate the runtime enforces for one tool."""
     kind = str((entry or {}).get("kind") or "")
     read_only = name in _DSH_READ_ONLY_TOOL_NAMES or kind in _DSH_READ_ONLY_REGISTRY_KINDS
     if name in _DSH_LONG_RUNNING_TOOL_NAMES or kind in _DSH_LONG_RUNNING_REGISTRY_KINDS:
@@ -3818,12 +3870,15 @@ def _dsh_tool_metadata(name: str, entry: dict | None) -> dict:
         timeout_ms = DSH_TOOL_TIMEOUT_READ_MS
     else:
         timeout_ms = DSH_TOOL_TIMEOUT_DEFAULT_MS
-    return {
+    metadata = {
         "kind": _dsh_tool_kind(name, entry),
         "timeout_ms": timeout_ms,
         "concurrency_safe": read_only,
         "max_model_chars": DSH_TOOL_MAX_MODEL_CHARS,
     }
+    if settings.dsh_tool_approval_enabled and _dsh_tool_requires_approval(name, entry):
+        metadata["approval"] = "ask"
+    return metadata
 
 
 def dsh_tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -> list[dict]:
@@ -3836,11 +3891,15 @@ def dsh_tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -
         if not name:
             continue
         entry = registry.get(name)
+        if not isinstance(entry, dict):
+            # Extension tools run inside the runtime and have no execution entry; ``_build_tools``
+            # attaches their manifest ``risk_level`` / ``side_effects`` to the definition instead.
+            entry = tool.get("risk") if isinstance(tool.get("risk"), dict) else None
         specs.append({
             "name": name,
             "description": str(function.get("description") or ""),
             "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
-            **_dsh_tool_metadata(name, entry if isinstance(entry, dict) else None),
+            **_dsh_tool_metadata(name, entry),
         })
     return specs
 

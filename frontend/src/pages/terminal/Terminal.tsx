@@ -19,6 +19,7 @@ import {
   PictureOutlined, EyeOutlined, MenuUnfoldOutlined, MenuFoldOutlined, HistoryOutlined,
   PushpinOutlined, PushpinFilled,
   AudioOutlined, PauseOutlined, CaretRightOutlined, StopOutlined,
+  SafetyOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -30,8 +31,10 @@ import {
   type TerminalTaskWithMessages,
   type SkillFolderSummary, type WorkspaceFileSummary, type TerminalEnterpriseApplication,
    type VoiceProfile, type WorkspaceFileEvent, type WorkspaceFileRefV1,
+  type TerminalApprovalOutcome, type TerminalApprovalDecidedBy,
   WORKSPACE_MAX_FILE_BYTES,
 } from '../../api/client';
+import ApprovalCard, { type ApprovalCardData } from '../../components/terminal/ApprovalCard';
 import { useUserAuth } from '../../context/UserAuthContext';
 import TaskConfigDrawer from './TaskConfigDrawer';
 import BrowserDrawer, { classifyFile, classifyUrl, type Source } from './BrowserDrawer';
@@ -100,14 +103,16 @@ function readApplicationNavPinPreference(userId?: string | null): boolean {
 }
 
 // ── 执行过程时间线 block 模型 ──────────────────────────────────────────
-type TraceCategory = 'rag' | 'ontology' | 'memory' | 'data_interface' | 'skill' | 'file';
+type TraceCategory = 'rag' | 'ontology' | 'memory' | 'data_interface' | 'skill' | 'file' | 'policy';
 type Block =
   | { kind: 'phase'; index: number }
   | { kind: 'tool_call'; id: string; name: string; arguments: string;
       running: boolean; result?: { content: string; ok: boolean } }
   | { kind: 'text'; content: string }
   | { kind: 'trace'; category: TraceCategory; title: string; detail?: unknown }
-  | { kind: 'meta'; subtype: 'memory' | 'judge'; data: unknown };
+  | { kind: 'meta'; subtype: 'memory' | 'judge'; data: unknown }
+  // 高风险工具用户审批：SSE approval_request 落成一块，approval_decided 补 outcome/decidedBy
+  | ({ kind: 'approval' } & ApprovalCardData);
 
 interface ChatMsg {
   role: 'user' | 'assistant';
@@ -785,6 +790,46 @@ export default function Terminal() {
           return next;
         });
         break;
+      case 'approval_request': {
+        // 高风险工具审批请求：追加为当前回合的一块卡片。重连回放可能重复下发，按 approval_id 去重。
+        const approvalId = String(evt.approval_id ?? '');
+        if (!approvalId) break;
+        const rawPreview = evt.arguments_preview;
+        const argumentsPreview = typeof rawPreview === 'string'
+          ? rawPreview
+          : rawPreview == null ? '' : JSON.stringify(rawPreview, null, 2);
+        updateTurn((bs) => {
+          if (bs.some((b) => b.kind === 'approval' && b.approvalId === approvalId)) return bs;
+          return [...bs, {
+            kind: 'approval',
+            approvalId,
+            tool: String(evt.tool ?? ''),
+            reason: String(evt.reason ?? ''),
+            argumentsPreview,
+            expiresAt: String(evt.expires_at ?? ''),
+            runId: typeof evt.run_id === 'number' ? evt.run_id : undefined,
+          }];
+        });
+        break;
+      }
+      case 'approval_decided': {
+        // 只更新已知卡片；回放顺序错位（先 decided 后 request）时忽略即可，request 到达时已过期会自行显示为不可操作。
+        const approvalId = String(evt.approval_id ?? '');
+        if (!approvalId) break;
+        updateTurn((bs) => {
+          const j = bs.findIndex((b) => b.kind === 'approval' && b.approvalId === approvalId);
+          if (j < 0) return bs;
+          const cur = bs[j] as Extract<Block, { kind: 'approval' }>;
+          const next = [...bs];
+          next[j] = {
+            ...cur,
+            outcome: (evt.outcome as TerminalApprovalOutcome) ?? cur.outcome,
+            decidedBy: (evt.decided_by as TerminalApprovalDecidedBy) ?? cur.decidedBy,
+          };
+          return next;
+        });
+        break;
+      }
       case 'run_status': {
         const status = String(evt.status ?? '');
         if (status === 'queued') {
@@ -795,12 +840,18 @@ export default function Terminal() {
         break;
       }
       case 'trace': {
-        // 五类资源调用痕迹（rag/ontology/memory/data_interface）；技能走 tool_call 不走此分支
+        // 五类资源调用痕迹（rag/ontology/memory/data_interface）+ policy 策略痕迹；技能走 tool_call 不走此分支。
+        // policy 类 approval_requested/approval_decided 只作为轻量痕迹渲染，审批卡片本体由 approval_request 事件负责。
         const { category: _c, title: _t, ...rest } = evt as Record<string, unknown>;
+        const category = (evt.category as TraceCategory) ?? 'rag';
+        let title = (evt.title as string) ?? '';
+        if (!title && category === 'policy') {
+          title = POLICY_TRACE_TITLE[String(evt.action ?? '')] ?? String(evt.action ?? '策略');
+        }
         updateTurn((bs) => [...bs, {
           kind: 'trace',
-          category: (evt.category as TraceCategory) ?? 'rag',
-          title: (evt.title as string) ?? (evt.category as string) ?? '',
+          category,
+          title: title || (evt.category as string) || '',
           detail: rest,
         }]);
         break;
@@ -3153,7 +3204,7 @@ function ChatView(props: {
                     </div>
                   </>
                 ) : (
-                  <AssistantBubble msg={m} streaming={streaming && isLast} onLink={onLink} fileLinks={fileLinks} />
+                  <AssistantBubble msg={m} streaming={streaming && isLast} onLink={onLink} fileLinks={fileLinks} taskId={selectedId} />
                 )}
               </div>
             );
@@ -3331,7 +3382,7 @@ function SpeechPlaybackButton({ text, disabled }: { text: string; disabled?: boo
   );
 }
 
-function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; streaming: boolean; onLink: (href: string) => void; fileLinks: ChatFileLink[] }) {
+function AssistantBubble({ msg, streaming, onLink, fileLinks, taskId }: { msg: ChatMsg; streaming: boolean; onLink: (href: string) => void; fileLinks: ChatFileLink[]; taskId: string | null }) {
   const blocks = msg.blocks;
   const hasLiveBlocks = blocks && blocks.length > 0;
   const verification = msg.executionVerification ?? verificationFromBlocks(blocks);
@@ -3387,6 +3438,9 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks }: { msg: ChatMsg; 
           }
           if (b.kind === 'trace') {
             return <TraceChip key={i} b={b} />;
+          }
+          if (b.kind === 'approval') {
+            return <ApprovalCard key={`approval:${b.approvalId}`} b={b} taskId={taskId} />;
           }
           if (b.kind === 'text') {
             const isLast = i === blocks!.length - 1;
@@ -3872,6 +3926,13 @@ const TRACE_META: Record<TraceCategory, { icon: ReactNode; color: string; label:
   data_interface: { icon: <ApiOutlined />, color: '#10b981', label: '数据接口' },
   file: { icon: <FileTextOutlined />, color: '#0ea5e9', label: '文件' },
   skill: { icon: <ThunderboltOutlined />, color: WB.primary, label: '技能' },
+  policy: { icon: <SafetyOutlined />, color: '#f97316', label: '策略' },
+};
+
+/** policy 类 trace 无 title 时按 action 给中文标题。 */
+const POLICY_TRACE_TITLE: Record<string, string> = {
+  approval_requested: '高风险工具等待用户审批',
+  approval_decided: '审批已有结果',
 };
 
 function TraceChip({ b }: { b: Extract<Block, { kind: 'trace' }> }) {
