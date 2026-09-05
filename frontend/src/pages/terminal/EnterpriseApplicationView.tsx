@@ -8,7 +8,9 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ApiError, terminal, type EnterpriseApplicationLaunch, type TerminalEnterpriseApplication,
+  type TerminalApprovalDecidedBy, type TerminalApprovalOutcome,
 } from '../../api/client';
+import ApprovalCard, { type ApprovalCardData } from '../../components/terminal/ApprovalCard';
 import {
   buildHostReadyMessage, isBridgeReady, parseBridgeContext, type BridgeExpectation,
 } from '../../utils/subsystemBridge';
@@ -66,6 +68,8 @@ type AssistantConversationMessage = {
   elapsedSeconds?: number;
 };
 
+type BusinessAssistantApproval = ApprovalCardData & { taskId: string };
+
 function progressForAssistantEvent(event: Record<string, unknown>): AssistantProgressItem | null {
   const type = String(event.type ?? '');
   if (type === 'run_status') {
@@ -95,6 +99,15 @@ function progressForAssistantEvent(event: Record<string, unknown>): AssistantPro
       policy: '正在校验本次操作权限',
       file: '正在处理任务所需的文件',
     };
+    if (category === 'data_interface') {
+      const detail = event.detail && typeof event.detail === 'object'
+        ? event.detail as Record<string, unknown>
+        : {};
+      const count = Number(event.interfaces ?? detail.interfaces);
+      if (Number.isFinite(count) && count === 0) {
+        return { key: `trace:${category}`, label: '当前页面没有可用于本次任务的业务接口', tone: 'warning' };
+      }
+    }
     return labels[category] ? { key: `trace:${category}`, label: labels[category] } : null;
   }
   if (type === 'tool_call') {
@@ -108,7 +121,7 @@ function progressForAssistantEvent(event: Record<string, unknown>): AssistantPro
   }
   if (type === 'tool_result') {
     return event.ok === false
-      ? { key: `tool:${String(event.id ?? 'result')}`, label: '本次业务查询未成功，正在调整处理方式', tone: 'warning' }
+      ? { key: `tool:${String(event.id ?? 'result')}`, label: '本次业务调用未成功，正在调整处理方式', tone: 'warning' }
       : { key: `tool:${String(event.id ?? 'result')}`, label: '业务系统已返回数据，正在核对结果' };
   }
   if (type === 'approval_request') {
@@ -159,6 +172,7 @@ export default function EnterpriseApplicationView({
   const [prompt, setPrompt] = useState('');
   const [assistantRunning, setAssistantRunning] = useState(false);
   const [assistantMessages, setAssistantMessages] = useState<AssistantConversationMessage[]>([]);
+  const [runtimeApprovals, setRuntimeApprovals] = useState<BusinessAssistantApproval[]>([]);
   const [frameKey, setFrameKey] = useState(0);
   const [frameLoaded, setFrameLoaded] = useState(false);
   const [frameSlow, setFrameSlow] = useState(false);
@@ -322,6 +336,7 @@ export default function EnterpriseApplicationView({
       ? launch?.page_keys?.find((key) => key.startsWith(`${fallbackModuleKey}.`))
       : undefined;
     setPrompt('');
+    setRuntimeApprovals([]);
     const startedAt = Date.now();
     setAssistantMessages((items) => [
       ...items,
@@ -348,6 +363,34 @@ export default function EnterpriseApplicationView({
         page_key: fallbackPageKey,
         ...bridgeContext,
       }, (event) => {
+        if (event.type === 'approval_request') {
+          const approvalId = String(event.approval_id ?? '');
+          const taskId = String(event.task_id ?? '');
+          if (approvalId && taskId) {
+            const rawPreview = event.arguments_preview;
+            const argumentsPreview = typeof rawPreview === 'string'
+              ? rawPreview
+              : rawPreview == null ? '' : JSON.stringify(rawPreview, null, 2);
+            setRuntimeApprovals((items) => items.some((item) => item.approvalId === approvalId)
+              ? items
+              : [...items, {
+                approvalId,
+                taskId,
+                tool: String(event.tool ?? ''),
+                reason: String(event.reason ?? ''),
+                argumentsPreview,
+                expiresAt: String(event.expires_at ?? new Date(Date.now() + 5 * 60_000).toISOString()),
+                runId: typeof event.run_id === 'number' ? event.run_id : undefined,
+              }]);
+          }
+        } else if (event.type === 'approval_decided') {
+          const approvalId = String(event.approval_id ?? '');
+          setRuntimeApprovals((items) => items.map((item) => item.approvalId === approvalId ? {
+            ...item,
+            outcome: event.outcome as TerminalApprovalOutcome | undefined,
+            decidedBy: event.decided_by as TerminalApprovalDecidedBy | undefined,
+          } : item));
+        }
         const progress = progressForAssistantEvent(event);
         if (!progress) return;
         updateRunningAssistant((item) => ({
@@ -489,6 +532,12 @@ export default function EnterpriseApplicationView({
               </Space></div>
             </Card>)}
           </Space>
+        </div>}
+        {runtimeApprovals.length > 0 && <div style={{ marginBottom: 18 }}>
+          <Typography.Title level={5}>本轮需要你确认的操作</Typography.Title>
+          {runtimeApprovals.map((item) => (
+            <ApprovalCard key={item.approvalId} b={item} taskId={item.taskId} />
+          ))}
         </div>}
         {assistantMessages.length > 0 && (
           <div aria-label="业务小助手对话" style={{ display: 'grid', gap: 10, marginBottom: 18 }}>

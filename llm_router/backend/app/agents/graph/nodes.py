@@ -2683,7 +2683,7 @@ def _enterprise_action_parameters(input_schema: dict | None, operation: str) -> 
     parameters = copy.deepcopy(input_schema or {"type": "object", "properties": {}})
     parameters.setdefault("type", "object")
     parameters.setdefault("properties", {})
-    if operation in {"update", "delete"}:
+    if operation in {"update", "delete", "approve"}:
         parameters["properties"].setdefault(
             "expectedVersion",
             {
@@ -2700,11 +2700,29 @@ def _enterprise_action_parameters(input_schema: dict | None, operation: str) -> 
     return parameters
 
 
-def _enterprise_action_request_id(state: AgentState, tool_call_id: str) -> str:
-    """Scope action idempotency to one run, not the task's entire conversation."""
+def _enterprise_action_request_id(
+    state: AgentState,
+    tool_call_id: str,
+    params: dict[str, Any],
+    expected_version: Any = None,
+) -> str:
+    """Scope idempotency to one run and one canonical Action payload.
+
+    Some providers reuse a tool-call id after correcting invalid arguments.  The
+    payload digest keeps an exact retry idempotent while allowing a corrected
+    request to execute instead of replaying the first cached failure.
+    """
     task_id = state.get("task_id") or "agent"
     run_id = state.get("run_id") or "run"
-    return f"{task_id}:{run_id}:{tool_call_id}"[:200]
+    payload = json.dumps(
+        {"params": params, "expectedVersion": expected_version},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return f"{task_id}:{run_id}:{tool_call_id}:{digest}"[:200]
 
 
 async def _build_tools(
@@ -3659,7 +3677,9 @@ async def _execute_tool_call(
                 action.module_key,
                 action_params,
                 user,
-                request_id=_enterprise_action_request_id(state, tool_call_id),
+                request_id=_enterprise_action_request_id(
+                    state, tool_call_id, action_params, expected_version,
+                ),
                 page_key=entry.get("page_key"),
                 operation=action.operation,
                 expected_version=expected_version,

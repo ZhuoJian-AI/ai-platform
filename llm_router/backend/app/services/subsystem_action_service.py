@@ -286,6 +286,25 @@ def _provenance(
     }
 
 
+def _subsystem_response_error(response: httpx.Response) -> str:
+    """Return a bounded, user-readable diagnostic for a non-2xx Action response."""
+
+    detail = ""
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            value = body.get("detail") or body.get("error") or body.get("message")
+            if isinstance(value, (dict, list)):
+                detail = json.dumps(value, ensure_ascii=False, default=str)
+            elif value is not None:
+                detail = str(value)
+    except (ValueError, TypeError):
+        detail = ""
+    detail = " ".join(detail.split())[:600]
+    suffix = f"：{detail}" if detail else ""
+    return f"子系统 Action 返回 HTTP {response.status_code}{suffix}"
+
+
 async def _execute_request(
     db: AsyncSession,
     request_row: EnterpriseApplicationActionRequest,
@@ -365,7 +384,11 @@ async def _execute_request(
             )
         if 300 <= response.status_code < 400:
             raise RuntimeError("Subsystem action endpoint must not redirect")
-        response.raise_for_status()
+        if response.is_error:
+            # The subsystem response is untrusted diagnostic data.  Keep only a
+            # compact single-line message so it can help the model correct its
+            # arguments without flooding traces or the user interface.
+            raise RuntimeError(_subsystem_response_error(response))
         if len(response.content) > 2 * 1024 * 1024:
             raise ValueError("Subsystem action response exceeds 2MB")
         body = response.json()

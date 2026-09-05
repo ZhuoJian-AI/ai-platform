@@ -77,6 +77,11 @@ _CURRENT_BUSINESS_DATA_TERMS = (
     "多少", "数量", "记录", "列表", "进度", "异常", "风险", "逾期", "待处理", "业务概况",
     "current", "today", "latest", "query", "list", "count", "progress", "risk", "overdue",
 )
+_BUSINESS_MUTATION_TERMS = (
+    "新增", "新建", "创建", "添加", "录入", "保存", "修改", "更新", "编辑", "调整", "改成", "改为",
+    "删除", "移除", "作废", "恢复", "审批", "批准", "提交",
+    "create", "add", "insert", "save", "update", "edit", "change", "delete", "remove", "approve",
+)
 # Runtime-side continuation budget (``settings.agent_completion_max_nudges`` overrides if defined).
 _COMPLETION_MAX_NUDGES = 1
 _COMPLETION_NUDGE_TEXT = (
@@ -139,6 +144,37 @@ def _requests_current_business_data(state: dict) -> bool:
         return False
     request = str(state.get("request") or "").lower()
     return any(term in request for term in _CURRENT_BUSINESS_DATA_TERMS)
+
+
+def _requests_business_mutation(state: dict) -> bool:
+    """Identify application requests that ask the assistant to change business data."""
+
+    if not state.get("application_id"):
+        return False
+    request = str(state.get("request") or "").lower()
+    return any(term in request for term in _BUSINESS_MUTATION_TERMS)
+
+
+def _enterprise_operation(entry: dict, tool_name: str = "") -> str:
+    action = entry.get("action")
+    operation = str(getattr(action, "operation", "") or entry.get("operation") or "").lower()
+    if operation:
+        return operation
+    lowered = tool_name.lower()
+    for candidate in ("query", "create", "update", "delete", "approve", "export"):
+        if candidate in lowered:
+            return candidate
+    return ""
+
+
+def _enterprise_result_status(content: object) -> str:
+    if not isinstance(content, str):
+        return ""
+    try:
+        value = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    return str(value.get("status") or "").lower() if isinstance(value, dict) else ""
 
 
 def _file_output_tools(state: dict) -> list[str]:
@@ -297,7 +333,12 @@ async def _consume_dsh(
     successful_tools = 0
     failed_tools: list[tuple[str, str]] = []
     enterprise_action_calls = 0
-    successful_enterprise_actions = 0
+    enterprise_query_calls = 0
+    successful_enterprise_queries = 0
+    enterprise_mutation_calls = 0
+    successful_enterprise_mutations = 0
+    pending_enterprise_mutations = 0
+    failed_enterprise_mutations: list[str] = []
     tool_arguments: dict[str, str] = {}
     usage = {"input_tokens": 0, "output_tokens": 0}
     async for event in client.stream_run(request):
@@ -321,7 +362,19 @@ async def _consume_dsh(
             entry = (state.get("_dsh_tool_registry") or {}).get(name) or {}
             if entry.get("kind") == "enterprise_action":
                 enterprise_action_calls += 1
-                successful_enterprise_actions += int(ok)
+                operation = _enterprise_operation(entry, name)
+                result_status = _enterprise_result_status(event.get("content"))
+                if operation == "query":
+                    enterprise_query_calls += 1
+                    successful_enterprise_queries += int(ok and result_status != "failed")
+                elif operation in {"create", "update", "delete", "approve"}:
+                    enterprise_mutation_calls += 1
+                    if ok and result_status == "pending":
+                        pending_enterprise_mutations += 1
+                    elif ok and result_status != "failed":
+                        successful_enterprise_mutations += 1
+                    else:
+                        failed_enterprise_mutations.append(str(event.get("content") or "未返回错误详情"))
             if not ok:
                 failed_tools.append((name, str(event.get("content") or "工具未返回错误详情")))
             state.setdefault("steps", []).append({"step": "tool", "name": name, "ok": ok})
@@ -342,12 +395,41 @@ async def _consume_dsh(
         elif kind == "done":
             text = str(event.get("text") or text)
 
+    mutation_required = _requests_business_mutation(state)
+    mutation_unverified = mutation_required and successful_enterprise_mutations == 0
     live_business_data_required = _requests_current_business_data(state)
-    live_business_data_unverified = live_business_data_required and successful_enterprise_actions == 0
-    if live_business_data_unverified:
+    live_business_data_unverified = live_business_data_required and successful_enterprise_queries == 0
+    if mutation_unverified:
         if text:
             _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
-        if enterprise_action_calls:
+        if pending_enterprise_mutations:
+            text = "该业务操作尚未执行，正在等待你确认。确认后系统才会真正修改业务数据。"
+            state.setdefault("steps", []).append({
+                "step": "business_mutation_pending_confirmation",
+                "pending_enterprise_mutations": pending_enterprise_mutations,
+            })
+        elif enterprise_mutation_calls:
+            detail = " ".join((failed_enterprise_mutations[-1] if failed_enterprise_mutations else "").split())[:300]
+            text = "本轮业务操作没有成功执行，业务数据未被修改。"
+            if detail:
+                text += f" 原因：{detail}"
+            state["error"] = "Requested business mutation was not completed"
+            state.setdefault("steps", []).append({
+                "step": "business_mutation_rejected",
+                "enterprise_mutation_calls": enterprise_mutation_calls,
+            })
+        else:
+            text = "本轮未调用当前页面的业务操作，因此业务数据没有被修改。请重试。"
+            state["error"] = "Requested business mutation was not completed"
+            state.setdefault("steps", []).append({
+                "step": "business_mutation_rejected",
+                "enterprise_mutation_calls": enterprise_mutation_calls,
+            })
+        _publish(handle, staged, {"type": "text", "delta": text})
+    elif live_business_data_unverified:
+        if text:
+            _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
+        if enterprise_query_calls:
             text = "本轮实时业务查询没有成功返回，因此暂时无法确认当前数据。请稍后重试。"
         else:
             text = "本轮未调用当前页面的实时业务查询，因此无法确认当前数据。请重试。"

@@ -179,15 +179,16 @@ async function consumeTerminalEventStream(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  const consumeLine = (line: string) => {
-    if (!line.startsWith('data: ')) return;
+  const consumeLine = (line: string): boolean => {
+    if (!line.startsWith('data: ')) return false;
     let event: Record<string, unknown>;
     try {
       event = JSON.parse(line.slice(6)) as Record<string, unknown>;
     } catch { /* 无法解析的控制行直接忽略 */
-      return;
+      return false;
     }
     onEvent(event);
+    return event.type === 'final';
   };
   while (true) {
     const { done, value } = await reader.read();
@@ -195,7 +196,12 @@ async function consumeTerminalEventStream(
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
     buffer = lines.pop() || '';
-    lines.forEach(consumeLine);
+    for (const line of lines) {
+      if (consumeLine(line)) {
+        await reader.cancel().catch(() => undefined);
+        return;
+      }
+    }
   }
   buffer += decoder.decode();
   if (buffer.trim()) consumeLine(buffer.trimEnd());
@@ -1628,7 +1634,7 @@ export default function Terminal() {
                   let streamedAnswer = '';
                   let streamedError = '';
                   await consumeTerminalEventStream(response, (event) => {
-                    onProgress(event);
+                    onProgress({ ...event, task_id: task.id });
                     if (event.type === 'text') streamedAnswer += String(event.delta ?? '');
                     if (event.type === 'error') streamedError = String(event.message ?? '业务小助手执行失败');
                   });

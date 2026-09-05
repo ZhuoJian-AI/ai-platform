@@ -118,6 +118,21 @@ try {
     /consumeTerminalEventStream\(response, \(event\) =>/,
     'business assistant must forward real run events to its progress timeline',
   );
+  assert.match(
+    applicationAssistantSource,
+    /onProgress\(\{ \.\.\.event, task_id: task\.id \}\)/,
+    'business assistant approval events must carry their task id to the inline UI',
+  );
+  assert.match(
+    terminalSource,
+    /event\.type === 'final'[\s\S]*reader\.cancel\(\)/,
+    'business assistant must stop waiting as soon as the terminal final event arrives',
+  );
+  assert.match(
+    applicationViewSource,
+    /<ApprovalCard[\s\S]*taskId=\{item\.taskId\}/,
+    'business assistant must render actionable runtime approval cards inline',
+  );
 
   process.stdout.write('subsystem bridge tests passed\n');
 } finally {
