@@ -138,7 +138,7 @@ services:
         limits: { cpus: "1.50", memory: 3G, pids: 512 }
 
   dsh-runtime:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-dsh-runtime-app@sha256:3d0fd0bfb2182b33603b94b4934395a02943399338f266100a51d4cef9ebdb2d
+    image: 127.0.0.1:5000/zhuojian/ai-platform-dsh-runtime-app@sha256:00c5ffab0c00a45c9462845b21d1d40841895512d478568f792ac81a365891c0
     environment:
       DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
       AI_PLATFORM_BACKEND_URL: http://backend:8000
@@ -187,7 +187,7 @@ services:
         limits: { cpus: "1.00", memory: 1G, pids: 256 }
 
   backend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:64cafdafab75b2de03e4a1cd580537f931e6f9579e626cfa2423f9cd031759f7
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -308,7 +308,7 @@ services:
         limits: { cpus: "1.50", memory: 2560M }
 
   workspace-parser:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:64cafdafab75b2de03e4a1cd580537f931e6f9579e626cfa2423f9cd031759f7
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -359,7 +359,7 @@ services:
         limits: { cpus: "0.75", memory: 1536M }
 
   workspace-preview:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-workspace-preview-app@sha256:0525978e7785b27cc2da3037f260ecf24ec6b1cbf26a5db718a32c839a760e0b
+    image: 127.0.0.1:5000/zhuojian/ai-platform-workspace-preview-app@sha256:ee5cd5802e8d29d4b4b49fe6993f76dc2087daef1167ce7a0638754b561efa93
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -410,7 +410,7 @@ services:
         limits: { cpus: "1.00", memory: 2G, pids: 256 }
 
   office-edit-reconcile:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:64cafdafab75b2de03e4a1cd580537f931e6f9579e626cfa2423f9cd031759f7
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -460,7 +460,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   storage-lifecycle:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:64cafdafab75b2de03e4a1cd580537f931e6f9579e626cfa2423f9cd031759f7
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -512,7 +512,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   multimodal-worker:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:64cafdafab75b2de03e4a1cd580537f931e6f9579e626cfa2423f9cd031759f7
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
     environment:
       APP_ENV: production
       DEBUG: "false"
