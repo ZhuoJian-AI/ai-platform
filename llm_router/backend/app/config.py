@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     dsh_runtime_url: str = "http://localhost:8030"
     dsh_runtime_token: str = "dsh-runtime-dev-token-change-in-production"
     dsh_runtime_timeout_seconds: int = 600
+    # Risky tools (hard deletes, mutating enterprise actions, high-risk / side-effect extension
+    # tools) carry ``ToolSpec.approval="ask"`` so the runtime pauses the call until the terminal
+    # user decides. False emits no ``approval`` field at all.
+    dsh_tool_approval_enabled: bool = True
     # Redis-backed DSH admission control shared by all Backend replicas.
     agent_global_concurrency: int = 12
     agent_user_concurrency: int = 2

@@ -28,6 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.dsh import registry as dsh_registry
 from app.agents.dsh import run_general_agent, stream_general_agent
 from app.agents.graph import run_registry
 from app.agents.runtime_support import stream_persisted_run
@@ -82,6 +83,7 @@ from app.schemas.skill import (
     SkillFolderUpdate,
 )
 from app.schemas.task import (
+    TaskApprovalDecision,
     TaskCreate,
     TaskFileRefV1,
     TaskRead,
@@ -1081,6 +1083,30 @@ async def cancel_task_endpoint(
     task = await _get_owned_task(db, task_id, cu)
     cancelled = run_registry.cancel(str(task.id))
     return {"cancelled": cancelled}
+
+
+@router.post("/terminal/tasks/{task_id}/approvals/{approval_id}")
+async def decide_task_approval_endpoint(
+    task_id: UUID,
+    approval_id: str,
+    data: TaskApprovalDecision,
+    cu: CurrentUser = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """应答本任务运行中的一次高风险工具审批（SSE ``approval_request``）。
+
+    ``allow`` → 运行时放行本次调用（``allowed-once``），``reject`` → 拒绝；
+    404 = 审批不存在 / 已过期 / 不属于该任务，409 = 已经有过决定（用户、超时或运行已停止）。
+    """
+    task = await _get_owned_task(db, task_id, cu)
+    assert_user_write(cu)
+    try:
+        outcome = dsh_registry.decide_approval(str(task.id), approval_id, data.decision)
+    except dsh_registry.ApprovalNotFoundError:
+        raise HTTPException(status_code=404, detail="Approval not found or expired") from None
+    except dsh_registry.ApprovalAlreadyDecidedError:
+        raise HTTPException(status_code=409, detail="Approval already decided") from None
+    return {"outcome": outcome}
 
 
 # ── 工作空间文件（用户 scope 内）──

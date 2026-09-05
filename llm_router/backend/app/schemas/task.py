@@ -52,6 +52,12 @@ class TaskFileRefV1(BaseModel):
     follow_latest: bool = True
 
 
+class TaskApprovalDecision(BaseModel):
+    """终端用户对运行中一次高风险工具调用的决定（``approval_request`` SSE 事件的应答）。"""
+
+    decision: Literal["allow", "reject"]
+
+
 class TaskRunRequest(BaseModel):
     message: str
     stream: bool = False

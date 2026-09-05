@@ -1,6 +1,7 @@
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
-import type { PlatformModelRequest, PlatformToolResult } from './contracts.js'
+import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
+import type { PlatformApprovalRequest, PlatformApprovalResponse, PlatformModelRequest, PlatformToolResult } from './contracts.js'
 import { isStreamChunk } from './contracts.js'
 
 export interface PlatformAdapterOptions {
@@ -166,6 +167,62 @@ export async function executePlatformTool(options: {
     })
     if (!response.ok) throw new Error(`AI Platform tool bridge failed (${response.status})`)
     return await response.json() as PlatformToolResult
+  } finally {
+    link.release()
+  }
+}
+
+/** How long the backend may hold an approval request before it must answer (`timeout_ms` in the body). */
+export const APPROVAL_TIMEOUT_MS = 120_000
+
+/** Extra client-side slack over `APPROVAL_TIMEOUT_MS` before a hung backend is treated as `unavailable`. */
+export const APPROVAL_GRACE_MS = 15_000
+
+/** Cap for `arguments_preview`; longer argument JSON is cut and marked with `...`. */
+export const APPROVAL_PREVIEW_CHARS = 500
+
+const APPROVAL_OUTCOMES: readonly ApprovalOutcome[] = ['allowed-once', 'rejected', 'cancelled', 'unavailable']
+
+/** Map a backend `outcome` string onto the closed DSH vocabulary; anything else fails closed as `unavailable`. */
+export function normalizeApprovalOutcome(value: unknown): ApprovalOutcome {
+  return (APPROVAL_OUTCOMES as readonly unknown[]).includes(value) ? value as ApprovalOutcome : 'unavailable'
+}
+
+/** Cut raw argument JSON to `APPROVAL_PREVIEW_CHARS` (the `...` marker counts towards the limit). */
+export function approvalArgumentsPreview(raw: string, limit: number = APPROVAL_PREVIEW_CHARS): string {
+  if (raw.length <= limit) return raw
+  return `${raw.slice(0, Math.max(0, limit - 3))}...`
+}
+
+/**
+ * Ask the platform for one user decision.  Resolves with the parsed backend answer; rejects on a
+ * network failure, a non-2xx status, an unparsable body or an abort of `signal` -- the caller maps
+ * every rejection to the fail-closed `unavailable` outcome.
+ */
+export async function requestPlatformApproval(options: {
+  backendUrl: string
+  serviceToken: string
+  request: PlatformApprovalRequest
+  signal?: AbortSignal
+}): Promise<PlatformApprovalResponse> {
+  const link = fetchSignal(options.signal)
+  try {
+    const response = await fetch(`${options.backendUrl}/api/v1/internal/dsh/approval/request`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${options.serviceToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(options.request),
+      signal: link.signal,
+    })
+    if (!response.ok) throw new Error(`AI Platform approval bridge failed (${response.status})`)
+    const payload = await response.json() as unknown
+    if (!payload || typeof payload !== 'object' || typeof (payload as { outcome?: unknown }).outcome !== 'string') {
+      throw new Error('AI Platform approval bridge returned an invalid body')
+    }
+    const { outcome, decided_by } = payload as { outcome: string; decided_by?: unknown }
+    return { outcome, ...(typeof decided_by === 'string' ? { decided_by } : {}) }
   } finally {
     link.release()
   }

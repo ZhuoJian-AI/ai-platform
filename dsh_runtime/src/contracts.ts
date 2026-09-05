@@ -12,6 +12,13 @@ export interface ToolSpec {
   concurrency_safe?: boolean
   /** Model-facing text budget; longer tool results are truncated with a Chinese notice appended. */
   max_model_chars?: number
+  /**
+   * `'ask'` marks a tool with external side effects: before every call the runtime asks the
+   * platform for a user decision (`POST /api/v1/internal/dsh/approval/request`) and only an
+   * `allowed-once` outcome lets the call run; anything else (rejected / cancelled / unavailable /
+   * transport failure) denies the call fail-closed.  Irrelevant in ask/plan modes, which expose no tools.
+   */
+  approval?: 'ask'
 }
 
 /** Loop-completion policy the backend attaches to a run (owned by DSH, not the Python bridge). */
@@ -49,7 +56,9 @@ export type RuntimeEvent =
   | { type: 'error'; message: string; code?: string }
   | {
     type: 'policy'
-    action: 'continuation' | 'repeat_failure_block' | 'tool_timeout'
+    action:
+      | 'continuation' | 'repeat_failure_block' | 'tool_timeout'
+      | 'approval_requested' | 'approval_decided'
     tool?: string
     detail?: string
     nudge?: number
@@ -68,6 +77,27 @@ export interface PlatformToolResult {
   ok: boolean
   content: string
   value?: unknown
+}
+
+/** Body of `POST /api/v1/internal/dsh/approval/request`; the backend holds the request until the user decides. */
+export interface PlatformApprovalRequest {
+  run_token: string
+  /** Runtime-minted UUID that pairs the `approval_requested` / `approval_decided` policy events with the backend record. */
+  approval_id: string
+  tool: string
+  /** The exact tool call being decided (DSH `CallId`), when the asker had one. */
+  call_id?: string
+  reason: string
+  /** Raw JSON arguments of the call, cut to at most 500 characters. */
+  arguments_preview: string
+  /** How long the backend may hold the request before answering `unavailable`. */
+  timeout_ms: number
+}
+
+/** Backend answer; `outcome` is validated against the DSH `ApprovalOutcome` vocabulary (unknown -> `unavailable`). */
+export interface PlatformApprovalResponse {
+  outcome: string
+  decided_by?: string
 }
 
 export function contentText(content: readonly ContentBlock[]): string {
