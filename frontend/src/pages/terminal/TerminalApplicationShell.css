@@ -55,6 +55,102 @@
   box-shadow: 0 8px 30px rgba(15, 23, 42, .06);
 }
 
+.business-assistant-progress {
+  margin-top: 9px;
+  overflow: hidden;
+  border: 1px solid #dfe3f3;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.business-assistant-progress__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  border-bottom: 1px solid #eef0f6;
+  color: #344054;
+  background: #f8f9ff;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.business-assistant-progress__header > span:last-child {
+  color: #667085;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.business-assistant-progress__steps {
+  display: grid;
+  gap: 0;
+  padding: 6px 11px;
+}
+
+.business-assistant-progress__step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 7px;
+  min-height: 29px;
+  align-items: start;
+  padding: 5px 0;
+  color: #667085;
+  font-size: 12px;
+  line-height: 19px;
+}
+
+.business-assistant-progress__step:not(:last-child)::after {
+  position: absolute;
+  top: 20px;
+  bottom: -5px;
+  left: 7px;
+  width: 1px;
+  background: #e4e7ec;
+  content: '';
+}
+
+.business-assistant-progress__icon {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  height: 19px;
+  place-items: center;
+  color: #98a2b3;
+  background: #fff;
+  font-size: 13px;
+}
+
+.business-assistant-progress__step--active {
+  color: #4338ca;
+  font-weight: 600;
+}
+
+.business-assistant-progress__step--active .business-assistant-progress__icon {
+  color: #6366f1;
+}
+
+.business-assistant-progress__step--warning,
+.business-assistant-progress__step--warning .business-assistant-progress__icon {
+  color: #b45309;
+}
+
+.business-assistant-progress--failed {
+  border-color: #fecaca;
+}
+
+.business-assistant-progress__step--error,
+.business-assistant-progress__step--error .business-assistant-progress__icon {
+  color: #dc2626;
+}
+
+.business-assistant-progress__hint {
+  padding: 7px 11px 9px 36px;
+  color: #98a2b3;
+  font-size: 11px;
+}
+
 .terminal-app-rail {
   width: 58px;
   flex: 0 0 58px;

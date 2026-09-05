@@ -87,7 +87,7 @@ try {
   assert.match(applicationViewSource, /referrerPolicy="origin"/);
   assert.match(
     applicationViewSource,
-    /onAskAI: \(prompt: string, pageContext: Record<string, unknown>\) => Promise<string>/,
+    /onAskAI: \([\s\S]*onProgress: \(event: Record<string, unknown>\) => void,[\s\S]*\) => Promise<string>/,
     'business assistant must execute inline and return its answer to the application drawer',
   );
   assert.match(
@@ -99,6 +99,24 @@ try {
     applicationViewSource,
     /在当前页面执行/,
     'business assistant must keep the user on the embedded application page',
+  );
+  assert.match(
+    applicationViewSource,
+    /aria-label="业务小助手实时执行过程"/,
+    'business assistant must show accessible live execution progress instead of a spinner-only state',
+  );
+
+  const terminalSource = await readFile(resolve('src/pages/terminal/Terminal.tsx'), 'utf8');
+  const applicationAssistantSource = terminalSource.slice(terminalSource.indexOf('onAskAI={async'));
+  assert.match(
+    applicationAssistantSource,
+    /terminal\.runTaskStream\(/,
+    'business assistant must consume the real task event stream',
+  );
+  assert.match(
+    applicationAssistantSource,
+    /consumeTerminalEventStream\(response, \(event\) =>/,
+    'business assistant must forward real run events to its progress timeline',
   );
 
   process.stdout.write('subsystem bridge tests passed\n');
