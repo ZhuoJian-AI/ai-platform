@@ -12,6 +12,8 @@ from uuid import UUID, uuid4
 import httpx
 import jwt
 from fastapi import HTTPException
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, best_match
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -106,14 +108,39 @@ def action_tool_name(application: EnterpriseApplication, action: EnterpriseAppli
     return (base[:55] + "_" + str(action.id).replace("-", "")[:8])[:64]
 
 
+def _schema_error_message(error) -> str:
+    """Return stable Chinese text instead of jsonschema's English validation detail."""
+
+    messages = {
+        "required": "缺少必填字段",
+        "type": "数据类型不正确",
+        "enum": "取值不在允许范围内",
+        "additionalProperties": "包含未约定的字段",
+        "pattern": "格式不正确",
+        "minimum": "数值小于允许的最小值",
+        "maximum": "数值超过允许的最大值",
+        "minLength": "文本长度不足",
+        "maxLength": "文本长度超出限制",
+        "minItems": "列表项目数量不足",
+        "maxItems": "列表项目数量超出限制",
+    }
+    return messages.get(str(error.validator), "内容不符合输入约定")
+
+
 def _validate_params(action: EnterpriseApplicationAction, params: dict) -> None:
     schema = action.input_schema or {}
     if schema.get("type") not in {None, "object"}:
-        raise HTTPException(status_code=422, detail="Subsystem action input schema must describe an object")
-    required = schema.get("required") if isinstance(schema.get("required"), list) else []
-    missing = [str(key) for key in required if key not in params]
-    if missing:
-        raise HTTPException(status_code=422, detail=f"Missing action parameters: {', '.join(missing)}")
+        raise HTTPException(status_code=409, detail="子系统 Action 输入 Schema 的根类型必须是 object")
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as exc:
+        raise HTTPException(status_code=409, detail="子系统 Action 输入 Schema 无效") from exc
+    error = best_match(Draft202012Validator(schema).iter_errors(params))
+    if error is None:
+        return
+    path = ".".join(str(part) for part in error.absolute_path)
+    location = f"参数 {path}" if path else "Action 参数"
+    raise HTTPException(status_code=422, detail=f"{location}不符合约定：{_schema_error_message(error)}")
 
 
 async def _integration_or_409(db: AsyncSession, application_id: UUID | str) -> EnterpriseApplicationIntegration:

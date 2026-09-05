@@ -53,6 +53,8 @@ dependencies = [
     "Pillow>=11.0.0",
     # Skill package frontmatter / manifest parsing
     "PyYAML>=6.0.2",
+    # Subsystem Action contracts are JSON Schema, not shallow required-field lists.
+    "jsonschema>=4.23.0",
 ]
 
 [project.optional-dependencies]

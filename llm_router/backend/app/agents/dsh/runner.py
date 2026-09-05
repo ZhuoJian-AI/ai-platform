@@ -72,6 +72,11 @@ _FILE_ARTIFACT_NOUNS = (
     "spreadsheet", "sheet", "document", "report", "slide", "deck", "presentation", "archive",
     "deliverable", "file",
 )
+_CURRENT_BUSINESS_DATA_TERMS = (
+    "当前", "现在", "今天", "今日", "实时", "最新", "查询", "查一下", "汇总", "统计",
+    "多少", "数量", "记录", "列表", "进度", "异常", "风险", "逾期", "待处理", "业务概况",
+    "current", "today", "latest", "query", "list", "count", "progress", "risk", "overdue",
+)
 # Runtime-side continuation budget (``settings.agent_completion_max_nudges`` overrides if defined).
 _COMPLETION_MAX_NUDGES = 1
 _COMPLETION_NUDGE_TEXT = (
@@ -125,6 +130,15 @@ def _requests_file_delivery(request: str) -> bool:
     return bool(text) and any(verb in text for verb in _FILE_PRODUCTION_VERBS) and any(
         noun in text for noun in _FILE_ARTIFACT_NOUNS
     )
+
+
+def _requests_current_business_data(state: dict) -> bool:
+    """Identify business-assistant requests that require a live subsystem Action result."""
+
+    if not state.get("application_id"):
+        return False
+    request = str(state.get("request") or "").lower()
+    return any(term in request for term in _CURRENT_BUSINESS_DATA_TERMS)
 
 
 def _file_output_tools(state: dict) -> list[str]:
@@ -282,6 +296,8 @@ async def _consume_dsh(
     text = ""
     successful_tools = 0
     failed_tools: list[tuple[str, str]] = []
+    enterprise_action_calls = 0
+    successful_enterprise_actions = 0
     tool_arguments: dict[str, str] = {}
     usage = {"input_tokens": 0, "output_tokens": 0}
     async for event in client.stream_run(request):
@@ -302,6 +318,10 @@ async def _consume_dsh(
             name = str(event.get("name") or "tool")
             successful_tools += int(ok)
             call_id = str(event.get("id") or "")
+            entry = (state.get("_dsh_tool_registry") or {}).get(name) or {}
+            if entry.get("kind") == "enterprise_action":
+                enterprise_action_calls += 1
+                successful_enterprise_actions += int(ok)
             if not ok:
                 failed_tools.append((name, str(event.get("content") or "工具未返回错误详情")))
             state.setdefault("steps", []).append({"step": "tool", "name": name, "ok": ok})
@@ -322,7 +342,22 @@ async def _consume_dsh(
         elif kind == "done":
             text = str(event.get("text") or text)
 
-    if successful_tools == 0 and contains_unverified_tool_success_claim(text):
+    live_business_data_required = _requests_current_business_data(state)
+    live_business_data_unverified = live_business_data_required and successful_enterprise_actions == 0
+    if live_business_data_unverified:
+        if text:
+            _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
+        if enterprise_action_calls:
+            text = "本轮实时业务查询没有成功返回，因此暂时无法确认当前数据。请稍后重试。"
+        else:
+            text = "本轮未调用当前页面的实时业务查询，因此无法确认当前数据。请重试。"
+        _publish(handle, staged, {"type": "text", "delta": text})
+        state["error"] = "Current business data was not verified by a successful enterprise Action"
+        state.setdefault("steps", []).append({
+            "step": "current_business_data_rejected",
+            "enterprise_action_calls": enterprise_action_calls,
+        })
+    elif successful_tools == 0 and contains_unverified_tool_success_claim(text):
         if text:
             _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
         text = "本轮未产生真实工具调用，因此无法确认任务已执行。请重试或检查当前模型的工具调用能力。"

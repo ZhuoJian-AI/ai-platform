@@ -612,15 +612,17 @@ async def test_business_application_turn_excludes_global_external_tools(db_sessi
 
     application_tools, _ = await _build_tools(
         db_session,
-        [],
+        [str(uuid4())],
         None,
         user=cu,
         application_id=str(uuid4()),
         page_context={"module_key": "progress_dashboard"},
     )
-    assert "legacy_production_query" not in {
+    application_tool_names = {
         item["function"]["name"] for item in application_tools
     }
+    assert "legacy_production_query" not in application_tool_names
+    assert application_tool_names.isdisjoint(_AUTHENTICATED_BUILTIN_TOOLS)
     external_defs.assert_awaited_once()
 
 

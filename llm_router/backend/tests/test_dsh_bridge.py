@@ -290,6 +290,61 @@ async def test_failed_tool_without_final_text_is_an_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_current_business_data_fails_closed_when_page_action_fails(monkeypatch):
+    async def stream_run(_request):
+        yield {"type": "tool_call", "id": "call-1", "name": "current_page_query", "arguments": "{}"}
+        yield {
+            "type": "tool_result", "id": "call-1", "name": "current_page_query",
+            "content": "Bad Gateway", "ok": False,
+        }
+        yield {"type": "done", "text": "根据历史记录，当前共有 74 条。"}
+
+    monkeypatch.setattr(runner.client, "stream_run", stream_run)
+    state = {
+        "run_id": 11,
+        "request": "查询当前页面共有多少条记录",
+        "application_id": "app-1",
+        "messages": [],
+        "steps": [],
+        "_dsh_tool_registry": {"current_page_query": {"kind": "enterprise_action"}},
+    }
+    staged: list[dict] = []
+
+    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, staged)
+
+    assert state["assistant_final"] == "本轮实时业务查询没有成功返回，因此暂时无法确认当前数据。请稍后重试。"
+    assert "74" not in state["assistant_final"]
+    assert state["error"] == "Current business data was not verified by a successful enterprise Action"
+    assert any(event.get("type") == "text_retract" for event in staged)
+
+
+@pytest.mark.asyncio
+async def test_current_business_data_accepts_successful_page_action(monkeypatch):
+    async def stream_run(_request):
+        yield {"type": "tool_call", "id": "call-1", "name": "current_page_query", "arguments": "{}"}
+        yield {
+            "type": "tool_result", "id": "call-1", "name": "current_page_query",
+            "content": '{"count": 12}', "ok": True,
+        }
+        yield {"type": "done", "text": "当前共有 12 条记录。"}
+
+    monkeypatch.setattr(runner.client, "stream_run", stream_run)
+    state = {
+        "run_id": 12,
+        "request": "查询当前页面共有多少条记录",
+        "application_id": "app-1",
+        "messages": [],
+        "steps": [],
+        "_dsh_tool_registry": {"current_page_query": {"kind": "enterprise_action"}},
+    }
+
+    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, [])
+
+    assert state["assistant_final"] == "当前共有 12 条记录。"
+    assert state.get("error") is None
+
+
+@pytest.mark.asyncio
 async def test_skill_file_delivery_runs_once_with_a_runtime_completion_policy(monkeypatch):
     """A1：Python 不再以 ``-continuation`` 重跑；续执行交给 RunRequest.completion_policy 的运行时。"""
     requests: list[dict] = []

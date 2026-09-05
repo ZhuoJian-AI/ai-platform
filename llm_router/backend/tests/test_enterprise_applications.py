@@ -4,6 +4,7 @@ import hashlib
 import json
 from copy import deepcopy
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -39,6 +40,43 @@ from app.schemas.enterprise_application import (
 from app.services import enterprise_application_service as service
 from app.services import subsystem_action_service as action_service
 from app.services import subsystem_integration_service as integration_service
+
+
+def test_action_params_use_complete_json_schema_validation():
+    action = SimpleNamespace(input_schema={
+        "type": "object",
+        "properties": {
+            "season": {"type": "string", "pattern": r"^\d{2}[春夏秋冬]$"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            "status": {"type": "string", "enum": ["进行中", "已完成"]},
+        },
+        "required": ["season"],
+        "additionalProperties": False,
+    })
+
+    action_service._validate_params(action, {"season": "26秋", "limit": 20, "status": "进行中"})
+
+    invalid_rows = [
+        {"season": "秋季"},
+        {"season": "26秋", "limit": 0},
+        {"season": "26秋", "status": "未知"},
+        {"season": "26秋", "unexpected": True},
+    ]
+    for params in invalid_rows:
+        with pytest.raises(HTTPException) as raised:
+            action_service._validate_params(action, params)
+        assert raised.value.status_code == 422
+        assert "不符合约定" in raised.value.detail
+
+
+def test_invalid_action_schema_is_a_contract_conflict():
+    action = SimpleNamespace(input_schema={"type": "object", "properties": {"value": {"type": "nope"}}})
+
+    with pytest.raises(HTTPException) as raised:
+        action_service._validate_params(action, {"value": "x"})
+
+    assert raised.value.status_code == 409
+    assert raised.value.detail == "子系统 Action 输入 Schema 无效"
 
 
 def _typed_secret(prefix: str, label: str, manifest_url: str) -> str:

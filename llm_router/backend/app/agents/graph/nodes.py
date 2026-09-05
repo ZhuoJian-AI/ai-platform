@@ -2754,6 +2754,10 @@ async def _build_tools(
                     "page_key": context_page_key,
                     "expected_version": context.get("data_version"),
                 }
+        # 企业应用内的业务小助手只允许使用当前应用、模块、页面与用户授权交集中的
+        # Manifest Action。员工在普通聊天中可见的 Skill、连接器和工作空间工具不能
+        # 混入这一轮，否则旧工具会绕回历史系统地址并造成跨系统取数或额外超时。
+        return tools, registry
     agent_skills: dict[str, dict] = {}
     agent_skill_slugs: dict[str, list[str]] = {}
     for sid in skill_ids:
@@ -3977,9 +3981,10 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
         f"{_workspace_access_prompt(state.get('effective_access') or {}, state.get('workspace_intent') or {})}"
     )
 
+    application_id = state.get("application_id")
     memory_context = ""
     mem_ctx = state.get("memory_context") or []
-    if mem_ctx:
+    if mem_ctx and not application_id:
         parts = [
             f"[{item['scope_type']}{('/' + item['category']) if item.get('category') else ''}]\n{item['content']}"
             for item in mem_ctx
@@ -4014,7 +4019,6 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
                 db, user, "data_interface", item.id,
             )
         ]
-        application_id = state.get("application_id")
         if application_id:
             application, permissions = await enterprise_application_service.assert_application_permission(
                 db, application_id, user, "view",
@@ -4026,6 +4030,9 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
                 f"允许操作：{', '.join(sorted(permissions))}\n"
                 f"页面上下文：{page_context}\n"
                 "只能执行允许操作；页面上下文是用户当前界面状态，不得把它当作工具执行结果。"
+                "凡是查询当前、今天、实时、数量、进度、异常、风险或待处理业务数据，"
+                "必须调用当前页面获准的 query Action；Action 没有成功返回时必须明确说无法确认，"
+                "禁止使用长期记忆、历史回答或页面展示值冒充本轮实时结果。"
             )
             if application.assistant_prompt and application.assistant_prompt.strip():
                 system_prompt = (
@@ -4181,7 +4188,9 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
         from app.services.platform_tool_registry import active_platform_tool_names
 
         active_platform_names = await active_platform_tool_names(db)
-        if rag_ids and (active_platform_names is None or "rag_search" in active_platform_names):
+        if not application_id and rag_ids and (
+            active_platform_names is None or "rag_search" in active_platform_names
+        ):
             tools.append({
                 "type": "function",
                 "function": {
@@ -4198,7 +4207,7 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
                 },
             })
             registry["rag_search"] = {"kind": "rag_search", "collection_ids": rag_ids}
-        if user is not None:
+        if user is not None and not application_id:
             # Long-term memory is a per-user capability; the admin playground has no principal.
             tools.extend(_memory_tool_defs())
             registry["read_memory"] = {"kind": "memory", "operation": "read"}
