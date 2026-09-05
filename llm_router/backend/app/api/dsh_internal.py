@@ -36,6 +36,20 @@ class ToolBridgeRequest(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
 
+class ApprovalBridgeRequest(BaseModel):
+    """One ``ToolSpec.approval="ask"`` call the runtime holds until the terminal user decides."""
+
+    run_token: str
+    approval_id: str
+    tool: str
+    # Optional on the runtime side (an asker may have no DSH CallId); never let a missing id 422 into
+    # the runtime's fail-closed ``unavailable``.
+    call_id: str = ""
+    reason: str = ""
+    arguments_preview: str = ""
+    timeout_ms: int = run_registry.APPROVAL_DEFAULT_TIMEOUT_MS
+
+
 _MODEL_BRIDGE_ERROR_DETAILS = {
     "deployment_not_verified": "当前模型尚未完成全部能力验证，请管理员在“模型提供商”中完成该模型声明的全部能力测试。",
     "model_gateway_not_enabled": "当前组织尚未启用已验证模型网关，请管理员检查模型网关开关。",
@@ -356,3 +370,24 @@ async def execute_tool(
     if not isinstance(content, str):
         content = preview
     return {"ok": ok, "content": content, "value": {"content": content, "ok": ok}, "preview": preview}
+
+
+@router.post("/approval/request")
+async def request_approval(
+    body: ApprovalBridgeRequest, authorization: str | None = Header(default=None),
+) -> dict[str, str]:
+    """Relay a risky tool call to the terminal user and block until they decide.
+
+    Publishes ``approval_request`` (then ``approval_decided``) on the run's SSE channel; the
+    user's answer arrives via ``POST /terminal/tasks/{task_id}/approvals/{approval_id}``.
+    Returns ``{"outcome": "allowed-once" | "rejected" | "cancelled" | "unavailable",
+    "decided_by": "user" | "timeout" | "system"}``; the wait is capped at 300 s.
+    """
+    _require_service(authorization)
+    context = run_registry.get(body.run_token)
+    if context is None:
+        raise HTTPException(status_code=401, detail="expired run token")
+    return await run_registry.await_approval(
+        context, approval_id=body.approval_id, tool=body.tool, call_id=body.call_id,
+        reason=body.reason, arguments_preview=body.arguments_preview, timeout_ms=body.timeout_ms,
+    )

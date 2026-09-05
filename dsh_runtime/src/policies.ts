@@ -1,14 +1,15 @@
 /**
  * Run-scoped loop policies implemented on DSH's own event pipeline:
- * repeat-failure guard, file-delivery tracking, continuation nudge, plus the
- * helpers the tool pipeline uses for hard timeouts and model-facing truncation.
+ * repeat-failure guard, user-approval gate for side-effecting tools, file-delivery
+ * tracking, continuation nudge, plus the helpers the tool pipeline uses for hard
+ * timeouts and model-facing truncation.
  * Everything here is registered through the unpublished agent scope, so the
  * listeners are scope-filtered to one run and unwind with the agent.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, type ContentBlock, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { PostToolDecision } from '@deepseek-ai/dsh-tools'
-import type { CompletionPolicy, RuntimeEvent } from './contracts.js'
+import type { CompletionPolicy, RunRequest, RuntimeEvent, ToolSpec } from './contracts.js'
 
 /** `source.plugin` stamped on every user-role message this runtime injects. */
 export const POLICY_PLUGIN = 'ai-platform-policy'
@@ -31,6 +32,11 @@ export function repeatFailureFeedback(count: number): string {
 
 export function toolTimeoutMessage(timeoutMs: number): string {
   return `工具执行超时（${TOOL_TIMEOUT_CODE}，${timeoutMs} ms）`
+}
+
+/** Human-readable `reason` carried by the `ask` decision (and forwarded to the platform approval request). */
+export function approvalReason(toolName: string): string {
+  return `${toolName} 会产生外部副作用，需要用户确认`
 }
 
 /** JSON with recursively sorted object keys, so argument order never defeats the repeat-failure key. */
@@ -109,6 +115,10 @@ export interface RunPolicyState {
 
 export interface RunPolicyOptions {
   completionPolicy?: CompletionPolicy
+  /** The run's execution mode; only craft mode may reach the approval gate (ask/plan expose no tools). */
+  execMode: RunRequest['exec_mode']
+  /** The run's tool specs; a spec with `approval: 'ask'` turns its calls into `ask` decisions. */
+  tools: readonly ToolSpec[]
   emit: (event: RuntimeEvent) => void
   /** Whether one more model step still fits in the run's step budget. */
   canContinue: () => boolean
@@ -120,7 +130,9 @@ export interface RunPolicyOptions {
  * Register the run policies on the unpublished agent scope.
  *
  * - `tools/pre-execute`: a call whose key already failed twice in a row is denied
- *   before the backend is hit.
+ *   before the backend is hit; otherwise a call to a tool declared `approval: 'ask'`
+ *   returns an `ask` decision, which dsh-tools resolves through `ctx.approval`
+ *   (the runtime's answerer POSTs to the platform) and denies unless `allowed-once`.
  * - `tools/post-execute`: counts consecutive identical failures; from the 2nd on the
  *   result is blocked with corrective feedback, and the 3rd/5th occurrence also
  *   attach guidance as `additionalContexts`.
@@ -133,12 +145,19 @@ export function installRunPolicies(agentCtx: Context, options: RunPolicyOptions)
   const policy = options.completionPolicy
   const fileTools = new Set(policy?.file_output_tools ?? [])
   const deniedCalls = new Set<string>()
+  const approvalTools = new Set(options.tools.filter(spec => spec.approval === 'ask').map(spec => spec.name))
+  // ask/plan runs never expose tools (rejected in `run()`); the mode check keeps the gate honest if that changes.
+  const approvalApplies = options.execMode !== 'ask' && options.execMode !== 'plan'
 
   agentCtx.on('tools/pre-execute', async (exec, next) => {
     const key = failureKey(exec.name, exec.arguments)
+    // A doomed repeat is denied first so the user is never asked to approve a call that cannot succeed.
     if (key === state.lastKey && state.consecutiveFailures >= 2) {
       deniedCalls.add(String(exec.callId))
       return { kind: 'deny', reason: repeatFailureFeedback(state.consecutiveFailures + 1) }
+    }
+    if (approvalApplies && approvalTools.has(exec.name)) {
+      return { kind: 'ask', reason: approvalReason(exec.name) }
     }
     return next()
   })

@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { afterEach, test } from 'node:test'
 import { DshRuntime, resolveMaxParallelToolCalls } from '../runtime.js'
 import type { RunRequest, RuntimeEvent, ToolSpec } from '../contracts.js'
-import { parseNdjson } from '../platform.js'
+import { approvalArgumentsPreview, normalizeApprovalOutcome, parseNdjson } from '../platform.js'
 import { stableStringify, truncateModelContent } from '../policies.js'
 
 const servers: Server[] = []
@@ -547,4 +547,223 @@ test('policy helpers normalise argument order and leave short content untouched'
     { type: 'text', text: 'abc' },
     { type: 'text', text: '\n[工具结果已截断，共 6 字符；如需更多内容请分页读取]' },
   ])
+})
+
+const APPROVAL_PATH = '/api/v1/internal/dsh/approval/request'
+
+/**
+ * Backend fixture for the approval tests: the model asks for `send_email` once, the approval
+ * endpoint answers with `decide()` (a thrown error becomes a 500), and the tool bridge records
+ * whether the call ever reached it.
+ */
+async function approvalBackend(decide: (incoming: IncomingMessage) => Promise<Record<string, unknown>>): Promise<{
+  backendUrl: string
+  approvalBodies: Array<Record<string, unknown>>
+  modelRequests: Array<Record<string, unknown>>
+  toolCalls: () => number
+}> {
+  const approvalBodies: Array<Record<string, unknown>> = []
+  const modelRequests: Array<Record<string, unknown>> = []
+  let toolCalls = 0
+  const backendUrl = await fakeBackend(async incoming => {
+    if (incoming.url === APPROVAL_PATH) {
+      assert.equal(incoming.method, 'POST')
+      assert.equal(incoming.headers.authorization, 'Bearer secret')
+      approvalBodies.push(await body(incoming))
+      return decide(incoming)
+    }
+    if (incoming.url?.endsWith('/tools/execute')) {
+      toolCalls += 1
+      const payload = await body(incoming)
+      assert.equal(payload.name, 'send_email')
+      return { ok: true, content: 'sent', value: { ok: true, message_id: 'm-1' } }
+    }
+    assert.equal(incoming.url, '/api/v1/internal/dsh/model/stream')
+    const payload = await body(incoming)
+    modelRequests.push(payload)
+    if (modelRequests.length === 1) return toolStream('send_email', { to: 'a@b.c', subject: '报价' })
+    return textStream('收尾')
+  })
+  return { backendUrl, approvalBodies, modelRequests, toolCalls: () => toolCalls }
+}
+
+test('asks the platform before an approval-gated tool runs and executes it once allowed', async () => {
+  const backend = await approvalBackend(async () => ({ outcome: 'allowed-once', decided_by: 'user:42' }))
+  const runtime = new DshRuntime({ backendUrl: backend.backendUrl, serviceToken: 'secret' })
+  await runtime.start()
+  const events: RuntimeEvent[] = []
+  await runtime.run(request({ tools: [tool('send_email', { approval: 'ask' })] }), event => events.push(event))
+
+  assert.equal(backend.approvalBodies.length, 1, JSON.stringify(events))
+  const approval = backend.approvalBodies[0]!
+  assert.deepEqual(Object.keys(approval).sort(), [
+    'approval_id', 'arguments_preview', 'call_id', 'reason', 'run_token', 'timeout_ms', 'tool',
+  ])
+  assert.equal(approval.run_token, 'opaque-token')
+  assert.match(String(approval.approval_id), /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+  assert.equal(approval.tool, 'send_email')
+  assert.equal(approval.call_id, 'call-1')
+  assert.equal(approval.reason, 'send_email 会产生外部副作用，需要用户确认')
+  assert.equal(approval.arguments_preview, JSON.stringify({ to: 'a@b.c', subject: '报价' }))
+  assert.equal(approval.timeout_ms, 120_000)
+
+  assert.equal(backend.toolCalls(), 1, 'the allowed call must reach the tool bridge exactly once')
+  assert.equal(backend.modelRequests.length, 2)
+  const requested = policyEvents(events, 'approval_requested')
+  const decided = policyEvents(events, 'approval_decided')
+  assert.equal(requested.length, 1)
+  assert.equal(decided.length, 1)
+  assert.equal(requested[0]?.tool, 'send_email')
+  assert.equal(requested[0]?.detail, `approval_id=${String(approval.approval_id)}`)
+  assert.equal(decided[0]?.tool, 'send_email')
+  assert.equal(decided[0]?.detail, 'outcome=allowed-once; decided_by=user:42')
+  const requestedIndex = events.indexOf(requested[0]!)
+  const decidedIndex = events.indexOf(decided[0]!)
+  const resultIndex = events.findIndex(event => event.type === 'tool_result')
+  assert(requestedIndex < decidedIndex && decidedIndex < resultIndex, 'requested -> decided -> tool_result')
+  assert(toolResults(events)[0]?.ok)
+  assert(events.some(event => event.type === 'done' && event.text === '收尾'))
+})
+
+test('denies an approval-gated tool the user rejected and lets the loop finish', async () => {
+  const backend = await approvalBackend(async () => ({ outcome: 'rejected', decided_by: 'user:42' }))
+  const runtime = new DshRuntime({ backendUrl: backend.backendUrl, serviceToken: 'secret' })
+  await runtime.start()
+  const events: RuntimeEvent[] = []
+  await runtime.run(request({ tools: [tool('send_email', { approval: 'ask' })] }), event => events.push(event))
+
+  assert.equal(backend.approvalBodies.length, 1)
+  assert.equal(backend.toolCalls(), 0, 'a rejected call must never reach the tool bridge')
+  const result = toolResults(events)[0]
+  assert(result, JSON.stringify(events))
+  assert.equal(result.ok, false)
+  assert.match(result.content, /rejected tool "send_email"/)
+  assert.equal(policyEvents(events, 'approval_decided')[0]?.detail, 'outcome=rejected; decided_by=user:42')
+  // The denial reaches the model as an error tool result and the loop keeps going.
+  assert.equal(backend.modelRequests.length, 2)
+  assert(JSON.stringify(backend.modelRequests[1]?.messages).includes('rejected tool'))
+  assert(events.some(event => event.type === 'done' && event.text === '收尾'), JSON.stringify(events))
+  assert(!events.some(event => event.type === 'error'))
+})
+
+test('fails closed (unavailable) when the approval endpoint answers 500', async () => {
+  const backend = await approvalBackend(async () => { throw new Error('approval store down') })
+  const runtime = new DshRuntime({ backendUrl: backend.backendUrl, serviceToken: 'secret' })
+  await runtime.start()
+  const events: RuntimeEvent[] = []
+  await runtime.run(request({ tools: [tool('send_email', { approval: 'ask' })] }), event => events.push(event))
+
+  assert.equal(backend.approvalBodies.length, 1)
+  assert.equal(backend.toolCalls(), 0)
+  const result = toolResults(events)[0]
+  assert(result && !result.ok, JSON.stringify(events))
+  assert.match(result.content, /requires approval, but no approval channel is available/)
+  assert.match(
+    policyEvents(events, 'approval_decided')[0]?.detail ?? '',
+    /^outcome=unavailable; decided_by=none; error=.*approval bridge failed \(500\)/,
+  )
+  assert(events.some(event => event.type === 'done'))
+})
+
+test('fails closed (unavailable) when the approval connection drops', async () => {
+  const backend = await approvalBackend(async incoming => {
+    incoming.socket.destroy()
+    await new Promise<void>(() => undefined)
+    return {}
+  })
+  const runtime = new DshRuntime({ backendUrl: backend.backendUrl, serviceToken: 'secret' })
+  await runtime.start()
+  const events: RuntimeEvent[] = []
+  await runtime.run(request({ tools: [tool('send_email', { approval: 'ask' })] }), event => events.push(event))
+
+  assert.equal(backend.toolCalls(), 0)
+  assert.match(toolResults(events)[0]?.content ?? '', /no approval channel is available/)
+  assert.match(policyEvents(events, 'approval_decided')[0]?.detail ?? '', /^outcome=unavailable; decided_by=none; error=/)
+  assert(events.some(event => event.type === 'done'))
+})
+
+test('treats an unknown approval outcome as unavailable', async () => {
+  const backend = await approvalBackend(async () => ({ outcome: 'allowed-always' }))
+  const runtime = new DshRuntime({ backendUrl: backend.backendUrl, serviceToken: 'secret' })
+  await runtime.start()
+  const events: RuntimeEvent[] = []
+  await runtime.run(request({ tools: [tool('send_email', { approval: 'ask' })] }), event => events.push(event))
+  assert.equal(backend.toolCalls(), 0)
+  assert.equal(policyEvents(events, 'approval_decided')[0]?.detail, 'outcome=unavailable; decided_by=unknown')
+  assert.match(toolResults(events)[0]?.content ?? '', /no approval channel is available/)
+})
+
+test('never asks for tools without an approval field', async () => {
+  const backend = await approvalBackend(async () => { throw new Error('must not be called') })
+  const runtime = new DshRuntime({ backendUrl: backend.backendUrl, serviceToken: 'secret' })
+  await runtime.start()
+  const events: RuntimeEvent[] = []
+  await runtime.run(request({ tools: [tool('send_email')] }), event => events.push(event))
+  assert.equal(backend.approvalBodies.length, 0)
+  assert.equal(backend.toolCalls(), 1)
+  assert.equal(policyEvents(events, 'approval_requested').length, 0)
+  assert.equal(policyEvents(events, 'approval_decided').length, 0)
+  assert(events.some(event => event.type === 'done'))
+})
+
+test('ask/plan runs refuse tools before any approval request can happen', async () => {
+  const backend = await approvalBackend(async () => { throw new Error('must not be called') })
+  const runtime = new DshRuntime({ backendUrl: backend.backendUrl, serviceToken: 'secret' })
+  await runtime.start()
+  for (const exec_mode of ['ask', 'plan'] as const) {
+    const events: RuntimeEvent[] = []
+    await assert.rejects(
+      runtime.run(request({ run_id: `run-${exec_mode}`, exec_mode, tools: [tool('send_email', { approval: 'ask' })] }), event => events.push(event)),
+      new RegExp(`${exec_mode} mode cannot expose tools`),
+    )
+    assert.equal(events.length, 0)
+  }
+  assert.equal(backend.approvalBodies.length, 0)
+  assert.equal(backend.modelRequests.length, 0)
+  assert.equal(backend.toolCalls(), 0)
+})
+
+test('aborts a pending approval request when the run is cancelled', async () => {
+  let approvalEntered!: () => void
+  const entered = new Promise<void>(resolve => { approvalEntered = resolve })
+  let approvalClosed = false
+  const backend = await approvalBackend(async incoming => {
+    // `IncomingMessage` only reports 'close' once a response completes; the client abort shows up on the socket.
+    incoming.socket.once('close', () => { approvalClosed = true })
+    approvalEntered()
+    await new Promise<void>(() => undefined) // the user never answers; only the client abort ends this
+    return {}
+  })
+  const runtime = new DshRuntime({ backendUrl: backend.backendUrl, serviceToken: 'secret' })
+  await runtime.start()
+  const events: RuntimeEvent[] = []
+  const run = runtime.run(
+    request({ run_id: 'run-cancel-approval', tools: [tool('send_email', { approval: 'ask' })] }),
+    event => events.push(event),
+  )
+  await entered
+  assert.equal(runtime.cancel('run-cancel-approval'), true)
+  await run
+  // The client abort is immediate; the server observes the closed socket one I/O tick later.
+  for (let waited = 0; !approvalClosed && waited < 2000; waited += 20) await sleep(20)
+  assert(approvalClosed, 'the approval HTTP request must be aborted together with the run')
+  assert.equal(backend.toolCalls(), 0)
+  const error = events.find(event => event.type === 'error')
+  assert(error && error.type === 'error' && error.code === 'CANCELLED', JSON.stringify(events))
+  assert(!events.some(event => event.type === 'done'))
+  assert.equal(runtime.health().active_runs, 0)
+})
+
+test('approval helpers normalise outcomes and cap the arguments preview', () => {
+  assert.equal(normalizeApprovalOutcome('allowed-once'), 'allowed-once')
+  assert.equal(normalizeApprovalOutcome('rejected'), 'rejected')
+  assert.equal(normalizeApprovalOutcome('cancelled'), 'cancelled')
+  assert.equal(normalizeApprovalOutcome('unavailable'), 'unavailable')
+  assert.equal(normalizeApprovalOutcome('allowed-always'), 'unavailable')
+  assert.equal(normalizeApprovalOutcome(undefined), 'unavailable')
+  assert.equal(approvalArgumentsPreview('{"a":1}'), '{"a":1}')
+  const long = approvalArgumentsPreview(`{"text":"${'x'.repeat(600)}"}`)
+  assert.equal(long.length, 500)
+  assert(long.endsWith('...'))
+  assert.equal(approvalArgumentsPreview('abcdef', 5), 'ab...')
 })

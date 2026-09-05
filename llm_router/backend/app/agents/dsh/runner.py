@@ -80,7 +80,10 @@ _COMPLETION_NUDGE_TEXT = (
 )
 _POLICY_TITLES = {
     "continuation": "续执行要求", "repeat_failure_block": "重复失败拦截", "tool_timeout": "工具超时",
+    "approval_requested": "审批请求", "approval_decided": "审批结果",
 }
+# Optional ``policy`` event fields copied into the step / trace record when present.
+_POLICY_DETAIL_KEYS = ("tool", "detail", "nudge", "approval_id", "outcome", "decided_by")
 
 
 class DshRunError(RuntimeError):
@@ -211,10 +214,11 @@ def _apply_policy_event(
 
     ``continuation`` means the runtime nudged the model to keep working, so the half answer
     streamed so far is retracted (the UI drops it) and the text buffer restarts. The other
-    actions (``repeat_failure_block`` / ``tool_timeout``) are informational: steps + trace only.
+    actions (``repeat_failure_block`` / ``tool_timeout`` / ``approval_requested`` /
+    ``approval_decided``) are informational: steps + trace only.
     """
     action = str(event.get("action") or "")
-    detail = {key: event[key] for key in ("tool", "detail", "nudge") if event.get(key) is not None}
+    detail = {key: event[key] for key in _POLICY_DETAIL_KEYS if event.get(key) is not None}
     state.setdefault("steps", []).append({"step": "policy", "action": action, **detail})
     trace = {"category": "policy", "title": _POLICY_TITLES.get(action, action), "action": action, **detail}
     state.setdefault("traces", []).append(trace)
@@ -226,17 +230,23 @@ def _apply_policy_event(
     return text
 
 
-async def _prepare(state: dict, deps: dict, writer: Any) -> tuple[dict, str]:
+async def _prepare(
+    state: dict, deps: dict, writer: Any, *,
+    handle: run_registry.RunHandle | None = None, staged: list[dict] | None = None,
+) -> tuple[dict, str]:
     with bind_runtime(deps, writer):
         _merge(state, await load_config(state))
         _merge(state, await load_memory(state))
         prepared = await prepare_dsh_turn(state)
     state["traces"] = prepared["traces"]
     state["_dsh_tool_registry"] = prepared["registry"]
+    # ``handle`` / ``staged`` let bridge callbacks (user approvals) publish onto this run's SSE
+    # channel and into the persisted event log exactly like the runner's own events.
     context = DshRunContext(
         state=state, db=deps["db"], deps=deps, tool_registry=prepared["registry"],
         image_inputs=_image_inputs(prepared.get("messages") or []),
         provider_override=prepared["provider_override"], model_override=prepared["model_override"],
+        handle=handle, staged=staged,
     )
     return prepared, registry.register(context)
 
@@ -403,7 +413,9 @@ async def _run_playground(
     staged: list[dict] = []
     run_token = ""
     try:
-        prepared, run_token = await _prepare(state, deps, lambda raw: staged.append(json.loads(raw)))
+        prepared, run_token = await _prepare(
+            state, deps, lambda raw: staged.append(json.loads(raw)), handle=handle, staged=staged,
+        )
         try:
             await _admitted_run(
                 state, deps, prepared, run_token, handle, staged,
@@ -494,7 +506,7 @@ async def run_general_agent(
     staged: list[dict] = []
     run_token = ""
     try:
-        prepared, run_token = await _prepare(state, deps, lambda raw: staged.append(json.loads(raw)))
+        prepared, run_token = await _prepare(state, deps, lambda raw: staged.append(json.loads(raw)), staged=staged)
         try:
             await _admitted_run(state, deps, prepared, run_token, None, staged, str(user.id))
             await _finish(state, deps)
@@ -553,7 +565,7 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
                 event = json.loads(raw)
                 _publish(handle, staged, event)
 
-            prepared, run_token = await _prepare(state, deps, writer)
+            prepared, run_token = await _prepare(state, deps, writer, handle=handle, staged=staged)
             handle.run_id = int(state["run_id"])
             try:
                 await _admitted_run(state, deps, prepared, run_token, handle, staged, str(user.id))
@@ -570,6 +582,10 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
                 )
                 _publish_failure_reply(handle, staged, state, exc)
                 await _finish_failed_run(state, deps, exc)
+            finally:
+                # The runtime stream is over (done / failed / user Stop): any approval still waiting
+                # is settled as ``cancelled`` *before* ``staged`` is persisted so the decision is on record.
+                registry.cancel_approvals(run_token)
             final = json.dumps({
                 "type": "final", "session_id": state["session_id"], "run_id": state.get("run_id"),
                 "latency_ms": int((time.monotonic() - start) * 1000),

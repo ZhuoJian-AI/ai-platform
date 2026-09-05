@@ -80,9 +80,15 @@ CORE_PLUGINS = [
         "version": "0.1.0-rc.5",
         "kind": "adapter_required",
         "required": False,
-        "enabled": False,
+        "enabled": True,
         "capabilities": ["approval"],
-        "warnings": ["平台审批事件与应答通道尚未适配，禁止发布"],
+        # The platform adapter is in place: tools tagged ``ToolSpec.approval="ask"`` pause inside the
+        # runtime, the bridge relays ``approval_request`` / ``approval_decided`` over the run's SSE
+        # channel, and the terminal user answers via POST /terminal/tasks/{task_id}/approvals/{id}.
+        "description": (
+            "高风险工具审批：运行时按 ToolSpec.approval 暂停调用，平台经运行 SSE 通道把审批请求转给终端用户，"
+            "由用户放行或拒绝后才继续执行"
+        ),
     },
 ]
 

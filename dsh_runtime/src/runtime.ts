@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -6,11 +7,15 @@ import SessionStore, { SessionId, type SessionEvent } from '@deepseek-ai/dsh-ses
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import ToolRuntime, { type ToolExecution, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import UserApproval, { type ApprovalOutcome, type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { RunRequest, RuntimeEvent, ToolSpec } from './contracts.js'
 import { contentText } from './contracts.js'
-import { executePlatformTool, PlatformLlmAdapter } from './platform.js'
 import {
-  installRunPolicies, toolTimeoutMessage, TOOL_TIMEOUT_CODE, truncateModelContent, untilAborted,
+  APPROVAL_GRACE_MS, APPROVAL_TIMEOUT_MS, approvalArgumentsPreview, executePlatformTool,
+  normalizeApprovalOutcome, PlatformLlmAdapter, requestPlatformApproval,
+} from './platform.js'
+import {
+  approvalReason, installRunPolicies, toolTimeoutMessage, TOOL_TIMEOUT_CODE, truncateModelContent, untilAborted,
 } from './policies.js'
 import {
   loadExternalExtensions, verifyRelease,
@@ -82,6 +87,19 @@ function safeToolSchema(schema: Record<string, unknown>): Record<string, unknown
     : { type: 'object', properties: {}, additionalProperties: true }
 }
 
+/**
+ * Raw JSON arguments of the tool call an approval request is about.  `ApprovalRequest` carries no
+ * arguments by design, so they are read back from the session's own `tool/call` log entry, which the
+ * loop appends before dispatch; without a `callId` (or a log entry) the preview is empty.
+ */
+function approvalCallArguments(req: ApprovalRequest): string {
+  if (req.callId === undefined) return ''
+  const call = [...req.agent.session.events]
+    .reverse()
+    .find(item => item.type === 'tool/call' && item.data.callId === req.callId)
+  return call?.type === 'tool/call' ? call.data.arguments : ''
+}
+
 export class DshRuntime {
   private ctx: Context | null = null
   private readonly activeByRun = new Map<string, ActiveRun>()
@@ -127,6 +145,16 @@ export class DshRuntime {
       if (enabled('dsh-agent')) await ctx.plugin(AgentRegistry)
       if (enabled('dsh-agent-loop')) {
         await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: this.maxParallelToolCalls })
+      }
+      // The approval seam is part of this runtime's own policy layer (its answerer is below), so it
+      // loads unless a release manifest explicitly disables the slug.  Without it dsh-tools degrades
+      // every `ask` decision to deny -- still fail-closed, but no user is ever asked.
+      const approvalDisabled = (manifest?.plugins ?? []).some(
+        item => item.slug === 'dsh-user-approval' && item.enabled === false,
+      )
+      if (!approvalDisabled) {
+        await ctx.plugin(UserApproval, { policy: 'ask' })
+        ctx.on('approval/request', (req, next) => this.answerApproval(req, next))
       }
       const extensions = manifest
         ? await loadExternalExtensions(ctx, manifest, this.options.extensionCacheRoot ?? '/tmp/dsh-extensions')
@@ -321,6 +349,8 @@ export class DshRuntime {
           for (const spec of request.tools) this.registerTool(agentCtx, active, spec)
           installRunPolicies(agentCtx, {
             completionPolicy: request.completion_policy,
+            execMode: request.exec_mode,
+            tools: request.tools,
             emit,
             canContinue: () => active.modelSteps < request.max_steps,
             // `done.text` must be the post-nudge answer only: the bridge retracts what was streamed before.
@@ -364,6 +394,69 @@ export class DshRuntime {
     if (!run?.agent) return false
     run.agent.cancel({ kind: 'user' })
     return true
+  }
+
+  /**
+   * Resolve the run an approval request belongs to.  `ApprovalRequest.agent.id` is the DSH session id,
+   * which is the same `platform-<run_id>` key the model adapter uses (`activeBySession`).  Should a
+   * request ever arrive without that identity, a single active run is the only unambiguous owner;
+   * any other situation yields `undefined` and the answerer fails closed with `unavailable`.
+   */
+  private resolveApprovalRun(req: ApprovalRequest): ActiveRun | undefined {
+    const agentId = (req as { agent?: { id?: unknown } }).agent?.id
+    if (agentId !== undefined) return this.activeBySession.get(String(agentId))
+    return this.activeByRun.size === 1 ? [...this.activeByRun.values()][0] : undefined
+  }
+
+  /**
+   * The runtime's terminal `approval/request` answerer: forward the question to the platform
+   * (`POST /api/v1/internal/dsh/approval/request`) and hand back its decision.  Every transport
+   * failure -- network error, non-2xx, invalid body, client-side deadline -- resolves `unavailable`
+   * (fail-closed); an abort of the request signal (run cancel) resolves `cancelled`.
+   */
+  private async answerApproval(req: ApprovalRequest, _next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
+    const active = this.resolveApprovalRun(req)
+    if (!active) return 'unavailable'
+    const approvalId = randomUUID()
+    const callId = req.callId !== undefined ? String(req.callId) : undefined
+    const reason = req.reason ?? approvalReason(req.toolName)
+    active.emit({
+      type: 'policy', action: 'approval_requested', tool: req.toolName, detail: `approval_id=${approvalId}`,
+    })
+    // `req.signal` is the tool call's signal (fused with the turn's cancel); the deadline adds a ceiling
+    // slightly above the backend's own hold time so a hung backend cannot pin the run forever.
+    const guard = deadline(req.signal, APPROVAL_TIMEOUT_MS + APPROVAL_GRACE_MS, 'APPROVAL_TIMEOUT')
+    let outcome: ApprovalOutcome
+    let detail: string
+    try {
+      const response = await requestPlatformApproval({
+        backendUrl: this.options.backendUrl,
+        serviceToken: this.options.serviceToken,
+        signal: guard.signal,
+        request: {
+          run_token: active.request.run_token,
+          approval_id: approvalId,
+          tool: req.toolName,
+          ...(callId !== undefined ? { call_id: callId } : {}),
+          reason,
+          arguments_preview: approvalArgumentsPreview(approvalCallArguments(req)),
+          timeout_ms: APPROVAL_TIMEOUT_MS,
+        },
+      })
+      outcome = normalizeApprovalOutcome(response.outcome)
+      detail = `outcome=${outcome}; decided_by=${response.decided_by ?? 'unknown'}`
+    } catch (error) {
+      outcome = req.signal?.aborted ? 'cancelled' : 'unavailable'
+      detail = `outcome=${outcome}; decided_by=none; error=${errorMessageOf(error)}`
+    } finally {
+      guard[Symbol.dispose]()
+    }
+    // A cancel settles the service's own race first; by the time the aborted fetch rejects the run
+    // may already have emitted its terminal event, and the NDJSON response must not be written after that.
+    if (this.activeByRun.get(active.request.run_id) === active) {
+      active.emit({ type: 'policy', action: 'approval_decided', tool: req.toolName, detail })
+    }
+    return outcome
   }
 
   private registerTool(agentCtx: Context, active: ActiveRun, spec: ToolSpec): void {

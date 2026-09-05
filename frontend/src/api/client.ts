@@ -2620,6 +2620,11 @@ export interface TerminalTaskWithMessages extends TerminalTask {
   run_status?: string | null;
 }
 
+/** 高风险工具用户审批（SSE `approval_request` / `approval_decided` 与 POST .../approvals/{id} 共用）。 */
+export type TerminalApprovalDecision = 'allow' | 'reject';
+export type TerminalApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable';
+export type TerminalApprovalDecidedBy = 'user' | 'timeout' | 'system';
+
 export interface TerminalMemoryItem {
   id: string;
   scope_type: string;
@@ -2813,6 +2818,13 @@ export const terminal = {
   /** 取消运行中的 run（真停后台 asyncio.Task，非仅断读端）。 */
   cancelTask: (id: string) =>
     userRequest<{ cancelled: boolean }>(`/api/v1/terminal/tasks/${id}/cancel`, { method: 'POST' }),
+  /** 对高风险工具的审批请求做决定（允许本次 / 拒绝）。
+   *  404 = 审批不存在或已过期；409 = 已被处理（其他端已决定或已超时）。调用方按 ApiError.status 区分。 */
+  decideApproval: (taskId: string, approvalId: string, decision: TerminalApprovalDecision) =>
+    userRequest<{ outcome: TerminalApprovalOutcome }>(
+      `/api/v1/terminal/tasks/${taskId}/approvals/${approvalId}`,
+      { method: 'POST', body: JSON.stringify({ decision }) },
+    ),
   listWsFilesPage: (wsId: string, page = 1, pageSize = 100) =>
     userRequest<WorkspaceFilePage>(`/api/v1/terminal/workspaces/${wsId}/files?page=${page}&page_size=${pageSize}`),
   listWsFiles: (wsId: string) => loadAllWorkspaceFilePages((page, pageSize) =>
