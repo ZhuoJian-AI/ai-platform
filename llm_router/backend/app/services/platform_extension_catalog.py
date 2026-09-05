@@ -100,7 +100,7 @@ CORE_PLUGINS = [
         "required": False,
         "enabled": False,
         "capabilities": ["session_persistence"],
-        "description": "JSONL 会话持久化 provider（路线图 C1）：已随 rc.8 打包进运行时，尚未接线，PostgreSQL 仍是事实源",
+        "description": "JSONL 会话持久化 provider（路线图 C1）：随 rc.8 打包，尚未接线，PostgreSQL 仍是事实源",
     },
     {
         "slug": "dsh-code-runtime-worker-thread",
@@ -120,7 +120,7 @@ CORE_PLUGINS = [
         "required": False,
         "enabled": False,
         "capabilities": ["hook_guard"],
-        "description": "上游重复调用提醒插件（仅注入提示，不拦截）；平台当前由 policies.ts 的重复失败拦截覆盖，保留未启用",
+        "description": "上游重复调用提醒插件（仅注入提示）；平台由 policies.ts 的重复失败拦截覆盖，保留未启用",
     },
     {
         "slug": "dsh-tool-call-timeout-policy",
