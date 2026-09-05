@@ -155,6 +155,27 @@ def _to_platform_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     } for tool in tools]
 
 
+def _authorized_tool_calls(
+    calls: list[dict[str, Any]], allowed_names: set[str], *, run_token: str,
+) -> list[dict[str, Any]]:
+    """Drop provider tool calls that were not advertised for this exact run."""
+    allowed: list[dict[str, Any]] = []
+    rejected: list[str] = []
+    for call in calls:
+        name = str(call.get("name") or "")
+        if name and name in allowed_names:
+            allowed.append(call)
+        else:
+            rejected.append(name or "<empty>")
+    if rejected:
+        logger.warning(
+            "dsh_model_unadvertised_tool_calls",
+            run_token=run_token[:12],
+            tools=sorted(set(rejected)),
+        )
+    return allowed
+
+
 async def _iterate_with_runtime(source: Any, deps: Any):
     """Advance a model stream with runtime context bound to the current task.
 
@@ -219,6 +240,11 @@ async def model_stream(
     async def _produce():
         messages = _to_platform_messages(body.messages, context.image_inputs)
         tools = _to_platform_tools(body.tools)
+        allowed_tool_names = {
+            str(item.get("function", {}).get("name") or "")
+            for item in tools
+            if str(item.get("function", {}).get("name") or "")
+        }
         text = ""
         text_started = False
         next_index = 0
@@ -248,7 +274,9 @@ async def model_stream(
                     ensure_ascii=False,
                 ) + "\n"
             elif kind == "tool_calls":
-                tool_calls = list(payload or [])
+                tool_calls = _authorized_tool_calls(
+                    list(payload or []), allowed_tool_names, run_token=body.run_token,
+                )
             elif kind == "reasoning_content":
                 reasoning_content += str(payload or "")
             elif kind == "usage" and extra:
@@ -273,7 +301,9 @@ async def model_stream(
                     model_override=context.model_override,
                 )
             text = result.content or ""
-            tool_calls = list(result.tool_calls or [])
+            tool_calls = _authorized_tool_calls(
+                list(result.tool_calls or []), allowed_tool_names, run_token=body.run_token,
+            )
             reasoning_content = result.reasoning_content or ""
             usage["input_tokens"] += int(result.usage.get("input_tokens") or 0)
             usage["output_tokens"] += int(result.usage.get("output_tokens") or 0)
@@ -358,6 +388,13 @@ async def execute_tool(
     context = run_registry.get(body.run_token)
     if context is None:
         raise HTTPException(status_code=401, detail="expired run token")
+    if body.name not in context.allowed_tool_names:
+        logger.warning(
+            "dsh_unadvertised_tool_execution_blocked",
+            run_token=body.run_token[:12],
+            tool=body.name,
+        )
+        raise HTTPException(status_code=403, detail="tool is not authorized for this run")
     # Identical-failure blocking moved into the DSH tool pipeline (``policy:repeat_failure_block``);
     # this bridge only authorizes and executes.
     call = {"id": f"dsh-{body.name}", "name": body.name, "arguments": body.arguments}
