@@ -171,6 +171,36 @@ type RuntimeUiStatus = {
   position?: number;
 };
 
+async function consumeTerminalEventStream(
+  response: Response,
+  onEvent: (event: Record<string, unknown>) => void,
+): Promise<void> {
+  if (!response.body) throw new Error('任务执行连接没有返回数据流');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const consumeLine = (line: string) => {
+    if (!line.startsWith('data: ')) return;
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line.slice(6)) as Record<string, unknown>;
+    } catch { /* 无法解析的控制行直接忽略 */
+      return;
+    }
+    onEvent(event);
+  };
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    lines.forEach(consumeLine);
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) consumeLine(buffer.trimEnd());
+}
+
 interface InvokedSkill {
   id: string;
   name: string;
@@ -886,23 +916,7 @@ export default function Terminal() {
 
   // SSE 读取循环：解析 `data: {...}` 行并派发。POST /run 与 GET /stream 共用。
   const consumeSSE = useCallback(async (resp: Response) => {
-    const reader = resp.body!.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const evt = JSON.parse(line.slice(6));
-          dispatchEvent(evt);
-        } catch { /* 半行/非 JSON：忽略，下轮补全 */ }
-      }
-    }
+    await consumeTerminalEventStream(resp, dispatchEvent);
   }, [dispatchEvent]);
 
   const runStream = useCallback(async (
@@ -1582,7 +1596,7 @@ export default function Terminal() {
                 immersive={applicationImmersive}
                 onOpenNavigation={() => setApplicationNavOpen(true)}
                 onToggleImmersive={() => setApplicationImmersive((value) => !value)}
-                onAskAI={async (prompt, context) => {
+                onAskAI={async (prompt, context, onProgress) => {
                   const modelAlias = config.model_alias ?? modelData?.models?.[0] ?? null;
                   if (!modelAlias) throw new Error('当前账号没有可用模型，请联系管理员配置模型权限');
                   const assistantConfig: TaskConfig = {
@@ -1593,19 +1607,40 @@ export default function Terminal() {
                   };
                   const task = await terminal.createTask({ message: prompt, config: assistantConfig });
                   qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
-                  const result = await terminal.runTask(
-                    task.id,
-                    prompt,
-                    null,
-                    [],
-                    [],
-                    selectedApplication.id,
-                    context,
+                  const controller = new AbortController();
+                  const response = await terminal.runTaskStream(
+                    task.id, prompt, controller.signal, null, [], [], selectedApplication.id, context,
                   );
+                  if (!response.ok || !response.body) {
+                    const body = await response.json().catch(() => ({}));
+                    const detail = body.detail;
+                    const errorMessage = typeof detail === 'string'
+                      ? detail
+                      : Array.isArray(detail)
+                        ? detail.map((item) => (
+                          item && typeof item === 'object' && typeof item.msg === 'string'
+                            ? item.msg
+                            : JSON.stringify(item)
+                        )).join('；')
+                        : `任务执行失败（HTTP ${response.status}）`;
+                    throw new Error(errorMessage);
+                  }
+                  let streamedAnswer = '';
+                  let streamedError = '';
+                  await consumeTerminalEventStream(response, (event) => {
+                    onProgress(event);
+                    if (event.type === 'text') streamedAnswer += String(event.delta ?? '');
+                    if (event.type === 'error') streamedError = String(event.message ?? '业务小助手执行失败');
+                  });
+                  if (streamedError) throw new Error(streamedError);
                   qc.invalidateQueries({ queryKey: ['terminal-task', task.id] });
                   qc.invalidateQueries({ queryKey: ['terminal-memory'] });
                   qc.invalidateQueries({ queryKey: ['application-action-confirmations'] });
-                  return result.assistant;
+                  const freshTask = await terminal.getTask(task.id);
+                  const persistedAnswer = [...freshTask.messages]
+                    .reverse()
+                    .find((item) => item.role === 'assistant')?.content;
+                  return persistedAnswer || streamedAnswer || '操作已完成。';
                 }}
               />
             ) : composerOpen ? (

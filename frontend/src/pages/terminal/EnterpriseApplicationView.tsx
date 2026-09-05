@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Badge, Button, Card, Drawer, Empty, Input, Result, Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import {
-  AppstoreOutlined, ExportOutlined, FullscreenExitOutlined, FullscreenOutlined,
-  ReloadOutlined, RobotOutlined, SendOutlined,
+  AppstoreOutlined, CheckCircleFilled, CloseCircleFilled, ExportOutlined,
+  FullscreenExitOutlined, FullscreenOutlined, LoadingOutlined, ReloadOutlined,
+  RobotOutlined, SendOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -49,6 +50,83 @@ function safeContextPageUrl(launchUrl: string | undefined, route: unknown): stri
   }
 }
 
+type AssistantProgressItem = {
+  key: string;
+  label: string;
+  tone?: 'normal' | 'warning' | 'error';
+};
+
+type AssistantConversationMessage = {
+  role: 'user' | 'assistant';
+  content: string;
+  progress?: AssistantProgressItem[];
+  running?: boolean;
+  failed?: boolean;
+  startedAt?: number;
+  elapsedSeconds?: number;
+};
+
+function progressForAssistantEvent(event: Record<string, unknown>): AssistantProgressItem | null {
+  const type = String(event.type ?? '');
+  if (type === 'run_status') {
+    if (event.status === 'queued') {
+      const position = Number(event.position) || 0;
+      return {
+        key: 'runtime',
+        label: position > 1 ? `任务已进入队列，前方约 ${position - 1} 个任务` : '任务已进入队列，正在分配运行资源',
+      };
+    }
+    if (event.status === 'running') return { key: 'runtime', label: '模型已连接，正在分析任务' };
+  }
+  if (type === 'phase') {
+    const index = Math.max(0, Number(event.index) || 0);
+    return {
+      key: `phase:${index}`,
+      label: index === 0 ? '正在理解你的需求和当前页面' : `正在推进第 ${index + 1} 步`,
+    };
+  }
+  if (type === 'trace') {
+    const category = String(event.category ?? '');
+    const labels: Record<string, string> = {
+      memory: '正在读取与你相关的业务上下文',
+      data_interface: '已加载当前页面允许使用的业务接口',
+      rag: '正在检索相关业务知识',
+      ontology: '正在理解业务对象之间的关系',
+      policy: '正在校验本次操作权限',
+      file: '正在处理任务所需的文件',
+    };
+    return labels[category] ? { key: `trace:${category}`, label: labels[category] } : null;
+  }
+  if (type === 'tool_call') {
+    const name = String(event.name ?? '').toLowerCase();
+    let label = '正在调用当前页面已授权的业务能力';
+    if (/(delete|remove|_de_)/.test(name)) label = '正在准备删除业务记录';
+    else if (/(update|edit|_up_)/.test(name)) label = '正在准备更新业务记录';
+    else if (/(create|add|_ad_)/.test(name)) label = '正在准备新增业务记录';
+    else if (/(query|search|list|_qu_)/.test(name)) label = '正在查询当前页面的业务数据';
+    return { key: `tool:${String(event.id ?? name)}`, label };
+  }
+  if (type === 'tool_result') {
+    return event.ok === false
+      ? { key: `tool:${String(event.id ?? 'result')}`, label: '本次业务查询未成功，正在调整处理方式', tone: 'warning' }
+      : { key: `tool:${String(event.id ?? 'result')}`, label: '业务系统已返回数据，正在核对结果' };
+  }
+  if (type === 'approval_request') {
+    return { key: 'approval', label: '操作已暂停，正在等待你的确认', tone: 'warning' };
+  }
+  if (type === 'text') return { key: 'answer', label: '数据已经核对，正在组织回答' };
+  if (type === 'done') return { key: 'done', label: '回答已经生成' };
+  if (type === 'error') return { key: 'error', label: '执行遇到问题，正在整理原因', tone: 'error' };
+  return null;
+}
+
+function appendProgress(
+  items: AssistantProgressItem[] | undefined,
+  next: AssistantProgressItem,
+): AssistantProgressItem[] {
+  return [...(items ?? []).filter((item) => item.key !== next.key), next].slice(-7);
+}
+
 export default function EnterpriseApplicationView({
   application,
   moduleKey,
@@ -64,7 +142,11 @@ export default function EnterpriseApplicationView({
   application: TerminalEnterpriseApplication;
   moduleKey: string | null;
   onModuleChange: (moduleKey: string) => void;
-  onAskAI: (prompt: string, pageContext: Record<string, unknown>) => Promise<string>;
+  onAskAI: (
+    prompt: string,
+    pageContext: Record<string, unknown>,
+    onProgress: (event: Record<string, unknown>) => void,
+  ) => Promise<string>;
   models: string[];
   modelAlias: string | null;
   onModelAliasChange: (modelAlias: string) => void;
@@ -76,10 +158,7 @@ export default function EnterpriseApplicationView({
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [assistantRunning, setAssistantRunning] = useState(false);
-  const [assistantMessages, setAssistantMessages] = useState<Array<{
-    role: 'user' | 'assistant';
-    content: string;
-  }>>([]);
+  const [assistantMessages, setAssistantMessages] = useState<AssistantConversationMessage[]>([]);
   const [frameKey, setFrameKey] = useState(0);
   const [frameLoaded, setFrameLoaded] = useState(false);
   const [frameSlow, setFrameSlow] = useState(false);
@@ -89,6 +168,32 @@ export default function EnterpriseApplicationView({
   const [launch, setLaunch] = useState<EnterpriseApplicationLaunch>();
   const [launchLoading, setLaunchLoading] = useState(true);
   const [launchError, setLaunchError] = useState<unknown>();
+
+  const updateRunningAssistant = useCallback((
+    update: (message: AssistantConversationMessage) => AssistantConversationMessage,
+  ) => {
+    setAssistantMessages((items) => {
+      const next = [...items];
+      for (let index = next.length - 1; index >= 0; index -= 1) {
+        if (next[index].role === 'assistant' && next[index].running) {
+          next[index] = update(next[index]);
+          break;
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!assistantRunning) return undefined;
+    const updateElapsed = () => updateRunningAssistant((item) => ({
+      ...item,
+      elapsedSeconds: Math.max(0, Math.floor((Date.now() - (item.startedAt ?? Date.now())) / 1000)),
+    }));
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1_000);
+    return () => window.clearInterval(timer);
+  }, [assistantRunning, updateRunningAssistant]);
   const requestFreshLaunch = useCallback(async () => {
     const requestId = ++launchRequestRef.current;
     setFrameLoaded(false);
@@ -217,7 +322,19 @@ export default function EnterpriseApplicationView({
       ? launch?.page_keys?.find((key) => key.startsWith(`${fallbackModuleKey}.`))
       : undefined;
     setPrompt('');
-    setAssistantMessages((items) => [...items, { role: 'user', content: value }]);
+    const startedAt = Date.now();
+    setAssistantMessages((items) => [
+      ...items,
+      { role: 'user', content: value },
+      {
+        role: 'assistant',
+        content: '',
+        running: true,
+        startedAt,
+        elapsedSeconds: 0,
+        progress: [{ key: 'connect', label: '正在连接业务助手' }],
+      },
+    ]);
     setAssistantRunning(true);
     try {
       const answer = await onAskAI(value, {
@@ -230,18 +347,34 @@ export default function EnterpriseApplicationView({
         module_key: fallbackModuleKey,
         page_key: fallbackPageKey,
         ...bridgeContext,
+      }, (event) => {
+        const progress = progressForAssistantEvent(event);
+        if (!progress) return;
+        updateRunningAssistant((item) => ({
+          ...item,
+          progress: appendProgress(item.progress, progress),
+        }));
       });
-      setAssistantMessages((items) => [...items, {
-        role: 'assistant',
+      updateRunningAssistant((item) => ({
+        ...item,
         content: answer || '操作已完成。',
-      }]);
+        running: false,
+        elapsedSeconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+        progress: appendProgress(item.progress, { key: 'done', label: '回答已经生成' }),
+      }));
       await refreshFrame();
     } catch (assistantError) {
       const errorMessage = assistantError instanceof Error ? assistantError.message : '业务小助手执行失败';
-      setAssistantMessages((items) => [...items, {
-        role: 'assistant',
+      updateRunningAssistant((item) => ({
+        ...item,
         content: `执行失败：${errorMessage}`,
-      }]);
+        running: false,
+        failed: true,
+        elapsedSeconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+        progress: appendProgress(item.progress, {
+          key: 'error', label: '执行未完成，请查看下方原因', tone: 'error',
+        }),
+      }));
     } finally {
       setAssistantRunning(false);
     }
@@ -372,10 +505,39 @@ export default function EnterpriseApplicationView({
                 }}
               >
                 <Typography.Text strong>{item.role === 'user' ? '我' : '业务小助手'}</Typography.Text>
-                <Typography.Paragraph style={{ margin: '4px 0 0' }}>{item.content}</Typography.Paragraph>
+                {item.role === 'assistant' && item.progress?.length ? (
+                  <div
+                    className={`business-assistant-progress${item.failed ? ' business-assistant-progress--failed' : ''}`}
+                    aria-live={item.running ? 'polite' : 'off'}
+                    aria-label="业务小助手实时执行过程"
+                  >
+                    <div className="business-assistant-progress__header">
+                      <span>{item.running ? '实时执行中' : (item.failed ? '执行未完成' : '本轮执行过程')}</span>
+                      <span>{item.running ? `已等待 ${item.elapsedSeconds ?? 0} 秒` : `用时 ${item.elapsedSeconds ?? 0} 秒`}</span>
+                    </div>
+                    <div className="business-assistant-progress__steps">
+                      {item.progress.map((step, progressIndex) => {
+                        const active = Boolean(item.running && progressIndex === item.progress!.length - 1);
+                        const failed = Boolean(!active && step.tone === 'error');
+                        return (
+                          <div
+                            key={step.key}
+                            className={`business-assistant-progress__step${active ? ' business-assistant-progress__step--active' : ''}${step.tone === 'warning' ? ' business-assistant-progress__step--warning' : ''}${step.tone === 'error' ? ' business-assistant-progress__step--error' : ''}`}
+                          >
+                            <span className="business-assistant-progress__icon">
+                              {active ? <LoadingOutlined spin /> : (failed ? <CloseCircleFilled /> : <CheckCircleFilled />)}
+                            </span>
+                            <span>{step.label}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {item.running && <div className="business-assistant-progress__hint">执行仍在继续，进度会自动更新，请不用重复提交。</div>}
+                  </div>
+                ) : null}
+                {item.content && <Typography.Paragraph style={{ margin: '8px 0 0' }}>{item.content}</Typography.Paragraph>}
               </div>
             ))}
-            {assistantRunning && <div style={{ padding: '8px 0' }}><Spin size="small" /> <Typography.Text type="secondary">正在理解当前页面并执行授权操作…</Typography.Text></div>}
           </div>
         )}
         <Typography.Paragraph type="secondary">你可以问：</Typography.Paragraph>
