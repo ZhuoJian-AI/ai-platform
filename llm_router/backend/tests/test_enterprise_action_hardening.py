@@ -83,6 +83,66 @@ async def test_successful_query_does_not_mask_a_failed_mutation(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_successful_mutation_is_not_failed_by_the_generic_record_noun(monkeypatch):
+    async def stream_run(_request):
+        yield {"type": "tool_call", "id": "c1", "name": "record_create", "arguments": "{}"}
+        yield {
+            "type": "tool_result", "id": "c1", "name": "record_create",
+            "content": '{"status":"completed","result":{"id":3,"dataVersion":1}}', "ok": True,
+        }
+        yield {"type": "done", "text": "已新增供应商记录，编号 3。"}
+
+    monkeypatch.setattr(runner.client, "stream_run", stream_run)
+    state = {
+        "run_id": 23,
+        "request": "新增一条供应商记录",
+        "application_id": "app-1",
+        "messages": [],
+        "steps": [],
+        "_dsh_tool_registry": {
+            "record_create": {
+                "kind": "enterprise_action", "action": SimpleNamespace(operation="create"),
+            },
+        },
+    }
+
+    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, [])
+
+    assert state["assistant_final"] == "已新增供应商记录，编号 3。"
+    assert state.get("error") is None
+
+
+@pytest.mark.asyncio
+async def test_query_for_saved_records_is_not_misclassified_as_a_mutation(monkeypatch):
+    async def stream_run(_request):
+        yield {"type": "tool_call", "id": "q1", "name": "record_query", "arguments": "{}"}
+        yield {
+            "type": "tool_result", "id": "q1", "name": "record_query",
+            "content": '{"status":"completed","result":{"totalCount":0,"dataVersion":1}}', "ok": True,
+        }
+        yield {"type": "done", "text": "当前共有 0 条已保存的核算记录。"}
+
+    monkeypatch.setattr(runner.client, "stream_run", stream_run)
+    state = {
+        "run_id": 24,
+        "request": "请实时查询当前面辅料耗料核算共有多少条已保存的核算记录；必须只调用当前模块查询工具，并返回数据版本。",
+        "application_id": "app-1",
+        "messages": [],
+        "steps": [],
+        "_dsh_tool_registry": {
+            "record_query": {
+                "kind": "enterprise_action", "action": SimpleNamespace(operation="query"),
+            },
+        },
+    }
+
+    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, [])
+
+    assert state["assistant_final"] == "当前共有 0 条已保存的核算记录。"
+    assert state.get("error") is None
+
+
+@pytest.mark.asyncio
 async def test_pending_mutation_is_not_reported_as_completed(monkeypatch):
     async def stream_run(_request):
         yield {"type": "tool_call", "id": "d1", "name": "record_delete", "arguments": "{}"}

@@ -152,6 +152,14 @@ def _requests_business_mutation(state: dict) -> bool:
     if not state.get("application_id"):
         return False
     request = str(state.get("request") or "").lower()
+    # Completed-state descriptions (for example "已保存的核算记录") are query
+    # filters, not commands to mutate data.  Strip the common Chinese forms before
+    # applying the deliberately conservative keyword guard.
+    for term in _BUSINESS_MUTATION_TERMS:
+        if term.isascii():
+            continue
+        for prefix in ("已", "已经", "曾", "曾经", "不要", "无需", "不必", "请勿", "禁止"):
+            request = request.replace(f"{prefix}{term}", "")
     return any(term in request for term in _BUSINESS_MUTATION_TERMS)
 
 
@@ -397,7 +405,10 @@ async def _consume_dsh(
 
     mutation_required = _requests_business_mutation(state)
     mutation_unverified = mutation_required and successful_enterprise_mutations == 0
-    live_business_data_required = _requests_current_business_data(state)
+    # A successful mutation already carries the subsystem's authoritative result.
+    # Generic nouns such as "记录" must not arm a second query requirement and turn a
+    # completed write into a failed run merely because the model did not query again.
+    live_business_data_required = _requests_current_business_data(state) and not mutation_required
     live_business_data_unverified = live_business_data_required and successful_enterprise_queries == 0
     if mutation_unverified:
         if text:

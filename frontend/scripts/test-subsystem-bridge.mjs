@@ -105,6 +105,11 @@ try {
     /aria-label="业务小助手实时执行过程"/,
     'business assistant must show accessible live execution progress instead of a spinner-only state',
   );
+  assert.doesNotMatch(
+    applicationViewSource,
+    /当前页面没有可用于本次任务的业务接口/,
+    'zero legacy data interfaces must not contradict the availability of Manifest Actions',
+  );
 
   const terminalSource = await readFile(resolve('src/pages/terminal/Terminal.tsx'), 'utf8');
   const applicationAssistantSource = terminalSource.slice(terminalSource.indexOf('onAskAI={async'));

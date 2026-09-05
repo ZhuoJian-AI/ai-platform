@@ -105,7 +105,10 @@ function progressForAssistantEvent(event: Record<string, unknown>): AssistantPro
         : {};
       const count = Number(event.interfaces ?? detail.interfaces);
       if (Number.isFinite(count) && count === 0) {
-        return { key: `trace:${category}`, label: '当前页面没有可用于本次任务的业务接口', tone: 'warning' };
+        // Manifest Actions are registered separately from legacy data interfaces.
+        // A zero legacy-interface count therefore is not proof that this page has no
+        // callable business capability.
+        return { key: `trace:${category}`, label: '正在核对当前页面允许使用的业务能力' };
       }
     }
     return labels[category] ? { key: `trace:${category}`, label: labels[category] } : null;
