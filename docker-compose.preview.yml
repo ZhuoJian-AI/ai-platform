@@ -1,0 +1,609 @@
+# ============================================================================
+# ai-platform · 「DSH 加强版」预览栈（第二套独立 Coolify 部署）
+# ============================================================================
+# 用途    ：把 dsh-enhanced 分支（DSH rc.8 + 原生策略/审批）作为独立预览环境跑起来，
+#           与 main → ai-platform.staging.zhuojianai.com 那套 staging 完全隔离：
+#           独立 Application / 网络 / 卷 / 数据库 / 环境变量 / 部署历史。
+# 分支    ：dsh-enhanced      Compose 路径：/docker-compose.preview.yml
+# 域名    ：https://ai-platform-dsh.staging.zhuojianai.com（在 Coolify 的
+#           docker_compose_domains 里绑到 frontend:80，本文件不写域名）
+# 镜像    ：全部为 127.0.0.1:5000 私有 Registry 中的 image@sha256，无 build:。
+#           digest 由 scripts/preview-release.sh 在发版服务器上从 dsh-enhanced 构建后
+#           改写（backend 镜像被 backend / workspace-parser / office-edit-reconcile /
+#           multimodal-worker 四个服务共用，会一起改）。操作说明见 docs/preview-environment.md。
+#
+# 与 docker-compose.coolify.yml 的差异（服务名、镜像名、环境变量名全部保持一致）：
+#   1. 没有 storage-lifecycle 服务 —— 见下方「存储告警」。
+#   2. 默认值改成预览栈专用：COMPOSE_PROJECT_NAME→ai-platform-dsh、DATA_PLANE_PREFIX→10.0.11
+#      （staging 用 10.0.10，同一宿主机两条 internal 网段不能重叠）、
+#      MODULE_SAAS_ORIGIN→预览域名；TRAEFIK_DOCKER_NETWORK 去掉了 staging 的默认值改为必填。
+#   3. 命名卷改名 dsh_*（Coolify 已按 app uuid 做项目前缀，这里再加一层，防止误用同一
+#      项目名时挂到 staging 的数据卷上）。没有任何 bind mount。
+#   4. 内存上限：postgres 2G→1536M、redis 512M→384M、skill-runner 3G→2560M、backend 2560M→2G、
+#      workspace-parser / multimodal-worker 1536M→1280M；dsh-runtime(1536M)、workspace-preview(2G，
+#      含 1G tmpfs 给 LibreOffice)、extension-builder(1G，含 512M tmpfs) 未降。
+#
+# 必须按栈单独设置的环境变量（值不能照抄 staging）：
+#   COMPOSE_PROJECT_NAME        ai-platform-dsh
+#   PUBLIC_ORIGIN               https://ai-platform-dsh.staging.zhuojianai.com
+#                               （backend 的 PROXY_BASE_URL / OAUTH_ISSUER / OAUTH_PUBLIC_BASE_URL /
+#                                 BROWSER_ALLOWED_ORIGINS 全部由它派生，即 Cookie/CORS/OAuth 的 origin）
+#   MODULE_SAAS_ORIGIN          同上预览域名（已是默认值，显式设一遍更稳）
+#   TRAEFIK_DOCKER_NETWORK      本 Application 的 uuid（创建后从 Coolify URL 里取；没有默认值）
+#   DATA_PLANE_PREFIX           10.0.11（已是默认值；若宿主机已占用该 /24 就换一个空闲的）
+#   POSTGRES_PASSWORD / DATABASE_URL / REDIS_PASSWORD / REDIS_URL
+#                               新密码；URL 里主机名仍写 postgres / redis（栈内 extra_hosts 解析）
+#   SECRET_KEY / OAUTH_SIGNING_KEY / MASTER_ENCRYPTION_KEY
+#                               全新生成（独立数据库，不要复用 staging 的密钥）
+#   SKILL_RUNNER_TOKEN / DSH_RUNTIME_TOKEN / EXTENSION_BUILDER_TOKEN / MES_API_KEY / CRM_API_KEY
+#                               栈内互认令牌，全新生成
+#   STORAGE_PROJECT_TOKEN       平台按仓库签发；两栈拿到的是同一个（同一 OSS 前缀）——
+#                               能申请到预览专用令牌就用专用的，见存储告警
+#   其余变量（STORAGE_GATEWAY_URL、STORAGE_*_ENDPOINT、WORKSPACE_*、功能开关等）与 staging 相同即可；
+#   COOLIFY_MODULE_DEPLOYER_ENABLED / GITHUB_MODULE_PUBLISHER_ENABLED 在预览栈保持 false（默认）。
+#
+# 存储告警（为什么没有 storage-lifecycle）：
+#   storage-lifecycle 每天按「本栈数据库里还被引用的 object_key」对整个 OSS 项目前缀做孤儿回收
+#   （storage_lifecycle_service.reconcile_orphan_objects，宽限 storage_orphan_grace_days=7 天）。
+#   两栈共用 STORAGE_PROJECT_TOKEN 就是共用前缀：预览栈若跑这个 worker，会把 staging 的全部对象
+#   当孤儿删掉。因此预览栈不部署它，任何 STORAGE_ORPHAN 类的 GC 在预览环境必须保持关闭。
+#   代价：预览栈的回收站到期清理 / 上传会话过期 / 技能版本物理删除都不会发生（只留 DB tombstone），
+#   预览环境可接受。反向风险仍在：staging 的 storage-lifecycle 会把预览栈上传、超过 7 天的对象当孤儿
+#   删掉——预览里的文件寿命按 7 天算；除非平台为预览签发独立的 STORAGE_PROJECT_TOKEN。
+#   上传本身（backend 经 Storage Gateway 签名直传）不受影响。
+# ============================================================================
+name: ${COMPOSE_PROJECT_NAME:-ai-platform-dsh}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-pgvector-pg16@sha256:eac621400b7b7ff52493883e41e930e3d104695fea5b68cc0c42370cf7880067
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_infra}
+      POSTGRES_USER: ${POSTGRES_USER:-ai_infra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    volumes:
+      - dsh_postgres_data:/var/lib/postgresql/data
+    command:
+      - postgres
+      - -c
+      - listen_addresses=127.0.0.1,${DATA_PLANE_PREFIX:-10.0.11}.10
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks:
+      data_plane:
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.11}.10
+    deploy:
+      resources:
+        limits: { cpus: "0.75", memory: 1536M }
+
+  redis:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-redis7@sha256:1db42ccef14898aa29bae778452d567534b59c107129cbc1163fb552de184d3c
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+    command:
+      - /bin/sh
+      - -c
+      - exec redis-server --appendonly yes --appendfsync everysec --requirepass "$${REDIS_PASSWORD}" --bind 127.0.0.1 ${DATA_PLANE_PREFIX:-10.0.11}.11 --protected-mode yes
+    volumes:
+      - dsh_redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    networks:
+      data_plane:
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.11}.11
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 384M }
+
+  mock:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-mock-app@sha256:750aeb5a41847d65024c019b043502252b58ec1226f5f6a85c5ad487fa623708
+    environment:
+      MES_API_KEY: ${MES_API_KEY:?}
+      CRM_API_KEY: ${CRM_API_KEY:?}
+    expose:
+      - "8010"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "0.20", memory: 256M }
+
+  skill-runner:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-skill-runner-app@sha256:9fb2c8b9ffc1e633d57eeba7473d0d614f74543b364679daea395b12d10c6ee5
+    environment:
+      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
+      # Standard Compose runtimes honor these empty overrides. The image
+      # entrypoint also rebuilds PID 1's environment for platforms that inject
+      # application variables after Compose merging.
+      DATABASE_URL: ""
+      REDIS_URL: ""
+      POSTGRES_DB: ""
+      POSTGRES_USER: ""
+      POSTGRES_PASSWORD: ""
+      REDIS_PASSWORD: ""
+      SECRET_KEY: ""
+      MASTER_ENCRYPTION_KEY: ""
+      CRM_API_KEY: ""
+      MES_API_KEY: ""
+      DSH_RUNTIME_TOKEN: ""
+      EXTENSION_BUILDER_TOKEN: ""
+      STORAGE_GATEWAY_URL: ""
+      STORAGE_PROJECT_TOKEN: ""
+      SKILL_CACHE_ROOT: /cache
+      SKILL_RUNNER_MAX_CONCURRENCY: "${SKILL_RUNNER_MAX_CONCURRENCY:-4}"
+      SKILL_RUNNER_MAX_QUEUE: "${SKILL_RUNNER_MAX_QUEUE:-100}"
+      SKILL_RUNNER_QUEUE_WAIT_SECONDS: "${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}"
+      SKILL_RUNNER_OFFICE_CONCURRENCY: "${SKILL_RUNNER_OFFICE_CONCURRENCY:-1}"
+      SKILL_PACKAGE_MAX_BYTES: "${SKILL_PACKAGE_MAX_BYTES:-104857600}"
+      SKILL_PACKAGE_EXPANDED_MAX_BYTES: "${SKILL_PACKAGE_EXPANDED_MAX_BYTES:-524288000}"
+      SKILL_PACKAGE_MAX_FILES: "${SKILL_PACKAGE_MAX_FILES:-1000}"
+      SKILL_CACHE_RETENTION_SECONDS: "${SKILL_CACHE_RETENTION_SECONDS:-604800}"
+      SKILL_CACHE_MAX_BYTES: "${SKILL_CACHE_MAX_BYTES:-10737418240}"
+      SKILL_FAILED_TEMP_RETENTION_SECONDS: "${SKILL_FAILED_TEMP_RETENTION_SECONDS:-3600}"
+    expose:
+      - "8020"
+    volumes:
+      - dsh_skill_cache:/cache
+    read_only: true
+    tmpfs:
+      - /tmp:size=1073741824,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "1.50", memory: 2560M, pids: 512 }
+
+  dsh-runtime:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-dsh-runtime-app@sha256:00c5ffab0c00a45c9462845b21d1d40841895512d478568f792ac81a365891c0
+    environment:
+      DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
+      AI_PLATFORM_BACKEND_URL: http://backend:8000
+      PORT: "8030"
+      EXTENSION_CACHE_ROOT: /extensions
+      DSH_RUNTIME_HARD_CONCURRENCY: "${DSH_RUNTIME_HARD_CONCURRENCY:-14}"
+    expose:
+      - "8030"
+    volumes:
+      - dsh_extension_cache:/extensions
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8030/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 1536M }
+
+  extension-builder:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-extension-builder-app@sha256:972fe834170b6bcdb47add9caa48e1847793caae2e37c473804b948c9beb0910
+    environment:
+      EXTENSION_BUILDER_TOKEN: ${EXTENSION_BUILDER_TOKEN:?}
+      AI_PLATFORM_BACKEND_URL: http://backend:8000
+      PORT: "8040"
+    expose:
+      - "8040"
+    read_only: true
+    tmpfs:
+      - /tmp:size=536870912,mode=1777
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8040/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 1G, pids: 256 }
+
+  backend:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?}
+      DATABASE_URL: ${DATABASE_URL:?}
+      REDIS_URL: ${REDIS_URL:?}
+      PROXY_BASE_URL: ${PUBLIC_ORIGIN:?}
+      OAUTH_ISSUER: ${PUBLIC_ORIGIN:?}
+      OAUTH_PUBLIC_BASE_URL: ${PUBLIC_ORIGIN:?}
+      OAUTH_SIGNING_KEY: ${OAUTH_SIGNING_KEY:?}
+      BROWSER_ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:?}
+      TRUSTED_PROXY_CIDRS: "${TRUSTED_PROXY_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
+      API_KEY_CACHE_TTL: "${API_KEY_CACHE_TTL:-60}"
+      DLP_EXPOSE_MATCHES_IN_ERROR: "${DLP_EXPOSE_MATCHES_IN_ERROR:-false}"
+      CODE_SKILLS_ENABLED: "${CODE_SKILLS_ENABLED:-true}"
+      AGENT_SKILLS_ORG_ALLOWLIST: "${AGENT_SKILLS_ORG_ALLOWLIST:-alphabet}"
+      SKILL_RUNNER_URL: http://skill-runner:8020
+      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
+      SKILL_RUNNER_TIMEOUT_SECONDS: "${SKILL_RUNNER_TIMEOUT_SECONDS:-120}"
+      SKILL_RUNNER_QUEUE_WAIT_SECONDS: "${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}"
+      DSH_RUNTIME_URL: http://dsh-runtime:8030
+      DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
+      DSH_RUNTIME_TIMEOUT_SECONDS: "${DSH_RUNTIME_TIMEOUT_SECONDS:-600}"
+      AGENT_GLOBAL_CONCURRENCY: "${AGENT_GLOBAL_CONCURRENCY:-12}"
+      AGENT_USER_CONCURRENCY: "${AGENT_USER_CONCURRENCY:-2}"
+      AGENT_QUEUE_MAX: "${AGENT_QUEUE_MAX:-100}"
+      AGENT_QUEUE_WAIT_SECONDS: "${AGENT_QUEUE_WAIT_SECONDS:-300}"
+      AGENT_LEASE_SECONDS: "${AGENT_LEASE_SECONDS:-60}"
+      AGENT_HEARTBEAT_SECONDS: "${AGENT_HEARTBEAT_SECONDS:-15}"
+      AGENT_MAX_STEPS: "${AGENT_MAX_STEPS:-24}"
+      EXTENSION_BUILDER_URL: http://extension-builder:8040
+      EXTENSION_BUILDER_TOKEN: ${EXTENSION_BUILDER_TOKEN:?}
+      EXTENSION_BUILDER_TIMEOUT_SECONDS: "${EXTENSION_BUILDER_TIMEOUT_SECONDS:-600}"
+      GITHUB_MODULE_PUBLISHER_ENABLED: "${GITHUB_MODULE_PUBLISHER_ENABLED:-false}"
+      GITHUB_MODULE_PUBLISHER_OWNER: "${GITHUB_MODULE_PUBLISHER_OWNER:-ZhuoJian-AI}"
+      GITHUB_MODULE_PUBLISHER_APP_ID: "${GITHUB_MODULE_PUBLISHER_APP_ID:-}"
+      GITHUB_MODULE_PUBLISHER_INSTALLATION_ID: "${GITHUB_MODULE_PUBLISHER_INSTALLATION_ID:-}"
+      GITHUB_MODULE_PUBLISHER_PRIVATE_KEY_B64: "${GITHUB_MODULE_PUBLISHER_PRIVATE_KEY_B64:-}"
+      GITHUB_MODULE_PUBLISHER_TIMEOUT_SECONDS: "${GITHUB_MODULE_PUBLISHER_TIMEOUT_SECONDS:-20}"
+      COOLIFY_MODULE_DEPLOYER_ENABLED: "${COOLIFY_MODULE_DEPLOYER_ENABLED:-false}"
+      COOLIFY_API_URL: "${COOLIFY_API_URL:-}"
+      COOLIFY_API_TOKEN: "${COOLIFY_API_TOKEN:-}"
+      COOLIFY_TIMEOUT_SECONDS: "${COOLIFY_TIMEOUT_SECONDS:-30}"
+      MODULE_SAAS_ORIGIN: "${MODULE_SAAS_ORIGIN:-https://ai-platform-dsh.staging.zhuojianai.com}"
+      ORIGINAL_PREVIEW_ENABLED: "${ORIGINAL_PREVIEW_ENABLED:-true}"
+      ORIGINAL_PREVIEW_ORG_ALLOWLIST: "${ORIGINAL_PREVIEW_ORG_ALLOWLIST:-}"
+      MULTIMODAL_VISION_ENABLED: "${MULTIMODAL_VISION_ENABLED:-true}"
+      MULTIMODAL_VISION_ORG_ALLOWLIST: "${MULTIMODAL_VISION_ORG_ALLOWLIST:-alphabet}"
+      IMAGE_GENERATION_ENABLED: "${IMAGE_GENERATION_ENABLED:-true}"
+      IMAGE_GENERATION_ORG_ALLOWLIST: "${IMAGE_GENERATION_ORG_ALLOWLIST:-alphabet}"
+      MODEL_GATEWAY_ENABLED: "${MODEL_GATEWAY_ENABLED:-true}"
+      MODEL_GATEWAY_ORG_ALLOWLIST: "${MODEL_GATEWAY_ORG_ALLOWLIST:-alphabet}"
+      MULTIMODAL_AUDIO_ENABLED: "${MULTIMODAL_AUDIO_ENABLED:-false}"
+      MULTIMODAL_AUDIO_ORG_ALLOWLIST: "${MULTIMODAL_AUDIO_ORG_ALLOWLIST:-alphabet}"
+      MULTIMODAL_USER_CONCURRENCY: "${MULTIMODAL_USER_CONCURRENCY:-2}"
+      MULTIMODAL_DAILY_AUDIO_SECONDS: "${MULTIMODAL_DAILY_AUDIO_SECONDS:-7200}"
+      CHAT_THINKING_DISABLED_MODELS: "${CHAT_THINKING_DISABLED_MODELS:-}"
+      WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-true}"
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
+      STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
+      STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-https://oss-cn-hongkong.aliyuncs.com}"
+      STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
+      STORAGE_ACCELERATE_ENDPOINT: "${STORAGE_ACCELERATE_ENDPOINT:-https://oss-accelerate.aliyuncs.com}"
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      WORKSPACE_HYBRID_UPLOAD_ENABLED: "${WORKSPACE_HYBRID_UPLOAD_ENABLED:-true}"
+      WORKSPACE_MAX_FILE_BYTES: "${WORKSPACE_MAX_FILE_BYTES:-5368709120}"
+      WORKSPACE_AI_PARSE_MAX_BYTES: "${WORKSPACE_AI_PARSE_MAX_BYTES:-104857600}"
+      WORKSPACE_PROXY_UPLOAD_MAX_BYTES: "${WORKSPACE_PROXY_UPLOAD_MAX_BYTES:-1048576}"
+      WORKSPACE_UPLOAD_SESSION_TTL_SECONDS: "${WORKSPACE_UPLOAD_SESSION_TTL_SECONDS:-86400}"
+      WORKSPACE_WEBOFFICE_ENABLED: "${WORKSPACE_WEBOFFICE_ENABLED:-true}"
+      WORKSPACE_WEBOFFICE_EDIT_ENABLED: "${WORKSPACE_WEBOFFICE_EDIT_ENABLED:-false}"
+      WORKSPACE_OFFICE_EVENT_CALLBACK_SECRET: "${WORKSPACE_OFFICE_EVENT_CALLBACK_SECRET:-}"
+      WORKSPACE_WEBOFFICE_MAX_BYTES: "${WORKSPACE_WEBOFFICE_MAX_BYTES:-209715200}"
+      WORKSPACE_PDF_DIRECT_PREVIEW_MAX_BYTES: "${WORKSPACE_PDF_DIRECT_PREVIEW_MAX_BYTES:-20971520}"
+      WORKSPACE_PREVIEW_JOB_POLL_SECONDS: "${WORKSPACE_PREVIEW_JOB_POLL_SECONDS:-1}"
+      WORKSPACE_PREVIEW_JOB_LEASE_SECONDS: "${WORKSPACE_PREVIEW_JOB_LEASE_SECONDS:-900}"
+      WORKSPACE_TRASH_RETENTION_DAYS: "${WORKSPACE_TRASH_RETENTION_DAYS:-30}"
+    expose:
+      - "8000"
+    extra_hosts:
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.11}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.11}.11"
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        alembic upgrade head
+        && exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock:
+        condition: service_healthy
+      skill-runner:
+        condition: service_healthy
+      dsh-runtime:
+        condition: service_healthy
+      extension-builder:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    networks:
+      default:
+      data_plane:
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.11}.20
+    deploy:
+      resources:
+        limits: { cpus: "1.50", memory: 2G }
+
+  workspace-parser:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?}
+      DATABASE_URL: ${DATABASE_URL:?}
+      REDIS_URL: ${REDIS_URL:?}
+      WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-true}"
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
+      STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
+      STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-https://oss-cn-hongkong.aliyuncs.com}"
+      STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
+      STORAGE_ACCELERATE_ENDPOINT: "${STORAGE_ACCELERATE_ENDPOINT:-https://oss-accelerate.aliyuncs.com}"
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      WORKSPACE_MAX_FILE_BYTES: "${WORKSPACE_MAX_FILE_BYTES:-5368709120}"
+      WORKSPACE_AI_PARSE_MAX_BYTES: "${WORKSPACE_AI_PARSE_MAX_BYTES:-104857600}"
+      WORKSPACE_TRASH_RETENTION_DAYS: "${WORKSPACE_TRASH_RETENTION_DAYS:-30}"
+    command: ["python", "-m", "app.workers.workspace_parser"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import pathlib,sys;
+          sys.exit(0 if b'app.workers.workspace_parser' in
+          pathlib.Path('/proc/1/cmdline').read_bytes() else 1)"
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    extra_hosts:
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.11}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.11}.11"
+    depends_on:
+      backend:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:size=1073741824,mode=1777
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks:
+      default:
+      data_plane:
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.11}.21
+    deploy:
+      resources:
+        limits: { cpus: "0.75", memory: 1280M }
+
+  workspace-preview:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-workspace-preview-app@sha256:ee5cd5802e8d29d4b4b49fe6993f76dc2087daef1167ce7a0638754b561efa93
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?}
+      DATABASE_URL: ${DATABASE_URL:?}
+      REDIS_URL: ${REDIS_URL:?}
+      WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-true}"
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
+      STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
+      STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-https://oss-cn-hongkong.aliyuncs.com}"
+      STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
+      STORAGE_ACCELERATE_ENDPOINT: "${STORAGE_ACCELERATE_ENDPOINT:-https://oss-accelerate.aliyuncs.com}"
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      WORKSPACE_WEBOFFICE_MAX_BYTES: "${WORKSPACE_WEBOFFICE_MAX_BYTES:-209715200}"
+      WORKSPACE_PREVIEW_JOB_POLL_SECONDS: "${WORKSPACE_PREVIEW_JOB_POLL_SECONDS:-1}"
+      WORKSPACE_PREVIEW_JOB_LEASE_SECONDS: "${WORKSPACE_PREVIEW_JOB_LEASE_SECONDS:-900}"
+    command: ["python", "-m", "app.workers.workspace_preview"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import pathlib,sys;
+          sys.exit(0 if b'app.workers.workspace_preview' in
+          pathlib.Path('/proc/1/cmdline').read_bytes() else 1)"
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    extra_hosts:
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.11}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.11}.11"
+    depends_on:
+      backend:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:size=1073741824,mode=1777
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks:
+      default:
+      data_plane:
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.11}.24
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 2G, pids: 256 }
+
+  office-edit-reconcile:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?}
+      DATABASE_URL: ${DATABASE_URL:?}
+      REDIS_URL: ${REDIS_URL:?}
+      WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-true}"
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
+      STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
+      STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-https://oss-cn-hongkong.aliyuncs.com}"
+      STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
+      STORAGE_ACCELERATE_ENDPOINT: "${STORAGE_ACCELERATE_ENDPOINT:-https://oss-accelerate.aliyuncs.com}"
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+      WORKSPACE_WEBOFFICE_EDIT_ENABLED: "${WORKSPACE_WEBOFFICE_EDIT_ENABLED:-false}"
+      WORKSPACE_OFFICE_EVENT_CALLBACK_SECRET: "${WORKSPACE_OFFICE_EVENT_CALLBACK_SECRET:-}"
+      WORKSPACE_OFFICE_RECONCILE_POLL_SECONDS: "${WORKSPACE_OFFICE_RECONCILE_POLL_SECONDS:-1}"
+      WORKSPACE_OFFICE_RECONCILE_LEASE_SECONDS: "${WORKSPACE_OFFICE_RECONCILE_LEASE_SECONDS:-300}"
+    command: ["python", "-m", "app.workers.office_edit_reconcile"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import pathlib,sys;
+          sys.exit(0 if b'app.workers.office_edit_reconcile' in
+          pathlib.Path('/proc/1/cmdline').read_bytes() else 1)"
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    extra_hosts:
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.11}.10"
+      - "redis:${DATA_PLANE_PREFIX:-10.0.11}.11"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks:
+      default:
+      data_plane:
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.11}.25
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 384M, pids: 128 }
+
+  multimodal-worker:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?}
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY:?}
+      DATABASE_URL: ${DATABASE_URL:?}
+      REDIS_URL: ${REDIS_URL:?}
+      MODEL_GATEWAY_ENABLED: "${MODEL_GATEWAY_ENABLED:-true}"
+      MODEL_GATEWAY_ORG_ALLOWLIST: "${MODEL_GATEWAY_ORG_ALLOWLIST:-alphabet}"
+      MULTIMODAL_AUDIO_ENABLED: "${MULTIMODAL_AUDIO_ENABLED:-false}"
+      MULTIMODAL_AUDIO_ORG_ALLOWLIST: "${MULTIMODAL_AUDIO_ORG_ALLOWLIST:-alphabet}"
+      MULTIMODAL_DAILY_AUDIO_SECONDS: "${MULTIMODAL_DAILY_AUDIO_SECONDS:-7200}"
+      MULTIMODAL_WORKER_POLL_SECONDS: "${MULTIMODAL_WORKER_POLL_SECONDS:-1}"
+      MULTIMODAL_WORKER_LEASE_SECONDS: "${MULTIMODAL_WORKER_LEASE_SECONDS:-600}"
+      MULTIMODAL_AUDIO_MAX_BYTES: "${MULTIMODAL_AUDIO_MAX_BYTES:-104857600}"
+      WORKSPACE_OBJECT_STORAGE_ENABLED: "${WORKSPACE_OBJECT_STORAGE_ENABLED:-true}"
+      STORAGE_GATEWAY_URL: "${STORAGE_GATEWAY_URL:-https://storage.staging.zhuojianai.com}"
+      STORAGE_PROJECT_TOKEN: ${STORAGE_PROJECT_TOKEN:?}
+      STORAGE_PUBLIC_ENDPOINT: "${STORAGE_PUBLIC_ENDPOINT:-https://oss-cn-hongkong.aliyuncs.com}"
+      STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
+      STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
+    command: ["python", "-m", "app.workers.multimodal_worker"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import pathlib,sys;
+          sys.exit(0 if b'app.workers.multimodal_worker' in
+          pathlib.Path('/proc/1/cmdline').read_bytes() else 1)"
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    extra_hosts:
+      - "postgres:${DATA_PLANE_PREFIX:-10.0.11}.10"
+    depends_on:
+      backend:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:size=1073741824,mode=1777
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks:
+      default:
+      data_plane:
+        ipv4_address: ${DATA_PLANE_PREFIX:-10.0.11}.23
+    deploy:
+      resources:
+        limits: { cpus: "1.00", memory: 1280M, pids: 256 }
+
+  frontend:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:0a9483c28dd73b9cda51a6db0b128f74462e6eb6f789fb36e8f81a3d25f00958
+    labels:
+      # Coolify also attaches its public application network. Pin Traefik to
+      # that network so it never selects the private Compose default network.
+      traefik.docker.network: "${TRAEFIK_DOCKER_NETWORK:?}"
+    expose:
+      - "80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    logging: *default-logging
+    networks:
+      - default
+    deploy:
+      resources:
+        limits: { cpus: "0.20", memory: 256M }
+
+volumes:
+  dsh_postgres_data:
+  dsh_redis_data:
+  dsh_skill_cache:
+  dsh_extension_cache:
+
+networks:
+  # PostgreSQL and Redis are invisible to executable Skills.  Backend and the
+  # trusted workers bridge this internal network to the application network.
+  data_plane:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${DATA_PLANE_PREFIX:-10.0.11}.0/24
