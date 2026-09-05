@@ -111,6 +111,12 @@ function stable(value: unknown): string {
   return JSON.stringify(value)
 }
 
+/**
+ * The DeepSeek Harness release vendored under `vendor/` (see `VENDOR.md`).
+ * `health()` reports it and a release manifest must name exactly this version.
+ */
+export const DSH_VERSION = '0.1.0-rc.8'
+
 export function verifyRelease(request: ReleaseRequest): void {
   if (!request.release_id || !/^[a-f0-9-]{16,64}$/i.test(request.release_id)) throw new Error('invalid release id')
   const checksum = createHash('sha256').update(stable(canonicalManifest(request.manifest))).digest('hex')
@@ -118,8 +124,8 @@ export function verifyRelease(request: ReleaseRequest): void {
   if (request.manifest.node_version && request.manifest.node_version !== '22.19.0') {
     throw new Error(`release requires Node ${request.manifest.node_version}; runtime is 22.19.0`)
   }
-  if (request.manifest.dsh_version && request.manifest.dsh_version !== '0.1.0-rc.5') {
-    throw new Error(`release requires DSH ${request.manifest.dsh_version}; runtime is 0.1.0-rc.5`)
+  if (request.manifest.dsh_version && request.manifest.dsh_version !== DSH_VERSION) {
+    throw new Error(`release requires DSH ${request.manifest.dsh_version}; runtime is ${DSH_VERSION}`)
   }
   const all = [...(request.manifest.plugins ?? []), ...(request.manifest.external_extensions ?? [])]
   const enabled = all.filter(item => item.enabled !== false)

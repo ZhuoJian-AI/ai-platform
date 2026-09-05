@@ -229,7 +229,7 @@ async def adaptation_brief(
 - GitHub：{entry.repository or '无'}
 - 目标能力层：{entry.layer}
 - 操作类型：{entry.operation}
-- 当前平台：DSH 0.1.0-rc.5 / Node 22.19.0
+- 当前平台：DSH 0.1.0-rc.8 / Node 22.19.0
 
 ## 当前兼容性结论
 
@@ -366,7 +366,7 @@ def _adaptation_package_markdown(source: PlatformExtensionSource) -> str:
 - 解析版本：{source.resolved_version or '无'}
 - Commit：{source.commit_sha or '无'}
 - SHA-256：{source.artifact_sha256 or '构建尚未成功'}
-- 当前平台：DSH 0.1.0-rc.5 / Node 22.19.0
+- 当前平台：DSH 0.1.0-rc.8 / Node 22.19.0
 
 ## 自动识别结果
 

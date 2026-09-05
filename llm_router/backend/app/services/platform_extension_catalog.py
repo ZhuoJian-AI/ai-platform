@@ -6,7 +6,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-llm-runtime",
         "name": "LLM Runtime",
-        "version": "0.1.0-rc.5",
+        "version": "0.1.0-rc.8",
         "kind": "runtime_plugin",
         "required": True,
         "capabilities": ["llm_runtime"],
@@ -14,7 +14,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-session",
         "name": "Session Store",
-        "version": "0.1.0-rc.5",
+        "version": "0.1.0-rc.8",
         "kind": "runtime_plugin",
         "required": True,
         "capabilities": ["session"],
@@ -22,7 +22,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-system-prompt",
         "name": "System Prompt",
-        "version": "0.1.0-rc.5",
+        "version": "0.1.0-rc.8",
         "kind": "runtime_plugin",
         "required": True,
         "capabilities": ["system_prompt"],
@@ -30,7 +30,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-tools",
         "name": "Tool Runtime",
-        "version": "0.1.0-rc.5",
+        "version": "0.1.0-rc.8",
         "kind": "runtime_plugin",
         "required": True,
         "capabilities": ["tool_runtime"],
@@ -38,7 +38,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-agent",
         "name": "Agent Registry",
-        "version": "0.1.0-rc.5",
+        "version": "0.1.0-rc.8",
         "kind": "runtime_plugin",
         "required": True,
         "capabilities": ["agent_registry"],
@@ -46,7 +46,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-agent-loop",
         "name": "Agent Loop",
-        "version": "0.1.0-rc.5",
+        "version": "0.1.0-rc.8",
         "kind": "runtime_plugin",
         "required": True,
         "capabilities": ["coordinator"],
@@ -55,7 +55,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-invariants",
         "name": "Invariant Registry",
-        "version": "0.1.0-rc.5",
+        "version": "0.1.0-rc.8",
         "kind": "runtime_plugin",
         "required": False,
         "enabled": False,
@@ -64,7 +64,7 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-timeout",
         "name": "DSH Timeout",
-        "version": "0.1.0-rc.5",
+        "version": "0.1.0-rc.8",
         "kind": "library",
         "required": False,
         "enabled": True,
@@ -77,12 +77,54 @@ CORE_PLUGINS = [
     {
         "slug": "dsh-user-approval",
         "name": "User Approval",
-        "version": "0.1.0-rc.5",
+        "version": "0.1.0-rc.8",
         "kind": "adapter_required",
         "required": False,
         "enabled": False,
         "capabilities": ["approval"],
         "warnings": ["平台审批事件与应答通道尚未适配，禁止发布"],
+    },
+    # rc.8 providers: vendored in ``dsh_runtime/vendor`` but not yet loaded by
+    # ``runtime.ts::buildContext``.  Listed disabled so the catalog stays truthful.
+    {
+        "slug": "dsh-session-persistence-jsonl",
+        "name": "Session Persistence (JSONL)",
+        "version": "0.1.0-rc.8",
+        "kind": "runtime_plugin",
+        "required": False,
+        "enabled": False,
+        "capabilities": ["session_persistence"],
+        "description": "JSONL 会话持久化 provider（路线图 C1）：已随 rc.8 打包进运行时，尚未接线，PostgreSQL 仍是事实源",
+    },
+    {
+        "slug": "dsh-code-runtime-worker-thread",
+        "name": "Code Runtime (Worker Thread)",
+        "version": "0.1.0-rc.8",
+        "kind": "runtime_plugin",
+        "required": False,
+        "enabled": False,
+        "capabilities": ["code_runtime"],
+        "description": "worker-thread 代码运行时 provider（路线图 C2 Code Mode）：已随 rc.8 打包进运行时，尚未接线",
+    },
+    {
+        "slug": "dsh-repeat-tool-reminder",
+        "name": "Repeat Tool Reminder",
+        "version": "0.1.0-rc.8",
+        "kind": "runtime_plugin",
+        "required": False,
+        "enabled": False,
+        "capabilities": ["hook_guard"],
+        "description": "上游重复调用提醒插件（仅注入提示，不拦截）；平台当前由 policies.ts 的重复失败拦截覆盖，保留未启用",
+    },
+    {
+        "slug": "dsh-tool-call-timeout-policy",
+        "name": "Tool Call Timeout Policy",
+        "version": "0.1.0-rc.8",
+        "kind": "runtime_plugin",
+        "required": False,
+        "enabled": False,
+        "capabilities": ["hook_guard"],
+        "description": "上游工具超时插件；平台已在 registerTool 用 dsh-timeout 直接实现同等硬超时，保留未启用",
     },
 ]
 
@@ -164,7 +206,7 @@ def baseline_manifest() -> dict:
         "schema_version": 1,
         "platform_version": "0.1.0",
         "node_version": "22.19.0",
-        "dsh_version": "0.1.0-rc.5",
+        "dsh_version": "0.1.0-rc.8",
         # ``description`` is catalog-only display text; the runtime release manifest keeps its shape.
         "plugins": [{key: value for key, value in item.items() if key != "description"} for item in CORE_PLUGINS],
         "system_tools": [{**item, "kind": "system_tool", "enabled": True} for item in SYSTEM_TOOL_GROUPS],

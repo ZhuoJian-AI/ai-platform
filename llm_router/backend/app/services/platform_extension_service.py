@@ -132,7 +132,7 @@ def _core_catalog_row(row: dict) -> dict:
         "layer": layer,
         "operation": "replace" if layer == "coordinator" else "add",
         "trust_level": "platform",
-        "runtime_requirements": {"node": "22.19.0", "dsh": "0.1.0-rc.5"},
+        "runtime_requirements": {"node": "22.19.0", "dsh": "0.1.0-rc.8"},
         "compatibility_status": "needs_adapter" if row["kind"] == "adapter_required" else "compatible",
         "compatibility_reasons": warnings,
         "repository": "https://github.com/deepseek-ai/deepseek-harness",

@@ -16,8 +16,8 @@ test('checks the fixed Node 22.19 runtime contract', () => {
 })
 
 test('checks the fixed DSH runtime contract', () => {
-  assert.equal(compatibleDsh('0.1.0-rc.5'), true)
-  assert.equal(compatibleDsh('>=0.1.0-rc.5 <0.2.0'), true)
+  assert.equal(compatibleDsh('0.1.0-rc.8'), true)
+  assert.equal(compatibleDsh('>=0.1.0-rc.8 <0.2.0'), true)
   assert.equal(compatibleDsh('>=0.2.0'), false)
 })
 

@@ -18,7 +18,7 @@ from app.services import platform_extension_discovery, platform_extension_servic
 @pytest.mark.asyncio
 async def test_overview_creates_truthful_baseline(client: AsyncClient, monkeypatch):
     async def healthy():
-        return {"status": "ok", "dsh_version": "0.1.0-rc.5", "node": "v22.19.0"}
+        return {"status": "ok", "dsh_version": "0.1.0-rc.8", "node": "v22.19.0"}
 
     monkeypatch.setattr(extension_api, "runtime_health", healthy)
     response = await client.get("/api/v1/platform/extensions/overview")
@@ -86,7 +86,7 @@ async def test_npm_import_requires_exact_version(client: AsyncClient, monkeypatc
     monkeypatch.setattr(platform_extension_service, "process_source_build", no_build)
     response = await client.post(
         "/api/v1/platform/extensions/import/npm",
-        json={"package": "@deepseek-ai/dsh-agent-loop", "version": "0.1.0-rc.5"},
+        json={"package": "@deepseek-ai/dsh-agent-loop", "version": "0.1.0-rc.8"},
     )
     assert response.status_code == 202
     assert response.json()["status"] == "importing"

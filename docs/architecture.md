@@ -290,7 +290,7 @@ platform_extension_sources / catalog_entries / releases / release_events（平�
 
 - 镜像构建/推送到 `127.0.0.1:5000` 的脚本不在仓库，pin 流程按 git 历史推断。
 - prod（academy）当前 SHA `4bd27bf` 与其 Coolify 环境变量来自 hist1 考古，未直接访问服务器。
-- `dsh_runtime/vendor` 里 `@deepseek-ai/dsh-*` 0.1.0-rc.5 的内部行为（agent loop 终止条件）未读源码。
+- `dsh_runtime/vendor` 里 `@deepseek-ai/dsh-*` 的内部行为（agent loop 终止条件）未读源码（写作时为 rc.5，B2 后为 rc.8）。
 - 本文写作时 `fix/audit-2026-09-03-high` 分支有 16 个文件在并行修改（含 `dsh_internal.py`、`workspace_permission_service.py`、`runner.py`），§8 引用的行号以 `main@3435cb8` 为准。
 
 ## DSH（DeepSeek Harness）接入现状与路线图（2026-09-05）
@@ -300,8 +300,10 @@ platform_extension_sources / catalog_entries / releases / release_events（平�
 ### 现状
 
 **版本与包**
-- 平台 vendored `@deepseek-ai/dsh-*` 0.1.0-rc.5：`dsh_runtime/package.json:16-34`，19 个 tgz（含 cordis 4.0.1、schemastery 3.18.1），清单 `dsh_runtime/VENDOR.md` + `dsh_runtime/vendor/SHA256SUMS`。上游克隆是 rc.8，比 vendored 新 3 个 rc。
-- rc.5 硬编码 4 处，升级时全要改：`dsh_runtime/src/runtime.ts:133`（上报 dsh_version）、`dsh_runtime/src/extensions.ts:121-122`（manifest.dsh_version 不等即拒绝激活）、`extension_builder/src/builder.ts::compatibleDsh`（:247，:250/:321/:379 三处字面量）、`platform_extension_catalog.py:9-76,163`。
+- 平台 vendored `@deepseek-ai/dsh-*` **0.1.0-rc.8**（B2 已完成，分支 `feat/dsh-rc8-upgrade`）：`dsh_runtime/package.json` 23 个 tgz（cordis 4.0.1、schemastery 3.18.1 与 rc.5 时字节相同；17 个原有 dsh 包升到 rc.8；新增 4 个 provider：`dsh-session-persistence-jsonl`、`dsh-code-runtime-worker-thread`、`dsh-repeat-tool-reminder`、`dsh-tool-call-timeout-policy`），清单与打包步骤见 `dsh_runtime/VENDOR.md` + `dsh_runtime/vendor/SHA256SUMS`。上游克隆 HEAD `141eb6f` 即 rc.8，与 vendored 同版。
+- rc.5→rc.8 对 `dsh_runtime/src` 用到的 API 零破坏：agent-loop / tools / timeout / user-approval / session-persistence / agent / system-prompt 的 `.d.ts` 逐字相同；只有 llm（`ReplayEnvelope`、`offloadRequestImages`、重试默认 2→5）、session（`assistant/message` 新增 `interrupted?: true`）、attachment（图片准入）是纯新增。行为变化一处：agent-loop 在中途 abort 时会把已流出的文本前缀作为 `interrupted: true` 的 `assistant/message` 落盘（runtime.ts 的 cancel 路径不消费 finalText，不受影响）。
+- DSH 版本号硬编码点：`dsh_runtime/src/extensions.ts::DSH_VERSION`（唯一常量，`runtime.ts::health` 与 `verifyRelease` 都引用它）、`extension_builder/src/builder.ts::compatibleDsh`（:250/:321/:379 三处字面量）、`platform_extension_catalog.py`（`CORE_PLUGINS[*].version` + `baseline_manifest().dsh_version`）、`platform_extensions.py` 两处文案、`platform_extension_discovery.py` / `platform_extension_service.py` 的 `runtime_requirements`、`extension-sdk/templates/*/ai-platform.extension.json`。升级时 `grep -rn "rc\.8" --exclude-dir=node_modules --exclude-dir=vendor` 全改。
+- 部署前置：`infra/base-images/dsh-runtime-deps.Dockerfile` 产出的 `AI_PLATFORM_DSH_RUNTIME_DEPS_BASE` 内嵌旧 lockfile 的 node_modules，**必须先重建该基础镜像**（它现在还要 COPY `dsh_runtime/pnpm-workspace.yaml`：pnpm 11 把 koffi 的 install 脚本记为 `allowBuilds: koffi: false`，否则 `ERR_PNPM_IGNORED_BUILDS` 直接失败）。已存在的 `platform_extension_releases` 行 manifest 里仍是 `dsh_version: 0.1.0-rc.5`，rc.8 运行时会在 `verifyRelease` 拒绝重新激活（`platform_extension_service.py::reconcile` 吞异常后运行时停在内建 baseline），需超管重新发布一次基线。
 
 **运行拓扑**
 - `runtime.ts:99-104` 只加载 6 个 cordis 插件：LlmRuntime / SessionStore / SystemPrompt / ToolRuntime / AgentRegistry / AgentLoop（`maxParallelToolCalls: 1`）。dsh-timeout 等其余 vendored 包一个都没 import。
@@ -316,7 +318,7 @@ platform_extension_sources / catalog_entries / releases / release_events（平�
 
 **vendored 但未接线**
 - dsh-code-runtime、dsh-session-persistence、dsh-user-approval（`platform_extension_catalog.py:74-81` 标「平台审批事件与应答通道尚未适配，禁止发布」）、dsh-attachment、dsh-settings、dsh-scope、dsh-timeout（catalog `:65-71` 声明 `enabled: True`，但 runtime.ts 从未 import）、dsh-typert-protocol / dsh-typert-registry、dsh-invariants。
-- rc.5 tgz 全是接口层：`tar tzf` 只见 `lib/index.js` / `invariant.js` / `types/`，**没有任何 provider 实现**。jsonl 持久化（`packages/session/session-persistence-jsonl`）、worker-thread 代码运行时（`packages/code-runtime/code-runtime-worker-thread`）、repeat-tool-reminder / timeout-policy（`packages/guard/`）、subagent（`packages/subagent/`）、mcp-client（`packages/mcp/mcp-client`）只在上游 rc.8。
+- B2 之后 vendor 里多了 4 个 provider（jsonl 持久化、worker-thread 代码运行时、repeat-tool-reminder、tool-call-timeout-policy），**都只是 vendored，`runtime.ts::buildContext` 一个都没 `ctx.plugin(...)`**；C1 / C2 接线时直接 import 即可。subagent（`packages/subagent/`）、mcp-client（`packages/mcp/mcp-client`）仍只在上游。注意 jsonl 拉进了原生依赖 `koffi`（仅 Windows 路径 import，Linux 容器不加载），见 `dsh_runtime/pnpm-workspace.yaml`。
 
 ### Phase A（本分支实施）：把循环策略搬进 DSH 事件管道
 
@@ -359,7 +361,7 @@ Phase A 验证清单：
 | 项 | 内容 | 前置 | 替换掉什么 | 风险 |
 |---|---|---|---|---|
 | B1 接 dsh-user-approval | 后端 `/internal/dsh/approval/request` 挂起 Future；SSE 新事件 `approval_request`；POST `/terminal/tasks/{id}/approvals/{approval_id}` 应答；Future 120s 超时视为拒绝 | 前端审批卡（`terminal.py` 现 0 处 approval） | `workspace_permission_service.resolve_workspace_intent` 的权限提问启发式（§3.2 第 8 步） | Future 在发起 run 的 backend 进程内存里，多副本必丢（同 §9.6/9.7）；120s 内不答 = 工具失败 |
-| B2 rc.5→rc.8 升级 spike | 用上游 `scripts/release/pack.ts` 打 tgz 进 `dsh_runtime/vendor/`；同步「现状」列的 4 处硬编码 + `VENDOR.md` + `SHA256SUMS` | 先读克隆 `docs/rescope.md`（cordis 等基础库在上游已 rescope 到 `@deepseek-ai/*`，包名与 rc.5 的 `vendor/deepseek-ai-cordis-4.0.1.tgz` 对不上） | — | AgentLoop / SessionStore 钩子签名变化未评估；已发布扩展的 `manifest.dsh_version` 全部失配（`extensions.ts:121`） |
+| ~~B2 rc.5→rc.8 升级~~（已完成，`feat/dsh-rc8-upgrade`） | 用上游 `pnpm pack`（`scripts/release/pack.ts` 同一命令）逐包打 tgz 进 `dsh_runtime/vendor/`；版本常量收口到 `extensions.ts::DSH_VERSION`；步骤见 `VENDOR.md` | 上游 `docs/rescope.md` 已核：cordis / schemastery 在 rc.8 仍是 4.0.1 / 3.18.1 且字节相同，无需换包 | — | 钩子签名零变化（见「现状」）；已发布 release 行的 `manifest.dsh_version` 仍失配，需重新发布基线；deps 基础镜像必须重建 |
 | C1 dsh-session-persistence（jsonl） | sessionId=`platform-task-${task_id}`，`ctx.agents.resume` + followup 续会话；PostgreSQL 仍是事实源 | B2（jsonl provider 只在 rc.8）；dsh-runtime 容器挂持久卷 | 每轮把 `RunRequest.messages` 重渲染进 system prompt | jsonl 丢/坏要从 `task_messages` 重建的 digest 回退；`/sessions` 卷无人清理；多副本 dsh-runtime 会话不共享 |
 | C2 Code Mode | `WorkerThreadCodeRuntime` + tools mode `both`；**不替换** skill_runner | B2；重算堆上限 | 无（新增能力） | 1536M 容器（§6.1）× 14 并发 worker，各自独立 heap，`--max-old-space-size` 要重算；worker 内可直接打 backend 网络 |
 
@@ -399,7 +401,7 @@ Phase A 验证清单：
 
 11. **循环策略只在 `dsh_runtime/src/policies.ts` 一处**。再遇到「模型只 load_skill 不干活 / 重复调失败工具 / 该停不停」，改 policies.ts 或下发 `completion_policy`，不要回到 `runner.py` / `dsh_internal.py` 加关键词（§8.2 的教训）。
 12. **catalog 的 `enabled: True` ≠ 已接线**。`platform_extension_catalog.py` 只是给超管看的目录；一个包有没有生效以 `runtime.ts:99-104` 的 `ctx.plugin(...)` 为准。
-13. **vendored rc.5 只有接口层**。想用 jsonl 持久化 / worker-thread / mcp-client / subagent 任何 provider，先做 B2 升级，别在 rc.5 上等一个不存在的实现。
-14. **DSH 版本号 4 处硬编码 + `VENDOR.md` + `SHA256SUMS`**（见「现状·版本与包」），升级漏一处 = 扩展全部拒绝激活（`extensions.ts:121`）或构建器误报不兼容（`builder.ts:321`）。
+13. **vendored rc.8 含 4 个 provider 但都未接线**。jsonl 持久化 / worker-thread / repeat-tool-reminder / tool-call-timeout-policy 已在 `dsh_runtime/vendor/`，要用就在 `runtime.ts::buildContext` 里 `ctx.plugin(...)`；mcp-client / subagent 仍要从上游再打包（步骤见 `VENDOR.md`）。
+14. **DSH 版本号：`extensions.ts::DSH_VERSION` 一处 + 平台侧多处字面量 + `VENDOR.md` + `SHA256SUMS`**（清单见「现状·版本与包」），升级漏一处 = 扩展全部拒绝激活（`extensions.ts::verifyRelease`）或构建器误报不兼容（`builder.ts:321`）。
 15. **`RunRequest` / `RuntimeEvent` 是跨语言契约**，改字段走「契约同步点」六处；`policy` 这类新事件类型要先确认 `Terminal.tsx` 对未知 type 不会抛。
 16. **对外接 dsh CLI 目前只有 `/v1` 一条路**，MCP 那条被 `transport.ts:45-48`（静态 headers）× `main.py:168-170`（OAuth-only）双重锁死；不要给客户承诺「配个 URL 就能用平台工具」。

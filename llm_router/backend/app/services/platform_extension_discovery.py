@@ -143,7 +143,7 @@ def _official_rows() -> list[dict]:
                 "operation": "replace" if layer == "coordinator" else "add",
                 "kind": item["kind"],
                 "trust_level": "official",
-                "runtime_requirements": {"node": "22.19.0", "dsh": "0.1.0-rc.5"},
+                "runtime_requirements": {"node": "22.19.0", "dsh": "0.1.0-rc.8"},
                 "compatibility_status": status,
                 "compatibility_reasons": item.get("compatibility_warnings") or [],
                 "metadata_payload": {"capabilities": item.get("capabilities") or []},

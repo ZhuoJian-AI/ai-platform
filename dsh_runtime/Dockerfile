@@ -16,7 +16,7 @@ RUN if ! command -v pnpm >/dev/null 2>&1; then \
     && rm -f /tmp/pnpm-11.7.0.tgz
 
 WORKDIR /app
-COPY package.json pnpm-lock.yaml tsconfig.json ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
 COPY vendor ./vendor
 RUN for attempt in 1 2 3 4 5; do \
         if pnpm install --frozen-lockfile --trust-lockfile; then exit 0; fi; \

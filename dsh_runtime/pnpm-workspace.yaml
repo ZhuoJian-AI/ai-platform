@@ -1,0 +1,10 @@
+# pnpm 11 settings for the DSH runtime (the `pnpm` field in package.json is no longer read).
+# Every Dockerfile that runs `pnpm install` here must COPY this file next to package.json.
+#
+# koffi is a transitive dependency of @deepseek-ai/dsh-session-persistence-jsonl (rc.8) and is
+# only imported on Windows (kernel32 file locking); its prebuilt binary arrives through the
+# @koromix/koffi-<platform> optional dependencies, so the `install` script (a from-source
+# fallback needing cmake + a C++ toolchain) is denied. pnpm 11 treats an unlisted build
+# script as a hard install error (ERR_PNPM_IGNORED_BUILDS), so the decision is recorded here.
+allowBuilds:
+  koffi: false

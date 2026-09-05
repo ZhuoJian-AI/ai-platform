@@ -11,7 +11,7 @@
   "provides": ["example-tool"],
   "requires": [],
   "conflicts": [],
-  "dsh_version": "0.1.0-rc.5",
+  "dsh_version": "0.1.0-rc.8",
   "health_check": "healthCheck",
   "smoke_test": "smokeTest",
   "tools": [{
