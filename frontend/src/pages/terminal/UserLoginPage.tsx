@@ -9,6 +9,7 @@ import { auth as authApi, terminal, type OrgInfo } from '../../api/client';
 import { useUserAuth, type TerminalUserState } from '../../context/UserAuthContext';
 import { BRAND_LOGO_SLOTS, applyBrandFavicon } from '../../branding/BrandLogoSlot';
 import { BRAND_TITLES, useBrandTitle } from '../../branding/brand';
+import { loginErrorMessage } from '../../auth/loginFeedback';
 
 /**
  * 终端用户登录页（/{slug}/terminal/login）：组织员工经 slug 登录，进入灼见。
@@ -25,6 +26,7 @@ export default function UserLoginPage() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [loginError, setLoginError] = useState('');
   const [passwordChangeError, setPasswordChangeError] = useState('');
   const [pendingPasswordChange, setPendingPasswordChange] = useState<{
     token: string;
@@ -70,6 +72,7 @@ export default function UserLoginPage() {
 
   const onFinish = async (values: { username: string; password: string }) => {
     setSubmitting(true);
+    setLoginError('');
     try {
       const canonicalSlug = org?.slug || slug;
       const data = await terminal.loginBySlug(canonicalSlug, values.username, values.password);
@@ -97,7 +100,7 @@ export default function UserLoginPage() {
       }
       completeLogin(data.access_token, userState, canonicalSlug);
     } catch (err) {
-      message.error(err instanceof Error ? err.message : '登录失败');
+      setLoginError(loginErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -205,20 +208,39 @@ export default function UserLoginPage() {
               </Form.Item>
               <Button type="primary" htmlType="submit" loading={submitting} block>保存并进入</Button>
             </Form>
-          ) : <Form name="user-login" onFinish={onFinish} autoComplete="off">
-            <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]}>
-              <Input prefix={<UserOutlined />} placeholder="用户名" autoComplete="username" />
-            </Form.Item>
-            <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]}>
-              <Input.Password prefix={<LockOutlined />} placeholder="密码" autoComplete="current-password" />
-            </Form.Item>
-            <Form.Item style={{ marginBottom: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <Button type="primary" htmlType="submit" loading={submitting} style={{ flex: 1 }}>登 录</Button>
-                <ContactUs slug={org?.slug || slug} />
-              </div>
-            </Form.Item>
-          </Form>}
+          ) : (
+            <>
+              {loginError && (
+                <Alert
+                  showIcon
+                  type="error"
+                  message={loginError}
+                  closable
+                  onClose={() => setLoginError('')}
+                  style={{ marginBottom: 14 }}
+                />
+              )}
+              <Form
+                name="user-login"
+                onFinish={onFinish}
+                onValuesChange={() => setLoginError('')}
+                autoComplete="off"
+              >
+                <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]}>
+                  <Input prefix={<UserOutlined />} placeholder="用户名" autoComplete="username" />
+                </Form.Item>
+                <Form.Item name="password" rules={[{ required: true, message: '请输入密码' }]}>
+                  <Input.Password prefix={<LockOutlined />} placeholder="密码" autoComplete="current-password" />
+                </Form.Item>
+                <Form.Item style={{ marginBottom: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <Button type="primary" htmlType="submit" loading={submitting} style={{ flex: 1 }}>登 录</Button>
+                    <ContactUs slug={org?.slug || slug} />
+                  </div>
+                </Form.Item>
+              </Form>
+            </>
+          )}
         </LoginCard>
       )}
     </LoginBackdrop>

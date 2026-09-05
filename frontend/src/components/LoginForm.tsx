@@ -4,6 +4,7 @@ import { Form, Input, Button, Card, ConfigProvider, Alert } from 'antd';
 import { LockOutlined, UserOutlined, ApartmentOutlined } from '@ant-design/icons';
 import { normalizeAdminUser, useAuth } from '../context/AuthContext';
 import { setAdminCsrfToken } from '../auth/adminSession';
+import { loginErrorMessage, loginResponseError } from '../auth/loginFeedback';
 import { WB, WB_FONT, FS, antdTheme } from './finder/theme';
 import ContactUs from './ContactUs';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, type BrandLogoSlotId } from '../branding/BrandLogoSlot';
@@ -55,7 +56,7 @@ export default function LoginForm({ slug, orgName }: LoginFormProps) {
     });
     if (!resp.ok) {
       const body = await resp.json().catch(() => ({})) as { detail?: unknown };
-      throw new Error(typeof body.detail === 'string' && body.detail ? body.detail : '登录失败');
+      throw loginResponseError(resp.status, body.detail);
     }
     const data = await resp.json();
     const authenticatedAdmin = normalizeAdminUser(data.admin);
@@ -75,7 +76,7 @@ export default function LoginForm({ slug, orgName }: LoginFormProps) {
     try {
       await authenticate(values);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '未知错误');
+      setError(loginErrorMessage(reason));
     } finally {
       setLoading(false);
     }
@@ -107,7 +108,12 @@ export default function LoginForm({ slug, orgName }: LoginFormProps) {
           />
         )}
 
-        <Form name="login" onFinish={onFinish} autoComplete="off">
+        <Form
+          name="login"
+          onFinish={onFinish}
+          onValuesChange={() => setError('')}
+          autoComplete="off"
+        >
           <Form.Item name="username" rules={[{ required: true, message: '请输入用户名' }]}>
             <Input prefix={<UserOutlined />} placeholder="用户名" autoComplete="username" />
           </Form.Item>
