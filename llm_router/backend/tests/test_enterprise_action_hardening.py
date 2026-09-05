@@ -31,7 +31,13 @@ def test_update_delete_and_approve_require_a_trusted_version():
     for operation in ("update", "delete", "approve"):
         parameters = nodes._enterprise_action_parameters({"type": "object", "properties": {}}, operation)
         assert "expectedVersion" in parameters["required"]
-        assert "expectedVersion" in parameters["properties"]
+        assert parameters["properties"]["expectedVersion"]["type"] == "integer"
+
+
+def test_numeric_string_version_is_normalized_before_action_dispatch():
+    assert nodes._normalize_expected_version(" 12 ") == 12
+    assert nodes._normalize_expected_version(12) == 12
+    assert nodes._normalize_expected_version("version-12") == "version-12"
 
 
 def test_subsystem_json_error_is_preserved_and_bounded():

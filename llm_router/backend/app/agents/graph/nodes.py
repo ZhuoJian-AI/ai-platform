@@ -2684,20 +2684,28 @@ def _enterprise_action_parameters(input_schema: dict | None, operation: str) -> 
     parameters.setdefault("type", "object")
     parameters.setdefault("properties", {})
     if operation in {"update", "delete", "approve"}:
-        parameters["properties"].setdefault(
-            "expectedVersion",
-            {
-                "anyOf": [{"type": "integer"}, {"type": "string"}],
-                "description": (
-                    "必须填写刚刚查询或页面上下文返回的当前 dataVersion；"
-                    "记录已被他人修改时会返回 409，需重新查询后再操作。"
-                ),
-            },
-        )
+        parameters["properties"]["expectedVersion"] = {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "必须填写刚刚查询或页面上下文返回的当前 dataVersion 整数；"
+                "记录已被他人修改时会返回 409，需重新查询后再操作。"
+            ),
+        }
         required = parameters.setdefault("required", [])
         if "expectedVersion" not in required:
             required.append("expectedVersion")
     return parameters
+
+
+def _normalize_expected_version(value: Any) -> Any:
+    """Repair the common provider mistake of quoting an otherwise valid version."""
+
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate.isdecimal():
+            return int(candidate)
+    return value
 
 
 def _enterprise_action_request_id(
@@ -3668,7 +3676,9 @@ async def _execute_tool_call(
         application = entry["application"]
         action = entry["action"]
         action_params = dict(params)
-        expected_version = action_params.pop("expectedVersion", entry.get("expected_version"))
+        expected_version = _normalize_expected_version(
+            action_params.pop("expectedVersion", entry.get("expected_version"))
+        )
         try:
             result = await subsystem_action_service.invoke_action(
                 db,

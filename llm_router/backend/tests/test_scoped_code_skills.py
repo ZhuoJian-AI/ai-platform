@@ -538,9 +538,16 @@ def test_enterprise_mutation_tools_require_an_explicit_expected_version():
     parameters = nodes._enterprise_action_parameters(original, "delete")
 
     assert parameters["required"] == ["id", "expectedVersion"]
-    assert parameters["properties"]["expectedVersion"]["anyOf"] == [
-        {"type": "integer"}, {"type": "string"},
-    ]
+    assert parameters["properties"]["expectedVersion"] == {
+        "type": "integer",
+        "minimum": 0,
+        "description": (
+            "必须填写刚刚查询或页面上下文返回的当前 dataVersion 整数；"
+            "记录已被他人修改时会返回 409，需重新查询后再操作。"
+        ),
+    }
+    assert nodes._normalize_expected_version(" 12 ") == 12
+    assert nodes._normalize_expected_version("version-12") == "version-12"
     assert original == {
         "type": "object",
         "properties": {"id": {"type": "string"}},
