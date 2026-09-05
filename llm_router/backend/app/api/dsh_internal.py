@@ -176,6 +176,27 @@ def _authorized_tool_calls(
     return allowed
 
 
+def _authorized_model_tools(
+    tools: list[dict[str, Any]], allowed_names: set[str], *, run_token: str,
+) -> list[dict[str, Any]]:
+    """Keep the platform's per-run catalog authoritative over DSH context state."""
+    allowed: list[dict[str, Any]] = []
+    rejected: list[str] = []
+    for tool in tools:
+        name = str(tool.get("name") or "")
+        if name and name in allowed_names:
+            allowed.append(tool)
+        else:
+            rejected.append(name or "<empty>")
+    if rejected:
+        logger.warning(
+            "dsh_stale_context_tools_removed",
+            run_token=run_token[:12],
+            tools=sorted(set(rejected)),
+        )
+    return allowed
+
+
 async def _iterate_with_runtime(source: Any, deps: Any):
     """Advance a model stream with runtime context bound to the current task.
 
@@ -239,7 +260,18 @@ async def model_stream(
 
     async def _produce():
         messages = _to_platform_messages(body.messages, context.image_inputs)
-        tools = _to_platform_tools(body.tools)
+        context_allowed_tool_names = getattr(context, "allowed_tool_names", None)
+        if context_allowed_tool_names is None:
+            # Compatibility for older in-process contexts during a rolling
+            # deployment. New runs always carry the platform-built catalog.
+            context_allowed_tool_names = {
+                str(item.get("function", {}).get("name") or item.get("name") or "")
+                for item in body.tools
+                if str(item.get("function", {}).get("name") or item.get("name") or "")
+            }
+        tools = _to_platform_tools(_authorized_model_tools(
+            body.tools, context_allowed_tool_names, run_token=body.run_token,
+        ))
         allowed_tool_names = {
             str(item.get("function", {}).get("name") or "")
             for item in tools
