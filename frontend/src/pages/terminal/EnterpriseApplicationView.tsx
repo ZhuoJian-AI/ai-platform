@@ -206,6 +206,10 @@ export default function EnterpriseApplicationView({
   const submit = async () => {
     const value = prompt.trim();
     if (!value || assistantRunning) return;
+    const fallbackModuleKey = launch?.module_key ?? moduleKey ?? undefined;
+    const fallbackPageKey = fallbackModuleKey
+      ? launch?.page_keys?.find((key) => key.startsWith(`${fallbackModuleKey}.`))
+      : undefined;
     setPrompt('');
     setAssistantMessages((items) => [...items, { role: 'user', content: value }]);
     setAssistantRunning(true);
@@ -217,6 +221,8 @@ export default function EnterpriseApplicationView({
         page_url: safeContextPageUrl(launch?.url, bridgeContext.route),
         source: 'business_assistant',
         allowed_module_keys: launch?.module_keys ?? [],
+        module_key: fallbackModuleKey,
+        page_key: fallbackPageKey,
         ...bridgeContext,
       });
       setAssistantMessages((items) => [...items, {
