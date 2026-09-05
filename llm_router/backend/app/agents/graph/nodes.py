@@ -2973,7 +2973,10 @@ async def _build_tools(
         ]
         for name in disabled_managed_names:
             registry.pop(name, None)
-    external_defs = await active_external_tool_defs(
+    # 企业应用内的业务小助手只能使用当前页面获准的契约 Action。
+    # 普通聊天可见的全局扩展工具可能仍指向旧系统地址；把它们混入应用会话不仅越过
+    # 应用边界，也会让模型先逐个等待失效接口超时，造成抽屉长期停在“正在理解”。
+    external_defs = [] if application_id else await active_external_tool_defs(
         db,
         organization_id=str(user.organization_id) if user is not None else "",
         user_role=str(user.role) if user is not None else None,

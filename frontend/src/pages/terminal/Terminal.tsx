@@ -1576,6 +1576,9 @@ export default function Terminal() {
                 application={selectedApplication}
                 moduleKey={selectedApplicationModuleKey}
                 onModuleChange={setSelectedApplicationModuleKey}
+                models={modelData?.models ?? []}
+                modelAlias={config.model_alias ?? modelData?.models?.[0] ?? null}
+                onModelAliasChange={(modelAlias) => setConfig((current) => ({ ...current, model_alias: modelAlias }))}
                 immersive={applicationImmersive}
                 onOpenNavigation={() => setApplicationNavOpen(true)}
                 onToggleImmersive={() => setApplicationImmersive((value) => !value)}
@@ -1585,6 +1588,7 @@ export default function Terminal() {
                   const assistantConfig: TaskConfig = {
                     ...config,
                     model_alias: modelAlias,
+                    template_agent_id: null,
                     application_id: selectedApplication.id,
                   };
                   const task = await terminal.createTask({ message: prompt, config: assistantConfig });
@@ -1592,7 +1596,7 @@ export default function Terminal() {
                   const result = await terminal.runTask(
                     task.id,
                     prompt,
-                    selectedAgentId,
+                    null,
                     [],
                     [],
                     selectedApplication.id,
