@@ -25,6 +25,7 @@ export default function UserLoginPage() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [passwordChangeError, setPasswordChangeError] = useState('');
   const [pendingPasswordChange, setPendingPasswordChange] = useState<{
     token: string;
     oldPassword: string;
@@ -85,6 +86,7 @@ export default function UserLoginPage() {
         team_id: data.user.team_id,
       };
       if (data.must_change_password) {
+        setPasswordChangeError('');
         setPendingPasswordChange({
           token: data.access_token,
           oldPassword: values.password,
@@ -113,7 +115,12 @@ export default function UserLoginPage() {
       message.success('密码已更新，请妥善保管');
       completeLogin(data.access_token, pendingPasswordChange.user, pendingPasswordChange.canonicalSlug);
     } catch (err) {
-      message.error(err instanceof Error ? err.message : '密码修改失败');
+      const rawMessage = err instanceof Error ? err.message : '密码修改失败';
+      const errorMessage = rawMessage === 'New password must be different from the current password'
+        ? '新密码不能与初始密码相同'
+        : rawMessage;
+      setPasswordChangeError(errorMessage);
+      message.error(errorMessage);
     } finally {
       setSubmitting(false);
     }
@@ -143,19 +150,39 @@ export default function UserLoginPage() {
           subtitle={BRAND_TITLES.terminal}
         >
           {pendingPasswordChange ? (
-            <Form name="user-change-password" onFinish={onChangePassword} autoComplete="off">
+            <Form
+              name="user-change-password"
+              onFinish={onChangePassword}
+              onValuesChange={() => setPasswordChangeError('')}
+              autoComplete="off"
+            >
               <Alert
                 showIcon
                 type="warning"
                 message="首次登录需要设置自己的密码"
-                description="完成后即可进入系统并连接个人 AI 助手。"
+                description="新密码不能与初始密码相同，且至少需要 8 个字符。完成后即可进入系统并连接个人 AI 助手。"
                 style={{ marginBottom: 18 }}
               />
+              {passwordChangeError && (
+                <Alert
+                  showIcon
+                  type="error"
+                  message={passwordChangeError}
+                  style={{ marginBottom: 14 }}
+                />
+              )}
               <Form.Item
                 name="newPassword"
                 rules={[
                   { required: true, message: '请输入新密码' },
                   { min: 8, message: '密码至少 8 个字符' },
+                  {
+                    validator(_, value) {
+                      return !value || value !== pendingPasswordChange.oldPassword
+                        ? Promise.resolve()
+                        : Promise.reject(new Error('新密码不能与初始密码相同'));
+                    },
+                  },
                 ]}
               >
                 <Input.Password prefix={<LockOutlined />} placeholder="新密码（至少 8 个字符）" autoComplete="new-password" />
