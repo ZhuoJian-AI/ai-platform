@@ -129,6 +129,37 @@ def test_export_result_rejects_nested_server_paths_even_when_schema_allows_them(
         })
 
 
+def test_query_result_rejects_internal_database_paths_before_model_use():
+    action = SimpleNamespace(operation="query", result_schema={"type": "object"})
+    with pytest.raises(RuntimeError, match="不得返回服务器路径"):
+        _validate_result(action, {
+            "items": [],
+            "metadata": {"dbMode": "sqlite", "dbPath": "/data/garment.sqlite3"},
+        })
+
+
+def test_browser_relative_business_links_are_not_misclassified_as_server_paths():
+    action = SimpleNamespace(operation="query", result_schema={"type": "object"})
+    _validate_result(action, {"items": [{"detailUrl": "/orders/PO-1"}]})
+
+
+@pytest.mark.parametrize(
+    "request, expected",
+    [
+        ("根据当前业务数据生成 Excel，保存到李四个人空间", False),
+        ("创建一份 Word 报告", False),
+        ("修改刚才的 Excel 文件", False),
+        ("新增供应商并生成 Excel", True),
+        ("更新订单，然后导出一份 PDF 报告", True),
+    ],
+)
+def test_file_delivery_verbs_do_not_fake_a_business_mutation(request, expected):
+    assert runner._requests_business_mutation({
+        "application_id": "app-1",
+        "request": request,
+    }) is expected
+
+
 def test_export_file_tool_name_stays_within_provider_limit():
     name = nodes._enterprise_export_file_tool_name("x" * 64)
     assert name.endswith("_file")

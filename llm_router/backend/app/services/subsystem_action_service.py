@@ -156,7 +156,15 @@ def _contains_server_path(value) -> bool:
         return any(_contains_server_path(item) for item in value)
     elif isinstance(value, str):
         text = value.strip()
-        return bool(re.match(r"^(?:/|[a-zA-Z]:[\\/])", text))
+        return bool(
+            re.match(r"^[a-zA-Z]:[\\/]", text)
+            or re.match(
+                r"^/(?:app|backups?|bin|boot|data|dev|etc|home|lib(?:64)?|mnt|opt|proc|"
+                r"root|run|sbin|srv|storage|sys|tmp|usr|var|workspace)(?:/|$)",
+                text,
+                re.IGNORECASE,
+            )
+        )
     return False
 
 
@@ -173,6 +181,8 @@ def _validate_result(action: EnterpriseApplicationAction, result: dict) -> None:
         path = ".".join(str(part) for part in error.absolute_path)
         location = f"返回字段 {path}" if path else "Action 返回值"
         raise RuntimeError(f"{location}不符合约定：{_schema_error_message(error)}")
+    if _contains_server_path(result):
+        raise RuntimeError("子系统 Action 不得返回服务器路径或数据库备份位置")
     if action.operation == "export":
         required = {"snapshotId", "snapshotAt", "columns", "rows", "rowCount", "nextCursor"}
         if not required.issubset(result):
@@ -196,8 +206,6 @@ def _validate_result(action: EnterpriseApplicationAction, result: dict) -> None:
             raise RuntimeError("导出 Action 的 columns 必须包含唯一且非空的 key")
         if not all(isinstance(row, dict) for row in result["rows"]):
             raise RuntimeError("导出 Action 的 rows 只能包含对象数据行")
-        if _contains_server_path(result):
-            raise RuntimeError("导出 Action 不得返回服务器路径或数据库备份位置")
         declared_keys = set(column_keys)
         if any(set(row) - declared_keys for row in result["rows"]):
             raise RuntimeError("导出 Action 的 rows 包含 columns 未声明的字段")

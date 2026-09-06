@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from typing import Any
@@ -83,6 +84,13 @@ _BUSINESS_MUTATION_TERMS = (
     "删除", "移除", "作废", "恢复", "审批", "批准", "提交",
     "create", "add", "insert", "save", "update", "edit", "change", "delete", "remove", "approve",
 )
+_FILE_DESTINATION_TERMS = (
+    "个人空间", "工作空间", "部门空间", "企业公共空间", "公司空间", "文件夹", "目录",
+    "workspace", "folder", "directory",
+)
+_REQUEST_CLAUSE_SEPARATOR = re.compile(
+    r"(?:[，,。；;！!？?\n]+|并且|然后|同时|以及|随后|再|\b(?:and|then)\b)"
+)
 # Runtime-side continuation budget (``settings.agent_completion_max_nudges`` overrides if defined).
 _COMPLETION_MAX_NUDGES = 1
 _COMPLETION_NUDGE_TEXT = (
@@ -161,7 +169,21 @@ def _requests_business_mutation(state: dict) -> bool:
             continue
         for prefix in ("已", "已经", "曾", "曾经", "不要", "无需", "不必", "请勿", "禁止"):
             request = request.replace(f"{prefix}{term}", "")
-    return any(term in request for term in _BUSINESS_MUTATION_TERMS)
+    clauses = [part.strip() for part in _REQUEST_CLAUSE_SEPARATOR.split(request) if part.strip()]
+    if _requests_file_delivery(request):
+        # File delivery and subsystem mutation share verbs such as 创建、保存 and
+        # 修改. Ignore clauses whose object/destination is clearly a file or a
+        # workspace, while preserving a separate business clause such as
+        # “新增供应商并生成 Excel”.
+        clauses = [
+            clause
+            for clause in clauses
+            if not (
+                any(noun in clause for noun in _FILE_ARTIFACT_NOUNS)
+                or any(destination in clause for destination in _FILE_DESTINATION_TERMS)
+            )
+        ]
+    return any(term in clause for clause in clauses for term in _BUSINESS_MUTATION_TERMS)
 
 
 def _enterprise_operation(entry: dict, tool_name: str = "") -> str:
