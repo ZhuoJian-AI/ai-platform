@@ -143,6 +143,14 @@ try {
     const versionId = artifact.versionId || artifact.version_id;
     const fileResponse = await fetch(`/api/v1/terminal/files/${fileId}`, { headers });
     const file = await fileResponse.json();
+    const previewUrl = `/api/v1/terminal/files/${fileId}/spreadsheet-preview?version_id=${encodeURIComponent(versionId)}`;
+    let previewResponse = await fetch(previewUrl, { method: 'POST', headers });
+    let preview = await previewResponse.json();
+    for (let attempt = 0; attempt < 60 && ['queued', 'processing'].includes(preview.status); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      previewResponse = await fetch(previewUrl, { headers });
+      preview = await previewResponse.json();
+    }
     return {
       taskId: task.id,
       runStatus: taskData.run_status,
@@ -154,6 +162,8 @@ try {
       fileStatus: fileResponse.status,
       currentVersionId: file.current_version_id,
       parseStatus: file.parse_status,
+      previewStatus: preview.status,
+      previewSheets: Array.isArray(preview.sheets) ? preview.sheets.length : 0,
     };
   }, { appId: applicationId, expectedName: suggestedName });
   if (result.error) throw new Error(result.error);
@@ -161,6 +171,9 @@ try {
   if (result.fileStatus !== 200) throw new Error(`工作空间文件实时鉴权失败：${result.fileStatus}`);
   if (!result.versionId || result.currentVersionId !== result.versionId) {
     throw new Error('Artifact 版本与工作空间当前版本不一致');
+  }
+  if (result.previewStatus !== 'ready' || result.previewSheets < 1) {
+    throw new Error(`Excel 预览未就绪：${result.previewStatus || 'unknown'}`);
   }
   if (!/^[a-f0-9]{64}$/.test(result.checksumSha256 || '')) throw new Error('Artifact 缺少 SHA-256');
   console.log(`E2E workspace:verified ${JSON.stringify(result)}`);
