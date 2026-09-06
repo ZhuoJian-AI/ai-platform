@@ -89,7 +89,7 @@ _FILE_DESTINATION_TERMS = (
     "workspace", "folder", "directory",
 )
 _REQUEST_CLAUSE_SEPARATOR = re.compile(
-    r"(?:[，,。；;！!？?\n]+|并且|然后|同时|以及|随后|再|\b(?:and|then)\b)"
+    r"(?:[，,。；;！!？?\n]+|并且|然后|同时|以及|随后|并|再|\b(?:and|then)\b)"
 )
 # Runtime-side continuation budget (``settings.agent_completion_max_nudges`` overrides if defined).
 _COMPLETION_MAX_NUDGES = 1
