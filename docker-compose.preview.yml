@@ -117,7 +117,7 @@ services:
         limits: { cpus: "0.25", memory: 384M }
 
   mock:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-mock-app@sha256:750aeb5a41847d65024c019b043502252b58ec1226f5f6a85c5ad487fa623708
+    image: 127.0.0.1:5000/zhuojian/ai-platform-mock-app@sha256:0e80ca0a83fb11dcaa03de368492c94ec52534549432bbad7bbd0a1f24f16657
     environment:
       MES_API_KEY: ${MES_API_KEY:?}
       CRM_API_KEY: ${CRM_API_KEY:?}
@@ -192,7 +192,7 @@ services:
         limits: { cpus: "1.50", memory: 2560M, pids: 512 }
 
   dsh-runtime:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-dsh-runtime-app@sha256:00c5ffab0c00a45c9462845b21d1d40841895512d478568f792ac81a365891c0
+    image: 127.0.0.1:5000/zhuojian/ai-platform-dsh-runtime-app@sha256:0ba1068d7c304a522882eb285b8c4afa7d396353c40880edd16254bcfe362ffb
     environment:
       DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
       AI_PLATFORM_BACKEND_URL: http://backend:8000
@@ -217,7 +217,7 @@ services:
         limits: { cpus: "1.00", memory: 1536M }
 
   extension-builder:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-extension-builder-app@sha256:972fe834170b6bcdb47add9caa48e1847793caae2e37c473804b948c9beb0910
+    image: 127.0.0.1:5000/zhuojian/ai-platform-extension-builder-app@sha256:519328095b9077c84863a4ab389352a43faf30c16a7d93f23e1132b30839e68a
     environment:
       EXTENSION_BUILDER_TOKEN: ${EXTENSION_BUILDER_TOKEN:?}
       AI_PLATFORM_BACKEND_URL: http://backend:8000
@@ -241,7 +241,7 @@ services:
         limits: { cpus: "1.00", memory: 1G, pids: 256 }
 
   backend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:9dd1a888b8f0d1604a18264113a8ec76e78545b2888775d3fa59efe73f56e63f
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -362,7 +362,7 @@ services:
         limits: { cpus: "1.50", memory: 2G }
 
   workspace-parser:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:9dd1a888b8f0d1604a18264113a8ec76e78545b2888775d3fa59efe73f56e63f
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -413,7 +413,7 @@ services:
         limits: { cpus: "0.75", memory: 1280M }
 
   workspace-preview:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-workspace-preview-app@sha256:ee5cd5802e8d29d4b4b49fe6993f76dc2087daef1167ce7a0638754b561efa93
+    image: 127.0.0.1:5000/zhuojian/ai-platform-workspace-preview-app@sha256:b140fa7160412484da34b1c87331f30ac111b20b44929c34b71a2caeb2dab611
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -464,7 +464,7 @@ services:
         limits: { cpus: "1.00", memory: 2G, pids: 256 }
 
   office-edit-reconcile:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:9dd1a888b8f0d1604a18264113a8ec76e78545b2888775d3fa59efe73f56e63f
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -514,7 +514,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   multimodal-worker:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0f60d1d6796fc0b020945795bef02f9c802e1b11c60f805daa8c81007e17e8ed
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:9dd1a888b8f0d1604a18264113a8ec76e78545b2888775d3fa59efe73f56e63f
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -568,7 +568,7 @@ services:
         limits: { cpus: "1.00", memory: 1280M, pids: 256 }
 
   frontend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:0a9483c28dd73b9cda51a6db0b128f74462e6eb6f789fb36e8f81a3d25f00958
+    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:9d9af2159c915372bfbb8b3dd657ec870c087b210d04c41a263e0371e3c0d765
     labels:
       # Coolify also attaches its public application network. Pin Traefik to
       # that network so it never selects the private Compose default network.
