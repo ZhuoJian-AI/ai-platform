@@ -194,8 +194,8 @@ def test_file_delivery_verbs_do_not_fake_a_business_mutation(user_text, expected
 
 def test_export_file_tool_name_stays_within_provider_limit():
     name = nodes._enterprise_export_file_tool_name("x" * 64)
-    assert name.endswith("_file")
-    assert len(name) == 64
+    assert name == "business_export_to_workspace_file"
+    assert len(name) <= 64
 
 
 @pytest.mark.asyncio
