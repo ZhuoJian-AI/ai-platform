@@ -1629,12 +1629,9 @@ export default function Terminal() {
                   const created = await terminal.createTask({
                     message: '',
                     config: {
-                      ...config,
+                      workspace_id: config.workspace_id,
                       model_alias: modelAlias,
                       exec_mode: 'craft',
-                      skill_ids: [],
-                      ontology_ids: [],
-                      rag_collection_ids: [],
                       template_agent_id: null,
                       application_id: selectedApplication.id,
                     },
@@ -1657,12 +1654,9 @@ export default function Terminal() {
                   const modelAlias = config.model_alias ?? modelData?.models?.[0] ?? null;
                   if (!modelAlias) throw new Error('当前账号没有可用模型，请联系管理员配置模型权限');
                   const assistantConfig: TaskConfig = {
-                    ...config,
+                    workspace_id: config.workspace_id,
                     model_alias: modelAlias,
                     exec_mode: 'craft',
-                    skill_ids: [],
-                    ontology_ids: [],
-                    rag_collection_ids: [],
                     template_agent_id: null,
                     application_id: selectedApplication.id,
                   };
