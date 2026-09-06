@@ -61,6 +61,9 @@ class TaskApprovalDecision(BaseModel):
 class TaskRunRequest(BaseModel):
     message: str
     stream: bool = False
+    # 客户端为一次用户提交生成的稳定标识。断线重试复用它；同一 Task 的不同提交
+    # 必须使用不同标识，避免把第二条消息误接到仍在执行的上一轮。
+    client_request_id: str | None = Field(default=None, min_length=8, max_length=128)
     # 当前轮由用户明确选择的 Skill。只影响本次运行，不写回 Task.config，发送后由前端清空。
     # /slug 仍由运行时解析以兼容历史和手动输入，但选择器必须传真实 UUID，避免同名 slug 歧义。
     invoked_skill_ids: list[UUID] = Field(default_factory=list, max_length=20)
@@ -80,6 +83,9 @@ class TaskRunRequest(BaseModel):
     # 任务配置中供同一应用的后续轮次使用，切换/清空应用时立即清除。
     application_id: UUID | None = None
     page_context: dict = Field(default_factory=dict)
+    # 文件产物唯一使用这一参数命名。省略时由服务端绑定当前员工个人空间；
+    # 模型只拿到已验证后的 workspace_id，不能自行选择或扩大写入范围。
+    target_workspace_id: UUID | None = None
 
     @field_validator("page_context")
     @classmethod

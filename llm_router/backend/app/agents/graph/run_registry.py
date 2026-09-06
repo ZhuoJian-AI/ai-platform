@@ -29,9 +29,11 @@ class RunHandle:
     """一次 detach 执行的句柄。payload 统一存 SSE 已格式化的 ``data: {json}\\n\\n`` 之前的纯 JSON 字符串。"""
 
     task_id: str
+    client_request_id: str | None = None
     run_id: int | None = None
     buffer: list[str] = field(default_factory=list)  # 历史事件，供新连接回放
     queue: asyncio.Queue[str | None] = field(default_factory=asyncio.Queue)  # live tail；None=哨兵（done）
+    updated: asyncio.Event = field(default_factory=asyncio.Event)
     done: bool = False
     error: str | None = None
     final_payload: str | None = None  # final 事件 JSON，mark_done 时投递
@@ -67,6 +69,7 @@ def set_run_id(handle: RunHandle, run_id: int) -> None:
 def publish(handle: RunHandle, payload_str: str) -> None:
     """后台 runner 调用：append 历史 + 投递 live queue。"""
     handle.buffer.append(payload_str)
+    handle.updated.set()
     # put_nowait：读者若已断只是无人取，队列会留到下个读者或 drop 时清理；容量给足
     try:
         handle.queue.put_nowait(payload_str)
@@ -94,6 +97,7 @@ def mark_done(handle: RunHandle, final_payload: str | None, error: str | None = 
             handle.queue.put_nowait(final_payload)
         except asyncio.QueueFull:
             pass
+    handle.updated.set()
     # 哨兵通知所有 tail 读者退出 get() 循环
     try:
         handle.queue.put_nowait(None)

@@ -9,6 +9,7 @@ import uuid
 from typing import Any
 
 import structlog
+from fastapi import HTTPException
 from starlette.responses import Response, StreamingResponse
 
 from app.agents.dsh import client, registry
@@ -622,7 +623,7 @@ async def run_general_agent(
     *, org_id: str, user: CurrentUser, task: Any, message: str, config: dict,
     session_id: str | None, db: Any, request: Any,
     attachment_files: list[dict] | None = None, file_refs_v1: list[dict] | None = None,
-    invoked_skills: list[dict] | None = None,
+    invoked_skills: list[dict] | None = None, client_request_id: str | None = None,
 ) -> dict:
     start = time.monotonic()
     state = general_initial_state(
@@ -631,6 +632,7 @@ async def run_general_agent(
         file_refs_v1=file_refs_v1,
         invoked_skills=invoked_skills,
     )
+    state["client_request_id"] = client_request_id
     deps = general_context(db, request, user, task)
     db.add(TaskMessage(
         task_id=task.id, role="user", content=message, metadata_=user_message_metadata(state),
@@ -662,17 +664,30 @@ async def stream_general_agent(
     session_id: str | None, db: Any, request: Any,
     attachment_files: list[dict] | None = None, file_refs_v1: list[dict] | None = None,
     invoked_skills: list[dict] | None = None,
+    client_request_id: str | None = None,
 ) -> Response:
     task_id = str(task.id)
     handle = run_registry.get(task_id)
-    if handle is None or handle.done:
+    if handle is not None and not handle.done:
+        if client_request_id and handle.client_request_id == client_request_id:
+            return StreamingResponse(
+                sse_replay_and_tail(handle), status_code=200,
+                media_type="text/event-stream", headers=_SSE_HEADERS,
+            )
+        raise HTTPException(status_code=409, detail="当前对话已有任务正在执行，请等待完成后再提交")
+    if handle is not None and handle.done:
+        run_registry.drop(task_id)
+        handle = None
+    if handle is None:
         handle = run_registry.get_or_register(task_id)
+        handle.client_request_id = client_request_id
         state = general_initial_state(
             org_id=org_id, user=user, task_id=task_id, message=message,
             session_id=session_id or f"sess-{uuid.uuid4()}", config=config,
             attachment_files=attachment_files, file_refs_v1=file_refs_v1,
             invoked_skills=invoked_skills,
         )
+        state["client_request_id"] = client_request_id
         handle.bg_task = asyncio.create_task(
             _run_bg(handle, state=state, user=user, task=task), name=f"dsh_agent_run:{task_id}",
         )

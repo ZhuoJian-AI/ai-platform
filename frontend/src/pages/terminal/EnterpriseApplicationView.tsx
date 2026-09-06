@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Badge, Button, Card, Drawer, Empty, Input, Result, Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import {
-  AppstoreOutlined, CheckCircleFilled, CloseCircleFilled, ExportOutlined,
+  AppstoreOutlined, CheckCircleFilled, CloseCircleFilled, DownloadOutlined, ExportOutlined, EyeOutlined, FileTextOutlined,
   FullscreenExitOutlined, FullscreenOutlined, LoadingOutlined, ReloadOutlined,
-  RobotOutlined, SendOutlined,
+  RobotOutlined, SendOutlined, UploadOutlined,
 } from '@ant-design/icons';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ApiError, terminal, type EnterpriseApplicationLaunch, type TerminalEnterpriseApplication,
+  type TerminalTaskMessage, type WorkspaceFileRefV1, type WorkspaceFileSummary,
   type TerminalApprovalDecidedBy, type TerminalApprovalOutcome,
 } from '../../api/client';
 import ApprovalCard, { type ApprovalCardData } from '../../components/terminal/ApprovalCard';
@@ -66,7 +69,58 @@ type AssistantConversationMessage = {
   failed?: boolean;
   startedAt?: number;
   elapsedSeconds?: number;
+  artifacts?: BusinessArtifact[];
 };
+
+export type BusinessArtifact = {
+  fileId: string;
+  versionId: string | null;
+  workspaceId: string;
+  canonicalPath: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  checksumSha256: string | null;
+  source?: Record<string, unknown>;
+};
+
+export type BusinessAssistantTurnResult = {
+  taskId: string;
+  runId: number | null;
+  userMessageId: string | null;
+  assistantMessageId: string | null;
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  content: string;
+  artifacts: BusinessArtifact[];
+  error: string | null;
+};
+
+export function businessArtifactsFromMessage(message: TerminalTaskMessage | undefined): BusinessArtifact[] {
+  const raw = message?.metadata?.artifacts;
+  if (!Array.isArray(raw)) return [];
+  const deduped = new Map<string, BusinessArtifact>();
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const value = item as Record<string, unknown>;
+    const fileId = typeof value.file_id === 'string' ? value.file_id : '';
+    const versionId = typeof value.version_id === 'string'
+      ? value.version_id
+      : typeof value.current_version_id === 'string' ? value.current_version_id : null;
+    if (!fileId || !versionId) continue;
+    deduped.set(`${fileId}:${versionId}`, {
+      fileId,
+      versionId,
+      workspaceId: typeof value.workspace_id === 'string' ? value.workspace_id : '',
+      canonicalPath: typeof value.canonical_path === 'string' ? value.canonical_path : '',
+      name: typeof value.display_name === 'string' ? value.display_name : '生成文件',
+      mimeType: typeof value.mime_type === 'string' ? value.mime_type : 'application/octet-stream',
+      sizeBytes: typeof value.size === 'number' ? value.size : 0,
+      checksumSha256: typeof value.checksum_sha256 === 'string' ? value.checksum_sha256 : null,
+      source: value.source && typeof value.source === 'object' ? value.source as Record<string, unknown> : undefined,
+    });
+  }
+  return [...deduped.values()];
+}
 
 type BusinessAssistantApproval = ApprovalCardData & { taskId: string };
 
@@ -154,6 +208,12 @@ export default function EnterpriseApplicationView({
   immersive,
   onOpenNavigation,
   onToggleImmersive,
+  businessTaskId,
+  onNewConversation,
+  targetWorkspaceId,
+  workspaceOptions,
+  onTargetWorkspaceChange,
+  onOpenArtifact,
 }: {
   application: TerminalEnterpriseApplication;
   moduleKey: string | null;
@@ -162,19 +222,29 @@ export default function EnterpriseApplicationView({
     prompt: string,
     pageContext: Record<string, unknown>,
     onProgress: (event: Record<string, unknown>) => void,
-  ) => Promise<string>;
+    fileRefs: WorkspaceFileRefV1[],
+  ) => Promise<BusinessAssistantTurnResult>;
   models: string[];
   modelAlias: string | null;
   onModelAliasChange: (modelAlias: string) => void;
   immersive: boolean;
   onOpenNavigation: () => void;
   onToggleImmersive: () => void;
+  businessTaskId: string | null;
+  onNewConversation: () => Promise<void>;
+  targetWorkspaceId: string | null;
+  workspaceOptions: Array<{ value: string; label: string }>;
+  onTargetWorkspaceChange: (workspaceId: string) => void;
+  onOpenArtifact: (fileId: string, versionId: string | null) => void;
 }) {
   const queryClient = useQueryClient();
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [assistantRunning, setAssistantRunning] = useState(false);
   const [assistantMessages, setAssistantMessages] = useState<AssistantConversationMessage[]>([]);
+  const [selectedInputFileIds, setSelectedInputFileIds] = useState<string[]>([]);
+  const [uploadingInput, setUploadingInput] = useState(false);
+  const [creatingConversation, setCreatingConversation] = useState(false);
   const [runtimeApprovals, setRuntimeApprovals] = useState<BusinessAssistantApproval[]>([]);
   const [frameKey, setFrameKey] = useState(0);
   const [frameLoaded, setFrameLoaded] = useState(false);
@@ -182,9 +252,31 @@ export default function EnterpriseApplicationView({
   const [bridgeContext, setBridgeContext] = useState<Record<string, unknown>>({});
   const frameRef = useRef<HTMLIFrameElement>(null);
   const launchRequestRef = useRef(0);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   const [launch, setLaunch] = useState<EnterpriseApplicationLaunch>();
   const [launchLoading, setLaunchLoading] = useState(true);
   const [launchError, setLaunchError] = useState<unknown>();
+  const { data: restoredBusinessTask } = useQuery({
+    queryKey: ['terminal-business-task', businessTaskId],
+    queryFn: () => terminal.getTask(businessTaskId!),
+    enabled: Boolean(businessTaskId),
+  });
+  const { data: availableInputFiles = [] } = useQuery<WorkspaceFileSummary[]>({
+    queryKey: ['terminal-business-input-files'],
+    queryFn: () => terminal.listAllWsFiles(),
+    enabled: assistantOpen,
+  });
+
+  useEffect(() => {
+    if (!restoredBusinessTask || assistantRunning) return;
+    setAssistantMessages(restoredBusinessTask.messages
+      .filter((item) => item.role === 'user' || item.role === 'assistant')
+      .map((item) => ({
+        role: item.role as 'user' | 'assistant',
+        content: item.content,
+        artifacts: item.role === 'assistant' ? businessArtifactsFromMessage(item) : [],
+      })));
+  }, [restoredBusinessTask, assistantRunning]);
 
   const updateRunningAssistant = useCallback((
     update: (message: AssistantConversationMessage) => AssistantConversationMessage,
@@ -355,7 +447,17 @@ export default function EnterpriseApplicationView({
     ]);
     setAssistantRunning(true);
     try {
-      const answer = await onAskAI(value, {
+      const selectedFileRefs: WorkspaceFileRefV1[] = selectedInputFileIds.map((fileId) => {
+        const selected = availableInputFiles.find((item) => item.id === fileId);
+        return {
+          file_id: fileId,
+          scope: 'task',
+          ...(selected?.current_version_id
+            ? { version_id: selected.current_version_id, follow_latest: false }
+            : { follow_latest: true }),
+        };
+      });
+      const result = await onAskAI(value, {
         application_id: application.id,
         application_slug: application.slug,
         application_name: application.name,
@@ -400,10 +502,11 @@ export default function EnterpriseApplicationView({
           ...item,
           progress: appendProgress(item.progress, progress),
         }));
-      });
+      }, selectedFileRefs);
       updateRunningAssistant((item) => ({
         ...item,
-        content: answer || '操作已完成。',
+        content: result.content || '操作已完成。',
+        artifacts: result.artifacts,
         running: false,
         elapsedSeconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
         progress: appendProgress(item.progress, { key: 'done', label: '回答已经生成' }),
@@ -423,6 +526,47 @@ export default function EnterpriseApplicationView({
       }));
     } finally {
       setAssistantRunning(false);
+    }
+  };
+
+  const uploadInputFiles = async (files: FileList | null) => {
+    if (!files?.length || !targetWorkspaceId || assistantRunning) return;
+    setUploadingInput(true);
+    try {
+      const uploadedIds: string[] = [];
+      for (const file of Array.from(files).slice(0, 5)) {
+        const safeName = file.name.replace(/[\\/:*?"<>|]+/g, '-').replace(/^\.+/, '') || '附件';
+        const uploaded = await terminal.uploadWsFile(
+          targetWorkspaceId,
+          file,
+          `会话附件/业务助手/${crypto.randomUUID()}-${safeName}`,
+        );
+        uploadedIds.push(uploaded.id);
+      }
+      setSelectedInputFileIds((current) => [...new Set([...current, ...uploadedIds])]);
+      await queryClient.invalidateQueries({ queryKey: ['terminal-business-input-files'] });
+      message.success(`已上传并引用 ${uploadedIds.length} 个文件`);
+    } catch (uploadError) {
+      message.error(uploadError instanceof ApiError ? uploadError.message : '附件上传失败');
+    } finally {
+      if (attachmentInputRef.current) attachmentInputRef.current.value = '';
+      setUploadingInput(false);
+    }
+  };
+
+  const downloadArtifact = async (artifact: BusinessArtifact) => {
+    try {
+      const blob = await terminal.downloadWsFile(artifact.fileId, undefined, artifact.versionId ?? undefined);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = artifact.name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '文件下载失败');
     }
   };
 
@@ -503,7 +647,23 @@ export default function EnterpriseApplicationView({
         <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}><Result icon={<ExportOutlined style={{ color: '#6366f1' }} />} title={`${application.name} 配置为独立打开`} subTitle="应用仍由原项目独立部署和迭代；AI Platform 负责权限、导航和业务助手。" extra={<Button type="primary" onClick={() => void openFreshLaunch()}>打开应用</Button>} /></div>
       )}
 
-      <Drawer title={<Space><RobotOutlined style={{ color: '#6366f1' }} />{application.name} · 业务小助手</Space>} open={assistantOpen} onClose={() => setAssistantOpen(false)} width={400}>
+      <Drawer
+        title={<Space><RobotOutlined style={{ color: '#6366f1' }} />{application.name} · 业务小助手</Space>}
+        extra={<Button size="small" loading={creatingConversation} disabled={assistantRunning} onClick={async () => {
+          setCreatingConversation(true);
+          try {
+            await onNewConversation();
+            setAssistantMessages([]);
+            setSelectedInputFileIds([]);
+            setRuntimeApprovals([]);
+          } catch (error) {
+            message.error(error instanceof Error ? error.message : '新建对话失败');
+          } finally {
+            setCreatingConversation(false);
+          }
+        }}>新建对话</Button>}
+        open={assistantOpen} onClose={() => setAssistantOpen(false)} width={420}
+      >
         <Alert
           showIcon type="info"
           message={typeof bridgeContext.module_name === 'string' ? `已连接当前模块：${bridgeContext.module_name}` : '助手会携带当前应用上下文'}
@@ -521,6 +681,55 @@ export default function EnterpriseApplicationView({
             placeholder="请选择模型"
             style={{ width: '100%', marginTop: 8 }}
           />
+        </div>
+        <div style={{ marginBottom: 18 }}>
+          <Typography.Text strong>文件保存位置</Typography.Text>
+          <Select
+            aria-label="选择业务小助手文件保存位置"
+            value={targetWorkspaceId ?? undefined}
+            options={workspaceOptions}
+            onChange={onTargetWorkspaceChange}
+            disabled={assistantRunning}
+            placeholder="默认保存到个人空间"
+            style={{ width: '100%', marginTop: 8 }}
+          />
+        </div>
+        <div style={{ marginBottom: 18 }}>
+          <Typography.Text strong>本对话引用文件</Typography.Text>
+          <Select
+            mode="multiple"
+            aria-label="选择业务小助手引用文件"
+            value={selectedInputFileIds}
+            options={availableInputFiles.map((file) => ({
+              value: file.id,
+              label: `${file.presentation?.display_name || file.original_filename || file.path} · ${file.workspace_name}`,
+            }))}
+            onChange={setSelectedInputFileIds}
+            disabled={assistantRunning || uploadingInput}
+            placeholder="可选择当前有权读取的工作空间文件"
+            optionFilterProp="label"
+            showSearch
+            maxTagCount="responsive"
+            style={{ width: '100%', marginTop: 8 }}
+          />
+          <input
+            ref={attachmentInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(event) => { void uploadInputFiles(event.target.files); }}
+          />
+          <Button
+            size="small"
+            icon={<UploadOutlined />}
+            loading={uploadingInput}
+            disabled={assistantRunning || !targetWorkspaceId}
+            onClick={() => attachmentInputRef.current?.click()}
+            style={{ marginTop: 8 }}
+          >
+            上传并引用
+          </Button>
+          {!targetWorkspaceId && <Typography.Text type="secondary" style={{ marginLeft: 8 }}>请先选择可写工作空间</Typography.Text>}
         </div>
         {pendingConfirmations.length > 0 && <div style={{ marginBottom: 18 }}>
           <Typography.Title level={5}>等待你确认的操作</Typography.Title>
@@ -587,7 +796,22 @@ export default function EnterpriseApplicationView({
                     {item.running && <div className="business-assistant-progress__hint">执行仍在继续，进度会自动更新，请不用重复提交。</div>}
                   </div>
                 ) : null}
-                {item.content && <Typography.Paragraph style={{ margin: '8px 0 0' }}>{item.content}</Typography.Paragraph>}
+                {item.content && item.role === 'assistant' ? (
+                  <div className="business-assistant-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown></div>
+                ) : item.content ? <Typography.Paragraph style={{ margin: '8px 0 0' }}>{item.content}</Typography.Paragraph> : null}
+                {!!item.artifacts?.length && <section aria-label="本轮交付文件" style={{ display: 'grid', gap: 8, marginTop: 10 }}>
+                  {item.artifacts.map((artifact) => <Card
+                    key={`${artifact.fileId}:${artifact.versionId}`}
+                    size="small"
+                    title={<Space><FileTextOutlined />{artifact.name}</Space>}
+                    extra={<Space>
+                      <Button size="small" icon={<EyeOutlined />} onClick={() => onOpenArtifact(artifact.fileId, artifact.versionId)}>预览</Button>
+                      <Button size="small" icon={<DownloadOutlined />} onClick={() => void downloadArtifact(artifact)}>下载</Button>
+                    </Space>}
+                  >
+                    <Typography.Text type="secondary">{artifact.canonicalPath || '已保存到工作空间'} · {artifact.sizeBytes} 字节</Typography.Text>
+                  </Card>)}
+                </section>}
               </div>
             ))}
           </div>

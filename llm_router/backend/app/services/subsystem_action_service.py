@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote, urljoin
@@ -141,6 +142,69 @@ def _validate_params(action: EnterpriseApplicationAction, params: dict) -> None:
     path = ".".join(str(part) for part in error.absolute_path)
     location = f"参数 {path}" if path else "Action 参数"
     raise HTTPException(status_code=422, detail=f"{location}不符合约定：{_schema_error_message(error)}")
+
+
+def _contains_server_path(value) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = str(key).replace("_", "").casefold()
+            if normalized in {"backuppath", "serverpath", "filesystempath", "localpath"}:
+                return True
+            if _contains_server_path(item):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_server_path(item) for item in value)
+    elif isinstance(value, str):
+        text = value.strip()
+        return bool(re.match(r"^(?:/|[a-zA-Z]:[\\/])", text))
+    return False
+
+
+def _validate_result(action: EnterpriseApplicationAction, result: dict) -> None:
+    """Validate untrusted subsystem output before it reaches the model."""
+
+    schema = action.result_schema or {}
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as exc:
+        raise RuntimeError("子系统 Action 返回 Schema 无效") from exc
+    error = best_match(Draft202012Validator(schema).iter_errors(result))
+    if error is not None:
+        path = ".".join(str(part) for part in error.absolute_path)
+        location = f"返回字段 {path}" if path else "Action 返回值"
+        raise RuntimeError(f"{location}不符合约定：{_schema_error_message(error)}")
+    if action.operation == "export":
+        required = {"snapshotId", "snapshotAt", "columns", "rows", "rowCount", "nextCursor"}
+        if not required.issubset(result):
+            raise RuntimeError("导出 Action 必须返回标准分页数据集")
+        if (
+            not isinstance(result.get("snapshotId"), str) or not result["snapshotId"].strip()
+            or not isinstance(result.get("snapshotAt"), str) or not result["snapshotAt"].strip()
+            or not isinstance(result.get("columns"), list)
+            or not isinstance(result.get("rows"), list)
+            or not isinstance(result.get("rowCount"), int)
+            or result.get("rowCount", -1) < 0
+            or result.get("nextCursor") is not None and not isinstance(result.get("nextCursor"), str)
+        ):
+            raise RuntimeError("导出 Action 的分页数据集字段类型不正确")
+        columns = result["columns"]
+        column_keys = [
+            item.get("key") for item in columns
+            if isinstance(item, dict) and isinstance(item.get("key"), str) and item["key"].strip()
+        ]
+        if len(column_keys) != len(columns) or len(set(column_keys)) != len(column_keys):
+            raise RuntimeError("导出 Action 的 columns 必须包含唯一且非空的 key")
+        if not all(isinstance(row, dict) for row in result["rows"]):
+            raise RuntimeError("导出 Action 的 rows 只能包含对象数据行")
+        if _contains_server_path(result):
+            raise RuntimeError("导出 Action 不得返回服务器路径或数据库备份位置")
+        declared_keys = set(column_keys)
+        if any(set(row) - declared_keys for row in result["rows"]):
+            raise RuntimeError("导出 Action 的 rows 包含 columns 未声明的字段")
+        if len(result["rows"]) > result["rowCount"]:
+            raise RuntimeError("导出 Action 当前页行数不能超过 rowCount")
+        if isinstance(result.get("nextCursor"), str) and not result["nextCursor"].strip():
+            raise RuntimeError("导出 Action 的 nextCursor 不能为空字符串")
 
 
 async def _integration_or_409(db: AsyncSession, application_id: UUID | str) -> EnterpriseApplicationIntegration:
@@ -393,6 +457,7 @@ async def _execute_request(
             raise ValueError("Subsystem action response exceeds 2MB")
         body = response.json()
         result = body if isinstance(body, dict) else {"value": body}
+        _validate_result(action, result)
         request_row.status = "completed"
         request_row.result = result
         request_row.error = None

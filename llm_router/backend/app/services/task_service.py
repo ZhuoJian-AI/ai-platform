@@ -272,38 +272,9 @@ async def update_task(db: AsyncSession, task: Task, data: TaskUpdate) -> Task:
 
 
 async def soft_delete_task(db: AsyncSession, task: Task) -> None:
-    """软删除任务，并一并清理该任务在工作空间中产出的文件。
-
-    工作空间输出文件以 ``metadata.task_id`` 标记归属（见 graph 节点 workspace_write_file）；
-    删除任务时把它们同步软删除，避免工作空间残留孤立产物。
-    """
-    await _soft_delete_task_files(db, task)
+    """只软删除对话；已经交付到工作空间的文件及版本保持不变。"""
     task.deleted_at = datetime.now(UTC)
     await db.flush()
-
-
-async def _soft_delete_task_files(db: AsyncSession, task: Task) -> int:
-    """Delete only task-created stable file generations, never matching paths."""
-    messages = list((await db.execute(select(TaskMessage).where(
-        TaskMessage.task_id == task.id,
-        TaskMessage.role == "assistant",
-    ).order_by(TaskMessage.created_at))).scalars().all())
-    owned: dict[UUID, UUID] = {}
-    for message in messages:
-        for file_id, version_id, created_new in _message_file_generations(message):
-            if created_new:
-                owned[file_id] = version_id
-            elif file_id in owned:
-                # A later task mutation keeps ownership but advances the exact
-                # generation that may safely be removed with this task.
-                owned[file_id] = version_id
-    # Use the same row-lock, active-room and outbox path as direct/folder
-    # deletion.  A task cleanup must never tombstone a file while its human
-    # WebOffice editor is still saving.
-    from app.services import workspace_service
-
-    files = await workspace_service.soft_delete_file_generations(db, owned)
-    return len(files)
 
 
 async def list_messages(db: AsyncSession, task_id: UUID) -> list[TaskMessage]:
@@ -315,26 +286,10 @@ async def list_messages(db: AsyncSession, task_id: UUID) -> list[TaskMessage]:
     return list((await db.execute(stmt)).scalars().all())
 
 
-def _message_file_generations(message: TaskMessage) -> list[tuple[UUID, UUID, bool]]:
-    """Read trusted stable ids/generations persisted by ``save_memory``."""
-    values = (message.metadata_ or {}).get("artifacts") or []
-    result: list[tuple[UUID, UUID, bool]] = []
-    for item in values:
-        if not isinstance(item, dict):
-            continue
-        try:
-            file_id = UUID(str(item.get("file_id") or ""))
-            version_id = UUID(str(item.get("current_version_id") or ""))
-        except (TypeError, ValueError):
-            continue
-        result.append((file_id, version_id, item.get("created_new") is True))
-    return result
-
-
 async def soft_delete_task_turn(
     db: AsyncSession, task: Task, user_message_id: UUID,
 ) -> dict:
-    """Delete a turn and only its exact task-created file generations."""
+    """Delete one conversation turn without deleting delivered workspace files."""
     # 1) 定位本轮 user / assistant 消息
     stmt = (
         select(TaskMessage)
@@ -375,23 +330,12 @@ async def soft_delete_task_turn(
     )
     assistant_msg = (await db.execute(stmt_asst)).scalar_one_or_none()
 
-    # 2) Stable IDs cannot accidentally select a later upload that reused the
-    # same path.  The generation check also preserves a file updated later.
-    generations = _message_file_generations(assistant_msg) if assistant_msg is not None else []
-    owned = {
-        file_id: version_id
-        for file_id, version_id, created_new in generations
-        if created_new
-    }
-    from app.services import workspace_service
-
-    deleted_files = len(await workspace_service.soft_delete_file_generations(db, owned))
-
-    # 3) 删除消息（硬删除——TaskMessage 无 SoftDeleteMixin，对话历史不留软删除残留）
+    # 2) 删除消息引用。工作空间文件有独立生命周期，只有用户在工作空间执行
+    # 明确删除时才进入回收站，不能因删除聊天而丢失已交付成果。
     to_delete = [user_msg]
     if assistant_msg is not None:
         to_delete.append(assistant_msg)
     for m in to_delete:
         await db.delete(m)
     await db.flush()
-    return {"deleted_messages": len(to_delete), "deleted_files": deleted_files}
+    return {"deleted_messages": len(to_delete), "deleted_files": 0}

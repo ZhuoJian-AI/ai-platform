@@ -156,6 +156,7 @@ export default function EnterpriseAccessControl() {
     [application.id, integrationQueries[index]?.data as EnterpriseApplicationIntegration | undefined]
   ))), [appList, integrationVersion]);
   const role = roleList.find(item => item.id === selectedRoleId) ?? roleList.find(item => item.is_active);
+  const inheritsAllWorkspaceAccess = Boolean(role?.permission_codes.includes('*'));
   const organizationDepartments = useMemo(() => Array.from(nodeMap.values())
     .filter(node => node.type === 'department' && node.orgId === orgId)
     .sort((left, right) => (
@@ -189,9 +190,10 @@ export default function EnterpriseAccessControl() {
     setDrafts(nextDrafts);
     const permissions = new Set(role.permission_codes);
     setDepartmentDraft(Object.fromEntries(organizationDepartments.map(department => [department.id, {
-      read: permissions.has(`${DEPARTMENT_READ_PREFIX}${department.id}`)
+      read: permissions.has('*')
+        || permissions.has(`${DEPARTMENT_READ_PREFIX}${department.id}`)
         || permissions.has(`${DEPARTMENT_UPLOAD_PREFIX}${department.id}`),
-      upload: permissions.has(`${DEPARTMENT_UPLOAD_PREFIX}${department.id}`),
+      upload: permissions.has('*') || permissions.has(`${DEPARTMENT_UPLOAD_PREFIX}${department.id}`),
     }])));
     setLegacyVisible(nextLegacy);
     // organizationDepartments 以 organizationDepartmentKey（部门 id 串）作为稳定依赖代理
@@ -231,7 +233,7 @@ export default function EnterpriseAccessControl() {
       const retainedPermissionCodes = role.permission_codes.filter(code => (
         !code.startsWith(DEPARTMENT_READ_PREFIX) && !code.startsWith(DEPARTMENT_UPLOAD_PREFIX)
       ));
-      const workspacePermissionCodes = Object.entries(departmentDraft).flatMap(([departmentId, access]) => {
+      const workspacePermissionCodes = inheritsAllWorkspaceAccess ? [] : Object.entries(departmentDraft).flatMap(([departmentId, access]) => {
         if (access.upload) return [`${DEPARTMENT_READ_PREFIX}${departmentId}`, `${DEPARTMENT_UPLOAD_PREFIX}${departmentId}`];
         return access.read ? [`${DEPARTMENT_READ_PREFIX}${departmentId}`] : [];
       });
@@ -282,7 +284,9 @@ export default function EnterpriseAccessControl() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['enterprise-applications', orgId] });
       qc.invalidateQueries({ queryKey: ['roles', orgId] });
-      const departmentCount = Object.values(departmentDraft).filter(access => access.read || access.upload).length;
+      const departmentCount = inheritsAllWorkspaceAccess
+        ? organizationDepartments.length
+        : Object.values(departmentDraft).filter(access => access.read || access.upload).length;
       const pageCountTotal = Object.values(drafts).reduce((total, appDraft) => (
         total + Object.values(appDraft).reduce((sum, access) => sum + pageCount(access), 0)
       ), 0);
@@ -553,7 +557,7 @@ export default function EnterpriseAccessControl() {
         <Button icon={<PlusOutlined />} onClick={() => { roleForm.resetFields(); setRoleModalOpen(true); }}>新建角色</Button>
         <div className="toolbar-summary">
           <span>当前草稿</span>
-          <strong>{Object.values(departmentDraft).filter(access => access.read || access.upload).length} 个部门</strong>
+          <strong>{grantedDepartmentCount} 个部门</strong>
           <i />
           <strong>{grantedPageTotal} 个页面</strong>
         </div>
@@ -573,21 +577,24 @@ export default function EnterpriseAccessControl() {
                     <span>员工仍只归属一个主部门；这里配置跨部门查看和协作，不改变员工归属。</span>
                   </div>
                   <div className="workspace-bulk-actions">
-                    <span>已授权 {grantedDepartmentCount} / {organizationDepartments.length} 个部门</span>
+                    <span>
+                      已授权 {grantedDepartmentCount} / {organizationDepartments.length} 个部门
+                      {inheritsAllWorkspaceAccess ? '（继承自 *）' : ''}
+                    </span>
                     <Space.Compact>
                       <Button
                         size="small"
-                        disabled={!role || !organizationDepartments.length}
+                        disabled={!role || !organizationDepartments.length || inheritsAllWorkspaceAccess}
                         onClick={() => applyDepartmentPreset({ read: true, upload: false })}
                       >全部只读</Button>
                       <Button
                         size="small"
-                        disabled={!role || !organizationDepartments.length}
+                        disabled={!role || !organizationDepartments.length || inheritsAllWorkspaceAccess}
                         onClick={() => applyDepartmentPreset({ read: true, upload: true })}
                       >全部协作</Button>
                       <Button
                         size="small"
-                        disabled={!role || grantedDepartmentCount === 0}
+                        disabled={!role || grantedDepartmentCount === 0 || inheritsAllWorkspaceAccess}
                         onClick={() => applyDepartmentPreset({ read: false, upload: false })}
                       >清空授权</Button>
                     </Space.Compact>
@@ -602,7 +609,7 @@ export default function EnterpriseAccessControl() {
                             aria-label="全选或取消全部部门协作权限"
                             checked={allDepartmentsWritable}
                             indeterminate={writableDepartmentCount > 0 && !allDepartmentsWritable}
-                            disabled={!role || !organizationDepartments.length}
+                            disabled={!role || !organizationDepartments.length || inheritsAllWorkspaceAccess}
                             onChange={event => applyDepartmentPreset(event.target.checked
                               ? { read: true, upload: true }
                               : { read: false, upload: false })}
@@ -616,7 +623,7 @@ export default function EnterpriseAccessControl() {
                             aria-label="全选或取消全部部门查看下载权限"
                             checked={allDepartmentsReadable}
                             indeterminate={readableDepartmentCount > 0 && !allDepartmentsReadable}
-                            disabled={!role || !organizationDepartments.length}
+                            disabled={!role || !organizationDepartments.length || inheritsAllWorkspaceAccess}
                             onChange={event => updateDepartmentColumn('read', event.target.checked)}
                           />
                           <span>查看 / 下载</span>
@@ -628,7 +635,7 @@ export default function EnterpriseAccessControl() {
                             aria-label="全选或取消全部部门上传修改权限"
                             checked={allDepartmentsWritable}
                             indeterminate={writableDepartmentCount > 0 && !allDepartmentsWritable}
-                            disabled={!role || !organizationDepartments.length}
+                            disabled={!role || !organizationDepartments.length || inheritsAllWorkspaceAccess}
                             onChange={event => updateDepartmentColumn('upload', event.target.checked)}
                           />
                           <span>上传 / 修改</span>
@@ -641,8 +648,8 @@ export default function EnterpriseAccessControl() {
                       return <tr
                         key={department.id}
                         className={access.upload ? 'is-collaborating' : readable ? 'is-readable' : undefined}
-                        onClick={() => toggleDepartmentRow(department.id)}
-                        title={access.upload ? '点击取消该部门授权' : '点击授予该部门查看、上传和修改权限'}
+                        onClick={() => { if (!inheritsAllWorkspaceAccess) toggleDepartmentRow(department.id); }}
+                        title={inheritsAllWorkspaceAccess ? '该权限继承自 *，不能单独取消' : (access.upload ? '点击取消该部门授权' : '点击授予该部门查看、上传和修改权限')}
                       >
                         <td>
                           <label className="workspace-row-selector" onClick={event => event.stopPropagation()}>
@@ -650,6 +657,7 @@ export default function EnterpriseAccessControl() {
                               aria-label={`${department.name} 整行授权`}
                               checked={access.read && access.upload}
                               indeterminate={readable && !access.upload}
+                              disabled={inheritsAllWorkspaceAccess}
                               onChange={() => toggleDepartmentRow(department.id)}
                             />
                             <span>
@@ -657,13 +665,14 @@ export default function EnterpriseAccessControl() {
                               <small>{department.slug}</small>
                             </span>
                             <Tag color={access.upload ? 'blue' : readable ? 'cyan' : 'default'} bordered={false}>
-                              {access.upload ? '可协作' : readable ? '只读' : '未授权'}
+                              {inheritsAllWorkspaceAccess ? '继承自 *' : access.upload ? '可协作' : readable ? '只读' : '未授权'}
                             </Tag>
                           </label>
                         </td>
                         <td><Checkbox
                           aria-label={`${department.name} 查看下载`}
                           checked={readable}
+                          disabled={inheritsAllWorkspaceAccess}
                           onClick={event => event.stopPropagation()}
                           onChange={event => setDepartmentDraft(current => ({
                             ...current,
@@ -675,6 +684,7 @@ export default function EnterpriseAccessControl() {
                         <td><Checkbox
                           aria-label={`${department.name} 上传修改`}
                           checked={access.upload}
+                          disabled={inheritsAllWorkspaceAccess}
                           onClick={event => event.stopPropagation()}
                           onChange={event => setDepartmentDraft(current => ({
                             ...current,

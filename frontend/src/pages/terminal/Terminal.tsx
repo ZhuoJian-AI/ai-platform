@@ -42,7 +42,9 @@ import WorkspaceManagerView from './WorkspaceManagerView';
 import KnowledgeBaseView from './KnowledgeBaseView';
 import SkillManagerView from './SkillManagerView';
 import AgentManagerView from './AgentManagerView';
-import EnterpriseApplicationView from './EnterpriseApplicationView';
+import EnterpriseApplicationView, {
+  businessArtifactsFromMessage, type BusinessAssistantTurnResult,
+} from './EnterpriseApplicationView';
 import CrossDepartmentWorkItemsView from './CrossDepartmentWorkItemsView';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from '../../branding/BrandLogoSlot';
@@ -442,7 +444,7 @@ function restoreChat(messages: TerminalTaskMessage[]): ChatMsg[] {
 }
 
 /** 按 user 消息 id 删除一整轮对话（user 消息 + 紧随其后的 assistant 消息）的本地视图更新。
- *  与后端 soft_delete_task_turn 同步：删除一对消息，工作空间文件由后端负责清理。 */
+ *  与后端 soft_delete_task_turn 同步：只删除一对消息，已交付文件保持不变。 */
 function dropTurnFromChat(chat: ChatMsg[], userMsgId: string): ChatMsg[] {
   const idx = chat.findIndex((m) => m.role === 'user' && m.id === userMsgId);
   if (idx < 0) return chat;
@@ -478,7 +480,7 @@ export default function Terminal() {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   // 删除确认弹窗：界面正中模态框（统一用共享 ConfirmModal）。
   const [delConfirm, setDelConfirm] = useState<{ id: string; title: string } | null>(null);
-  // 删除单轮对话确认弹窗：删一整轮 user+assistant，并清理本轮产出文件。
+  // 删除单轮对话确认弹窗：只删一整轮 user+assistant，不删除工作空间文件。
   const [turnDelConfirm, setTurnDelConfirm] = useState<{ taskId: string; messageId: string } | null>(null);
   // 任务重命名：内联编辑，Enter 保存、Esc 取消、失焦保存
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -517,6 +519,8 @@ export default function Terminal() {
   const [applicationNavOpen, setApplicationNavOpen] = useState(false);
   const [applicationNavPinned, setApplicationNavPinned] = useState(() => readApplicationNavPinPreference(user?.id));
   const [applicationImmersive, setApplicationImmersive] = useState(false);
+  const [businessTaskSelection, setBusinessTaskSelection] = useState<Record<string, string | null>>({});
+  const [businessWorkspaceSelection, setBusinessWorkspaceSelection] = useState<Record<string, string>>({});
 
   const updateApplicationNavPinned = useCallback((pinned: boolean) => {
     setApplicationNavPinned(pinned);
@@ -605,6 +609,22 @@ export default function Terminal() {
   const { data: tasks } = useQuery<TerminalTask[]>({
     queryKey: ['terminal-tasks', deferredTaskSearch], queryFn: () => terminal.listTasks(deferredTaskSearch),
   });
+  const { data: businessTasks } = useQuery<TerminalTask[]>({
+    queryKey: ['terminal-business-tasks'], queryFn: () => terminal.listTasks(),
+  });
+  const selectedBusinessTaskId = selectedApplication ? (
+    Object.prototype.hasOwnProperty.call(businessTaskSelection, selectedApplication.id)
+      ? businessTaskSelection[selectedApplication.id]
+      : (businessTasks ?? []).find((task) => task.config?.application_id === selectedApplication.id)?.id ?? null
+  ) : null;
+  const selectedBusinessWorkspaceId = selectedApplication ? (
+    businessWorkspaceSelection[selectedApplication.id]
+      ?? resources?.defaults?.workspace_id
+      ?? null
+  ) : null;
+  const businessWorkspaceOptions = (resources?.workspaces ?? [])
+    .filter((workspace) => workspace.capabilities?.create)
+    .map((workspace) => ({ value: workspace.id, label: workspace.name }));
   const taskGroups = useMemo(() => {
     const filtered = tasks ?? [];
     const startToday = new Date();
@@ -1184,8 +1204,9 @@ export default function Terminal() {
     try {
       await terminal.deleteTask(id);
       qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
+      qc.invalidateQueries({ queryKey: ['terminal-business-tasks'] });
       if (selectedId === id) newTask();
-      message.success('已删除任务及其工作空间输出文件');
+      message.success('已删除对话，工作空间文件保持不变');
     } catch (e) {
       message.error((e as Error).message);
     }
@@ -1196,11 +1217,11 @@ export default function Terminal() {
       await terminal.deleteTaskMessage(taskId, messageId);
       // 乐观更新本地 chat：立即移除该轮对话，避免等回放闪烁
       setChat((c) => dropTurnFromChat(c, messageId));
-      // 刷新工作空间文件清单（本轮产出文件已被后端软删除）与任务列表
+      // 只刷新对话；工作空间文件拥有独立生命周期，不因删除消息而改变。
       const wsId = (selectedTask?.config ?? config).workspace_id;
       qc.invalidateQueries({ queryKey: ['terminal-task', taskId] });
       if (wsId) qc.invalidateQueries({ queryKey: ['terminal-ws-files', wsId] });
-      message.success('已删除该轮对话及本轮产出文件');
+      message.success('已删除该轮对话，工作空间文件保持不变');
     } catch (e) {
       message.error((e as Error).message);
     }
@@ -1602,20 +1623,64 @@ export default function Terminal() {
                 immersive={applicationImmersive}
                 onOpenNavigation={() => setApplicationNavOpen(true)}
                 onToggleImmersive={() => setApplicationImmersive((value) => !value)}
-                onAskAI={async (prompt, context, onProgress) => {
+                businessTaskId={selectedBusinessTaskId}
+                onNewConversation={async () => {
+                  const modelAlias = config.model_alias ?? modelData?.models?.[0] ?? null;
+                  const created = await terminal.createTask({
+                    message: '',
+                    config: {
+                      ...config,
+                      model_alias: modelAlias,
+                      exec_mode: 'craft',
+                      skill_ids: [],
+                      ontology_ids: [],
+                      rag_collection_ids: [],
+                      template_agent_id: null,
+                      application_id: selectedApplication.id,
+                    },
+                  });
+                  setBusinessTaskSelection((current) => ({
+                    ...current, [selectedApplication.id]: created.id,
+                  }));
+                  await qc.invalidateQueries({ queryKey: ['terminal-business-tasks'] });
+                  qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
+                }}
+                targetWorkspaceId={selectedBusinessWorkspaceId}
+                workspaceOptions={businessWorkspaceOptions}
+                onTargetWorkspaceChange={(workspaceId) => setBusinessWorkspaceSelection((current) => ({
+                  ...current, [selectedApplication.id]: workspaceId,
+                }))}
+                onOpenArtifact={(fileId, versionId) => openLink(
+                  `${workspaceInternalPath(fileId)}${versionId ? `?version=${encodeURIComponent(versionId)}` : ''}`,
+                )}
+                onAskAI={async (prompt, context, onProgress, fileRefs) => {
                   const modelAlias = config.model_alias ?? modelData?.models?.[0] ?? null;
                   if (!modelAlias) throw new Error('当前账号没有可用模型，请联系管理员配置模型权限');
                   const assistantConfig: TaskConfig = {
                     ...config,
                     model_alias: modelAlias,
+                    exec_mode: 'craft',
+                    skill_ids: [],
+                    ontology_ids: [],
+                    rag_collection_ids: [],
                     template_agent_id: null,
                     application_id: selectedApplication.id,
                   };
-                  const task = await terminal.createTask({ message: prompt, config: assistantConfig });
-                  qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
+                  let activeTaskId = selectedBusinessTaskId;
+                  if (!activeTaskId) {
+                    const created = await terminal.createTask({ message: prompt, config: assistantConfig });
+                    activeTaskId = created.id;
+                    setBusinessTaskSelection((current) => ({
+                      ...current, [selectedApplication.id]: created.id,
+                    }));
+                    qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
+                    qc.invalidateQueries({ queryKey: ['terminal-business-tasks'] });
+                  }
                   const controller = new AbortController();
+                  const clientRequestId = crypto.randomUUID();
                   const response = await terminal.runTaskStream(
-                    task.id, prompt, controller.signal, null, [], [], selectedApplication.id, context,
+                    activeTaskId, prompt, controller.signal, null, [], [], selectedApplication.id,
+                    context, fileRefs, selectedBusinessWorkspaceId, clientRequestId,
                   );
                   if (!response.ok || !response.body) {
                     const body = await response.json().catch(() => ({}));
@@ -1633,20 +1698,63 @@ export default function Terminal() {
                   }
                   let streamedAnswer = '';
                   let streamedError = '';
-                  await consumeTerminalEventStream(response, (event) => {
-                    onProgress({ ...event, task_id: task.id });
-                    if (event.type === 'text') streamedAnswer += String(event.delta ?? '');
-                    if (event.type === 'error') streamedError = String(event.message ?? '业务小助手执行失败');
-                  });
+                  let streamedRunId: number | null = null;
+                  let streamInterrupted = false;
+                  let streamResponse = response;
+                  let streamCompleted = false;
+                  for (let attempt = 0; attempt < 3 && !streamCompleted; attempt += 1) {
+                    let sawFinal = false;
+                    if (attempt > 0) {
+                      // GET /stream 会完整回放同一 AgentRun；因此正文也从零重建，
+                      // 避免断线重连把已收到的 token 重复拼接。
+                      streamedAnswer = '';
+                      streamedError = '';
+                    }
+                    try {
+                      await consumeTerminalEventStream(streamResponse, (event) => {
+                        onProgress({ ...event, task_id: activeTaskId });
+                        if (event.type === 'text') streamedAnswer += String(event.delta ?? '');
+                        if (event.type === 'error') streamedError = String(event.message ?? '业务小助手执行失败');
+                        if (event.type === 'final') sawFinal = true;
+                        if (event.type === 'final' && event.interrupted === true) streamInterrupted = true;
+                        if (typeof event.run_id === 'number') streamedRunId = event.run_id;
+                      });
+                    } catch (streamError) {
+                      if ((streamError as Error).name === 'AbortError' || attempt === 2) throw streamError;
+                    }
+                    if (sawFinal) {
+                      streamCompleted = true;
+                      break;
+                    }
+                    streamResponse = await terminal.streamTask(activeTaskId, controller.signal);
+                    if (!streamResponse.ok || !streamResponse.body) {
+                      throw new Error(`业务小助手连接恢复失败（HTTP ${streamResponse.status}）`);
+                    }
+                  }
+                  if (!streamCompleted) throw new Error('业务小助手连接中断，请稍后重试');
                   if (streamedError) throw new Error(streamedError);
-                  qc.invalidateQueries({ queryKey: ['terminal-task', task.id] });
+                  qc.invalidateQueries({ queryKey: ['terminal-task', activeTaskId] });
+                  qc.invalidateQueries({ queryKey: ['terminal-business-task', activeTaskId] });
                   qc.invalidateQueries({ queryKey: ['terminal-memory'] });
                   qc.invalidateQueries({ queryKey: ['application-action-confirmations'] });
-                  const freshTask = await terminal.getTask(task.id);
-                  const persistedAnswer = [...freshTask.messages]
-                    .reverse()
-                    .find((item) => item.role === 'assistant')?.content;
-                  return persistedAnswer || streamedAnswer || '操作已完成。';
+                  const freshTask = await terminal.getTask(activeTaskId);
+                  const assistantMessage = [...freshTask.messages].reverse().find((item) => item.role === 'assistant');
+                  const userMessage = [...freshTask.messages].reverse().find((item) => item.role === 'user');
+                  const result: BusinessAssistantTurnResult = {
+                    taskId: activeTaskId,
+                    runId: streamedRunId,
+                    userMessageId: userMessage?.id ?? null,
+                    assistantMessageId: assistantMessage?.id ?? null,
+                    status: streamInterrupted
+                      ? 'interrupted'
+                      : freshTask.run_status === 'cancelled'
+                      ? 'cancelled'
+                      : freshTask.run_status === 'error' ? 'failed' : 'completed',
+                    content: assistantMessage?.content || streamedAnswer || '操作已完成。',
+                    artifacts: businessArtifactsFromMessage(assistantMessage),
+                    error: null,
+                  };
+                  return result;
                 }}
               />
             ) : composerOpen ? (
@@ -1963,16 +2071,16 @@ export default function Terminal() {
       <ConfirmModal
         open={!!delConfirm}
         title="删除该任务？"
-        desc="将同时清理该任务在工作空间中产出的文件"
+        desc="只删除对话记录；已交付到工作空间的文件保持不变"
         onCancel={() => setDelConfirm(null)}
         onOk={() => { if (delConfirm) { deleteTask(delConfirm.id); setDelConfirm(null); } }}
       />
 
-      {/* 删除单轮对话确认：删该轮 user+assistant，并清理仅本轮产出文件 */}
+      {/* 删除单轮对话确认：只删该轮 user+assistant，不删除工作空间文件 */}
       <ConfirmModal
         open={!!turnDelConfirm}
         title="删除该轮对话？"
-        desc="将同时清理该轮在工作空间中产出、且未被后续轮次覆盖的文件"
+        desc="只删除本轮对话；已交付到工作空间的文件保持不变"
         onCancel={() => setTurnDelConfirm(null)}
         onOk={() => {
           if (turnDelConfirm) {
@@ -3202,7 +3310,7 @@ function ChatView(props: {
                 {isUser ? (
                   <>
                     {showDel && (
-                      <Tooltip title="删除该轮对话及本轮产出文件">
+                      <Tooltip title="删除该轮对话（保留工作空间文件）">
                         <DeleteOutlined
                           onClick={() => onDeleteTurn(m.id!)}
                           style={{ color: '#9ca3af', fontSize: 14, cursor: 'pointer', marginTop: 14, flexShrink: 0 }}

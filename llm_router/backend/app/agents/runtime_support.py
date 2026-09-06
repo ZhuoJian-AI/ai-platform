@@ -75,6 +75,8 @@ def general_initial_state(
 
 def user_message_metadata(initial: AgentState) -> dict:
     metadata: dict = {}
+    if initial.get("client_request_id"):
+        metadata["client_request_id"] = initial["client_request_id"]
     if attachments := list(initial.get("attachment_files") or []):
         metadata["attachments"] = attachments
     if file_refs := list(initial.get("file_refs_v1") or []):
@@ -161,17 +163,28 @@ async def finalize_bg_error(
 
 
 async def sse_replay_and_tail(handle: run_registry.RunHandle) -> AsyncIterator[str]:
-    for payload in list(handle.buffer):
-        yield f"data: {payload}\n\n"
-    if handle.done:
-        return
+    """Replay each event exactly once per reader, then follow future events.
+
+    A shared consumptive queue cannot support reconnects or multiple browser
+    readers: replaying ``buffer`` and then draining that queue duplicated old
+    events for the first reader and could starve later readers.  Each reader now
+    owns an index into the append-only buffer and waits on a broadcast event.
+    """
+
+    cursor = 0
     handle.attach_reader()
     try:
         while True:
-            payload = await handle.queue.get()
-            if payload is None:
-                break
-            yield f"data: {payload}\n\n"
+            handle.updated.clear()
+            while cursor < len(handle.buffer):
+                payload = handle.buffer[cursor]
+                cursor += 1
+                yield f"data: {payload}\n\n"
+            if handle.done:
+                return
+            # publish/mark_done after clear() sets this event; if it happened
+            # before the length check, the new buffer item was already emitted.
+            await handle.updated.wait()
     finally:
         handle.detach_reader()
 

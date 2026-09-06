@@ -9,6 +9,7 @@ import pytest
 
 from app.agents.dsh import runner
 from app.agents.graph import nodes, run_registry
+from app.agents.runtime_support import sse_replay_and_tail
 from app.services import platform_tool_registry
 
 
@@ -254,6 +255,24 @@ def test_runner_tool_specs_delegate_to_the_shared_assembly():
     assert specs == nodes.dsh_tool_specs(tools, {})
     assert specs[0]["input_schema"] == {"type": "object"}
     assert specs[0]["concurrency_safe"] is True
+
+
+@pytest.mark.asyncio
+async def test_sse_replay_and_tail_never_duplicates_buffered_events():
+    handle = run_registry.RunHandle(task_id="task-replay-once")
+    run_registry.publish(handle, '{"type":"text","delta":"一"}')
+    stream = sse_replay_and_tail(handle)
+
+    first = await anext(stream)
+    run_registry.publish(handle, '{"type":"artifact","artifact":{"fileId":"f1"}}')
+    run_registry.mark_done(handle, '{"type":"final"}')
+    rest = [item async for item in stream]
+
+    assert [first, *rest] == [
+        'data: {"type":"text","delta":"一"}\n\n',
+        'data: {"type":"artifact","artifact":{"fileId":"f1"}}\n\n',
+        'data: {"type":"final"}\n\n',
+    ]
 
 
 # ── memory tools ─────────────────────────────────────────────────────────

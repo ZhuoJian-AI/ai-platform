@@ -2770,7 +2770,7 @@ export const terminal = {
   updateTask: (id: string, data: Partial<{ title: string; status: string; config: TaskConfig }>) =>
     userRequest<TerminalTask>(`/api/v1/terminal/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteTask: (id: string) => userRequest<void>(`/api/v1/terminal/tasks/${id}`, { method: 'DELETE' }),
-  /** 删除一整轮对话（user+assistant 消息），并清理仅本轮产出、未被后续轮次覆盖的工作空间文件。 */
+  /** 删除一整轮对话（user+assistant 消息）；已交付到工作空间的文件保持不变。 */
   deleteTaskMessage: (taskId: string, messageId: string) =>
     userRequest<void>(`/api/v1/terminal/tasks/${taskId}/messages/${messageId}`, { method: 'DELETE' }),
   runTask: (
@@ -2778,10 +2778,11 @@ export const terminal = {
     attachment_file_ids: string[] = [], invoked_skill_ids: string[] = [],
     application_id?: string | null, page_context: Record<string, unknown> = {},
     file_refs_v1: WorkspaceFileRefV1[] = [],
+    target_workspace_id?: string | null, client_request_id?: string,
   ) =>
     userRequest<{ assistant: string; steps: unknown[]; usage: Record<string, number>; run_id: number; latency_ms: number }>(
       `/api/v1/terminal/tasks/${id}/run`,
-      { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null, invoked_skill_ids, application_id: application_id ?? null, page_context, ...buildTaskRunFilePayload(attachment_file_ids, file_refs_v1) }) },
+      { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null, invoked_skill_ids, application_id: application_id ?? null, page_context, target_workspace_id: target_workspace_id ?? null, client_request_id: client_request_id ?? crypto.randomUUID(), ...buildTaskRunFilePayload(attachment_file_ids, file_refs_v1) }) },
     ),
   /** 流式执行：返回原始 Response，由调用方解析 SSE（仿 AgentPlayground）。
    *  template_agent_id 逐次覆盖（不落库）：undefined=沿用 task.config；null=通用；UUID=该次用此智能体。 */
@@ -2791,11 +2792,12 @@ export const terminal = {
     invoked_skill_ids: string[] = [], application_id?: string | null,
     page_context: Record<string, unknown> = {},
     file_refs_v1: WorkspaceFileRefV1[] = [],
+    target_workspace_id?: string | null, client_request_id?: string,
   ) =>
     fetch(`${BASE_URL}/api/v1/terminal/tasks/${id}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionStorage.getItem(USER_TOKEN_KEY) || ''}` },
-      body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null, invoked_skill_ids, application_id: application_id ?? null, page_context, ...buildTaskRunFilePayload(attachment_file_ids, file_refs_v1) }),
+      body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null, invoked_skill_ids, application_id: application_id ?? null, page_context, target_workspace_id: target_workspace_id ?? null, client_request_id: client_request_id ?? crypto.randomUUID(), ...buildTaskRunFilePayload(attachment_file_ids, file_refs_v1) }),
       signal,
     }),
   /** resume：重连/回放一个运行中或已完成的 run（后台 detach 执行，刷新不丢）。 */

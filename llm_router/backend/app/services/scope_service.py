@@ -263,22 +263,7 @@ async def get_user_workspace(db: AsyncSession, cu: CurrentUser) -> Workspace | N
 
 def is_workspace_visible(ws: Workspace, cu: CurrentUser) -> bool:
     """Runtime read check using the dedicated workspace role matrix."""
-    if (
-        str(ws.organization_id) != str(cu.organization_id)
-        or ws.deleted_at is not None
-        or not getattr(ws, "is_active", True)
-    ):
-        return False
-    if ws.scope_type == "department":
-        codes = set(getattr(cu, "permission_codes", ()) or ())
-        return (
-            str(ws.scope_id) == str(cu.department_id or "")
-            or "*" in codes
-            or str(ws.scope_id) in workspace_permission_service.department_workspace_scope_ids(cu)
-        )
-    if ws.scope_type == "user" and ws.scope_id == cu.id:
-        return True
-    return False
+    return workspace_permission_service.is_workspace_readable(ws, cu)
 
 
 async def list_api_keys_for_user(db: AsyncSession, cu: CurrentUser) -> list[ApiKey]:

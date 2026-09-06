@@ -100,24 +100,8 @@ async def test_explicit_new_reference_can_change_a_pinned_task_version():
     assert existing.follow_latest is False
 
 
-def test_task_cleanup_uses_only_stable_file_generation_not_trace_path():
-    file_id = uuid4()
-    version_id = uuid4()
-    message = SimpleNamespace(metadata_={
-        "traces": [{
-            "name": "workspace_write_file",
-            "arguments": {"path": "共享/可能被重用.txt"},
-            "ok": True,
-        }],
-        "artifacts": [{
-            "file_id": str(file_id),
-            "current_version_id": str(version_id),
-            "created_new": True,
-        }],
-    })
-    assert task_service._message_file_generations(message) == [
-        (file_id, version_id, True),
-    ]
-    assert task_service._message_file_generations(SimpleNamespace(metadata_={
-        "traces": message.metadata_["traces"],
-    })) == []
+def test_task_cleanup_cannot_delete_delivered_workspace_files():
+    """Conversation lifecycle no longer exposes an implicit file-cleanup helper."""
+
+    assert not hasattr(task_service, "_soft_delete_task_files")
+    assert not hasattr(task_service, "_message_file_generations")

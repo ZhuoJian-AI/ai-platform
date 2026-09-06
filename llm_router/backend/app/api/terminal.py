@@ -47,7 +47,7 @@ from app.models.ontology import OntologyFile, OntologyFolder
 from app.models.organization import Organization
 from app.models.rag import RagCollection, RagDocument, RagFolder
 from app.models.skill import SkillFolder, SkillVersion
-from app.models.task import Task
+from app.models.task import Task, TaskMessage
 from app.models.team import Team
 from app.models.workspace import WorkspaceFileVersion, WorkspaceUploadSession
 from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
@@ -231,10 +231,37 @@ from app.tools.skill_manifest import parse_skill_manifest
 from app.utils.workspace_presentation import clean_display_name, presentation_dict
 
 router = APIRouter()
+_NON_STREAM_ACTIVE_TASKS: set[str] = set()
 
 _FILE_MENTION_RE = re.compile(
     r"(?<![\w])@([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
 )
+
+
+async def _assert_client_request_not_completed(
+    db: AsyncSession, task: Task, client_request_id: str | None,
+) -> None:
+    """Reject a completed browser retry without repeating its Action or file write.
+
+    While a streaming run is alive the in-memory handle replays that exact run.
+    Once it has finished, the stable request id persisted on the user message is
+    the durable idempotency fence; no new run may reuse it.
+    """
+
+    if not client_request_id:
+        return
+    handle = run_registry.get(str(task.id))
+    if handle is not None and not handle.done:
+        return
+    existing = (await db.execute(
+        select(TaskMessage.id).where(
+            TaskMessage.task_id == task.id,
+            TaskMessage.role == "user",
+            TaskMessage.metadata_.contains({"client_request_id": client_request_id}),
+        ).limit(1)
+    )).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="本次请求已经提交，请查看当前对话中的已有结果")
 
 
 async def _skill_summaries(db: AsyncSession, folders: list[SkillFolder]) -> list[dict]:
@@ -840,7 +867,7 @@ async def delete_task_message_endpoint(
     """删除任务中的一整轮对话（用户消息 + 紧随其后的 assistant 消息）。
 
     若该轮 assistant 调用了写文件工具（workspace_write_file / generate_docx），
-    一并软删除仅本轮产出、且未被后续轮次覆盖的工作空间文件。
+    只删除该轮对话引用；已交付到工作空间的文件与历史版本保持不变。
     """
     task = await _get_owned_task(db, task_id, cu)
     try:
@@ -864,7 +891,7 @@ def _merge_application_run_context(
 ) -> dict:
     """Keep the last verified business page context for follow-up turns.
 
-    An explicit application switch clears the previous page context. An empty
+    A business Task is permanently bound to its first application. An empty
     context for the same application means "continue this business task", not
     "drop page authorization".
     """
@@ -872,9 +899,9 @@ def _merge_application_run_context(
     previous_application_id = str(cfg.get("application_id") or "")
     if application_id_provided:
         next_application_id = str(application_id) if application_id else ""
+        if previous_application_id and next_application_id != previous_application_id:
+            raise HTTPException(status_code=409, detail="业务助手对话已绑定其他应用，请新建对话")
         cfg["application_id"] = next_application_id or None
-        if next_application_id != previous_application_id:
-            cfg["page_context"] = {}
     if page_context:
         cfg["page_context"] = dict(page_context)
     else:
@@ -895,8 +922,8 @@ async def run_task_endpoint(
     """运行通用智能体。stream=true 返回 SSE，否则返回最终结果。"""
     task = await _get_owned_task(db, task_id, cu)
     assert_user_write(cu)
-    # 历史任务可能绑定过共享工作空间；运行时一律收敛到个人工作空间。
-    # 模型必须显式选择（创建时未选且无最近使用默认则空）——不选模型不允许执行。
+    # 输出位置由客户端显式选择并由服务端实时鉴权；省略时固定为个人空间。
+    # 模型只能看到校验后的 workspace_id，不能自行扩大写入范围。
     provided = data.model_dump(exclude_unset=True)
     cfg = _merge_application_run_context(
         dict(task.config or {}),
@@ -905,7 +932,17 @@ async def run_task_endpoint(
         page_context=data.page_context,
     )
     defaults = await _user_defaults(db, cu)
-    cfg["workspace_id"] = defaults["workspace_id"]
+    target_workspace_id = data.target_workspace_id or UUID(str(defaults["workspace_id"]))
+    target_workspace = await workspace_service.get_workspace(db, target_workspace_id)
+    if target_workspace is None or str(target_workspace.organization_id) != str(cu.organization_id):
+        raise HTTPException(status_code=404, detail="目标工作空间不存在")
+    try:
+        await workspace_permission_service.assert_can_create(db, target_workspace, cu)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            raise HTTPException(status_code=403, detail="你没有向目标工作空间创建文件的权限") from exc
+        raise
+    cfg["workspace_id"] = str(target_workspace.id)
     if cfg.get("application_id"):
         application, application_permissions = await enterprise_application_service.assert_application_permission(
             db, cfg["application_id"], cu, "view",
@@ -1003,6 +1040,9 @@ async def run_task_endpoint(
         await skill_scope_service.assert_bound_skills_visible(db, cu, list(selected_agent.skill_ids or []))
         await scope_service.assert_bound_rags_visible(db, cu, list(selected_agent.rag_collection_ids or []))
     if data.stream:
+        await _assert_client_request_not_completed(db, task, data.client_request_id)
+        if str(task.id) in _NON_STREAM_ACTIVE_TASKS:
+            raise HTTPException(status_code=409, detail="当前对话已有任务正在执行，请等待完成后再提交")
         resp = await stream_general_agent(
             org_id=str(task.organization_id), user=cu, task=task,
             message=data.message, config=cfg,
@@ -1010,19 +1050,29 @@ async def run_task_endpoint(
             attachment_files=attachment_files,
             file_refs_v1=file_refs_v1,
             invoked_skills=invoked_skills,
+            client_request_id=data.client_request_id,
         )
         # 流式响应内部完成图执行（含 save_memory/extract_memory/write_run_log）；
         # commit 由各节点 flush 后于响应结束时统一提交。
         return resp
 
-    result = await run_general_agent(
-        org_id=str(task.organization_id), user=cu, task=task,
-        message=data.message, config=cfg,
-        session_id=task.session_id, db=db, request=request,
-        attachment_files=attachment_files,
-        file_refs_v1=file_refs_v1,
-        invoked_skills=invoked_skills,
-    )
+    await _assert_client_request_not_completed(db, task, data.client_request_id)
+    active_handle = run_registry.get(str(task.id))
+    if str(task.id) in _NON_STREAM_ACTIVE_TASKS or (active_handle is not None and not active_handle.done):
+        raise HTTPException(status_code=409, detail="当前对话已有任务正在执行，请等待完成后再提交")
+    _NON_STREAM_ACTIVE_TASKS.add(str(task.id))
+    try:
+        result = await run_general_agent(
+            org_id=str(task.organization_id), user=cu, task=task,
+            message=data.message, config=cfg,
+            session_id=task.session_id, db=db, request=request,
+            attachment_files=attachment_files,
+            file_refs_v1=file_refs_v1,
+            invoked_skills=invoked_skills,
+            client_request_id=data.client_request_id,
+        )
+    finally:
+        _NON_STREAM_ACTIVE_TASKS.discard(str(task.id))
     await db.commit()
     return result
 

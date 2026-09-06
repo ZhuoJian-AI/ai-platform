@@ -30,6 +30,7 @@ class AgentState(TypedDict, total=False):
     template_agent_id: str | None
     application_id: str | None
     page_context: dict
+    client_request_id: str | None
 
     # ── Agent 配置（load_config 节点填充）──
     system_prompt: str

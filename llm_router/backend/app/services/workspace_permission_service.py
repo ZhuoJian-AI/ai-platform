@@ -38,6 +38,25 @@ def _department_workspace_access(cu: CurrentUser, department_id: str) -> tuple[b
     return home_department or explicit_read or can_upload, can_upload
 
 
+def is_workspace_readable(workspace: Workspace, cu: CurrentUser) -> bool:
+    """Synchronous read predicate shared by catalogue and legacy callers."""
+
+    if (
+        str(getattr(workspace, "organization_id", None)) != str(getattr(cu, "organization_id", None))
+        or getattr(workspace, "deleted_at", None) is not None
+        or not getattr(workspace, "is_active", True)
+    ):
+        return False
+    scope_type = getattr(workspace, "scope_type", "organization")
+    scope_id = str(getattr(workspace, "scope_id", None) or "")
+    if scope_type == "user":
+        return scope_id == str(getattr(cu, "id", ""))
+    if scope_type == "department":
+        can_read, _ = _department_workspace_access(cu, scope_id)
+        return can_read
+    return False
+
+
 def _role_sources(cu: CurrentUser, permission_code: str) -> list[dict[str, str]]:
     """Return active roles contributing one concrete permission code."""
     sources: list[dict[str, str]] = []
@@ -73,12 +92,11 @@ async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) 
     scope_type = getattr(workspace, "scope_type", "organization")
     scope_id = str(getattr(workspace, "scope_id", None) or "")
     own = scope_type == "user" and scope_id == str(getattr(cu, "id", ""))
-    department_read, department_upload = _department_workspace_access(cu, scope_id)
-    same_department = scope_type == "department" and department_read
+    _, department_upload = _department_workspace_access(cu, scope_id)
     # Workspace file access follows the explicit administrator role matrix.
     # Until organization/team workspace permissions have corresponding role
     # codes, membership alone must not silently disclose those catalogues.
-    can_read = own or same_department
+    can_read = is_workspace_readable(workspace, cu)
     can_write_department = scope_type == "department" and department_upload
     can_update = own or can_write_department
     return {

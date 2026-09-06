@@ -1,13 +1,14 @@
 """Focused regression tests for enterprise Action reliability boundaries."""
 
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 import pytest
 
 from app.agents.dsh import runner
 from app.agents.graph import nodes
-from app.services.subsystem_action_service import _subsystem_response_error
+from app.services.subsystem_action_service import _subsystem_response_error, _validate_result
 
 
 @pytest.fixture
@@ -25,6 +26,18 @@ def test_corrected_action_arguments_get_a_new_idempotency_key():
 
     assert first == exact_retry
     assert corrected != first
+
+
+def test_browser_retry_keeps_action_and_file_idempotency_across_new_run_ids():
+    first = nodes._enterprise_action_request_id(
+        {"task_id": "task-1", "run_id": 7, "client_request_id": "browser-request-1"},
+        "call-1", {"limit": 50},
+    )
+    retried = nodes._enterprise_action_request_id(
+        {"task_id": "task-1", "run_id": 8, "client_request_id": "browser-request-1"},
+        "call-1", {"limit": 50},
+    )
+    assert first == retried
 
 
 def test_update_delete_and_approve_require_a_trusted_version():
@@ -45,6 +58,128 @@ def test_subsystem_json_error_is_preserved_and_bounded():
     assert _subsystem_response_error(response) == (
         "子系统 Action 返回 HTTP 409：记录已更新，请重新查询当前版本 再试"
     )
+
+
+def _export_action(result_schema: dict) -> SimpleNamespace:
+    return SimpleNamespace(operation="export", result_schema=result_schema)
+
+
+def _export_schema() -> dict:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["snapshotId", "snapshotAt", "columns", "rows", "rowCount", "nextCursor"],
+        "properties": {
+            "snapshotId": {"type": "string"},
+            "snapshotAt": {"type": "string"},
+            "columns": {"type": "array", "items": {"type": "object"}},
+            "rows": {"type": "array", "items": {"type": "object"}},
+            "rowCount": {"type": "integer", "minimum": 0},
+            "nextCursor": {"type": ["string", "null"]},
+        },
+    }
+
+
+def test_export_result_is_schema_validated_before_model_use():
+    action = _export_action(_export_schema())
+    _validate_result(action, {
+        "snapshotId": "snap-1", "snapshotAt": "2026-09-06T00:00:00Z",
+        "columns": [{"key": "orderNo", "label": "订单号", "type": "string"}],
+        "rows": [{"orderNo": "PO-1"}], "rowCount": 1, "nextCursor": None,
+    })
+
+    with pytest.raises(RuntimeError, match="不符合约定"):
+        _validate_result(action, {
+            "snapshotId": "snap-1", "snapshotAt": "2026-09-06T00:00:00Z",
+            "columns": [], "rows": [], "rowCount": "1", "nextCursor": None,
+        })
+
+    with pytest.raises(RuntimeError, match="未声明"):
+        _validate_result(action, {
+            "snapshotId": "snap-1", "snapshotAt": "2026-09-06T00:00:00Z",
+            "columns": [{"key": "orderNo", "label": "订单号", "type": "string"}],
+            "rows": [{"orderNo": "PO-1", "serverOnly": "x"}],
+            "rowCount": 1, "nextCursor": None,
+        })
+
+
+def test_export_result_rejects_nested_server_paths_even_when_schema_allows_them():
+    schema = _export_schema()
+    schema["properties"]["rows"] = {"type": "array", "items": {"type": "object"}}
+    with pytest.raises(RuntimeError, match="不得返回服务器路径"):
+        _validate_result(_export_action(schema), {
+            "snapshotId": "snap-1", "snapshotAt": "2026-09-06T00:00:00Z",
+            "columns": [], "rows": [{"metadata": {"download": "/var/backups/db.sqlite"}}],
+            "rowCount": 1, "nextCursor": None,
+        })
+
+
+def test_export_file_tool_name_stays_within_provider_limit():
+    name = nodes._enterprise_export_file_tool_name("x" * 64)
+    assert name.endswith("_file")
+    assert len(name) == 64
+
+
+@pytest.mark.asyncio
+async def test_trusted_export_executor_collects_one_snapshot_without_exposing_rows_to_model(monkeypatch):
+    user = SimpleNamespace(id="user-1")
+    pages = [
+        {
+            "status": "completed",
+            "result": {
+                "snapshotId": "snap-1", "snapshotAt": "2026-09-06T00:00:00Z",
+                "columns": [{"key": "id", "label": "编号", "type": "string"}],
+                "rows": [{"id": "1"}, {"id": "2"}], "rowCount": 3, "nextCursor": "cursor-2",
+            },
+            "provenance": {"actionKey": "orders.export", "requestId": "request-1"},
+        },
+        {
+            "status": "completed",
+            "result": {
+                "snapshotId": "snap-1", "snapshotAt": "2026-09-06T00:00:00Z",
+                "columns": [{"key": "id", "label": "编号", "type": "string"}],
+                "rows": [{"id": "3"}], "rowCount": 3, "nextCursor": None,
+            },
+            "provenance": {"actionKey": "orders.export", "requestId": "request-2"},
+        },
+    ]
+    invoked: list[dict] = []
+    generated: dict = {}
+
+    async def fresh_user(_db, current):
+        assert current is user
+        return user
+
+    async def invoke(_db, _application_id, _action_key, _module_key, action_params, _user, **kwargs):
+        invoked.append({"params": action_params, **kwargs})
+        return pages[len(invoked) - 1]
+
+    async def generate(_state, name, params, _ws, current):
+        generated.update({"name": name, "params": params, "user": current})
+        return '{"status":"success","outputs":[{"file_id":"file-1"}]}'
+
+    monkeypatch.setattr(nodes, "_fresh_user_principal", fresh_user)
+    monkeypatch.setattr(nodes.subsystem_action_service, "invoke_action", invoke)
+    monkeypatch.setattr(nodes, "_execute_platform_file_tool", generate)
+    state = {"task_id": "task-1", "run_id": 7, "business_action_provenance": []}
+    entry = {
+        "application": SimpleNamespace(id=uuid4()),
+        "action": SimpleNamespace(action_key="orders.export", module_key="orders"),
+        "page_key": "orders.list",
+    }
+
+    content, ok = await nodes._execute_enterprise_export_file(
+        state, entry, {"limit": 2, "output_name": "订单.xlsx"}, user, object(), "call-1",
+    )
+
+    assert ok is True
+    assert len(invoked) == 2
+    assert invoked[1]["params"]["snapshotId"] == "snap-1"
+    assert invoked[1]["params"]["nextCursor"] == "cursor-2"
+    assert generated["name"] == "spreadsheet_tool"
+    assert generated["params"]["sheets"][0]["rows"] == [["编号"], ["1"], ["2"], ["3"]]
+    assert "snap-1" not in content  # model only receives the committed file result
+    assert state["business_action_provenance"][-1]["row_count"] == 3
 
 
 @pytest.mark.asyncio
@@ -131,7 +266,10 @@ async def test_query_for_saved_records_is_not_misclassified_as_a_mutation(monkey
     monkeypatch.setattr(runner.client, "stream_run", stream_run)
     state = {
         "run_id": 24,
-        "request": "请实时查询当前面辅料耗料核算共有多少条已保存的核算记录；必须只调用当前模块查询工具，并返回数据版本。",
+        "request": (
+            "请实时查询当前面辅料耗料核算共有多少条已保存的核算记录；"
+            "必须只调用当前模块查询工具，并返回数据版本。"
+        ),
         "application_id": "app-1",
         "messages": [],
         "steps": [],
