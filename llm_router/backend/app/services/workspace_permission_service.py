@@ -11,6 +11,7 @@ from app.models.workspace import Workspace
 
 DEPARTMENT_READ_PREFIX = "workspace.department.read:"
 DEPARTMENT_UPLOAD_PREFIX = "workspace.department.upload:"
+ORGANIZATION_MANAGE_PERMISSION = "workspace.organization.manage"
 def department_workspace_scope_ids(cu: CurrentUser) -> tuple[str, ...]:
     """Return departments explicitly exposed to the user by role permissions."""
     department_ids: set[str] = set()
@@ -62,7 +63,12 @@ def is_workspace_readable(workspace: Workspace, cu: CurrentUser) -> bool:
     return False
 
 
-def _role_sources(cu: CurrentUser, permission_code: str) -> list[dict[str, str]]:
+def _role_sources(
+    cu: CurrentUser,
+    permission_code: str,
+    *,
+    include_wildcard: bool = True,
+) -> list[dict[str, str]]:
     """Return active roles contributing one concrete permission code."""
     sources: list[dict[str, str]] = []
     user_state = getattr(getattr(cu, "user", None), "__dict__", {})
@@ -70,7 +76,8 @@ def _role_sources(cu: CurrentUser, permission_code: str) -> list[dict[str, str]]
         role = getattr(assignment, "role", None)
         if role is None or not role.is_active or role.deleted_at is not None:
             continue
-        if any(item.permission_code in {"*", permission_code} for item in role.permissions):
+        accepted = {permission_code, *({"*"} if include_wildcard else set())}
+        if any(item.permission_code in accepted for item in role.permissions):
             sources.append({"type": "role", "id": str(role.id), "name": role.name})
     return sorted(sources, key=lambda item: (item["name"], item["id"]))
 
@@ -96,21 +103,25 @@ async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) 
         }
     scope_type = getattr(workspace, "scope_type", "organization")
     scope_id = str(getattr(workspace, "scope_id", None) or "")
+    codes = set(getattr(cu, "permission_codes", ()) or ())
     own = scope_type == "user" and scope_id == str(getattr(cu, "id", ""))
     _, department_upload = _department_workspace_access(cu, scope_id)
+    organization_manage = (
+        scope_type == "organization" and ORGANIZATION_MANAGE_PERMISSION in codes
+    )
     # Workspace file access follows the explicit administrator role matrix.
     # Until organization/team workspace permissions have corresponding role
     # codes, membership alone must not silently disclose those catalogues.
     can_read = is_workspace_readable(workspace, cu)
     can_write_department = scope_type == "department" and department_upload
-    can_update = own or can_write_department
+    can_update = own or can_write_department or organization_manage
     return {
         "read": can_read,
-        "create": own or can_write_department,
+        "create": own or can_write_department or organization_manage,
         "update": can_update,
         # Shared workspace deletion is intentionally not granted by the
         # department "upload / modify" permission.
-        "delete": own,
+        "delete": own or organization_manage,
         # Compatibility for existing clients while mutation endpoints migrate
         # to the explicit update/delete capabilities.
         "manage": can_update,
@@ -127,13 +138,21 @@ def capability_sources(workspace: Workspace, cu: CurrentUser) -> dict[str, list[
         source = [{"type": "ownership", "id": str(cu.id), "name": "个人工作空间"}]
         return {key: source for key in ("read", "create", "update", "delete")}
     if scope_type == "organization":
-        return {
+        result = {
             "read": [{
                 "type": "membership",
                 "id": str(getattr(cu, "organization_id", "")),
                 "name": "企业公共空间默认只读",
             }],
         }
+        manage_sources = _role_sources(
+            cu,
+            ORGANIZATION_MANAGE_PERMISSION,
+            include_wildcard=False,
+        )
+        if manage_sources:
+            result.update({key: manage_sources for key in ("create", "update", "delete")})
+        return result
     if scope_type != "department":
         return {}
 

@@ -66,6 +66,33 @@ async def test_wildcard_role_grants_department_update_but_never_shared_delete() 
         "manage": True, "publish": False,
     }
 
+    organization_workspace = SimpleNamespace(
+        organization_id="org-1", deleted_at=None, scope_type="organization",
+        scope_id=None,
+    )
+    assert await workspace_permission_service.capabilities(None, organization_workspace, cu) == {
+        "read": True, "create": False, "update": False, "delete": False,
+        "manage": False, "publish": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_company_workspace_management_requires_explicit_role_permission() -> None:
+    cu = SimpleNamespace(
+        id="user-1", organization_id="org-1", department_id="home",
+        team_id=None,
+        permission_codes=(workspace_permission_service.ORGANIZATION_MANAGE_PERMISSION,),
+    )
+    workspace = SimpleNamespace(
+        organization_id="org-1", deleted_at=None, scope_type="organization",
+        scope_id=None,
+    )
+
+    assert await workspace_permission_service.capabilities(None, workspace, cu) == {
+        "read": True, "create": True, "update": True, "delete": True,
+        "manage": True, "publish": False,
+    }
+
 
 @pytest.mark.asyncio
 async def test_department_membership_is_read_only_and_roles_are_unioned() -> None:

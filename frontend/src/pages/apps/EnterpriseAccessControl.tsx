@@ -32,6 +32,7 @@ type SaveNotice = { type: 'info' | 'success' | 'error'; text: string };
 
 const DEPARTMENT_READ_PREFIX = 'workspace.department.read:';
 const DEPARTMENT_UPLOAD_PREFIX = 'workspace.department.upload:';
+const ORGANIZATION_MANAGE_PERMISSION = 'workspace.organization.manage';
 
 const OPERATION_COLUMNS: Array<{ key: EnterpriseApplicationOperation; label: string }> = [
   { key: 'query', label: '查询' },
@@ -123,6 +124,7 @@ export default function EnterpriseAccessControl() {
   const [onlyGranted, setOnlyGranted] = useState(false);
   const [drafts, setDrafts] = useState<DraftByApplication>({});
   const [departmentDraft, setDepartmentDraft] = useState<DepartmentWorkspaceDraft>({});
+  const [organizationWorkspaceManage, setOrganizationWorkspaceManage] = useState(false);
   const [legacyVisible, setLegacyVisible] = useState<Record<string, boolean>>({});
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewUserId, setPreviewUserId] = useState<string>();
@@ -175,6 +177,7 @@ export default function EnterpriseAccessControl() {
     if (!role) {
       setDrafts({});
       setDepartmentDraft({});
+      setOrganizationWorkspaceManage(false);
       setLegacyVisible({});
       return;
     }
@@ -189,6 +192,7 @@ export default function EnterpriseAccessControl() {
     });
     setDrafts(nextDrafts);
     const permissions = new Set(role.permission_codes);
+    setOrganizationWorkspaceManage(permissions.has(ORGANIZATION_MANAGE_PERMISSION));
     setDepartmentDraft(Object.fromEntries(organizationDepartments.map(department => [department.id, {
       read: permissions.has('*')
         || permissions.has(`${DEPARTMENT_READ_PREFIX}${department.id}`)
@@ -231,12 +235,15 @@ export default function EnterpriseAccessControl() {
     mutationFn: async () => {
       if (!role) throw new Error('请先选择角色');
       const retainedPermissionCodes = role.permission_codes.filter(code => (
-        !code.startsWith(DEPARTMENT_READ_PREFIX) && !code.startsWith(DEPARTMENT_UPLOAD_PREFIX)
+        !code.startsWith(DEPARTMENT_READ_PREFIX)
+        && !code.startsWith(DEPARTMENT_UPLOAD_PREFIX)
+        && code !== ORGANIZATION_MANAGE_PERMISSION
       ));
       const workspacePermissionCodes = inheritsAllWorkspaceAccess ? [] : Object.entries(departmentDraft).flatMap(([departmentId, access]) => {
         if (access.upload) return [`${DEPARTMENT_READ_PREFIX}${departmentId}`, `${DEPARTMENT_UPLOAD_PREFIX}${departmentId}`];
         return access.read ? [`${DEPARTMENT_READ_PREFIX}${departmentId}`] : [];
       });
+      if (organizationWorkspaceManage) workspacePermissionCodes.push(ORGANIZATION_MANAGE_PERMISSION);
       const activeRoleIds = new Set(roleList.filter(item => item.is_active).map(item => item.id));
       await Promise.all([...appList.flatMap(application => {
         const currentGrant = roleGrant(application, role.id);
@@ -290,7 +297,8 @@ export default function EnterpriseAccessControl() {
       const pageCountTotal = Object.values(drafts).reduce((total, appDraft) => (
         total + Object.values(appDraft).reduce((sum, access) => sum + pageCount(access), 0)
       ), 0);
-      const successText = `已保存“${role?.name}”：${departmentCount} 个部门工作空间、${pageCountTotal} 个企业页面`;
+      const companyText = organizationWorkspaceManage ? '，可管理企业公共空间' : '';
+      const successText = `已保存“${role?.name}”：${departmentCount} 个部门工作空间${companyText}、${pageCountTotal} 个企业页面`;
       setSaveNotice({ type: 'success', text: successText });
       message.success({
         key: 'role-permission-save',
@@ -557,7 +565,7 @@ export default function EnterpriseAccessControl() {
         <Button icon={<PlusOutlined />} onClick={() => { roleForm.resetFields(); setRoleModalOpen(true); }}>新建角色</Button>
         <div className="toolbar-summary">
           <span>当前草稿</span>
-          <strong>{grantedDepartmentCount} 个部门</strong>
+          <strong>{grantedDepartmentCount} 个部门{organizationWorkspaceManage ? ' + 企业公共空间管理' : ''}</strong>
           <i />
           <strong>{grantedPageTotal} 个页面</strong>
         </div>
@@ -569,12 +577,12 @@ export default function EnterpriseAccessControl() {
           items={[
             {
               key: 'departments',
-              label: '部门工作空间',
+              label: '工作空间',
               children: <div className="permission-tab-pane">
                 <div className="tab-guidance">
                   <div>
-                    <strong>允许这个角色进入哪些部门工作空间</strong>
-                    <span>员工仍只归属一个主部门；这里配置跨部门查看和协作，不改变员工归属。</span>
+                    <strong>允许这个角色管理企业公共空间或进入哪些部门工作空间</strong>
+                    <span>企业公共空间全员默认只读；管理权限需单独授予，且不会附带任何部门权限。</span>
                   </div>
                   <div className="workspace-bulk-actions">
                     <span>
@@ -614,7 +622,7 @@ export default function EnterpriseAccessControl() {
                               ? { read: true, upload: true }
                               : { read: false, upload: false })}
                           />
-                          <span>部门工作空间</span>
+                          <span>企业及部门工作空间</span>
                         </label>
                       </th>
                       <th>
@@ -642,7 +650,43 @@ export default function EnterpriseAccessControl() {
                         </label>
                       </th>
                     </tr></thead>
-                    <tbody>{organizationDepartments.map(department => {
+                    <tbody>
+                      <tr
+                        className={organizationWorkspaceManage ? 'is-collaborating' : 'is-readable'}
+                        onClick={() => setOrganizationWorkspaceManage(current => !current)}
+                        title={organizationWorkspaceManage
+                          ? '点击取消企业公共空间的上传、修改和删除权限'
+                          : '点击授予企业公共空间的上传、修改和删除权限'}
+                      >
+                        <td>
+                          <label className="workspace-row-selector" onClick={event => event.stopPropagation()}>
+                            <Checkbox
+                              aria-label="企业公共空间管理授权"
+                              checked={organizationWorkspaceManage}
+                              onChange={event => setOrganizationWorkspaceManage(event.target.checked)}
+                            />
+                            <span>
+                              <strong>{orgs.find(item => item.id === orgId)?.name ?? '企业公共空间'}</strong>
+                              <small>企业公共空间 · 全体员工默认查看</small>
+                            </span>
+                            <Tag color={organizationWorkspaceManage ? 'purple' : 'cyan'} bordered={false}>
+                              {organizationWorkspaceManage ? '可上传 / 修改 / 删除' : '全员只读'}
+                            </Tag>
+                          </label>
+                        </td>
+                        <td><Checkbox
+                          aria-label="企业公共空间查看下载"
+                          checked
+                          disabled
+                        /></td>
+                        <td><Checkbox
+                          aria-label="企业公共空间上传修改删除"
+                          checked={organizationWorkspaceManage}
+                          onClick={event => event.stopPropagation()}
+                          onChange={event => setOrganizationWorkspaceManage(event.target.checked)}
+                        /></td>
+                      </tr>
+                      {organizationDepartments.map(department => {
                       const access = departmentDraft[department.id] ?? { read: false, upload: false };
                       const readable = access.read || access.upload;
                       return <tr
@@ -695,7 +739,8 @@ export default function EnterpriseAccessControl() {
                           }))}
                         /></td>
                       </tr>;
-                    })}</tbody>
+                      })}
+                    </tbody>
                   </table>
                   {!organizationDepartments.length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无部门" />}
                 </div>

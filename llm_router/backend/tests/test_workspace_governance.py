@@ -114,6 +114,11 @@ async def test_member_capabilities_and_cross_tenant_are_consistent(db_session):
         "read": True, "create": False, "update": False, "delete": False,
         "manage": False, "publish": False,
     }
+    cu.permission_codes = (workspace_permission_service.ORGANIZATION_MANAGE_PERMISSION,)
+    assert await workspace_permission_service.capabilities(db_session, organization_ws, cu) == {
+        "read": True, "create": True, "update": True, "delete": True,
+        "manage": True, "publish": False,
+    }
     assert not (await workspace_permission_service.capabilities(db_session, foreign_ws, cu))["read"]
     with pytest.raises(HTTPException) as exc:
         await workspace_permission_service.assert_can_read(db_session, foreign_ws, cu)
