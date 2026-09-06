@@ -116,6 +116,33 @@ def test_strict_mode_null_placeholders_are_removed_before_server_validation():
     assert normalized == {"sheets": params["sheets"]}
 
 
+def test_new_artifact_does_not_implicitly_read_persistent_task_history():
+    stale = [str(uuid4())]
+    state = {"referenced_file_ids": stale}
+
+    assert nodes._implicit_runner_input_ids(
+        state,
+        requested_ids=None,
+        name="spreadsheet_create",
+        canonical_tool_name="spreadsheet_create",
+        action="create",
+    ) == []
+    assert nodes._implicit_runner_input_ids(
+        state,
+        requested_ids=["explicit-file"],
+        name="spreadsheet_create",
+        canonical_tool_name="spreadsheet_create",
+        action="create",
+    ) == ["explicit-file"]
+    assert nodes._implicit_runner_input_ids(
+        state,
+        requested_ids=None,
+        name="spreadsheet_edit",
+        canonical_tool_name="spreadsheet_edit",
+        action="edit",
+    ) == stale
+
+
 def test_artifact_validation_rejects_extension_content_mismatch():
     with pytest.raises(FileToolValidationError) as raised:
         validate_artifact_bytes("伪造.xlsx", b"not-an-ooxml-package")

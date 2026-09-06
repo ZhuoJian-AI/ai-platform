@@ -1316,6 +1316,25 @@ def _file_tool_error(
     )
 
 
+def _implicit_runner_input_ids(
+    state: AgentState,
+    *,
+    requested_ids: Any,
+    name: str,
+    canonical_tool_name: str,
+    action: str,
+) -> Any:
+    """Resolve implicit inputs without coupling fresh creates to task history."""
+
+    if requested_ids is not None:
+        return requested_ids
+    if name == "web_tool" or (
+        canonical_tool_name in STRICT_FILE_TOOL_NAMES and action == "create"
+    ):
+        return []
+    return state.get("referenced_file_ids") or []
+
+
 async def _execute_platform_file_tool(
     state: AgentState,
     name: str,
@@ -1389,9 +1408,16 @@ async def _execute_platform_file_tool(
                 workspace_error,
                 "选择个人空间或当前用户有相应权限的工作空间",
             )
-    requested_ids = params.get("input_file_ids")
-    if requested_ids is None:
-        requested_ids = [] if name == "web_tool" else (state.get("referenced_file_ids") or [])
+    # A create call is output-only unless the model explicitly selected
+    # input_file_ids.  Reusing every historical reference from a persistent
+    # Task here made a fresh business export depend on unrelated older files.
+    requested_ids = _implicit_runner_input_ids(
+        state,
+        requested_ids=params.get("input_file_ids"),
+        name=name,
+        canonical_tool_name=canonical_tool_name,
+        action=action,
+    )
     if not isinstance(requested_ids, list):
         return _file_tool_error(
             "invalid_input_file_ids",
