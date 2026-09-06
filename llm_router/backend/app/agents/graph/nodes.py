@@ -2801,8 +2801,19 @@ def _enterprise_action_request_id(
         separators=(",", ":"),
         default=str,
     )
-    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-    return f"{task_id}:{run_id}:{tool_call_id}:{digest}"[:200]
+    payload_digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    scope = json.dumps(
+        {"task": task_id, "run": run_id, "tool": tool_call_id},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    scope_digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:32]
+    # Contract v2.5 limits requestId to 128 safe characters.  Hashing the
+    # potentially long task/run/tool identifiers keeps retries stable without
+    # leaking provider-specific tool names into the subsystem request.
+    return f"zjact-{scope_digest}-{payload_digest}"
 
 
 async def _execute_enterprise_export_file(

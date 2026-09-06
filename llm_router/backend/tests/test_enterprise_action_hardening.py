@@ -1,5 +1,6 @@
 """Focused regression tests for enterprise Action reliability boundaries."""
 
+import re
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -38,6 +39,20 @@ def test_browser_retry_keeps_action_and_file_idempotency_across_new_run_ids():
         "call-1", {"limit": 50},
     )
     assert first == retried
+
+
+def test_action_request_id_is_contract_safe_even_with_long_runtime_identifiers():
+    request_id = nodes._enterprise_action_request_id(
+        {
+            "task_id": "task-" + "a" * 200,
+            "client_request_id": "browser-" + "b" * 200,
+        },
+        "provider-tool-call-" + "c" * 300,
+        {"筛选": "值" * 300},
+    )
+
+    assert 8 <= len(request_id) <= 128
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}", request_id)
 
 
 def test_update_delete_and_approve_require_a_trusted_version():
