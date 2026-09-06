@@ -345,6 +345,40 @@ async def test_current_business_data_accepts_successful_page_action(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_current_business_export_accepts_successful_composite_file_tool(monkeypatch):
+    async def stream_run(_request):
+        yield {
+            "type": "tool_call", "id": "call-1",
+            "name": "current_page_export_file", "arguments": '{"target_format":"xlsx"}',
+        }
+        yield {
+            "type": "tool_result", "id": "call-1", "name": "current_page_export_file",
+            "content": '{"status":"success","outputs":[{"file_id":"file-1"}]}',
+            "ok": True,
+        }
+        yield {"type": "done", "text": "已生成当前业务数据 Excel。"}
+
+    monkeypatch.setattr(runner.client, "stream_run", stream_run)
+    state = {
+        "run_id": 13,
+        "request": "根据当前业务数据生成一份 Excel，保存到个人空间",
+        "application_id": "app-1",
+        "messages": [],
+        "steps": [],
+        "_dsh_tool_registry": {
+            "current_page_export_file": {
+                "kind": "enterprise_export_file", "operation": "export",
+            },
+        },
+    }
+
+    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, [])
+
+    assert state["assistant_final"] == "已生成当前业务数据 Excel。"
+    assert state.get("error") is None
+
+
+@pytest.mark.asyncio
 async def test_skill_file_delivery_runs_once_with_a_runtime_completion_policy(monkeypatch):
     """A1：Python 不再以 ``-continuation`` 重跑；续执行交给 RunRequest.completion_policy 的运行时。"""
     requests: list[dict] = []

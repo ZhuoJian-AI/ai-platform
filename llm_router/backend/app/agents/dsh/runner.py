@@ -391,7 +391,8 @@ async def _consume_dsh(
             successful_tools += int(ok)
             call_id = str(event.get("id") or "")
             entry = (state.get("_dsh_tool_registry") or {}).get(name) or {}
-            if entry.get("kind") == "enterprise_action":
+            entry_kind = entry.get("kind")
+            if entry_kind == "enterprise_action":
                 enterprise_action_calls += 1
                 operation = _enterprise_operation(entry, name)
                 result_status = _enterprise_result_status(event.get("content"))
@@ -406,6 +407,18 @@ async def _consume_dsh(
                         successful_enterprise_mutations += 1
                     else:
                         failed_enterprise_mutations.append(str(event.get("content") or "未返回错误详情"))
+            elif entry_kind == "enterprise_export_file":
+                # This trusted composite tool performs the current-page export Action
+                # itself, validates every paged result, then commits the artifact through
+                # the platform file service.  Count the successful composite result as a
+                # verified live query; otherwise the final guard would retract a genuine
+                # export merely because the model never saw a separate Action tool call.
+                enterprise_action_calls += 1
+                enterprise_query_calls += 1
+                result_status = _enterprise_result_status(event.get("content"))
+                successful_enterprise_queries += int(
+                    ok and result_status not in {"failed", "error"}
+                )
             if not ok:
                 failed_tools.append((name, str(event.get("content") or "工具未返回错误详情")))
             state.setdefault("steps", []).append({"step": "tool", "name": name, "ok": ok})
