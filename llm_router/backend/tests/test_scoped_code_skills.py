@@ -529,6 +529,15 @@ def test_platform_tool_registry_keeps_legacy_docx_hidden():
     assert "generate_docx" in nodes.LEGACY_BUILTIN_TOOL_NAMES
 
 
+def test_platform_output_path_strips_only_the_authorized_workspace_prefix():
+    assert nodes._relative_platform_output_path(
+        "李四:/生产进度报告.xlsx", "李四",
+    ) == "生产进度报告.xlsx"
+    assert nodes._relative_platform_output_path(
+        "财务部:/生产进度报告.xlsx", "李四",
+    ) == "财务部:/生产进度报告.xlsx"
+
+
 def test_enterprise_mutation_tools_require_an_explicit_expected_version():
     original = {
         "type": "object",

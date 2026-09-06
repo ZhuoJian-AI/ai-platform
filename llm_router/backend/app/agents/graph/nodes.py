@@ -1014,6 +1014,22 @@ async def _verified_tool_file_records(
     return verified, artifacts
 
 
+def _relative_platform_output_path(value: object, workspace_name: str) -> str:
+    """Accept the readable ``工作空间:/path`` spelling as a relative output path.
+
+    The model is shown canonical paths so it can explain where a file lives, but
+    the storage service expects a path relative to the already-authorized target
+    workspace.  Strip only that workspace's own prefix; a different prefix stays
+    literal and therefore cannot redirect the write to another workspace.
+    """
+
+    path = str(value or "").strip().replace("\\", "/")
+    prefix = f"{workspace_name}:/" if workspace_name else ""
+    if prefix and path.casefold().startswith(prefix.casefold()):
+        path = path[len(prefix):].lstrip("/")
+    return path
+
+
 async def _execute_platform_file_tool(
     state: AgentState, name: str, params: dict, ws, user,
 ) -> str:
@@ -1123,7 +1139,10 @@ async def _execute_platform_file_tool(
             relative = PurePosixPath(str(item.get("relative_path") or original).replace("\\", "/"))
             safe_parts = [part for part in relative.parts if part not in {"", ".", ".."}]
             relative_path = "/".join(safe_parts) or original
-            path = str(params.get("output_path") or "").strip() or (
+            requested_path = _relative_platform_output_path(
+                params.get("output_path"), str(getattr(ws, "name", "") or ""),
+            )
+            path = requested_path or (
                 f"平台工具输出/{task_part}/{hashlib.sha256(output_mutation_key.encode()).hexdigest()[:12]}-{relative_path}"
             )
             mime = item.get("mime_type") or mimetypes.guess_type(original)[0] or "application/octet-stream"
