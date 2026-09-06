@@ -163,3 +163,44 @@ async def test_effective_access_omits_workspaces_with_no_capability(db_session) 
 
     assert [item["id"] for item in access["workspaces"]] == [str(readable.id)]
     assert "其他团队秘密" not in str(access)
+
+
+@pytest.mark.asyncio
+async def test_effective_access_includes_company_public_workspace_read_only(db_session) -> None:
+    org = Organization(name="Public workspace tenant", slug="public-workspace-tenant")
+    db_session.add(org)
+    await db_session.flush()
+    user = User(
+        organization_id=org.id, username="public-workspace-user", role="member", is_active=True,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    public = Workspace(
+        organization_id=org.id, name="公司公共空间", slug="organization-public",
+        scope_type="organization", scope_id=None,
+    )
+    db_session.add(public)
+    await db_session.flush()
+    cu = CurrentUser(
+        user=user, id=str(user.id), email=user.username, role=user.role,
+        organization_id=org.id,
+    )
+
+    access = await workspace_permission_service.effective_access(db_session, cu)
+
+    assert access["workspaces"] == [{
+        "id": str(public.id),
+        "name": "公司公共空间",
+        "slug": "organization-public",
+        "scope_type": "organization",
+        "scope_id": None,
+        "capabilities": {
+            "read": True, "create": False, "update": False, "delete": False,
+            "manage": False, "publish": False,
+        },
+        "sources": {
+            "read": [{
+                "type": "membership", "id": str(org.id), "name": "企业公共空间默认只读",
+            }],
+        },
+    }]

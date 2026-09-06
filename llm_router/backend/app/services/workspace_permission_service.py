@@ -51,6 +51,11 @@ def is_workspace_readable(workspace: Workspace, cu: CurrentUser) -> bool:
     scope_id = str(getattr(workspace, "scope_id", None) or "")
     if scope_type == "user":
         return scope_id == str(getattr(cu, "id", ""))
+    if scope_type == "organization":
+        # The organization workspace is the tenant's company-wide public area.
+        # Tenant membership grants read-only access; writes still require an
+        # explicit capability and are intentionally not inferred here.
+        return True
     if scope_type == "department":
         can_read, _ = _department_workspace_access(cu, scope_id)
         return can_read
@@ -121,6 +126,14 @@ def capability_sources(workspace: Workspace, cu: CurrentUser) -> dict[str, list[
     if own:
         source = [{"type": "ownership", "id": str(cu.id), "name": "个人工作空间"}]
         return {key: source for key in ("read", "create", "update", "delete")}
+    if scope_type == "organization":
+        return {
+            "read": [{
+                "type": "membership",
+                "id": str(getattr(cu, "organization_id", "")),
+                "name": "企业公共空间默认只读",
+            }],
+        }
     if scope_type != "department":
         return {}
 
