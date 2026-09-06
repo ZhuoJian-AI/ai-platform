@@ -1175,7 +1175,9 @@ async def _execute_platform_file_tool(
                 "mime": mime,
                 "name": (
                     clean_display_name(target_file.path, target_file.metadata_ or {})
-                    if target_file is not None else original
+                    if target_file is not None else (
+                        PurePosixPath(path).name if params.get("output_path") else original
+                    )
                 ),
                 "storage_backend": "oss_gateway" if content_ref else "postgres_base64",
                 **({"etag": actual_etag} if actual_etag else {}),
