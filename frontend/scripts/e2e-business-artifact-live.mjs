@@ -63,14 +63,51 @@ try {
   if (!modelText?.trim()) throw new Error('业务小助手没有可用模型');
   console.log('E2E assistant:ready');
 
+  // Business-assistant tasks are intentionally persistent. Existing turns may
+  // already contain artifact cards, so the E2E must wait for the card created
+  // by this turn instead of accepting (or blocking on) stale history.
+  await page.waitForTimeout(1_000);
+  const progressRuns = drawer.getByLabel('业务小助手实时执行过程');
+  const deliveredSections = drawer.locator('section[aria-label="本轮交付文件"]');
+  const baselineProgressCount = await progressRuns.count();
+  const baselineArtifactCount = await deliveredSections.count();
+
   await drawer.getByPlaceholder('描述你要查询或执行的业务任务…').fill(prompt);
-  await drawer.getByRole('button', { name: /在当前页面执行/ }).click();
-  await drawer.getByLabel('业务小助手实时执行过程').waitFor({ timeout: 30_000 });
+  const submitButton = drawer.getByRole('button', { name: /在当前页面执行/ });
+  await submitButton.click();
+  const currentProgress = progressRuns.nth(baselineProgressCount);
+  await currentProgress.waitFor({ timeout: 30_000 });
   console.log('E2E run:started');
 
-  const delivered = drawer.getByLabel('本轮交付文件').last();
-  await delivered.waitFor({ timeout: 12 * 60_000 });
-  await drawer.getByText('文件已交付', { exact: true }).last().waitFor({ timeout: 180_000 });
+  const completionDeadline = Date.now() + (12 * 60_000);
+  let progressText = '';
+  let lastProgressLog = 0;
+  while (Date.now() < completionDeadline) {
+    // A successful query invalidation replaces the transient running message
+    // with the persisted Task history, which intentionally has no progress UI.
+    if (await progressRuns.count() <= baselineProgressCount) {
+      progressText = '';
+      break;
+    }
+    progressText = (await currentProgress.textContent({ timeout: 2_000 })) || '';
+    if (!progressText.includes('实时执行中')) break;
+    if (Date.now() - lastProgressLog >= 30_000) {
+      console.log(`E2E run:waiting ${progressText.replace(/\s+/g, ' ').slice(0, 240)}`);
+      lastProgressLog = Date.now();
+    }
+    await page.waitForTimeout(2_000);
+  }
+  if (progressText.includes('实时执行中')) throw new Error('本轮业务助手执行超过 12 分钟');
+  if (progressText.includes('执行未完成')) {
+    throw new Error(`本轮业务助手执行失败：${progressText.slice(0, 300)}`);
+  }
+  const artifactDeadline = Date.now() + 30_000;
+  while (await deliveredSections.count() <= baselineArtifactCount) {
+    if (Date.now() >= artifactDeadline) throw new Error('本轮执行完成但没有新增文件卡片');
+    await page.waitForTimeout(500);
+  }
+  const delivered = deliveredSections.nth(baselineArtifactCount);
+  await delivered.waitFor({ timeout: 30_000 });
   const downloadButton = delivered.getByRole('button', { name: /下载/ }).last();
   const downloadPromise = page.waitForEvent('download');
   await downloadButton.click();
@@ -104,7 +141,7 @@ try {
     if (!artifact?.fileId && !artifact?.file_id) return { error: '消息没有可信 Artifact' };
     const fileId = artifact.fileId || artifact.file_id;
     const versionId = artifact.versionId || artifact.version_id;
-    const fileResponse = await fetch(`/api/v1/terminal/workspace-files/${fileId}`, { headers });
+    const fileResponse = await fetch(`/api/v1/terminal/files/${fileId}`, { headers });
     const file = await fileResponse.json();
     return {
       taskId: task.id,
