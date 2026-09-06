@@ -144,7 +144,7 @@ def test_browser_relative_business_links_are_not_misclassified_as_server_paths()
 
 
 @pytest.mark.parametrize(
-    "request, expected",
+    "user_text, expected",
     [
         ("根据当前业务数据生成 Excel，保存到李四个人空间", False),
         ("创建一份 Word 报告", False),
@@ -153,10 +153,10 @@ def test_browser_relative_business_links_are_not_misclassified_as_server_paths()
         ("更新订单，然后导出一份 PDF 报告", True),
     ],
 )
-def test_file_delivery_verbs_do_not_fake_a_business_mutation(request, expected):
+def test_file_delivery_verbs_do_not_fake_a_business_mutation(user_text, expected):
     assert runner._requests_business_mutation({
         "application_id": "app-1",
-        "request": request,
+        "request": user_text,
     }) is expected
 
 
