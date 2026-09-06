@@ -3914,6 +3914,11 @@ function InlineArtifactCard({
 const FILE_WRITE_TOOLS = new Set([
   'workspace_write_file', 'generate_docx', 'spreadsheet_tool', 'document_tool',
   'presentation_tool', 'pdf_tool', 'text_tool', 'image_tool', 'archive_tool',
+  'spreadsheet_create', 'spreadsheet_edit', 'spreadsheet_convert',
+  'document_create', 'document_edit', 'document_convert',
+  'presentation_create', 'presentation_edit', 'presentation_convert',
+  'pdf_create', 'pdf_merge', 'pdf_split', 'pdf_extract', 'pdf_convert',
+  'text_create', 'text_edit', 'text_convert', 'business_export_to_workspace_file',
   'image_generation_tool', 'run_skill_script',
 ]);
 

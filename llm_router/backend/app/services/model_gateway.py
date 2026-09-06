@@ -113,11 +113,7 @@ async def _metered_result(
 
 def _bounded_max_tokens(value: int | None) -> int:
     try:
-        maximum = (
-            settings.ai_quota_default_max_output_tokens
-            if value is None
-            else int(value)
-        )
+        maximum = settings.ai_quota_default_max_output_tokens if value is None else int(value)
     except (TypeError, ValueError) as exc:
         raise GatewayError("quota_configuration_error") from exc
     if maximum < 0:
@@ -193,7 +189,12 @@ async def _transcribe_audio_unmetered(
     if len(audio) > _AUDIO_INPUT_LIMIT_BYTES:
         raise GatewayError("audio_segment_too_large")
     resolved = await resolve_deployment(
-        db, org_id, model_alias, "speech_to_text", dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        "speech_to_text",
+        dept_id=dept_id,
+        team_id=team_id,
     )
     if not resolved:
         raise GatewayError("capability_not_configured")
@@ -205,13 +206,17 @@ async def _transcribe_audio_unmetered(
     encoded = base64.b64encode(audio).decode("ascii")
     body = {
         "model": deployment.model_id,
-        "messages": [{
-            "role": "user",
-            "content": [{
-                "type": "input_audio",
-                "input_audio": {"data": f"data:{mime_type};base64,{encoded}"},
-            }],
-        }],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": f"data:{mime_type};base64,{encoded}"},
+                    }
+                ],
+            }
+        ],
         "asr_options": {"language": language},
         "stream": False,
         "max_tokens": settings.ai_quota_default_max_output_tokens,
@@ -326,7 +331,12 @@ async def _understand_audio_unmetered(
 ) -> LlmResult:
     """Ask a question about an object-scoped, short-lived audio URL."""
     resolved = await resolve_deployment(
-        db, org_id, model_alias, "audio_understanding", dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        "audio_understanding",
+        dept_id=dept_id,
+        team_id=team_id,
     )
     if not resolved:
         raise GatewayError("capability_not_configured")
@@ -338,13 +348,15 @@ async def _understand_audio_unmetered(
         org_id,
         provider,
         deployment,
-        [{
-            "role": "user",
-            "content": [
-                {"type": "input_audio", "input_audio": {"data": audio_url}},
-                {"type": "text", "text": question},
-            ],
-        }],
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_audio", "input_audio": {"data": audio_url}},
+                    {"type": "text", "text": question},
+                ],
+            }
+        ],
         max_tokens=settings.ai_quota_default_max_output_tokens,
     )
     return result
@@ -397,20 +409,27 @@ async def _stream_understand_audio_unmetered(
 ) -> AsyncIterator[tuple[str, Any, Any]]:
     """Stream audio understanding without falling back to a chat-only model."""
     resolved = await resolve_deployment(
-        db, org_id, model_alias, "audio_understanding", dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        "audio_understanding",
+        dept_id=dept_id,
+        team_id=team_id,
     )
     if not resolved:
         raise GatewayError("capability_not_configured")
     provider, deployment = resolved
     if deployment.adapter != "openai_chat_completions":
         raise GatewayError("capability_mismatch")
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "input_audio", "input_audio": {"data": audio_url}},
-            {"type": "text", "text": question},
-        ],
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_audio", "input_audio": {"data": audio_url}},
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
     async for event in legacy_client.stream_chat(
         db,
         org_id,
@@ -489,7 +508,12 @@ async def _synthesize_audio_unmetered(
 ) -> dict[str, Any]:
     capability = "voice_clone" if clone_audio is not None else "voice_design" if design_prompt else "text_to_speech"
     resolved = await resolve_deployment(
-        db, org_id, model_alias, capability, dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        capability,
+        dept_id=dept_id,
+        team_id=team_id,
     )
     if not resolved:
         raise GatewayError("capability_not_configured")
@@ -631,8 +655,7 @@ def _upstream_error_category(status_code: int, payload: Any = None) -> str:
     if status_code >= 500:
         return "provider_service_unavailable"
     if status_code == 400 and any(
-        marker in lowered
-        for marker in ("unsupported", "capability", "dimension", "image", "vision", "size")
+        marker in lowered for marker in ("unsupported", "capability", "dimension", "image", "vision", "size")
     ):
         return "capability_mismatch"
     return "provider_rejected_request"
@@ -682,15 +705,9 @@ def _normalize_bailian_image_size(value: str) -> str:
 def _scope_clause(dept_id: str | UUID | None, team_id: str | UUID | None):
     branches = [LlmProvider.scope_type == "organization"]
     if dept_id:
-        branches.append(
-            (LlmProvider.scope_type == "department")
-            & (LlmProvider.department_id == UUID(str(dept_id)))
-        )
+        branches.append((LlmProvider.scope_type == "department") & (LlmProvider.department_id == UUID(str(dept_id))))
     if team_id:
-        branches.append(
-            (LlmProvider.scope_type == "team")
-            & (LlmProvider.team_id == UUID(str(team_id)))
-        )
+        branches.append((LlmProvider.scope_type == "team") & (LlmProvider.team_id == UUID(str(team_id))))
     return or_(*branches)
 
 
@@ -723,10 +740,7 @@ async def candidate_deployments(
     rows = list((await db.execute(statement)).all())
     organization = await db.get(Organization, org_id)
     allow_new_gateway = bool(
-        organization
-        and settings.model_gateway_enabled_for(
-            organization.slug, organization_id=organization.id
-        )
+        organization and settings.model_gateway_enabled_for(organization.slug, organization_id=organization.id)
     )
     candidates = [
         (provider, deployment)
@@ -757,8 +771,13 @@ async def resolve_deployment(
     include_unverified: bool = False,
 ) -> tuple[LlmProvider, ModelDeployment] | None:
     candidates = await candidate_deployments(
-        db, org_id, model_alias, capability,
-        dept_id=dept_id, team_id=team_id, include_unverified=include_unverified,
+        db,
+        org_id,
+        model_alias,
+        capability,
+        dept_id=dept_id,
+        team_id=team_id,
+        include_unverified=include_unverified,
     )
     return candidates[0] if candidates else None
 
@@ -799,17 +818,31 @@ async def resolve_provider_model(
 ) -> tuple[str, str]:
     capability = "embedding" if for_embeddings else "chat"
     resolved = await resolve_deployment(
-        db, org_id, model_alias, capability, dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        capability,
+        dept_id=dept_id,
+        team_id=team_id,
     )
     if resolved:
         provider, deployment = resolved
         return str(provider.id), deployment.model_id
     await _assert_legacy_fallback_allowed(
-        db, org_id, model_alias, capability, dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        capability,
+        dept_id=dept_id,
+        team_id=team_id,
     )
     return await legacy_client.resolve_provider_model(
-        db, org_id, model_alias, for_embeddings=for_embeddings,
-        dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        for_embeddings=for_embeddings,
+        dept_id=dept_id,
+        team_id=team_id,
     )
 
 
@@ -822,16 +855,30 @@ async def resolve_provider(
     team_id: str | UUID | None = None,
 ) -> tuple[LlmProvider, str]:
     resolved = await resolve_deployment(
-        db, org_id, model_alias, "chat", dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        "chat",
+        dept_id=dept_id,
+        team_id=team_id,
     )
     if resolved:
         provider, deployment = resolved
         return effective_provider(provider, deployment), deployment.model_id
     await _assert_legacy_fallback_allowed(
-        db, org_id, model_alias, "chat", dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        "chat",
+        dept_id=dept_id,
+        team_id=team_id,
     )
     return await legacy_client.resolve_provider(
-        db, org_id, model_alias, dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        dept_id=dept_id,
+        team_id=team_id,
     )
 
 
@@ -854,18 +901,25 @@ def is_retryable_gateway_error(exc: Exception) -> bool:
     return _retryable(exc)
 
 
-def _responses_tools(tools: list[dict] | None) -> list[dict] | None:
+def _responses_tools(
+    provider: LlmProvider,
+    tools: list[dict] | None,
+) -> list[dict] | None:
+    tools = legacy_client.prepare_tools_for_provider(provider, tools)
     if not tools:
         return None
     converted: list[dict] = []
     for tool in tools:
         function = tool.get("function") or {}
-        converted.append({
+        converted_tool = {
             "type": "function",
             "name": function.get("name", ""),
             "description": function.get("description", ""),
             "parameters": function.get("parameters") or {"type": "object", "properties": {}},
-        })
+        }
+        if function.get("strict") is True:
+            converted_tool["strict"] = True
+        converted.append(converted_tool)
     return converted
 
 
@@ -889,23 +943,27 @@ def _responses_input(messages: list[dict]) -> list[dict]:
     for message in messages:
         role = message.get("role")
         if role == "tool":
-            items.append({
-                "type": "function_call_output",
-                "call_id": message.get("tool_call_id", ""),
-                "output": str(message.get("content", "")),
-            })
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message.get("tool_call_id", ""),
+                    "output": str(message.get("content", "")),
+                }
+            )
             continue
         if role == "assistant" and message.get("tool_calls"):
             if message.get("content"):
                 items.append({"role": "assistant", "content": message["content"]})
             for call in message["tool_calls"]:
                 function = call.get("function") or {}
-                items.append({
-                    "type": "function_call",
-                    "call_id": call.get("id", ""),
-                    "name": function.get("name", ""),
-                    "arguments": function.get("arguments", "{}"),
-                })
+                items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": call.get("id", ""),
+                        "name": function.get("name", ""),
+                        "arguments": function.get("arguments", "{}"),
+                    }
+                )
             continue
         items.append({"role": role, "content": _responses_content(message.get("content", ""))})
     return items
@@ -933,7 +991,7 @@ async def _responses_chat(
         body["temperature"] = temperature
     if max_tokens is not None:
         body["max_output_tokens"] = max_tokens
-    response_tools = _responses_tools(tools)
+    response_tools = _responses_tools(provider, tools)
     if response_tools:
         body["tools"] = response_tools
     async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
@@ -956,11 +1014,13 @@ async def _responses_chat(
                 if part.get("type") in {"output_text", "text"}:
                     text_parts.append(part.get("text", ""))
         elif item.get("type") == "function_call":
-            tool_calls.append({
-                "id": item.get("call_id") or item.get("id", ""),
-                "name": item.get("name", ""),
-                "arguments": item.get("arguments", "{}"),
-            })
+            tool_calls.append(
+                {
+                    "id": item.get("call_id") or item.get("id", ""),
+                    "name": item.get("name", ""),
+                    "arguments": item.get("arguments", "{}"),
+                }
+            )
     usage = data.get("usage") or {}
     return LlmResult(
         content="".join(text_parts),
@@ -985,14 +1045,19 @@ async def _chat_with_deployment(
 ) -> LlmResult:
     if deployment.adapter == "openai_responses":
         return await _responses_chat(
-            provider, deployment, messages,
+            provider,
+            deployment,
+            messages,
             system_prompt=kwargs.get("system_prompt", ""),
             temperature=kwargs.get("temperature"),
             max_tokens=kwargs.get("max_tokens"),
             tools=kwargs.get("tools"),
         )
     return await legacy_client.chat(
-        db, org_id, deployment.model_id, messages,
+        db,
+        org_id,
+        deployment.model_id,
+        messages,
         system_prompt=kwargs.get("system_prompt", ""),
         temperature=kwargs.get("temperature"),
         max_tokens=kwargs.get("max_tokens"),
@@ -1023,34 +1088,70 @@ async def _chat_unmetered(
             deployment = await db.get(ModelDeployment, UUID(deployment_id))
             if deployment is not None:
                 return await _chat_with_deployment(
-                    db, org_id, provider_override, deployment, messages,
-                    system_prompt=system_prompt, temperature=temperature,
-                    max_tokens=max_tokens, tools=tools,
+                    db,
+                    org_id,
+                    provider_override,
+                    deployment,
+                    messages,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=tools,
                 )
         return await legacy_client.chat(
-            db, org_id, model_alias, messages, system_prompt=system_prompt,
-            temperature=temperature, max_tokens=max_tokens, tools=tools,
-            provider_override=provider_override, model_override=model_override,
+            db,
+            org_id,
+            model_alias,
+            messages,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            provider_override=provider_override,
+            model_override=model_override,
         )
     candidates = await candidate_deployments(
-        db, org_id, model_alias, "chat", dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        "chat",
+        dept_id=dept_id,
+        team_id=team_id,
     )
     if not candidates:
         await _assert_legacy_fallback_allowed(
-            db, org_id, model_alias, "chat", dept_id=dept_id, team_id=team_id,
+            db,
+            org_id,
+            model_alias,
+            "chat",
+            dept_id=dept_id,
+            team_id=team_id,
         )
         return await legacy_client.chat(
-            db, org_id, model_alias, messages, system_prompt=system_prompt,
-            temperature=temperature, max_tokens=max_tokens, tools=tools,
-            dept_id=dept_id, team_id=team_id,
+            db,
+            org_id,
+            model_alias,
+            messages,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            dept_id=dept_id,
+            team_id=team_id,
         )
     last_error: Exception | None = None
     for index, (provider, deployment) in enumerate(candidates):
         try:
             return await _chat_with_deployment(
-                db, org_id, provider, deployment, messages,
-                system_prompt=system_prompt, temperature=temperature,
-                max_tokens=max_tokens, tools=tools,
+                db,
+                org_id,
+                provider,
+                deployment,
+                messages,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
             )
         except Exception as exc:
             last_error = exc
@@ -1132,8 +1233,13 @@ async def _stream_chat_unmetered(
             deployment = await db.get(ModelDeployment, UUID(deployment_id))
             if deployment is not None and deployment.adapter == "openai_responses":
                 result = await _responses_chat(
-                    provider_override, deployment, messages, system_prompt=system_prompt,
-                    temperature=temperature, max_tokens=max_tokens, tools=tools,
+                    provider_override,
+                    deployment,
+                    messages,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=tools,
                 )
                 if result.content:
                     yield ("text", result.content, None)
@@ -1144,23 +1250,47 @@ async def _stream_chat_unmetered(
                 yield ("usage", None, result.usage)
                 return
         async for event in legacy_client.stream_chat(
-            db, org_id, model_alias, messages, system_prompt=system_prompt,
-            temperature=temperature, max_tokens=max_tokens, tools=tools,
-            provider_override=provider_override, model_override=model_override,
+            db,
+            org_id,
+            model_alias,
+            messages,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            provider_override=provider_override,
+            model_override=model_override,
         ):
             yield event
         return
     candidates = await candidate_deployments(
-        db, org_id, model_alias, "chat", dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        "chat",
+        dept_id=dept_id,
+        team_id=team_id,
     )
     if not candidates:
         await _assert_legacy_fallback_allowed(
-            db, org_id, model_alias, "chat", dept_id=dept_id, team_id=team_id,
+            db,
+            org_id,
+            model_alias,
+            "chat",
+            dept_id=dept_id,
+            team_id=team_id,
         )
         async for event in legacy_client.stream_chat(
-            db, org_id, model_alias, messages, system_prompt=system_prompt,
-            temperature=temperature, max_tokens=max_tokens, tools=tools,
-            dept_id=dept_id, team_id=team_id,
+            db,
+            org_id,
+            model_alias,
+            messages,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            dept_id=dept_id,
+            team_id=team_id,
         ):
             yield event
         return
@@ -1172,8 +1302,13 @@ async def _stream_chat_unmetered(
                 # The Responses adapter is normalized before emitting anything,
                 # so a retryable upstream error can safely switch providers.
                 result = await _responses_chat(
-                    provider, deployment, messages, system_prompt=system_prompt,
-                    temperature=temperature, max_tokens=max_tokens, tools=tools,
+                    provider,
+                    deployment,
+                    messages,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=tools,
                 )
                 if result.content:
                     emitted = True
@@ -1188,8 +1323,14 @@ async def _stream_chat_unmetered(
                 yield ("usage", None, result.usage)
                 return
             async for event in legacy_client.stream_chat(
-                db, org_id, deployment.model_id, messages, system_prompt=system_prompt,
-                temperature=temperature, max_tokens=max_tokens, tools=tools,
+                db,
+                org_id,
+                deployment.model_id,
+                messages,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
                 provider_override=effective_provider(provider, deployment),
                 model_override=deployment.model_id,
             ):
@@ -1278,14 +1419,29 @@ async def _embed_unmetered(
     team_id: str | UUID | None = None,
 ) -> tuple[list[list[float]], dict[str, Any]]:
     resolved = await resolve_deployment(
-        db, org_id, model, "embedding", dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model,
+        "embedding",
+        dept_id=dept_id,
+        team_id=team_id,
     )
     if not resolved:
         await _assert_legacy_fallback_allowed(
-            db, org_id, model, "embedding", dept_id=dept_id, team_id=team_id,
+            db,
+            org_id,
+            model,
+            "embedding",
+            dept_id=dept_id,
+            team_id=team_id,
         )
         return await legacy_client.embed_with_usage(
-            db, org_id, model, texts, dept_id=dept_id, team_id=team_id,
+            db,
+            org_id,
+            model,
+            texts,
+            dept_id=dept_id,
+            team_id=team_id,
         )
     provider, deployment = resolved
     return await _embed_with_deployment(effective_provider(provider, deployment), deployment, texts)
@@ -1359,8 +1515,10 @@ async def _embed_with_deployment(
     vectors: list[list[float]] = []
     for item in items:
         vector = item.get("embedding")
-        if not isinstance(vector, list) or not vector or any(
-            not isinstance(value, (int, float)) or isinstance(value, bool) for value in vector
+        if (
+            not isinstance(vector, list)
+            or not vector
+            or any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in vector)
         ):
             raise GatewayError("invalid_provider_response")
         if deployment.embedding_dimensions and len(vector) != deployment.embedding_dimensions:
@@ -1390,7 +1548,8 @@ async def _generate_image_unmetered(
 ) -> ImageGenerationResult:
     deployment = next(
         (
-            item for item in (provider.model_deployments or [])
+            item
+            for item in (provider.model_deployments or [])
             if item.model_id == model
             and item.is_active
             and item.deleted_at is None
@@ -1401,18 +1560,30 @@ async def _generate_image_unmetered(
     )
     if deployment is None:
         return await legacy_client.generate_image(
-            provider, model, prompt=prompt, size=size, quality=quality,
-            endpoint_path=endpoint_path, max_bytes=max_bytes,
+            provider,
+            model,
+            prompt=prompt,
+            size=size,
+            quality=quality,
+            endpoint_path=endpoint_path,
+            max_bytes=max_bytes,
         )
     if deployment.adapter == "bailian_multimodal_generation":
         return await _bailian_generate_image(
-            effective_provider(provider, deployment), deployment,
-            prompt=prompt, size=size, max_bytes=max_bytes,
+            effective_provider(provider, deployment),
+            deployment,
+            prompt=prompt,
+            size=size,
+            max_bytes=max_bytes,
         )
     return await legacy_client.generate_image(
-        effective_provider(provider, deployment), deployment.model_id,
-        prompt=prompt, size=size, quality=quality,
-        endpoint_path=deployment.endpoint_path or endpoint_path, max_bytes=max_bytes,
+        effective_provider(provider, deployment),
+        deployment.model_id,
+        prompt=prompt,
+        size=size,
+        quality=quality,
+        endpoint_path=deployment.endpoint_path or endpoint_path,
+        max_bytes=max_bytes,
     )
 
 
@@ -1510,7 +1681,7 @@ async def _bailian_generate_image(
             raise GatewayError(_upstream_error_category(response.status_code, data))
         image_url = ""
         for choice in (data.get("output") or {}).get("choices") or []:
-            for item in ((choice.get("message") or {}).get("content") or []):
+            for item in (choice.get("message") or {}).get("content") or []:
                 if item.get("image"):
                     image_url = str(item["image"])
                     break
@@ -1533,7 +1704,9 @@ async def _bailian_generate_image(
     if not raw:
         raise GatewayError("invalid_provider_response")
     return ImageGenerationResult(
-        raw=raw, provider_id=str(provider.id), model_served=deployment.model_id,
+        raw=raw,
+        provider_id=str(provider.id),
+        model_served=deployment.model_id,
     )
 
 
@@ -1558,9 +1731,15 @@ async def _test_deployment_unmetered(
         # the requested answer.
         verification_max_tokens = 512 if capability == "vision" else 128
         result = await _chat_with_deployment(
-            db, provider.organization_id, provider, deployment,
-            [{"role": "user", "content": content}], system_prompt="",
-            temperature=0, max_tokens=verification_max_tokens, tools=None,
+            db,
+            provider.organization_id,
+            provider,
+            deployment,
+            [{"role": "user", "content": content}],
+            system_prompt="",
+            temperature=0,
+            max_tokens=verification_max_tokens,
+            tools=None,
         )
         output = (result.content or "").strip()
         if not output:
@@ -1583,19 +1762,27 @@ async def _test_deployment_unmetered(
     if capability == "image_generation":
         if deployment.adapter == "bailian_multimodal_generation":
             image = await _bailian_generate_image(
-                effective, deployment, prompt="A simple blue circle on white background",
+                effective,
+                deployment,
+                prompt="A simple blue circle on white background",
                 size=str((deployment.config or {}).get("default_size") or "1024x1024"),
                 max_bytes=5 * 1024 * 1024,
             )
         else:
             image = await legacy_client.generate_image(
-                effective, deployment.model_id, prompt="A simple blue circle on white background",
+                effective,
+                deployment.model_id,
+                prompt="A simple blue circle on white background",
                 size=str((deployment.config or {}).get("default_size") or "1024x1024"),
                 endpoint_path=deployment.endpoint_path or "/images/generations",
             )
         return {"bytes": len(image.raw)}
     if capability in {
-        "audio_understanding", "speech_to_text", "text_to_speech", "voice_design", "voice_clone",
+        "audio_understanding",
+        "speech_to_text",
+        "text_to_speech",
+        "voice_design",
+        "voice_clone",
     }:
         audio_bytes = _test_wav_bytes()
         if test_file_id := str((deployment.config or {}).get("test_workspace_file_id") or "").strip():
@@ -1606,16 +1793,18 @@ async def _test_deployment_unmetered(
                 parsed_test_file_id = UUID(test_file_id)
             except ValueError as exc:
                 raise GatewayError("invalid_test_audio_configuration") from exc
-            test_file = (await db.execute(
-                select(WorkspaceFile)
-                .join(Workspace, Workspace.id == WorkspaceFile.workspace_id)
-                .where(
-                    WorkspaceFile.id == parsed_test_file_id,
-                    WorkspaceFile.deleted_at.is_(None),
-                    Workspace.organization_id == provider.organization_id,
-                    Workspace.deleted_at.is_(None),
+            test_file = (
+                await db.execute(
+                    select(WorkspaceFile)
+                    .join(Workspace, Workspace.id == WorkspaceFile.workspace_id)
+                    .where(
+                        WorkspaceFile.id == parsed_test_file_id,
+                        WorkspaceFile.deleted_at.is_(None),
+                        Workspace.organization_id == provider.organization_id,
+                        Workspace.deleted_at.is_(None),
+                    )
                 )
-            )).scalar_one_or_none()
+            ).scalar_one_or_none()
             if test_file is None or not test_file.content_ref:
                 raise GatewayError("invalid_test_audio_configuration")
             audio_bytes = await download_bytes(test_file.content_ref)
@@ -1623,15 +1812,19 @@ async def _test_deployment_unmetered(
         if capability in {"audio_understanding", "speech_to_text"}:
             body: dict[str, Any] = {
                 "model": deployment.model_id,
-                "messages": [{
-                    "role": "user",
-                    "content": [{
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": f"data:audio/wav;base64,{encoded}",
-                        },
-                    }],
-                }],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": f"data:audio/wav;base64,{encoded}",
+                                },
+                            }
+                        ],
+                    }
+                ],
                 "stream": False,
             }
             if capability == "audio_understanding":
@@ -1687,7 +1880,8 @@ async def test_deployment(
         ),
         dept_id=getattr(provider, "department_id", None),
         team_id=getattr(provider, "team_id", None),
-        supports_token_metering=capability not in {
+        supports_token_metering=capability
+        not in {
             "image_generation",
             "audio_understanding",
             "speech_to_text",

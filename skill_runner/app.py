@@ -35,7 +35,9 @@ except ModuleNotFoundError:  # pragma: no cover - production Runner is Python 3.
     import tomli as tomllib
 
 CACHE_ROOT = Path(os.getenv("SKILL_CACHE_ROOT", "/cache")).resolve()
-RUNNER_TOKEN = os.getenv("SKILL_RUNNER_TOKEN", "skill-runner-dev-token-change-in-production")
+RUNNER_TOKEN = os.getenv(
+    "SKILL_RUNNER_TOKEN", "skill-runner-dev-token-change-in-production"
+)
 MAX_PACKAGE_BYTES = int(os.getenv("SKILL_PACKAGE_MAX_BYTES", str(100 * 1024 * 1024)))
 MAX_EXPANDED_PACKAGE_BYTES = int(
     os.getenv("SKILL_PACKAGE_EXPANDED_MAX_BYTES", str(500 * 1024 * 1024))
@@ -43,16 +45,29 @@ MAX_EXPANDED_PACKAGE_BYTES = int(
 MAX_PACKAGE_FILES = int(os.getenv("SKILL_PACKAGE_MAX_FILES", "1000"))
 MAX_OUTPUT_BYTES = 100 * 1024 * 1024
 MAX_OUTPUT_FILES = 20
-BASE_NODE_MODULES = Path(os.getenv("SKILL_BASE_NODE_MODULES", "/opt/skill-node/node_modules"))
+BASE_NODE_MODULES = Path(
+    os.getenv("SKILL_BASE_NODE_MODULES", "/opt/skill-node/node_modules")
+)
 RUNNER_MAX_CONCURRENCY = int(os.getenv("SKILL_RUNNER_MAX_CONCURRENCY", "4"))
 RUNNER_MAX_QUEUE = int(os.getenv("SKILL_RUNNER_MAX_QUEUE", "100"))
 RUNNER_QUEUE_WAIT_SECONDS = int(os.getenv("SKILL_RUNNER_QUEUE_WAIT_SECONDS", "300"))
 RUNNER_OFFICE_CONCURRENCY = int(os.getenv("SKILL_RUNNER_OFFICE_CONCURRENCY", "1"))
-CACHE_RETENTION_SECONDS = int(os.getenv("SKILL_CACHE_RETENTION_SECONDS", str(7 * 24 * 60 * 60)))
+CACHE_RETENTION_SECONDS = int(
+    os.getenv("SKILL_CACHE_RETENTION_SECONDS", str(7 * 24 * 60 * 60))
+)
 CACHE_MAX_BYTES = int(os.getenv("SKILL_CACHE_MAX_BYTES", str(10 * 1024 * 1024 * 1024)))
-FAILED_TEMP_RETENTION_SECONDS = int(os.getenv("SKILL_FAILED_TEMP_RETENTION_SECONDS", "3600"))
+FAILED_TEMP_RETENTION_SECONDS = int(
+    os.getenv("SKILL_FAILED_TEMP_RETENTION_SECONDS", "3600")
+)
 BUILTIN_PYTHON_PACKAGES = (
-    "openpyxl", "pandas", "python-docx", "python-pptx", "PyMuPDF", "pypdf", "Pillow", "pytesseract",
+    "openpyxl",
+    "pandas",
+    "python-docx",
+    "python-pptx",
+    "PyMuPDF",
+    "pypdf",
+    "Pillow",
+    "pytesseract",
 )
 BUILTIN_NODE_PACKAGES = ("exceljs",)
 
@@ -83,7 +98,9 @@ _INSTALL_LOCKS: dict[str, asyncio.Lock] = {}
 class RunnerCapacity:
     """A small in-process queue protecting this isolated Runner container."""
 
-    def __init__(self, limit: int, queue_limit: int, wait_seconds: int, label: str) -> None:
+    def __init__(
+        self, limit: int, queue_limit: int, wait_seconds: int, label: str
+    ) -> None:
         self.limit = max(1, limit)
         self.queue_limit = max(0, queue_limit)
         self.wait_seconds = max(1, wait_seconds)
@@ -95,7 +112,9 @@ class RunnerCapacity:
     async def _wait_for_slot(self) -> None:
         async with self._condition:
             if self.waiting >= self.queue_limit:
-                raise HTTPException(status_code=429, detail=f"{self.label} queue is full")
+                raise HTTPException(
+                    status_code=429, detail=f"{self.label} queue is full"
+                )
             self.waiting += 1
             try:
                 await asyncio.wait_for(
@@ -129,10 +148,16 @@ class RunnerCapacity:
 
 
 EXECUTION_CAPACITY = RunnerCapacity(
-    RUNNER_MAX_CONCURRENCY, RUNNER_MAX_QUEUE, RUNNER_QUEUE_WAIT_SECONDS, "Skill Runner",
+    RUNNER_MAX_CONCURRENCY,
+    RUNNER_MAX_QUEUE,
+    RUNNER_QUEUE_WAIT_SECONDS,
+    "Skill Runner",
 )
 OFFICE_CAPACITY = RunnerCapacity(
-    RUNNER_OFFICE_CONCURRENCY, RUNNER_MAX_QUEUE, RUNNER_QUEUE_WAIT_SECONDS, "Office Runner",
+    RUNNER_OFFICE_CONCURRENCY,
+    RUNNER_MAX_QUEUE,
+    RUNNER_QUEUE_WAIT_SECONDS,
+    "Office Runner",
 )
 
 
@@ -158,16 +183,28 @@ def _package_version(name: str) -> str | None:
 def _runtime_info() -> dict:
     return {
         "python_version": platform.python_version(),
-        "node_version": (_command_version(["node", "--version"]) or "").lstrip("v") or None,
+        "node_version": (_command_version(["node", "--version"]) or "").lstrip("v")
+        or None,
         "bash_version": _command_version(["bash", "--version"]),
         "libreoffice_version": _command_version(["libreoffice", "--version"]),
         "tesseract_version": _command_version(["tesseract", "--version"]),
         "platform_tools": [
-            "spreadsheet", "document", "presentation", "pdf", "text", "web", "image", "archive",
+            "spreadsheet",
+            "document",
+            "presentation",
+            "pdf",
+            "text",
+            "web",
+            "image",
+            "archive",
         ],
         "builtin_dependencies": {
-            "python": {name: _package_version(name) for name in BUILTIN_PYTHON_PACKAGES},
-            "node": {"exceljs": "4.4.0" if (BASE_NODE_MODULES / "exceljs").exists() else None},
+            "python": {
+                name: _package_version(name) for name in BUILTIN_PYTHON_PACKAGES
+            },
+            "node": {
+                "exceljs": "4.4.0" if (BASE_NODE_MODULES / "exceljs").exists() else None
+            },
         },
     }
 
@@ -203,7 +240,14 @@ class ExecuteRequest(InstallRequest):
 
 class BuiltinExecuteRequest(BaseModel):
     tool_kind: Literal[
-        "spreadsheet", "document", "presentation", "pdf", "text", "web", "image", "archive",
+        "spreadsheet",
+        "document",
+        "presentation",
+        "pdf",
+        "text",
+        "web",
+        "image",
+        "archive",
     ]
     action: str = Field(min_length=1, max_length=32)
     params: dict = Field(default_factory=dict)
@@ -222,7 +266,8 @@ def _assert_platform_secrets_absent() -> None:
     if leaked:
         raise HTTPException(
             status_code=503,
-            detail="Skill Runner contains forbidden platform secrets: " + ", ".join(leaked),
+            detail="Skill Runner contains forbidden platform secrets: "
+            + ", ".join(leaked),
         )
 
 
@@ -252,22 +297,32 @@ async def _load_archive(req: InstallRequest) -> bytes:
         total = 0
         try:
             async with (
-                httpx.AsyncClient(timeout=300, trust_env=False, follow_redirects=False) as client,
-                client.stream("GET", req.archive_url, headers=req.archive_headers) as response,
+                httpx.AsyncClient(
+                    timeout=300, trust_env=False, follow_redirects=False
+                ) as client,
+                client.stream(
+                    "GET", req.archive_url, headers=req.archive_headers
+                ) as response,
             ):
                 response.raise_for_status()
                 async for chunk in response.aiter_bytes(1024 * 1024):
                     total += len(chunk)
                     if total > MAX_PACKAGE_BYTES:
-                        raise HTTPException(status_code=413, detail="Skill package exceeds 100MB")
+                        raise HTTPException(
+                            status_code=413, detail="Skill package exceeds 100MB"
+                        )
                     chunks.append(chunk)
         except HTTPException:
             raise
         except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail="Unable to download Skill package") from exc
+            raise HTTPException(
+                status_code=502, detail="Unable to download Skill package"
+            ) from exc
         raw = b"".join(chunks)
     if req.archive_size is not None and len(raw) != req.archive_size:
-        raise HTTPException(status_code=422, detail="Skill package size does not match metadata")
+        raise HTTPException(
+            status_code=422, detail="Skill package size does not match metadata"
+        )
     if hashlib.sha256(raw).hexdigest() != req.package_hash:
         raise HTTPException(status_code=422, detail="Skill package checksum mismatch")
     return raw
@@ -285,7 +340,9 @@ def _extract(raw: bytes, target: Path) -> None:
                 )
             expanded_size = sum(item.file_size for item in file_entries)
             if expanded_size > MAX_EXPANDED_PACKAGE_BYTES:
-                raise HTTPException(status_code=413, detail="Expanded Skill package exceeds 500MB")
+                raise HTTPException(
+                    status_code=413, detail="Expanded Skill package exceeds 500MB"
+                )
             seen_paths: set[str] = set()
             for info in entries:
                 name = info.filename.replace("\\", "/").lstrip("/")
@@ -294,7 +351,9 @@ def _extract(raw: bytes, target: Path) -> None:
                     raise HTTPException(status_code=422, detail="Unsafe archive path")
                 normalized = path.as_posix().casefold()
                 if normalized in seen_paths:
-                    raise HTTPException(status_code=422, detail="Duplicate archive path")
+                    raise HTTPException(
+                        status_code=422, detail="Duplicate archive path"
+                    )
                 seen_paths.add(normalized)
                 destination = (target / Path(*path.parts)).resolve()
                 if target not in destination.parents and destination != target:
@@ -310,20 +369,42 @@ def _extract(raw: bytes, target: Path) -> None:
 
 
 _CHILD_ENV_ALLOWLIST = {
-    "PATH", "HOME", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
     # Windows needs these process-level values to start Python/Node reliably. They
     # describe the operating system and temporary directory, not platform secrets.
-    "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PATHEXT", "COMSPEC",
-    "PIP_INDEX_URL", "PIP_TRUSTED_HOST", "PIP_DEFAULT_TIMEOUT", "PIP_RETRIES",
-    "NPM_CONFIG_REGISTRY", "NPM_CONFIG_FETCH_RETRIES", "NPM_CONFIG_FETCH_RETRY_MINTIMEOUT",
-    "NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT", "NPM_CONFIG_FETCH_TIMEOUT", "NODE_PATH",
+    "SYSTEMROOT",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "PATHEXT",
+    "COMSPEC",
+    "PIP_INDEX_URL",
+    "PIP_TRUSTED_HOST",
+    "PIP_DEFAULT_TIMEOUT",
+    "PIP_RETRIES",
+    "NPM_CONFIG_REGISTRY",
+    "NPM_CONFIG_FETCH_RETRIES",
+    "NPM_CONFIG_FETCH_RETRY_MINTIMEOUT",
+    "NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT",
+    "NPM_CONFIG_FETCH_TIMEOUT",
+    "NODE_PATH",
 }
 
 
 def _child_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
-    result = {key: value for key, value in os.environ.items() if key in _CHILD_ENV_ALLOWLIST}
+    result = {
+        key: value for key, value in os.environ.items() if key in _CHILD_ENV_ALLOWLIST
+    }
     result.update(extra or {})
-    result.setdefault("HOME", "/tmp/skill-home" if os.name == "posix" else tempfile.gettempdir())
+    result.setdefault(
+        "HOME", "/tmp/skill-home" if os.name == "posix" else tempfile.gettempdir()
+    )
     result.setdefault("LANG", "C.UTF-8")
     return result
 
@@ -344,7 +425,9 @@ def _remove_tree(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-async def _run(argv: list[str], cwd: Path, timeout: int, env: dict[str, str] | None = None) -> tuple[int, str, str]:
+async def _run(
+    argv: list[str], cwd: Path, timeout: int, env: dict[str, str] | None = None
+) -> tuple[int, str, str]:
     process = await asyncio.create_subprocess_exec(
         *argv,
         cwd=str(cwd),
@@ -362,13 +445,21 @@ async def _run(argv: list[str], cwd: Path, timeout: int, env: dict[str, str] | N
         else:
             process.kill()
         await process.communicate()
-        raise HTTPException(status_code=408, detail=f"Skill execution exceeded {timeout}s")
-    return process.returncode or 0, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
+        raise HTTPException(
+            status_code=408, detail=f"Skill execution exceeded {timeout}s"
+        )
+    return (
+        process.returncode or 0,
+        stdout.decode("utf-8", "replace"),
+        stderr.decode("utf-8", "replace"),
+    )
 
 
 def _uses_language(root: Path, suffixes: set[str]) -> bool:
     scripts = root / "scripts"
-    return scripts.is_dir() and any(path.suffix.lower() in suffixes for path in scripts.rglob("*"))
+    return scripts.is_dir() and any(
+        path.suffix.lower() in suffixes for path in scripts.rglob("*")
+    )
 
 
 def _python_spec(root: Path) -> str | None:
@@ -378,9 +469,15 @@ def _python_spec(root: Path) -> str | None:
     try:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid pyproject.toml: {exc}") from exc
+        raise HTTPException(
+            status_code=422, detail=f"Invalid pyproject.toml: {exc}"
+        ) from exc
     project = data.get("project")
-    return str(project.get("requires-python")) if isinstance(project, dict) and project.get("requires-python") else None
+    return (
+        str(project.get("requires-python"))
+        if isinstance(project, dict) and project.get("requires-python")
+        else None
+    )
 
 
 def _node_spec(root: Path) -> str | None:
@@ -390,9 +487,15 @@ def _node_spec(root: Path) -> str | None:
     try:
         data = json.loads(package_json.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid package.json: {exc}") from exc
+        raise HTTPException(
+            status_code=422, detail=f"Invalid package.json: {exc}"
+        ) from exc
     engines = data.get("engines")
-    return str(engines.get("node")) if isinstance(engines, dict) and engines.get("node") else None
+    return (
+        str(engines.get("node"))
+        if isinstance(engines, dict) and engines.get("node")
+        else None
+    )
 
 
 def _node_version_matches(spec: str, actual: str) -> bool:
@@ -405,7 +508,9 @@ def _node_version_matches(spec: str, actual: str) -> bool:
     try:
         current = Version(actual)
     except InvalidVersion as exc:
-        raise HTTPException(status_code=422, detail=f"Runner Node version is invalid: {actual}") from exc
+        raise HTTPException(
+            status_code=422, detail=f"Runner Node version is invalid: {actual}"
+        ) from exc
     for alternative in spec.split("||"):
         tokens = [token for token in re.split(r"[ ,]+", alternative.strip()) if token]
         ok = True
@@ -413,18 +518,28 @@ def _node_version_matches(spec: str, actual: str) -> bool:
             token = token.strip()
             if token in {"*", "x", "X"}:
                 continue
-            match = re.fullmatch(r"(>=|<=|>|<|=)?v?(\d+)(?:\.(\d+|x|X|\*))?(?:\.(\d+|x|X|\*))?", token)
+            match = re.fullmatch(
+                r"(>=|<=|>|<|=)?v?(\d+)(?:\.(\d+|x|X|\*))?(?:\.(\d+|x|X|\*))?", token
+            )
             if token.startswith(("^", "~")):
                 operator, raw = token[0], token[1:].lstrip("v")
                 parts = [int(p) for p in raw.split(".") if p.isdigit()]
                 if not parts:
-                    raise HTTPException(status_code=422, detail=f"Unsupported Node engine range: {spec}")
+                    raise HTTPException(
+                        status_code=422, detail=f"Unsupported Node engine range: {spec}"
+                    )
                 low = Version(".".join(map(str, parts + [0] * (3 - len(parts)))))
-                high = Version(f"{low.major + 1}.0.0") if operator == "^" else Version(f"{low.major}.{low.minor + 1}.0")
+                high = (
+                    Version(f"{low.major + 1}.0.0")
+                    if operator == "^"
+                    else Version(f"{low.major}.{low.minor + 1}.0")
+                )
                 ok = ok and current >= low and current < high
                 continue
             if not match:
-                raise HTTPException(status_code=422, detail=f"Unsupported Node engine range: {spec}")
+                raise HTTPException(
+                    status_code=422, detail=f"Unsupported Node engine range: {spec}"
+                )
             op, major, minor, patch = match.groups()
             if minor in {None, "x", "X", "*"}:
                 if op:
@@ -437,10 +552,17 @@ def _node_version_matches(spec: str, actual: str) -> bool:
                 continue
             else:
                 target = Version(f"{major}.{minor}.{patch or 0}")
-            ok = ok and {
-                ">=": current >= target, "<=": current <= target, ">": current > target,
-                "<": current < target, "=": current == target, None: current == target,
-            }[op]
+            ok = (
+                ok
+                and {
+                    ">=": current >= target,
+                    "<=": current <= target,
+                    ">": current > target,
+                    "<": current < target,
+                    "=": current == target,
+                    None: current == target,
+                }[op]
+            )
         if ok:
             return True
     return False
@@ -455,10 +577,13 @@ def _dependency_declarations(root: Path) -> dict[str, list[str]]:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
         project = data.get("project")
         values = project.get("dependencies") if isinstance(project, dict) else []
-        python_deps = [str(value) for value in values] if isinstance(values, list) else []
+        python_deps = (
+            [str(value) for value in values] if isinstance(values, list) else []
+        )
     elif requirements.exists():
         python_deps = [
-            line.strip() for line in requirements.read_text(encoding="utf-8").splitlines()
+            line.strip()
+            for line in requirements.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         ]
     package_json = root / "package.json"
@@ -466,7 +591,9 @@ def _dependency_declarations(root: Path) -> dict[str, list[str]]:
         data = json.loads(package_json.read_text(encoding="utf-8"))
         dependencies = data.get("dependencies")
         if isinstance(dependencies, dict):
-            node_deps = [f"{name}@{version}" for name, version in sorted(dependencies.items())]
+            node_deps = [
+                f"{name}@{version}" for name, version in sorted(dependencies.items())
+            ]
     return {"python": python_deps, "node": node_deps}
 
 
@@ -478,33 +605,44 @@ def _validate_runtime_compatibility(root: Path) -> list[str]:
         or (root / "pyproject.toml").exists()
         or (root / "requirements.txt").exists()
     )
-    uses_node = _uses_language(root, {".js", ".mjs", ".cjs"}) or (root / "package.json").exists()
+    uses_node = (
+        _uses_language(root, {".js", ".mjs", ".cjs"})
+        or (root / "package.json").exists()
+    )
     if uses_python:
         spec = _python_spec(root)
         if spec:
             try:
                 compatible = Version(info["python_version"]) in SpecifierSet(spec)
             except (InvalidSpecifier, InvalidVersion) as exc:
-                raise HTTPException(status_code=422, detail=f"Invalid requires-python value: {spec}") from exc
+                raise HTTPException(
+                    status_code=422, detail=f"Invalid requires-python value: {spec}"
+                ) from exc
             if not compatible:
                 raise HTTPException(
                     status_code=422,
                     detail=f"Skill requires Python {spec}, but Runner provides Python {info['python_version']}",
                 )
         else:
-            warnings.append(f"Skill 未声明 requires-python；当前使用 Python {info['python_version']}")
+            warnings.append(
+                f"Skill 未声明 requires-python；当前使用 Python {info['python_version']}"
+            )
     if uses_node:
         spec = _node_spec(root)
         actual = info.get("node_version")
         if not actual:
-            raise HTTPException(status_code=422, detail="Runner Node runtime is unavailable")
+            raise HTTPException(
+                status_code=422, detail="Runner Node runtime is unavailable"
+            )
         if spec and not _node_version_matches(spec, actual):
             raise HTTPException(
                 status_code=422,
                 detail=f"Skill requires Node {spec}, but Runner provides Node {actual}",
             )
         if not spec:
-            warnings.append(f"Skill 未声明 package.json engines.node；当前使用 Node {actual}")
+            warnings.append(
+                f"Skill 未声明 package.json engines.node；当前使用 Node {actual}"
+            )
     return warnings
 
 
@@ -562,7 +700,10 @@ async def _cleanup_cache() -> dict[str, int]:
 
         survivors: list[tuple[Path, str, float, int]] = []
         for path, package_hash, last_used, size in entries:
-            if package_hash not in _ACTIVE_PACKAGE_HASHES and now - last_used >= CACHE_RETENTION_SECONDS:
+            if (
+                package_hash not in _ACTIVE_PACKAGE_HASHES
+                and now - last_used >= CACHE_RETENTION_SECONDS
+            ):
                 shutil.rmtree(path, ignore_errors=True)
                 removed_entries += 1
                 removed_bytes += size
@@ -597,32 +738,62 @@ async def _ensure_installed(req: InstallRequest) -> tuple[Path, dict]:
         if marker.exists():
             _touch_cache_entry(package_dir)
             metadata_file = package_dir / ".install.json"
-            metadata = json.loads(metadata_file.read_text(encoding="utf-8")) if metadata_file.exists() else {
-                **_runtime_info(), "installed_dependencies": {"python": [], "node": []}, "compatibility_warnings": [],
-            }
+            metadata = (
+                json.loads(metadata_file.read_text(encoding="utf-8"))
+                if metadata_file.exists()
+                else {
+                    **_runtime_info(),
+                    "installed_dependencies": {"python": [], "node": []},
+                    "compatibility_warnings": [],
+                }
+            )
             return package_dir, metadata
-        temp = Path(tempfile.mkdtemp(prefix=f"install-{req.package_hash[:8]}-", dir=CACHE_ROOT))
+        temp = Path(
+            tempfile.mkdtemp(prefix=f"install-{req.package_hash[:8]}-", dir=CACHE_ROOT)
+        )
         try:
             _extract(await _load_archive(req), temp)
             warnings = _validate_runtime_compatibility(temp)
             needs_python = req.runtime == "python" or (
                 req.runtime == "agent_skill"
-                and any((temp / name).exists() for name in ("requirements.txt", "pyproject.toml"))
+                and any(
+                    (temp / name).exists()
+                    for name in ("requirements.txt", "pyproject.toml")
+                )
             )
-            needs_node = req.runtime == "node" or (req.runtime == "agent_skill" and (temp / "package.json").exists())
+            needs_node = req.runtime == "node" or (
+                req.runtime == "agent_skill" and (temp / "package.json").exists()
+            )
             if needs_python:
                 venv = temp / ".venv"
-                code, _, err = await _run(["python", "-m", "venv", "--system-site-packages", str(venv)], temp, 120)
+                code, _, err = await _run(
+                    ["python", "-m", "venv", "--system-site-packages", str(venv)],
+                    temp,
+                    120,
+                )
                 if code:
                     raise HTTPException(status_code=422, detail=err[-2000:])
-                python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+                python = venv / (
+                    "Scripts/python.exe" if os.name == "nt" else "bin/python"
+                )
                 if (temp / "pyproject.toml").exists():
-                    code, _, err = await _run([str(python), "-m", "pip", "install", "."], temp, 300)
+                    code, _, err = await _run(
+                        [str(python), "-m", "pip", "install", "."], temp, 300
+                    )
                     if code:
                         raise HTTPException(status_code=422, detail=err[-2000:])
                 elif (temp / "requirements.txt").exists():
                     code, _, err = await _run(
-                        [str(python), "-m", "pip", "install", "-r", str(temp / "requirements.txt")], temp, 300,
+                        [
+                            str(python),
+                            "-m",
+                            "pip",
+                            "install",
+                            "-r",
+                            str(temp / "requirements.txt"),
+                        ],
+                        temp,
+                        300,
                     )
                     if code:
                         raise HTTPException(status_code=422, detail=err[-2000:])
@@ -640,7 +811,9 @@ async def _ensure_installed(req: InstallRequest) -> tuple[Path, dict]:
                 "installed_dependencies": _dependency_declarations(temp),
                 "compatibility_warnings": warnings,
             }
-            (temp / ".install.json").write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+            (temp / ".install.json").write_text(
+                json.dumps(metadata, ensure_ascii=False), encoding="utf-8"
+            )
             (temp / ".ready").write_text("ready", encoding="utf-8")
             _touch_cache_entry(temp)
             if package_dir.exists():
@@ -675,45 +848,77 @@ async def _materialize_input(item: InputFile, path: Path) -> None:
         try:
             raw = base64.b64decode(item.content_base64, validate=True)
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=f"Invalid input {item.name}") from exc
+            raise HTTPException(
+                status_code=422, detail=f"Invalid input {item.name}"
+            ) from exc
         if len(raw) > MAX_OUTPUT_BYTES:
-            raise HTTPException(status_code=413, detail=f"Input {item.name} exceeds 100MB")
+            raise HTTPException(
+                status_code=413, detail=f"Input {item.name} exceeds 100MB"
+            )
         path.write_bytes(raw)
     elif item.download_url:
         total = 0
         try:
             async with (
-                httpx.AsyncClient(timeout=300, trust_env=False, follow_redirects=False) as client,
-                client.stream("GET", item.download_url, headers=item.download_headers) as response,
+                httpx.AsyncClient(
+                    timeout=300, trust_env=False, follow_redirects=False
+                ) as client,
+                client.stream(
+                    "GET", item.download_url, headers=item.download_headers
+                ) as response,
             ):
                 response.raise_for_status()
                 with path.open("wb") as handle:
                     async for chunk in response.aiter_bytes(1024 * 1024):
                         total += len(chunk)
                         if total > MAX_OUTPUT_BYTES:
-                            raise HTTPException(status_code=413, detail=f"Input {item.name} exceeds 100MB")
+                            raise HTTPException(
+                                status_code=413,
+                                detail=f"Input {item.name} exceeds 100MB",
+                            )
                         handle.write(chunk)
         except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"Unable to download input {item.name}") from exc
+            raise HTTPException(
+                status_code=502, detail=f"Unable to download input {item.name}"
+            ) from exc
         if item.expected_size is not None and total != item.expected_size:
-            raise HTTPException(status_code=409, detail=f"Input {item.name} size mismatch")
+            raise HTTPException(
+                status_code=409, detail=f"Input {item.name} size mismatch"
+            )
     else:
         raise HTTPException(status_code=422, detail=f"Input {item.name} has no content")
     path.chmod(0o444)
 
 
-async def _serialize_output(path: Path, relative_path: str, mime_type: str | None = None) -> dict:
+async def _serialize_output(
+    path: Path,
+    relative_path: str,
+    mime_type: str | None = None,
+    verification: dict | None = None,
+) -> dict:
     size = path.stat().st_size
     if size > MAX_OUTPUT_BYTES:
         raise HTTPException(status_code=413, detail=f"Output {path.name} exceeds 100MB")
-    base = {"name": path.name, "relative_path": relative_path, "size": size, "mime_type": mime_type}
+    base = {
+        "name": path.name,
+        "relative_path": relative_path,
+        "size": size,
+        "mime_type": mime_type,
+        "format_verified": bool(verification),
+        **(verification or {}),
+    }
     # Return output only across the authenticated Runner-to-backend channel.
     # The trusted backend persists it through Storage Gateway, so executable
     # Skills never share the project-wide storage credential.
-    return {**base, "content_base64": base64.b64encode(path.read_bytes()).decode("ascii")}
+    return {
+        **base,
+        "content_base64": base64.b64encode(path.read_bytes()).decode("ascii"),
+    }
 
 
-def _script(package: Path, requested: str | None, legacy_entrypoint: str | None) -> tuple[Path, str]:
+def _script(
+    package: Path, requested: str | None, legacy_entrypoint: str | None
+) -> tuple[Path, str]:
     value = requested or legacy_entrypoint
     if not value:
         raise HTTPException(status_code=422, detail="A script_path is required")
@@ -721,12 +926,20 @@ def _script(package: Path, requested: str | None, legacy_entrypoint: str | None)
     if normalized.is_absolute() or ".." in normalized.parts:
         raise HTTPException(status_code=422, detail="Unsafe script path")
     if requested and (not normalized.parts or normalized.parts[0].lower() != "scripts"):
-        raise HTTPException(status_code=422, detail="Standard Skill scripts must be inside scripts/")
+        raise HTTPException(
+            status_code=422, detail="Standard Skill scripts must be inside scripts/"
+        )
     language = {
-        ".py": "python", ".js": "node", ".mjs": "node", ".cjs": "node", ".sh": "bash",
+        ".py": "python",
+        ".js": "node",
+        ".mjs": "node",
+        ".cjs": "node",
+        ".sh": "bash",
     }.get(normalized.suffix.lower())
     if not language:
-        raise HTTPException(status_code=422, detail="Only Python, Node, and Bash scripts are executable")
+        raise HTTPException(
+            status_code=422, detail="Only Python, Node, and Bash scripts are executable"
+        )
     path = (package / Path(*normalized.parts)).resolve()
     if package not in path.parents or not path.is_file():
         raise HTTPException(status_code=422, detail="Skill script is unavailable")
@@ -738,7 +951,8 @@ async def health() -> dict:
     _assert_platform_secrets_absent()
     cache = await _cleanup_cache()
     return {
-        "status": "ok", **_runtime_info(),
+        "status": "ok",
+        **_runtime_info(),
         "execution_capacity": EXECUTION_CAPACITY.snapshot(),
         "office_capacity": OFFICE_CAPACITY.snapshot(),
         "queue_limit": RUNNER_MAX_QUEUE,
@@ -752,11 +966,18 @@ async def health() -> dict:
 
 
 @app.post("/install")
-async def install(req: InstallRequest, x_skill_runner_token: str | None = Header(None)) -> dict:
+async def install(
+    req: InstallRequest, x_skill_runner_token: str | None = Header(None)
+) -> dict:
     _auth(x_skill_runner_token)
     _assert_platform_secrets_absent()
     path, metadata = await _ensure_installed(req)
-    return {"status": "ready", "package_hash": req.package_hash, "path": str(path), **metadata}
+    return {
+        "status": "ready",
+        "package_hash": req.package_hash,
+        "path": str(path),
+        **metadata,
+    }
 
 
 @app.post("/cache/cleanup")
@@ -775,11 +996,17 @@ async def delete_cache_entry(
         raise HTTPException(status_code=422, detail="Invalid package hash")
     async with _CACHE_LOCK:
         if package_hash in _ACTIVE_PACKAGE_HASHES:
-            raise HTTPException(status_code=409, detail="Skill package is currently executing")
+            raise HTTPException(
+                status_code=409, detail="Skill package is currently executing"
+            )
         path = (CACHE_ROOT / package_hash).resolve()
         removed_bytes = _cache_entry_size(path) if path.exists() else 0
         shutil.rmtree(path, ignore_errors=True)
-    return {"status": "deleted", "package_hash": package_hash, "removed_bytes": removed_bytes}
+    return {
+        "status": "deleted",
+        "package_hash": package_hash,
+        "removed_bytes": removed_bytes,
+    }
 
 
 async def _execute_builtin_tool(
@@ -787,7 +1014,9 @@ async def _execute_builtin_tool(
 ) -> dict:
     """Execute a platform-owned file handler without loading a user Skill."""
     if len(req.inputs) > 20:
-        raise HTTPException(status_code=422, detail="Builtin tools accept at most 20 input files")
+        raise HTTPException(
+            status_code=422, detail="Builtin tools accept at most 20 input files"
+        )
     run_root = Path(tempfile.mkdtemp(prefix=f"builtin-{req.execution_id}-"))
     try:
         input_dir, output_dir = run_root / "input", run_root / "output"
@@ -825,13 +1054,20 @@ async def _execute_builtin_tool(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         files = [path for path in output_dir.rglob("*") if path.is_file()]
         if len(files) > MAX_OUTPUT_FILES:
-            raise HTTPException(status_code=422, detail="Builtin tool produced more than 20 files")
+            raise HTTPException(
+                status_code=422, detail="Builtin tool produced more than 20 files"
+            )
         outputs = []
         for path in files:
-            outputs.append(await _serialize_output(
-                path, path.relative_to(output_dir).as_posix(),
-                (result.get("mime_types") or {}).get(path.name),
-            ))
+            verification = (result.get("output_verification") or {}).get(path.name)
+            outputs.append(
+                await _serialize_output(
+                    path,
+                    path.relative_to(output_dir).as_posix(),
+                    (result.get("mime_types") or {}).get(path.name),
+                    verification,
+                )
+            )
         return {
             "status": "success",
             "tool_kind": req.tool_kind,
@@ -866,8 +1102,16 @@ async def _execute(req: ExecuteRequest) -> dict:
         entrypoint, language = _script(package, req.script_path, req.entrypoint)
         run_root = Path(tempfile.mkdtemp(prefix=f"run-{req.execution_id}-"))
         _touch_cache_entry(package)
-        skill_dir, input_dir, output_dir = run_root / "skill", run_root / "input", run_root / "output"
-        shutil.copytree(package, skill_dir, ignore=shutil.ignore_patterns(".venv", "node_modules", ".ready"))
+        skill_dir, input_dir, output_dir = (
+            run_root / "skill",
+            run_root / "input",
+            run_root / "output",
+        )
+        shutil.copytree(
+            package,
+            skill_dir,
+            ignore=shutil.ignore_patterns(".venv", "node_modules", ".ready"),
+        )
         input_dir.mkdir()
         output_dir.mkdir()
         for path in sorted(skill_dir.rglob("*"), reverse=True):
@@ -880,10 +1124,14 @@ async def _execute(req: ExecuteRequest) -> dict:
             input_paths.append(path)
         input_dir.chmod(0o555)
         params_path = run_root / "params.json"
-        params_path.write_text(json.dumps(req.params, ensure_ascii=False), encoding="utf-8")
+        params_path.write_text(
+            json.dumps(req.params, ensure_ascii=False), encoding="utf-8"
+        )
         params_path.chmod(0o444)
         replacements = {
-            "{input_dir}": str(input_dir), "{output_dir}": str(output_dir), "{params_json}": str(params_path),
+            "{input_dir}": str(input_dir),
+            "{output_dir}": str(output_dir),
+            "{params_json}": str(params_path),
             "{input_file}": str(input_paths[0]) if input_paths else "",
         }
         args = []
@@ -893,9 +1141,20 @@ async def _execute(req: ExecuteRequest) -> dict:
                 value = value.replace(key, replacement)
             args.append(value)
         if not args and not req.script_path:
-            args = ["--input-dir", str(input_dir), "--output-dir", str(output_dir), "--params", str(params_path)]
+            args = [
+                "--input-dir",
+                str(input_dir),
+                "--output-dir",
+                str(output_dir),
+                "--params",
+                str(params_path),
+            ]
         if language == "python":
-            executable = package / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            executable = (
+                package
+                / ".venv"
+                / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            )
             if not executable.exists():
                 executable = Path(shutil.which("python") or "python")
             argv = [str(executable), str(copied_entrypoint), *args]
@@ -904,25 +1163,38 @@ async def _execute(req: ExecuteRequest) -> dict:
         else:
             bash = shutil.which("bash")
             if not bash:
-                raise HTTPException(status_code=422, detail="Bash interpreter is unavailable")
+                raise HTTPException(
+                    status_code=422, detail="Bash interpreter is unavailable"
+                )
             argv = [bash, str(copied_entrypoint), *args]
         node_paths = [str(package / "node_modules")]
         if BASE_NODE_MODULES.exists():
             node_paths.append(str(BASE_NODE_MODULES))
-        code, stdout, stderr = await _run(argv, skill_dir, req.timeout_seconds, {
-            "SKILL_INPUT_DIR": str(input_dir), "SKILL_OUTPUT_DIR": str(output_dir),
-            "SKILL_PARAMS_JSON": str(params_path),
-            "SKILL_DIR": str(skill_dir), "SKILL_ROOT": str(skill_dir),
-            "NODE_PATH": os.pathsep.join(node_paths),
-        })
+        code, stdout, stderr = await _run(
+            argv,
+            skill_dir,
+            req.timeout_seconds,
+            {
+                "SKILL_INPUT_DIR": str(input_dir),
+                "SKILL_OUTPUT_DIR": str(output_dir),
+                "SKILL_PARAMS_JSON": str(params_path),
+                "SKILL_DIR": str(skill_dir),
+                "SKILL_ROOT": str(skill_dir),
+                "NODE_PATH": os.pathsep.join(node_paths),
+            },
+        )
         if code:
             raise HTTPException(status_code=422, detail=(stderr or stdout)[-4000:])
         files = [path for path in output_dir.rglob("*") if path.is_file()]
         if len(files) > MAX_OUTPUT_FILES:
-            raise HTTPException(status_code=422, detail="Skill produced more than 20 files")
+            raise HTTPException(
+                status_code=422, detail="Skill produced more than 20 files"
+            )
         outputs = []
         for path in files:
-            outputs.append(await _serialize_output(path, path.relative_to(output_dir).as_posix()))
+            outputs.append(
+                await _serialize_output(path, path.relative_to(output_dir).as_posix())
+            )
         return {"status": "success", "stdout": stdout[-4000:], "outputs": outputs}
     finally:
         if "run_root" in locals():
@@ -931,7 +1203,9 @@ async def _execute(req: ExecuteRequest) -> dict:
 
 
 @app.post("/execute")
-async def execute(req: ExecuteRequest, x_skill_runner_token: str | None = Header(None)) -> dict:
+async def execute(
+    req: ExecuteRequest, x_skill_runner_token: str | None = Header(None)
+) -> dict:
     _auth(x_skill_runner_token)
     _assert_platform_secrets_absent()
     async with EXECUTION_CAPACITY.slot():

@@ -491,6 +491,28 @@ export interface WorkspaceFileCapabilities {
   delete: boolean;
 }
 
+export interface FileFormatCapability {
+  format: string;
+  mimeTypes: string[];
+  family: 'spreadsheet' | 'document' | 'presentation' | 'pdf' | 'text' | 'image' | 'archive';
+  capabilities: {
+    create: boolean;
+    inspect: boolean;
+    edit: boolean;
+    convert: boolean;
+    preview: boolean;
+  };
+  nativeOrCompatibility: 'native' | 'compatibility';
+  canonicalOutputFormat: string;
+  conversionTargets: string[];
+  limitations: string[];
+}
+
+export interface FileCapabilityRegistryResponse {
+  formats: FileFormatCapability[];
+  defaultOutputs: Record<string, string>;
+}
+
 export interface EffectiveWorkspaceAccess {
   id: string;
   name: string;
@@ -2651,6 +2673,8 @@ export const terminal = {
     }
     return resp.json() as Promise<{ access_token: string; must_change_password: boolean; user: User }>;
   },
+  fileCapabilities: () =>
+    userRequest<FileCapabilityRegistryResponse>('/api/v1/workspaces/file-capabilities'),
   changeOwnPassword: async (token: string, oldPassword: string, newPassword: string) => {
     const resp = await fetch(`${BASE_URL}/api/v1/users/change-password`, {
       method: 'POST',

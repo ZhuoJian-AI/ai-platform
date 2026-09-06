@@ -61,26 +61,41 @@ async def _hierarchy(db_session):
     db_session.add_all([org, other_org])
     await db_session.flush()
     department = Department(
-        organization_id=org.id, name="Finance", slug=f"finance-{uuid4().hex[:6]}",
+        organization_id=org.id,
+        name="Finance",
+        slug=f"finance-{uuid4().hex[:6]}",
     )
     other_department = Department(
-        organization_id=other_org.id, name="Other Finance", slug=f"other-finance-{uuid4().hex[:6]}",
+        organization_id=other_org.id,
+        name="Other Finance",
+        slug=f"other-finance-{uuid4().hex[:6]}",
     )
     db_session.add_all([department, other_department])
     await db_session.flush()
     team = Team(
-        organization_id=org.id, department_id=department.id,
-        name="Accounting", slug=f"accounting-{uuid4().hex[:6]}",
+        organization_id=org.id,
+        department_id=department.id,
+        name="Accounting",
+        slug=f"accounting-{uuid4().hex[:6]}",
     )
     user = User(
-        organization_id=org.id, username=f"member-{uuid4().hex[:8]}", role="member",
-        department_id=department.id, team_id=None, is_active=True,
+        organization_id=org.id,
+        username=f"member-{uuid4().hex[:8]}",
+        role="member",
+        department_id=department.id,
+        team_id=None,
+        is_active=True,
     )
     db_session.add_all([team, user])
     await db_session.flush()
     cu = CurrentUser(
-        user=user, id=str(user.id), email=user.username, role=user.role,
-        organization_id=org.id, department_id=str(department.id), team_id=None,
+        user=user,
+        id=str(user.id),
+        email=user.username,
+        role=user.role,
+        organization_id=org.id,
+        department_id=str(department.id),
+        team_id=None,
     )
     return org, other_org, department, other_department, team, user, cu
 
@@ -88,9 +103,13 @@ async def _hierarchy(db_session):
 @pytest.mark.asyncio
 async def test_department_manager_inherits_team_management_and_cross_tenant_is_rejected(db_session):
     org, other_org, department, other_department, team, user, cu = await _hierarchy(db_session)
-    await replace_manager_grants(db_session, user, [
-        ManagerScopeGrant(scope_type="department", scope_id=department.id),
-    ])
+    await replace_manager_grants(
+        db_session,
+        user,
+        [
+            ManagerScopeGrant(scope_type="department", scope_id=department.id),
+        ],
+    )
 
     scopes = await managed_scopes(db_session, cu)
     assert ("department", str(department.id)) in scopes
@@ -102,8 +121,12 @@ async def test_department_manager_inherits_team_management_and_cross_tenant_is_r
     assert exc.value.status_code == 422
 
     foreign = SkillFolder(
-        organization_id=other_org.id, scope_type="organization", scope_id=None,
-        name="Foreign", slug=f"foreign-{uuid4().hex[:8]}", is_active=True,
+        organization_id=other_org.id,
+        scope_type="organization",
+        scope_id=None,
+        name="Foreign",
+        slug=f"foreign-{uuid4().hex[:8]}",
+        is_active=True,
     )
     db_session.add(foreign)
     await db_session.flush()
@@ -112,8 +135,11 @@ async def test_department_manager_inherits_team_management_and_cross_tenant_is_r
     assert exc.value.status_code == 403
 
     foreign_rag = RagCollection(
-        organization_id=other_org.id, name="Foreign Knowledge", slug=f"foreign-rag-{uuid4().hex[:8]}",
-        scope_type="organization", scope_id=None,
+        organization_id=other_org.id,
+        name="Foreign Knowledge",
+        slug=f"foreign-rag-{uuid4().hex[:8]}",
+        scope_type="organization",
+        scope_id=None,
     )
     db_session.add(foreign_rag)
     await db_session.flush()
@@ -138,8 +164,12 @@ Always validate the input workbook before processing.
 """
     upload = UploadFile(filename="SKILL.md", file=io.BytesIO(skill_v1))
     folder, version1 = await skill_import_service.import_package(
-        db_session, org_id=org.id, scope_type="user", scope_id=str(user.id),
-        upload=upload, created_by=str(user.id),
+        db_session,
+        org_id=org.id,
+        scope_type="user",
+        scope_id=str(user.id),
+        upload=upload,
+        created_by=str(user.id),
     )
     assert version1.version_no == 1
     assert version1.install_status == "ready"
@@ -150,8 +180,12 @@ Always validate the input workbook before processing.
 
     duplicate = UploadFile(filename="skill.md", file=io.BytesIO(skill_v1))
     same_folder, same_version = await skill_import_service.import_package(
-        db_session, org_id=org.id, scope_type="user", scope_id=str(user.id),
-        upload=duplicate, created_by=str(user.id),
+        db_session,
+        org_id=org.id,
+        scope_type="user",
+        scope_id=str(user.id),
+        upload=duplicate,
+        created_by=str(user.id),
     )
     assert same_folder.id == folder.id
     assert same_version.id == version1.id
@@ -159,8 +193,12 @@ Always validate the input workbook before processing.
     skill_v2 = skill_v1 + b"\nReturn an audit summary.\n"
     upgraded = UploadFile(filename="skill.md", file=io.BytesIO(skill_v2))
     _, version2 = await skill_import_service.import_package(
-        db_session, org_id=org.id, scope_type="user", scope_id=str(user.id),
-        upload=upgraded, created_by=str(user.id),
+        db_session,
+        org_id=org.id,
+        scope_type="user",
+        scope_id=str(user.id),
+        upload=upgraded,
+        created_by=str(user.id),
     )
     assert version2.version_no == 2
     assert version2.id != version1.id
@@ -184,7 +222,10 @@ Always validate the input workbook before processing.
         await assert_bound_skills_visible(db_session, cu, [str(folder.id)])
     assert exc.value.status_code == 422
     disabled_tools, disabled_registry = await _build_tools(
-        db_session, [str(folder.id)], None, user=cu,
+        db_session,
+        [str(folder.id)],
+        None,
+        user=cu,
     )
     disabled_names = {tool["function"]["name"] for tool in disabled_tools}
     assert _AUTHENTICATED_BUILTIN_TOOLS <= disabled_names
@@ -216,23 +257,33 @@ Read references/rules.md, then run scripts/clean.py with the input attachment.
     monkeypatch.setattr(skill_import_service.settings, "code_skills_enabled", False)
     zip_upload = UploadFile(filename="bank-skill.zip", file=io.BytesIO(archive.getvalue()))
     folder, zip_version = await skill_import_service.import_package(
-        db_session, org_id=org.id, scope_type="user", scope_id=str(user.id),
-        upload=zip_upload, created_by=str(user.id),
+        db_session,
+        org_id=org.id,
+        scope_type="user",
+        scope_id=str(user.id),
+        upload=zip_upload,
+        created_by=str(user.id),
     )
     folder_uploads = [
-        UploadFile(filename=path.rsplit("/", 1)[-1], file=io.BytesIO(raw))
-        for path, raw in package_files.items()
+        UploadFile(filename=path.rsplit("/", 1)[-1], file=io.BytesIO(raw)) for path, raw in package_files.items()
     ]
     same_folder, folder_version = await skill_import_service.import_package_folder(
-        db_session, org_id=org.id, scope_type="user", scope_id=str(user.id),
-        uploads=folder_uploads, relative_paths=list(package_files), created_by=str(user.id),
+        db_session,
+        org_id=org.id,
+        scope_type="user",
+        scope_id=str(user.id),
+        uploads=folder_uploads,
+        relative_paths=list(package_files),
+        created_by=str(user.id),
     )
     assert same_folder.id == folder.id
     assert folder_version.id == zip_version.id
     assert zip_version.runtime == "agent_skill"
     assert zip_version.manifest["_platform"]["script_languages"] == ["python"]
     assert {item["path"] for item in zip_version.manifest["_platform"]["resources"]} == {
-        "SKILL.md", "references/rules.md", "scripts/clean.py",
+        "SKILL.md",
+        "references/rules.md",
+        "scripts/clean.py",
     }
 
     monkeypatch.setattr(skill_import_service.settings, "code_skills_enabled", True)
@@ -240,29 +291,40 @@ Read references/rules.md, then run scripts/clean.py with the input attachment.
     tool_names = {item["function"]["name"] for item in tools}
     assert _AUTHENTICATED_BUILTIN_TOOLS <= tool_names
     assert {"load_skill", "read_skill_resource", "run_skill_script"} <= tool_names
-    run_tool = next(
-        item["function"] for item in tools
-        if item.get("function", {}).get("name") == "run_skill_script"
-    )
+    run_tool = next(item["function"] for item in tools if item.get("function", {}).get("name") == "run_skill_script")
     args_description = run_tool["parameters"]["properties"]["args"]["description"]
     assert "{input_file}" in args_description
     assert "{output_dir}" in args_description
     assert "严禁猜测" in args_description
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": cu})
     state = {"org_id": str(org.id)}
-    loaded = json.loads(await nodes._execute_agent_skill_tool(
-        state, registry["load_skill"], "load_skill", {"skill_slug": folder.slug},
-    ))
+    loaded = json.loads(
+        await nodes._execute_agent_skill_tool(
+            state,
+            registry["load_skill"],
+            "load_skill",
+            {"skill_slug": folder.slug},
+        )
+    )
     assert loaded["status"] == "success"
     assert "scripts/clean.py" in {item["path"] for item in loaded["scripts"]}
-    resource = json.loads(await nodes._execute_agent_skill_tool(
-        state, registry["read_skill_resource"], "read_skill_resource",
-        {"skill_slug": folder.slug, "path": "references/rules.md"},
-    ))
+    resource = json.loads(
+        await nodes._execute_agent_skill_tool(
+            state,
+            registry["read_skill_resource"],
+            "read_skill_resource",
+            {"skill_slug": folder.slug, "path": "references/rules.md"},
+        )
+    )
     assert resource["content"] == "Keep the first worksheet."
-    denied = json.loads(await nodes._execute_agent_skill_tool(
-        state, registry["load_skill"], "load_skill", {"skill_slug": "not-bound"},
-    ))
+    denied = json.loads(
+        await nodes._execute_agent_skill_tool(
+            state,
+            registry["load_skill"],
+            "load_skill",
+            {"skill_slug": "not-bound"},
+        )
+    )
     assert denied["status"] == "error"
 
     workspace = Workspace(
@@ -283,13 +345,20 @@ Read references/rules.md, then run scripts/clean.py with the input attachment.
         content_type="text/plain",
         raw=b"source data",
     )
-    runner = AsyncMock(return_value=({
-        "stdout": "normalized",
-        "outputs": [{
-            "name": "normalized.txt",
-            "content_base64": base64.b64encode(b"clean data").decode(),
-        }],
-    }, 23))
+    runner = AsyncMock(
+        return_value=(
+            {
+                "stdout": "normalized",
+                "outputs": [
+                    {
+                        "name": "normalized.txt",
+                        "content_base64": base64.b64encode(b"clean data").decode(),
+                    }
+                ],
+            },
+            23,
+        )
+    )
     monkeypatch.setattr(nodes.skill_runner_client, "execute_version", runner)
     run_state = {
         "org_id": str(org.id),
@@ -299,16 +368,18 @@ Read references/rules.md, then run scripts/clean.py with the input attachment.
         "exec_mode": "craft",
         "referenced_file_ids": [str(input_file.id)],
     }
-    executed = json.loads(await nodes._execute_agent_skill_tool(
-        run_state,
-        registry["run_skill_script"],
-        "run_skill_script",
-        {
-            "skill_slug": folder.slug,
-            "script_path": "scripts/clean.py",
-            "args": ["{input_file}", "{output_dir}/normalized.txt"],
-        },
-    ))
+    executed = json.loads(
+        await nodes._execute_agent_skill_tool(
+            run_state,
+            registry["run_skill_script"],
+            "run_skill_script",
+            {
+                "skill_slug": folder.slug,
+                "script_path": "scripts/clean.py",
+                "args": ["{input_file}", "{output_dir}/normalized.txt"],
+            },
+        )
+    )
     assert executed["status"] == "success"
     assert executed["summary"] == "normalized"
     assert executed["outputs"][0]["name"] == "normalized.txt"
@@ -361,11 +432,13 @@ async def test_agent_skill_folder_applies_total_upload_limit(monkeypatch):
 
 def test_agent_skill_rejects_case_insensitive_duplicate_paths():
     with pytest.raises(HTTPException, match="Duplicate Skill path"):
-        skill_import_service._normalize_files({
-            "SKILL.md": b"---\nname: Example\ndescription: example\n---\n",
-            "scripts/Run.py": b"print('first')",
-            "scripts/run.py": b"print('second')",
-        })
+        skill_import_service._normalize_files(
+            {
+                "SKILL.md": b"---\nname: Example\ndescription: example\n---\n",
+                "scripts/Run.py": b"print('first')",
+                "scripts/run.py": b"print('second')",
+            }
+        )
 
 
 def test_standard_agent_skill_requires_root_manifest_and_scripts_directory() -> None:
@@ -434,27 +507,36 @@ async def test_executable_skill_output_is_ingested_into_workspace(db_session, mo
     monkeypatch.setattr(
         nodes.skill_runner_client,
         "execute_version",
-        AsyncMock(return_value=({
-            "stdout": "created result",
-            "outputs": [{
-                "name": "result.txt",
-                "content_base64": base64.b64encode("处理完成".encode()).decode(),
-            }],
-        }, 17)),
+        AsyncMock(
+            return_value=(
+                {
+                    "stdout": "created result",
+                    "outputs": [
+                        {
+                            "name": "result.txt",
+                            "content_base64": base64.b64encode("处理完成".encode()).decode(),
+                        }
+                    ],
+                },
+                17,
+            )
+        ),
     )
 
-    result = json.loads(await nodes._execute_code_skill(
-        {
-            "org_id": str(org.id),
-            "task_id": None,
-            "template_agent_id": None,
-            "workspace_id": str(workspace.id),
-            "exec_mode": "craft",
-            "referenced_file_ids": [],
-        },
-        {"folder": folder, "version": version},
-        {},
-    ))
+    result = json.loads(
+        await nodes._execute_code_skill(
+            {
+                "org_id": str(org.id),
+                "task_id": None,
+                "template_agent_id": None,
+                "workspace_id": str(workspace.id),
+                "exec_mode": "craft",
+                "referenced_file_ids": [],
+            },
+            {"folder": folder, "version": version},
+            {},
+        )
+    )
 
     assert result["status"] == "success"
     assert result["summary"] == "created result"
@@ -470,7 +552,8 @@ async def test_executable_skill_output_is_ingested_into_workspace(db_session, mo
 
 @pytest.mark.asyncio
 async def test_platform_file_tools_are_available_without_skills_and_persist_outputs(
-    db_session, monkeypatch,
+    db_session,
+    monkeypatch,
 ):
     org, _, _, _, _, user, cu = await _hierarchy(db_session)
     workspace = Workspace(
@@ -487,20 +570,57 @@ async def test_platform_file_tools_are_available_without_skills_and_persist_outp
     tools, registry = await _build_tools(db_session, [], str(workspace.id), user=cu)
     names = {item["function"]["name"] for item in tools}
     assert {
-        "spreadsheet_tool", "document_tool", "presentation_tool", "pdf_tool", "text_tool",
-        "image_tool", "archive_tool", "web_tool",
+        "spreadsheet_create",
+        "spreadsheet_inspect",
+        "spreadsheet_edit",
+        "spreadsheet_convert",
+        "document_create",
+        "document_inspect",
+        "document_edit",
+        "document_convert",
+        "presentation_create",
+        "presentation_inspect",
+        "presentation_edit",
+        "presentation_convert",
+        "pdf_create",
+        "pdf_inspect",
+        "pdf_merge",
+        "pdf_split",
+        "pdf_extract",
+        "pdf_convert",
+        "text_create",
+        "text_inspect",
+        "text_edit",
+        "text_convert",
+        "image_tool",
+        "archive_tool",
+        "web_tool",
     } <= names
+    assert {
+        "spreadsheet_tool",
+        "document_tool",
+        "presentation_tool",
+        "pdf_tool",
+        "text_tool",
+    }.isdisjoint(names)
     assert "generate_docx" not in names
     assert registry == {}
 
-    runner = AsyncMock(return_value=({
-        "summary": "created text file",
-        "outputs": [{
-            "name": "result.md",
-            "mime_type": "text/markdown",
-            "content_base64": base64.b64encode("# 完成".encode()).decode(),
-        }],
-    }, 12))
+    runner = AsyncMock(
+        return_value=(
+            {
+                "summary": "created text file",
+                "outputs": [
+                    {
+                        "name": "result.md",
+                        "mime_type": "text/markdown",
+                        "content_base64": base64.b64encode("# 完成".encode()).decode(),
+                    }
+                ],
+            },
+            12,
+        )
+    )
     monkeypatch.setattr(nodes.skill_runner_client, "execute_builtin", runner)
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": cu})
     state = {
@@ -510,11 +630,13 @@ async def test_platform_file_tools_are_available_without_skills_and_persist_outp
         "task_id": None,
         "referenced_file_ids": [],
     }
-    result = json.loads(await nodes._execute_builtin_tool(
-        state,
-        "text_tool",
-        {"action": "create", "output_name": "result.md", "content": "# 完成"},
-    ))
+    result = json.loads(
+        await nodes._execute_builtin_tool(
+            state,
+            "text_tool",
+            {"action": "create", "output_name": "result.md", "content": "# 完成"},
+        )
+    )
     assert result["status"] == "success"
     assert result["outputs"][0]["name"] == "result.md"
     assert result["outputs"][0]["path"].startswith("平台工具输出/playground/")
@@ -524,18 +646,28 @@ async def test_platform_file_tools_are_available_without_skills_and_persist_outp
 
 def test_platform_tool_registry_keeps_legacy_docx_hidden():
     names = {item["function"]["name"] for item in nodes._builtin_tool_defs()}
-    assert nodes.PLATFORM_TOOL_NAMES <= names
+    assert nodes.STRICT_FILE_TOOL_NAMES <= names
+    assert {"image_tool", "archive_tool", "web_tool"} <= names
+    assert nodes.LEGACY_FILE_TOOL_NAMES.isdisjoint(names)
     assert "generate_docx" not in names
     assert "generate_docx" in nodes.LEGACY_BUILTIN_TOOL_NAMES
 
 
 def test_platform_output_path_strips_only_the_authorized_workspace_prefix():
-    assert nodes._relative_platform_output_path(
-        "李四:/生产进度报告.xlsx", "李四",
-    ) == "生产进度报告.xlsx"
-    assert nodes._relative_platform_output_path(
-        "财务部:/生产进度报告.xlsx", "李四",
-    ) == "财务部:/生产进度报告.xlsx"
+    assert (
+        nodes._relative_platform_output_path(
+            "李四:/生产进度报告.xlsx",
+            "李四",
+        )
+        == "生产进度报告.xlsx"
+    )
+    assert (
+        nodes._relative_platform_output_path(
+            "财务部:/生产进度报告.xlsx",
+            "李四",
+        )
+        == "财务部:/生产进度报告.xlsx"
+    )
 
 
 def test_enterprise_mutation_tools_require_an_explicit_expected_version():
@@ -565,15 +697,9 @@ def test_enterprise_mutation_tools_require_an_explicit_expected_version():
 
 
 def test_enterprise_action_idempotency_is_scoped_to_the_current_run():
-    first = nodes._enterprise_action_request_id(
-        {"task_id": "task-1", "run_id": 101}, "tool-call-1", {}
-    )
-    replay = nodes._enterprise_action_request_id(
-        {"task_id": "task-1", "run_id": 101}, "tool-call-1", {}
-    )
-    next_turn = nodes._enterprise_action_request_id(
-        {"task_id": "task-1", "run_id": 102}, "tool-call-1", {}
-    )
+    first = nodes._enterprise_action_request_id({"task_id": "task-1", "run_id": 101}, "tool-call-1", {})
+    replay = nodes._enterprise_action_request_id({"task_id": "task-1", "run_id": 101}, "tool-call-1", {})
+    next_turn = nodes._enterprise_action_request_id({"task_id": "task-1", "run_id": 102}, "tool-call-1", {})
 
     assert first == replay
     assert first != next_turn
@@ -585,22 +711,27 @@ def test_enterprise_action_idempotency_is_scoped_to_the_current_run():
 async def test_web_tool_is_available_and_executable_without_workspace(db_session, monkeypatch):
     _, _, _, _, _, _, cu = await _hierarchy(db_session)
     tools, registry = await _build_tools(db_session, [], None, user=cu)
-    assert _AUTHENTICATED_BUILTIN_TOOLS <= {
-        item["function"]["name"] for item in tools
-    }
+    assert _AUTHENTICATED_BUILTIN_TOOLS <= {item["function"]["name"] for item in tools}
     assert registry == {}
 
-    runner = AsyncMock(return_value=({
-        "summary": {"query": "AI", "results": [{"title": "Result", "url": "https://example.com"}]},
-        "outputs": [],
-    }, 8))
+    runner = AsyncMock(
+        return_value=(
+            {
+                "summary": {"query": "AI", "results": [{"title": "Result", "url": "https://example.com"}]},
+                "outputs": [],
+            },
+            8,
+        )
+    )
     monkeypatch.setattr(nodes.skill_runner_client, "execute_builtin", runner)
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": cu})
-    result = json.loads(await nodes._execute_builtin_tool(
-        {"exec_mode": "craft", "referenced_file_ids": [str(uuid4())]},
-        "web_tool",
-        {"action": "search", "query": "AI"},
-    ))
+    result = json.loads(
+        await nodes._execute_builtin_tool(
+            {"exec_mode": "craft", "referenced_file_ids": [str(uuid4())]},
+            "web_tool",
+            {"action": "search", "query": "AI"},
+        )
+    )
     assert result["status"] == "success"
     assert result["summary"]["results"][0]["title"] == "Result"
     assert runner.await_args.kwargs["inputs"] == []
@@ -623,9 +754,7 @@ async def test_business_application_turn_excludes_global_external_tools(db_sessi
     monkeypatch.setattr(platform_tool_registry, "active_external_tool_defs", external_defs)
 
     normal_tools, _ = await _build_tools(db_session, [], None, user=cu)
-    assert "legacy_production_query" in {
-        item["function"]["name"] for item in normal_tools
-    }
+    assert "legacy_production_query" in {item["function"]["name"] for item in normal_tools}
 
     application_tools, _ = await _build_tools(
         db_session,
@@ -635,9 +764,7 @@ async def test_business_application_turn_excludes_global_external_tools(db_sessi
         application_id=str(uuid4()),
         page_context={"module_key": "progress_dashboard"},
     )
-    application_tool_names = {
-        item["function"]["name"] for item in application_tools
-    }
+    application_tool_names = {item["function"]["name"] for item in application_tools}
     assert "legacy_production_query" not in application_tool_names
     assert application_tool_names.isdisjoint(_AUTHENTICATED_BUILTIN_TOOLS)
     external_defs.assert_awaited_once()
@@ -646,9 +773,13 @@ async def test_business_application_turn_excludes_global_external_tools(db_sessi
 @pytest.mark.asyncio
 async def test_manager_grant_is_revoked_when_membership_no_longer_matches(db_session):
     _, _, department, _, _, user, cu = await _hierarchy(db_session)
-    await replace_manager_grants(db_session, user, [
-        ManagerScopeGrant(scope_type="department", scope_id=department.id),
-    ])
+    await replace_manager_grants(
+        db_session,
+        user,
+        [
+            ManagerScopeGrant(scope_type="department", scope_id=department.id),
+        ],
+    )
     assert ("department", str(department.id)) in await managed_scopes(db_session, cu)
 
     user.department_id = None
@@ -673,7 +804,10 @@ runtime: prompt
 Follow these instructions.
 """.encode()
         return await skill_import_service.import_package(
-            db_session, org_id=org.id, scope_type="user", scope_id=str(user.id),
+            db_session,
+            org_id=org.id,
+            scope_type="user",
+            scope_id=str(user.id),
             upload=UploadFile(filename="SKILL.md", file=io.BytesIO(content)),
             created_by=str(user.id),
         )
@@ -681,25 +815,41 @@ Follow these instructions.
     default_folder, _ = await import_prompt("Default Finance", "Default finance workflow")
     explicit_folder, _ = await import_prompt("Explicit Cleaner", "Clean the selected workbook")
     rag = RagCollection(
-        organization_id=org.id, name="Finance RAG", slug=f"finance-rag-{uuid4().hex[:8]}",
-        scope_type="user", scope_id=str(user.id),
+        organization_id=org.id,
+        name="Finance RAG",
+        slug=f"finance-rag-{uuid4().hex[:8]}",
+        scope_type="user",
+        scope_id=str(user.id),
     )
     db_session.add(rag)
     await db_session.flush()
     agent = Agent(
-        organization_id=org.id, scope_type="user", scope_id=str(user.id), created_by=str(user.id),
-        name="Finance Agent", slug=f"finance-agent-{uuid4().hex[:8]}",
-        system_prompt="You are a finance agent.", model_alias="default",
-        skill_ids=[str(default_folder.id)], rag_collection_ids=[str(rag.id)], is_active=True,
+        organization_id=org.id,
+        scope_type="user",
+        scope_id=str(user.id),
+        created_by=str(user.id),
+        name="Finance Agent",
+        slug=f"finance-agent-{uuid4().hex[:8]}",
+        system_prompt="You are a finance agent.",
+        model_alias="default",
+        skill_ids=[str(default_folder.id)],
+        rag_collection_ids=[str(rag.id)],
+        is_active=True,
     )
     db_session.add(agent)
     await db_session.flush()
 
     state = {
-        "org_id": str(org.id), "task_id": None, "user_id": str(user.id),
-        "session_id": f"sess-{uuid4()}", "request": "请用清洗技能处理文件",
-        "exec_mode": "craft", "template_agent_id": str(agent.id),
-        "model_alias": "default", "skill_ids": [], "ontology_ids": [],
+        "org_id": str(org.id),
+        "task_id": None,
+        "user_id": str(user.id),
+        "session_id": f"sess-{uuid4()}",
+        "request": "请用清洗技能处理文件",
+        "exec_mode": "craft",
+        "template_agent_id": str(agent.id),
+        "model_alias": "default",
+        "skill_ids": [],
+        "ontology_ids": [],
         "invoked_skill_ids": [str(explicit_folder.id)],
         "invoked_skills": [{"id": str(explicit_folder.id)}],
         "referenced_file_ids": [],
@@ -715,11 +865,14 @@ Follow these instructions.
 
     general_state = {
         **state,
-        "session_id": f"sess-{uuid4()}", "template_agent_id": None,
-        "invoked_skill_ids": [], "invoked_skills": [],
+        "session_id": f"sess-{uuid4()}",
+        "template_agent_id": None,
+        "invoked_skill_ids": [],
+        "invoked_skills": [],
     }
     general = await nodes._load_config_general(general_state, {"user": cu}, db_session)
     assert general["rag_collection_ids"] == []
     assert {row["id"] for row in general["skill_catalog"]} == {
-        str(default_folder.id), str(explicit_folder.id),
+        str(default_folder.id),
+        str(explicit_folder.id),
     }

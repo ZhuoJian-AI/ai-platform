@@ -43,7 +43,8 @@ def test_dsh_messages_preserve_tool_protocol_and_current_images():
             "role": "user",
             "content": [
                 {
-                    "type": "tool-result", "toolCallId": "c1",
+                    "type": "tool-result",
+                    "toolCallId": "c1",
                     "content": [{"type": "text", "text": "完成"}],
                 },
             ],
@@ -152,19 +153,25 @@ async def test_model_bridge_prefetch_can_continue_in_streaming_response_context(
 
 
 def test_dsh_tools_convert_to_existing_gateway_schema():
-    tools = _to_platform_tools([
+    tools = _to_platform_tools(
+        [
+            {
+                "name": "rag_search",
+                "description": "检索知识库",
+                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+            },
+        ]
+    )
+    assert tools == [
         {
-            "name": "rag_search", "description": "检索知识库",
-            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
-        },
-    ])
-    assert tools == [{
-        "type": "function",
-        "function": {
-            "name": "rag_search", "description": "检索知识库",
-            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
-        },
-    }]
+            "type": "function",
+            "function": {
+                "name": "rag_search",
+                "description": "检索知识库",
+                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+            },
+        }
+    ]
 
 
 def test_model_bridge_rejects_tool_calls_not_advertised_for_the_run():
@@ -174,7 +181,9 @@ def test_model_bridge_rejects_tool_calls_not_advertised_for_the_run():
     ]
 
     assert _authorized_tool_calls(
-        calls, {"current_application_query"}, run_token="run-token",
+        calls,
+        {"current_application_query"},
+        run_token="run-token",
     ) == [calls[0]]
 
 
@@ -185,7 +194,9 @@ def test_model_bridge_removes_stale_dsh_context_tools_before_provider_call():
     ]
 
     assert _authorized_model_tools(
-        tools, {"current_application_query"}, run_token="run-token",
+        tools,
+        {"current_application_query"},
+        run_token="run-token",
     ) == [tools[0]]
 
 
@@ -294,8 +305,11 @@ async def test_current_business_data_fails_closed_when_page_action_fails(monkeyp
     async def stream_run(_request):
         yield {"type": "tool_call", "id": "call-1", "name": "current_page_query", "arguments": "{}"}
         yield {
-            "type": "tool_result", "id": "call-1", "name": "current_page_query",
-            "content": "Bad Gateway", "ok": False,
+            "type": "tool_result",
+            "id": "call-1",
+            "name": "current_page_query",
+            "content": "Bad Gateway",
+            "ok": False,
         }
         yield {"type": "done", "text": "根据历史记录，当前共有 74 条。"}
 
@@ -323,8 +337,11 @@ async def test_current_business_data_accepts_successful_page_action(monkeypatch)
     async def stream_run(_request):
         yield {"type": "tool_call", "id": "call-1", "name": "current_page_query", "arguments": "{}"}
         yield {
-            "type": "tool_result", "id": "call-1", "name": "current_page_query",
-            "content": '{"count": 12}', "ok": True,
+            "type": "tool_result",
+            "id": "call-1",
+            "name": "current_page_query",
+            "content": '{"count": 12}',
+            "ok": True,
         }
         yield {"type": "done", "text": "当前共有 12 条记录。"}
 
@@ -348,11 +365,15 @@ async def test_current_business_data_accepts_successful_page_action(monkeypatch)
 async def test_current_business_export_accepts_successful_composite_file_tool(monkeypatch):
     async def stream_run(_request):
         yield {
-            "type": "tool_call", "id": "call-1",
-            "name": "current_page_export_file", "arguments": '{"target_format":"xlsx"}',
+            "type": "tool_call",
+            "id": "call-1",
+            "name": "current_page_export_file",
+            "arguments": '{"target_format":"xlsx"}',
         }
         yield {
-            "type": "tool_result", "id": "call-1", "name": "current_page_export_file",
+            "type": "tool_result",
+            "id": "call-1",
+            "name": "current_page_export_file",
             "content": '{"status":"success","outputs":[{"file_id":"file-1"}]}',
             "ok": True,
         }
@@ -367,7 +388,8 @@ async def test_current_business_export_accepts_successful_composite_file_tool(mo
         "steps": [],
         "_dsh_tool_registry": {
             "current_page_export_file": {
-                "kind": "enterprise_export_file", "operation": "export",
+                "kind": "enterprise_export_file",
+                "operation": "export",
             },
         },
     }
@@ -387,16 +409,24 @@ async def test_skill_file_delivery_runs_once_with_a_runtime_completion_policy(mo
         requests.append(request)
         yield {"type": "tool_call", "id": "load-1", "name": "load_skill", "arguments": "{}"}
         yield {
-            "type": "tool_result", "id": "load-1", "name": "load_skill",
-            "content": "loaded", "ok": True,
+            "type": "tool_result",
+            "id": "load-1",
+            "name": "load_skill",
+            "content": "loaded",
+            "ok": True,
         }
         yield {"type": "done", "text": "技能已加载。", "steps": 1, "tool_calls": 1}
 
     monkeypatch.setattr(runner.client, "stream_run", stream_run)
     state = {
-        "run_id": 4, "request": "请使用技能处理附件并生成一份 Excel 表格", "messages": [], "steps": [],
-        "exec_mode": "craft", "attachment_files": [{"file_id": "file-1"}],
-        "invoked_skill_ids": ["skill-1"], "_dsh_tool_registry": {"bank_flow": {"kind": "code"}},
+        "run_id": 4,
+        "request": "请使用技能处理附件并生成一份 Excel 表格",
+        "messages": [],
+        "steps": [],
+        "exec_mode": "craft",
+        "attachment_files": [{"file_id": "file-1"}],
+        "invoked_skill_ids": ["skill-1"],
+        "_dsh_tool_registry": {"bank_flow": {"kind": "code"}},
     }
     staged: list[dict] = []
 
@@ -522,8 +552,12 @@ async def test_model_stream_ends_with_error_finish_when_upstream_raises(monkeypa
         raise RuntimeError("provider exploded")
 
     context = SimpleNamespace(
-        state={"org_id": str(uuid4()), "model_alias": "default"}, deps={}, db=None,
-        image_inputs=[], provider_override=None, model_override=None,
+        state={"org_id": str(uuid4()), "model_alias": "default"},
+        deps={},
+        db=None,
+        image_inputs=[],
+        provider_override=None,
+        model_override=None,
     )
     monkeypatch.setattr(dsh_internal.run_registry, "get", lambda _token: context)
     monkeypatch.setattr(dsh_internal, "bind_runtime", lambda _deps: nullcontext())
@@ -548,8 +582,8 @@ async def test_model_stream_ends_with_error_finish_when_upstream_raises(monkeypa
     assert last["reason"]["error"]["message"] == last["reason"]["failure"]["message"]
 
 
-def test_publish_failure_reply_retracts_partial_text_and_ends_stream():
-    """H7：后台流失败时，撤回半截文本、推公开错误文案 + done。"""
+def test_publish_failure_reply_retracts_partial_text_before_persisted_done():
+    """失败文案先替换半截文本；done 必须等失败消息持久化后由调用方发布。"""
     from app.agents.graph import run_registry
 
     handle = run_registry.RunHandle(task_id="task-h7")
@@ -561,8 +595,8 @@ def test_publish_failure_reply_retracts_partial_text_and_ends_stream():
 
     assert staged[2] == {"type": "text_retract", "chars": 6}
     assert staged[3] == {"type": "text", "delta": runner._public_failure_message(RuntimeError("boom"))}
-    assert staged[4] == {"type": "done", "usage": {"input_tokens": 1}}
-    assert len(handle.buffer) == 3  # 三条新事件都进了 live 缓冲
+    assert len(staged) == 4
+    assert len(handle.buffer) == 2  # done 由持久化完成后的调用方发布
 
 
 @pytest.mark.asyncio
@@ -593,7 +627,13 @@ async def test_finalize_bg_error_publishes_error_event_before_done(monkeypatch):
     handle = run_registry.RunHandle(task_id="task-h7-final")
 
     await runtime_support.finalize_bg_error(
-        handle, SimpleNamespace(id="task-h7-final"), 42, "boom", "RuntimeError: boom", "sess", 0.0,
+        handle,
+        SimpleNamespace(id="task-h7-final"),
+        42,
+        "boom",
+        "RuntimeError: boom",
+        "sess",
+        0.0,
     )
 
     payloads = [json.loads(item) for item in handle.buffer]
@@ -604,8 +644,6 @@ async def test_finalize_bg_error_publishes_error_event_before_done(monkeypatch):
 
 
 def test_unverified_model_error_has_an_actionable_public_message():
-    error = runner.DshRunError(
-        "当前模型尚未完成全部能力验证，请管理员在“模型提供商”中完成该模型声明的全部能力测试。"
-    )
+    error = runner.DshRunError("当前模型尚未完成全部能力验证，请管理员在“模型提供商”中完成该模型声明的全部能力测试。")
 
     assert "完成该模型声明的全部能力测试" in runner._public_failure_message(error)

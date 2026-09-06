@@ -24,7 +24,9 @@ from PIL import Image
 
 @pytest.mark.asyncio
 async def test_runner_capacity_queues_and_releases_slots():
-    capacity = runner.RunnerCapacity(limit=1, queue_limit=2, wait_seconds=2, label="test")
+    capacity = runner.RunnerCapacity(
+        limit=1, queue_limit=2, wait_seconds=2, label="test"
+    )
     first_entered = asyncio.Event()
     release_first = asyncio.Event()
 
@@ -50,7 +52,9 @@ async def test_runner_capacity_queues_and_releases_slots():
 
 @pytest.mark.asyncio
 async def test_runner_capacity_rejects_full_queue():
-    capacity = runner.RunnerCapacity(limit=1, queue_limit=1, wait_seconds=2, label="test")
+    capacity = runner.RunnerCapacity(
+        limit=1, queue_limit=1, wait_seconds=2, label="test"
+    )
     first_entered = asyncio.Event()
     release_first = asyncio.Event()
 
@@ -152,7 +156,9 @@ def test_skill_archive_enforces_file_count_and_expanded_size(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_python_agent_skill_uses_direct_script_and_io_directories(tmp_path, monkeypatch):
+async def test_python_agent_skill_uses_direct_script_and_io_directories(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(runner, "CACHE_ROOT", tmp_path / "cache")
     script = b"""import os
 from pathlib import Path
@@ -166,10 +172,13 @@ target.write_text(source.read_text(encoding='utf-8').upper(), encoding='utf-8')
         archive_base64=archive,
         runtime="agent_skill",
         script_path="scripts/clean.py",
-        inputs=[runner.InputFile(
-            file_id="1", name="input.txt",
-            content_base64=base64.b64encode(b"hello").decode(),
-        )],
+        inputs=[
+            runner.InputFile(
+                file_id="1",
+                name="input.txt",
+                content_base64=base64.b64encode(b"hello").decode(),
+            )
+        ],
         execution_id=1,
     )
     result = await runner.execute(request, runner.RUNNER_TOKEN)
@@ -204,7 +213,9 @@ Path(os.environ["SKILL_OUTPUT_DIR"], "environment.json").write_text(
             execution_id=11,
         )
     )
-    output = next(item for item in result["outputs"] if item["name"] == "environment.json")
+    output = next(
+        item for item in result["outputs"] if item["name"] == "environment.json"
+    )
     assert json.loads(base64.b64decode(output["content_base64"])) == {
         "DATABASE_URL": None,
         "REDIS_URL": None,
@@ -270,7 +281,9 @@ async def test_execution_temp_directory_is_removed(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_runner_cache_removes_expired_failed_and_lru_entries(tmp_path, monkeypatch):
+async def test_runner_cache_removes_expired_failed_and_lru_entries(
+    tmp_path, monkeypatch
+):
     cache = tmp_path / "cache"
     cache.mkdir()
     monkeypatch.setattr(runner, "CACHE_ROOT", cache)
@@ -340,12 +353,17 @@ async def test_standard_script_must_stay_under_scripts(tmp_path, monkeypatch):
     assert exc.value.status_code == 422
 
 
-@pytest.mark.parametrize("script_path,language", [
-    ("scripts/a.py", "python"),
-    ("scripts/a.js", "node"),
-    ("scripts/a.sh", "bash"),
-])
-def test_supported_script_languages_are_detected(tmp_path: Path, script_path: str, language: str):
+@pytest.mark.parametrize(
+    "script_path,language",
+    [
+        ("scripts/a.py", "python"),
+        ("scripts/a.js", "node"),
+        ("scripts/a.sh", "bash"),
+    ],
+)
+def test_supported_script_languages_are_detected(
+    tmp_path: Path, script_path: str, language: str
+):
     package = tmp_path / "package"
     target = package / script_path
     target.parent.mkdir(parents=True)
@@ -354,37 +372,60 @@ def test_supported_script_languages_are_detected(tmp_path: Path, script_path: st
     assert actual == language
 
 
-def test_python_version_requirement_rejects_incompatible_skill(tmp_path: Path, monkeypatch):
+def test_python_version_requirement_rejects_incompatible_skill(
+    tmp_path: Path, monkeypatch
+):
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "run.py").write_text("print('ok')", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname="future-skill"\nversion="1.0.0"\nrequires-python=">=99"\n', encoding="utf-8",
+        '[project]\nname="future-skill"\nversion="1.0.0"\nrequires-python=">=99"\n',
+        encoding="utf-8",
     )
-    monkeypatch.setattr(runner, "_runtime_info", lambda: {
-        "python_version": "3.12.0", "node_version": "20.0.0",
-        "bash_version": None, "libreoffice_version": None, "builtin_dependencies": {},
-    })
+    monkeypatch.setattr(
+        runner,
+        "_runtime_info",
+        lambda: {
+            "python_version": "3.12.0",
+            "node_version": "20.0.0",
+            "bash_version": None,
+            "libreoffice_version": None,
+            "builtin_dependencies": {},
+        },
+    )
     with pytest.raises(runner.HTTPException) as exc:
         runner._validate_runtime_compatibility(tmp_path)
     assert "requires Python >=99" in exc.value.detail
 
 
-def test_node_engine_requirement_and_missing_version_warning(tmp_path: Path, monkeypatch):
+def test_node_engine_requirement_and_missing_version_warning(
+    tmp_path: Path, monkeypatch
+):
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "run.js").write_text("console.log('ok')", encoding="utf-8")
-    (tmp_path / "package.json").write_text('{"engines":{"node":">=20 <21"}}', encoding="utf-8")
-    monkeypatch.setattr(runner, "_runtime_info", lambda: {
-        "python_version": "3.12.0", "node_version": "20.20.2",
-        "bash_version": None, "libreoffice_version": None, "builtin_dependencies": {},
-    })
+    (tmp_path / "package.json").write_text(
+        '{"engines":{"node":">=20 <21"}}', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        runner,
+        "_runtime_info",
+        lambda: {
+            "python_version": "3.12.0",
+            "node_version": "20.20.2",
+            "bash_version": None,
+            "libreoffice_version": None,
+            "builtin_dependencies": {},
+        },
+    )
     assert runner._validate_runtime_compatibility(tmp_path) == []
-    (tmp_path / "package.json").write_text('{}', encoding="utf-8")
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
     warnings = runner._validate_runtime_compatibility(tmp_path)
     assert any("engines.node" in warning for warning in warnings)
 
 
 @pytest.mark.asyncio
-async def test_pyproject_takes_precedence_over_requirements(tmp_path: Path, monkeypatch):
+async def test_pyproject_takes_precedence_over_requirements(
+    tmp_path: Path, monkeypatch
+):
     monkeypatch.setattr(runner, "CACHE_ROOT", tmp_path / "cache")
     calls: list[list[str]] = []
 
@@ -393,59 +434,87 @@ async def test_pyproject_takes_precedence_over_requirements(tmp_path: Path, monk
         return 0, "", ""
 
     monkeypatch.setattr(runner, "_run", fake_run)
-    monkeypatch.setattr(runner, "_runtime_info", lambda: {
-        "python_version": "3.12.0", "node_version": "20.0.0",
-        "bash_version": None, "libreoffice_version": None, "builtin_dependencies": {},
-    })
-    package_hash, archive = _package_files({
-        "scripts/run.py": b"print('ok')",
-        "pyproject.toml": b'[project]\nname="priority-test"\nversion="1.0.0"\nrequires-python=">=3.12"\n',
-        "requirements.txt": b"this-must-not-be-installed==999\n",
-    })
-    await runner._ensure_installed(runner.InstallRequest(
-        package_hash=package_hash, archive_base64=archive, runtime="agent_skill",
-    ))
+    monkeypatch.setattr(
+        runner,
+        "_runtime_info",
+        lambda: {
+            "python_version": "3.12.0",
+            "node_version": "20.0.0",
+            "bash_version": None,
+            "libreoffice_version": None,
+            "builtin_dependencies": {},
+        },
+    )
+    package_hash, archive = _package_files(
+        {
+            "scripts/run.py": b"print('ok')",
+            "pyproject.toml": b'[project]\nname="priority-test"\nversion="1.0.0"\nrequires-python=">=3.12"\n',
+            "requirements.txt": b"this-must-not-be-installed==999\n",
+        }
+    )
+    await runner._ensure_installed(
+        runner.InstallRequest(
+            package_hash=package_hash,
+            archive_base64=archive,
+            runtime="agent_skill",
+        )
+    )
     pip_calls = [call for call in calls if "pip" in call]
     assert any(call[-2:] == ["install", "."] for call in pip_calls)
     assert not any("-r" in call for call in pip_calls)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("script_path", "content", "output_name", "expected"), [
-    (
-        "scripts/write.js",
-        b"require('fs').writeFileSync(process.env.SKILL_OUTPUT_DIR + '/node.txt', 'NODE')\n",
-        "node.txt",
-        b"NODE",
-    ),
-    (
-        "scripts/write.sh",
-        b"printf BASH > \"$SKILL_OUTPUT_DIR/bash.txt\"\n",
-        "bash.txt",
-        b"BASH",
-    ),
-])
+@pytest.mark.parametrize(
+    ("script_path", "content", "output_name", "expected"),
+    [
+        (
+            "scripts/write.js",
+            b"require('fs').writeFileSync(process.env.SKILL_OUTPUT_DIR + '/node.txt', 'NODE')\n",
+            "node.txt",
+            b"NODE",
+        ),
+        (
+            "scripts/write.sh",
+            b'printf BASH > "$SKILL_OUTPUT_DIR/bash.txt"\n',
+            "bash.txt",
+            b"BASH",
+        ),
+    ],
+)
 async def test_node_and_bash_scripts_execute_directly(
-    tmp_path, monkeypatch, script_path: str, content: bytes, output_name: str, expected: bytes,
+    tmp_path,
+    monkeypatch,
+    script_path: str,
+    content: bytes,
+    output_name: str,
+    expected: bytes,
 ):
-    if script_path.endswith(".sh") and runner._command_version(["bash", "--version"]) is None:
+    if (
+        script_path.endswith(".sh")
+        and runner._command_version(["bash", "--version"]) is None
+    ):
         pytest.skip("A functional Bash interpreter is not available on this host")
     monkeypatch.setattr(runner, "CACHE_ROOT", tmp_path / "cache")
     package_hash, archive = _package(script_path, content)
-    result = await runner.execute(runner.ExecuteRequest(
-        package_hash=package_hash,
-        archive_base64=archive,
-        runtime="agent_skill",
-        script_path=script_path,
-        execution_id=3,
-    ), runner.RUNNER_TOKEN)
+    result = await runner.execute(
+        runner.ExecuteRequest(
+            package_hash=package_hash,
+            archive_base64=archive,
+            runtime="agent_skill",
+            script_path=script_path,
+            execution_id=3,
+        ),
+        runner.RUNNER_TOKEN,
+    )
     output = next(item for item in result["outputs"] if item["name"] == output_name)
     assert base64.b64decode(output["content_base64"]) == expected
 
 
 @pytest.mark.asyncio
 async def test_python_skill_without_requirements_uses_builtin_excel_library(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     monkeypatch.setattr(runner, "CACHE_ROOT", tmp_path / "cache")
     script = b"""from pathlib import Path
@@ -473,7 +542,9 @@ book.save(Path(os.environ["SKILL_OUTPUT_DIR"]) / "result.xlsx")
 
 
 @pytest.mark.asyncio
-async def test_node_skill_without_package_json_uses_builtin_exceljs(tmp_path, monkeypatch):
+async def test_node_skill_without_package_json_uses_builtin_exceljs(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(runner, "CACHE_ROOT", tmp_path / "cache")
     script = b"""const ExcelJS = require('exceljs');
 const path = require('path');
@@ -500,12 +571,14 @@ workbook.addWorksheet('Sheet1').addRow(['ready', 1]);
 
 @pytest.mark.asyncio
 async def test_python_skill_installs_extra_dependency_in_its_own_environment(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     monkeypatch.setattr(runner, "CACHE_ROOT", tmp_path / "cache")
-    package_hash, archive = _package_files({
-        "requirements.txt": b"humanize==4.12.1\n",
-        "scripts/run.py": b"""from pathlib import Path
+    package_hash, archive = _package_files(
+        {
+            "requirements.txt": b"humanize==4.12.1\n",
+            "scripts/run.py": b"""from pathlib import Path
 import os
 import humanize
 
@@ -513,7 +586,8 @@ Path(os.environ["SKILL_OUTPUT_DIR"], "result.txt").write_text(
     humanize.intcomma(1234567), encoding="utf-8"
 )
 """,
-    })
+        }
+    )
     result = await runner.execute(
         runner.ExecuteRequest(
             package_hash=package_hash,
@@ -526,14 +600,18 @@ Path(os.environ["SKILL_OUTPUT_DIR"], "result.txt").write_text(
     )
     output = next(item for item in result["outputs"] if item["name"] == "result.txt")
     assert base64.b64decode(output["content_base64"]) == b"1,234,567"
-    metadata = json.loads((tmp_path / "cache" / package_hash / ".install.json").read_text())
+    metadata = json.loads(
+        (tmp_path / "cache" / package_hash / ".install.json").read_text()
+    )
     assert metadata["installed_dependencies"]["python"] == ["humanize==4.12.1"]
 
 
 @pytest.mark.asyncio
 async def test_builtin_spreadsheet_create_does_not_load_skill_package(monkeypatch):
     async def fail_install(*_args, **_kwargs):
-        raise AssertionError("builtin execution must not install or load a Skill package")
+        raise AssertionError(
+            "builtin execution must not install or load a Skill package"
+        )
 
     monkeypatch.setattr(runner, "_ensure_installed", fail_install)
     result = await runner.execute_builtin_tool(
@@ -542,7 +620,9 @@ async def test_builtin_spreadsheet_create_does_not_load_skill_package(monkeypatc
             action="create",
             params={
                 "output_name": "测试表.xlsx",
-                "sheets": [{"name": "数据", "rows": [["名称", "金额"], ["样例", 123.45]]}],
+                "sheets": [
+                    {"name": "数据", "rows": [["名称", "金额"], ["样例", 123.45]]}
+                ],
             },
             execution_id="builtin-create",
         ),
@@ -569,11 +649,13 @@ async def test_builtin_spreadsheet_inspects_original_input():
         runner.BuiltinExecuteRequest(
             tool_kind="spreadsheet",
             action="inspect",
-            inputs=[runner.InputFile(
-                file_id="file-1",
-                name="明细.xlsx",
-                content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
-            )],
+            inputs=[
+                runner.InputFile(
+                    file_id="file-1",
+                    name="明细.xlsx",
+                    content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+                )
+            ],
             execution_id="builtin-inspect",
         ),
         runner.RUNNER_TOKEN,
@@ -657,17 +739,30 @@ async def test_builtin_spreadsheet_edit_preserves_existing_styles_and_widths():
         runner.BuiltinExecuteRequest(
             tool_kind="spreadsheet",
             action="edit",
-            inputs=[runner.InputFile(
-                file_id="file-style",
-                name="原样式.xlsx",
-                content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
-            )],
-            params={"operations": [{"type": "set_cell", "sheet": "Sheet", "cell": "B2", "value": "新增"}]},
+            inputs=[
+                runner.InputFile(
+                    file_id="file-style",
+                    name="原样式.xlsx",
+                    content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+                )
+            ],
+            params={
+                "operations": [
+                    {
+                        "type": "set_cell",
+                        "sheet": "Sheet",
+                        "cell": "B2",
+                        "value": "新增",
+                    }
+                ]
+            },
             execution_id="builtin-edit-style",
         ),
         runner.RUNNER_TOKEN,
     )
-    edited = load_workbook(io.BytesIO(base64.b64decode(result["outputs"][0]["content_base64"])))
+    edited = load_workbook(
+        io.BytesIO(base64.b64decode(result["outputs"][0]["content_base64"]))
+    )
     edited_sheet = edited["Sheet"]
     assert edited_sheet["B2"].value == "新增"
     assert edited_sheet["A1"].font.italic is True
@@ -680,7 +775,7 @@ async def test_builtin_spreadsheet_edit_preserves_existing_styles_and_widths():
 
 
 @pytest.mark.asyncio
-async def test_builtin_spreadsheet_edit_preserves_xlsm_vba_and_extension():
+async def test_builtin_spreadsheet_edit_converts_xlsm_to_macro_free_xlsx_copy():
     from openpyxl import Workbook
 
     plain = io.BytesIO()
@@ -688,9 +783,14 @@ async def test_builtin_spreadsheet_edit_preserves_xlsm_vba_and_extension():
     book.active["A1"] = "before"
     book.save(plain)
     source = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(plain.getvalue()), "r") as original, zipfile.ZipFile(
-        source, "w", zipfile.ZIP_DEFLATED,
-    ) as macro_book:
+    with (
+        zipfile.ZipFile(io.BytesIO(plain.getvalue()), "r") as original,
+        zipfile.ZipFile(
+            source,
+            "w",
+            zipfile.ZIP_DEFLATED,
+        ) as macro_book,
+    ):
         for member in original.infolist():
             payload = original.read(member.filename)
             if member.filename == "[Content_Types].xml":
@@ -713,20 +813,27 @@ async def test_builtin_spreadsheet_edit_preserves_xlsm_vba_and_extension():
         runner.BuiltinExecuteRequest(
             tool_kind="spreadsheet",
             action="edit",
-            inputs=[runner.InputFile(
-                file_id="macro-file",
-                name="含宏表格.xlsm",
-                content_base64=base64.b64encode(source.getvalue()).decode("ascii"),
-            )],
-            params={"operations": [{"type": "set_cell", "cell": "B2", "value": "after"}]},
+            inputs=[
+                runner.InputFile(
+                    file_id="macro-file",
+                    name="含宏表格.xlsm",
+                    content_base64=base64.b64encode(source.getvalue()).decode("ascii"),
+                )
+            ],
+            params={
+                "operations": [{"type": "set_cell", "cell": "B2", "value": "after"}]
+            },
             execution_id="builtin-edit-xlsm",
         ),
         runner.RUNNER_TOKEN,
     )
     output = result["outputs"][0]
-    assert output["name"] == "含宏表格.xlsm"
-    with zipfile.ZipFile(io.BytesIO(base64.b64decode(output["content_base64"]))) as edited:
-        assert edited.read("xl/vbaProject.bin") == b"test-vba-payload"
+    assert output["name"] == "含宏表格.xlsx"
+    assert "不含宏" in result["summary"]
+    with zipfile.ZipFile(
+        io.BytesIO(base64.b64decode(output["content_base64"]))
+    ) as edited:
+        assert "xl/vbaProject.bin" not in edited.namelist()
 
 
 def test_builtin_spreadsheet_values_are_json_safe():
@@ -751,18 +858,23 @@ async def test_builtin_spreadsheet_inspects_datetime_cells():
         runner.BuiltinExecuteRequest(
             tool_kind="spreadsheet",
             action="inspect",
-            inputs=[runner.InputFile(
-                file_id="file-with-date",
-                name="日期明细.xlsx",
-                content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
-            )],
+            inputs=[
+                runner.InputFile(
+                    file_id="file-with-date",
+                    name="日期明细.xlsx",
+                    content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+                )
+            ],
             execution_id="builtin-inspect-date",
         ),
         runner.RUNNER_TOKEN,
     )
 
     assert result["status"] == "success"
-    assert result["summary"]["sheets"][0]["rows"][1] == ["2026-09-01T09:06:07", 13142.74]
+    assert result["summary"]["sheets"][0]["rows"][1] == [
+        "2026-09-01T09:06:07",
+        13142.74,
+    ]
 
 
 @pytest.mark.asyncio
@@ -770,7 +882,10 @@ async def test_builtin_execution_requires_internal_token():
     with pytest.raises(runner.HTTPException) as exc:
         await runner.execute_builtin_tool(
             runner.BuiltinExecuteRequest(
-                tool_kind="text", action="create", params={"content": "x"}, execution_id="no-auth",
+                tool_kind="text",
+                action="create",
+                params={"content": "x"},
+                execution_id="no-auth",
             ),
             None,
         )
@@ -831,11 +946,13 @@ async def test_builtin_web_search_falls_back_to_bing(monkeypatch):
         ),
         runner.RUNNER_TOKEN,
     )
-    assert result["summary"]["results"] == [{
-        "title": "Example result",
-        "url": "https://example.com",
-        "snippet": "Useful snippet",
-    }]
+    assert result["summary"]["results"] == [
+        {
+            "title": "Example result",
+            "url": "https://example.com",
+            "snippet": "Useful snippet",
+        }
+    ]
 
 
 def test_builtin_web_rejects_private_and_invalid_urls():
@@ -854,11 +971,13 @@ async def test_builtin_image_resize_outputs_real_png():
             tool_kind="image",
             action="resize",
             params={"width": 30, "height": 30, "output_name": "缩略图.png"},
-            inputs=[runner.InputFile(
-                file_id="image-1",
-                name="原图.png",
-                content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
-            )],
+            inputs=[
+                runner.InputFile(
+                    file_id="image-1",
+                    name="原图.png",
+                    content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+                )
+            ],
             execution_id="image-resize",
         ),
         runner.RUNNER_TOKEN,
@@ -878,16 +997,21 @@ async def test_builtin_archive_extract_preserves_relative_paths():
         runner.BuiltinExecuteRequest(
             tool_kind="archive",
             action="extract",
-            inputs=[runner.InputFile(
-                file_id="archive-1",
-                name="资料包.zip",
-                content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
-            )],
+            inputs=[
+                runner.InputFile(
+                    file_id="archive-1",
+                    name="资料包.zip",
+                    content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
+                )
+            ],
             execution_id="archive-extract",
         ),
         runner.RUNNER_TOKEN,
     )
-    assert {item["relative_path"] for item in result["outputs"]} == {"资料/说明.txt", "数据.csv"}
+    assert {item["relative_path"] for item in result["outputs"]} == {
+        "资料/说明.txt",
+        "数据.csv",
+    }
 
 
 @pytest.mark.asyncio
@@ -900,17 +1024,21 @@ async def test_builtin_archive_rejects_path_traversal():
             runner.BuiltinExecuteRequest(
                 tool_kind="archive",
                 action="extract",
-                inputs=[runner.InputFile(
-                    file_id="archive-2",
-                    name="unsafe.zip",
-                    content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
-                )],
+                inputs=[
+                    runner.InputFile(
+                        file_id="archive-2",
+                        name="unsafe.zip",
+                        content_base64=base64.b64encode(stream.getvalue()).decode(
+                            "ascii"
+                        ),
+                    )
+                ],
                 execution_id="archive-unsafe",
             ),
             runner.RUNNER_TOKEN,
         )
     assert exc.value.status_code == 422
-    assert "Unsafe archive path" in str(exc.value.detail)
+    assert "不安全路径" in str(exc.value.detail)
 
 
 @pytest.mark.asyncio
@@ -926,11 +1054,15 @@ async def test_builtin_archive_rejects_zip_links():
             runner.BuiltinExecuteRequest(
                 tool_kind="archive",
                 action="extract",
-                inputs=[runner.InputFile(
-                    file_id="archive-link",
-                    name="unsafe-link.zip",
-                    content_base64=base64.b64encode(stream.getvalue()).decode("ascii"),
-                )],
+                inputs=[
+                    runner.InputFile(
+                        file_id="archive-link",
+                        name="unsafe-link.zip",
+                        content_base64=base64.b64encode(stream.getvalue()).decode(
+                            "ascii"
+                        ),
+                    )
+                ],
                 execution_id="archive-link",
             ),
             runner.RUNNER_TOKEN,

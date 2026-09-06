@@ -12,6 +12,7 @@ from fastapi import HTTPException, Request
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
+from app.agents import llm_client
 from app.agents.graph import nodes
 from app.api import terminal
 from app.auth.user_auth import current_user_for_user
@@ -25,6 +26,14 @@ from app.schemas.workspace import (
     WorkspaceUploadInitiate,
 )
 from app.services import platform_extension_catalog, workspace_governance_service, workspace_service
+from app.services.file_capability_registry import (
+    FILE_TOOL_SCHEMAS,
+    FileCapabilityRegistry,
+    FileToolValidationError,
+    file_tool_definitions,
+    normalize_file_tool_call,
+    validate_artifact_bytes,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -33,10 +42,7 @@ def db_engine():
 
 
 def test_workspace_platform_catalog_exposes_all_canonical_atomic_tools():
-    group = next(
-        item for item in platform_extension_catalog.SYSTEM_TOOL_GROUPS
-        if item["slug"] == "workspace-files"
-    )
+    group = next(item for item in platform_extension_catalog.SYSTEM_TOOL_GROUPS if item["slug"] == "workspace-files")
     assert {
         "workspace_list",
         "workspace_search",
@@ -51,6 +57,69 @@ def test_workspace_platform_catalog_exposes_all_canonical_atomic_tools():
         "workspace_list_versions",
         "workspace_restore_version",
     }.issubset(set(group["tools"]))
+
+
+def test_file_registry_is_the_source_of_truth_for_modern_and_legacy_formats():
+    public = {item["format"]: item for item in FileCapabilityRegistry.public()}
+    assert public["xlsx"]["nativeOrCompatibility"] == "native"
+    assert public["xls"]["nativeOrCompatibility"] == "compatibility"
+    assert public["xls"]["canonicalOutputFormat"] == "xlsx"
+    assert public["doc"]["canonicalOutputFormat"] == "docx"
+    assert public["ppt"]["canonicalOutputFormat"] == "pptx"
+    assert public["pdf"]["capabilities"]["preview"] is True
+    assert public["md"]["capabilities"]["edit"] is True
+
+
+def test_atomic_file_tool_schemas_are_closed_and_server_rejects_json_strings():
+    advertised = {item["function"]["name"]: item["function"] for item in file_tool_definitions()}
+    assert set(FILE_TOOL_SCHEMAS) == set(advertised)
+    assert all(tool["strict"] is True for tool in advertised.values())
+    assert all(tool["parameters"]["additionalProperties"] is False for tool in advertised.values())
+    with pytest.raises(FileToolValidationError) as raised:
+        normalize_file_tool_call(
+            "spreadsheet_create",
+            {"sheets": '[{"name":"Sheet1","rows":[]}]'},
+        )
+    assert raised.value.code == "invalid_tool_arguments"
+
+
+def test_provider_strict_schema_is_enabled_only_for_capable_provider():
+    tools = file_tool_definitions()
+    capable = SimpleNamespace(provider_type="openai", vendor="custom", config={"supports_strict_tools": True})
+    prepared = llm_client.prepare_tools_for_provider(capable, tools)
+    spreadsheet = next(item["function"] for item in prepared if item["function"]["name"] == "spreadsheet_create")
+    properties = spreadsheet["parameters"]["properties"]
+    assert spreadsheet["strict"] is True
+    assert set(spreadsheet["parameters"]["required"]) == set(properties)
+    assert "null" in properties["target_format"]["type"]
+
+    compatible = SimpleNamespace(provider_type="openai", vendor="custom", config={})
+    fallback = llm_client.prepare_tools_for_provider(compatible, tools)
+    fallback_sheet = next(item["function"] for item in fallback if item["function"]["name"] == "spreadsheet_create")
+    assert "strict" not in fallback_sheet
+    assert fallback_sheet["parameters"]["required"] == ["sheets"]
+
+
+def test_strict_mode_null_placeholders_are_removed_before_server_validation():
+    params = {
+        "sheets": [{"name": "Sheet1", "rows": [["编号"], ["1"]]}],
+        "output_name": None,
+        "output_path": None,
+        "target_workspace_id": None,
+        "target_file_id": None,
+        "base_version_id": None,
+        "idempotency_key": None,
+        "target_format": None,
+    }
+    family, action, normalized, canonical = normalize_file_tool_call("spreadsheet_create", params)
+    assert (family, action, canonical) == ("spreadsheet", "create", "spreadsheet_create")
+    assert normalized == {"sheets": params["sheets"]}
+
+
+def test_artifact_validation_rejects_extension_content_mismatch():
+    with pytest.raises(FileToolValidationError) as raised:
+        validate_artifact_bytes("伪造.xlsx", b"not-an-ooxml-package")
+    assert raised.value.code in {"corrupt_file", "format_mismatch"}
 
 
 def test_explicit_upload_replacement_identity_is_all_or_none():
@@ -86,22 +155,28 @@ def test_plain_text_mutation_rejects_known_binary_but_allows_code():
         workspace_service._assert_plain_text_update_supported(binary)
     with pytest.raises(workspace_service.WorkspaceFileMetadataConflict):
         workspace_service._merge_update_metadata(
-            binary, {"binary": False, "name": "明细.txt", "mime": "text/plain"},
+            binary,
+            {"binary": False, "name": "明细.txt", "mime": "text/plain"},
         )
     # A separate rename changes only the human path/name.  Persisted binary
     # provenance still wins, so renaming an Office file to .txt cannot make the
     # generic UTF-8 endpoint corrupt it.
     renamed_binary = SimpleNamespace(
-        path="共享/明细.txt", content=None, parse_kind="spreadsheet",
+        path="共享/明细.txt",
+        content=None,
+        parse_kind="spreadsheet",
         metadata_={
-            "binary": True, "name": "明细.txt",
+            "binary": True,
+            "name": "明细.txt",
             "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         },
     )
     with pytest.raises(workspace_service.WorkspaceFileUnsupportedTextUpdate):
         workspace_service._assert_plain_text_update_supported(renamed_binary)
     source_code = SimpleNamespace(
-        path="scripts/report.py", content="print('ok')", parse_kind="text",
+        path="scripts/report.py",
+        content="print('ok')",
+        parse_kind="text",
         metadata_={"name": "report.py", "mime": "application/octet-stream"},
     )
     workspace_service._assert_plain_text_update_supported(source_code)
@@ -109,8 +184,10 @@ def test_plain_text_mutation_rejects_known_binary_but_allows_code():
 
 def test_office_edit_capability_is_server_owned_and_fail_closed(monkeypatch):
     file = SimpleNamespace(
-        path="共享/明细.xlsx", content_ref="oss://projects/repo/assets/source.xlsx",
-        current_version_id=uuid4(), size=1024,
+        path="共享/明细.xlsx",
+        content_ref="oss://projects/repo/assets/source.xlsx",
+        current_version_id=uuid4(),
+        size=1024,
         metadata_={"binary": True, "name": "明细.xlsx"},
     )
     monkeypatch.setattr(settings, "workspace_weboffice_edit_enabled", True)
@@ -128,7 +205,8 @@ def test_terminal_delete_contract_requires_explicit_version_and_key():
     with pytest.raises(ValidationError):
         WorkspaceFileDeleteRequest(base_version_id=uuid4())
     request = WorkspaceFileDeleteRequest(
-        base_version_id=uuid4(), idempotency_key="delete-file-0001",
+        base_version_id=uuid4(),
+        idempotency_key="delete-file-0001",
     )
     assert request.idempotency_key == "delete-file-0001"
 
@@ -139,7 +217,8 @@ def test_version_restore_contract_requires_explicit_version_and_key():
     with pytest.raises(ValidationError):
         WorkspaceFileRestoreRequest(base_version_id=uuid4())
     request = WorkspaceFileRestoreRequest(
-        base_version_id=uuid4(), idempotency_key="restore-file-0001",
+        base_version_id=uuid4(),
+        idempotency_key="restore-file-0001",
     )
     assert request.idempotency_key == "restore-file-0001"
 
@@ -294,29 +373,46 @@ def test_artifact_replacement_rejects_same_family_extension_and_generic_ole():
 
 
 def test_validation_errors_do_not_reflect_input_or_context():
-    error = SimpleNamespace(errors=lambda: [{
-        "type": "value_error", "loc": ("body", "access_token"),
-        "msg": "Value error", "input": "super-secret-token",
-        "ctx": {"error": "signed-url?token=secret"},
-    }])
+    error = SimpleNamespace(
+        errors=lambda: [
+            {
+                "type": "value_error",
+                "loc": ("body", "access_token"),
+                "msg": "Value error",
+                "input": "super-secret-token",
+                "ctx": {"error": "signed-url?token=secret"},
+            }
+        ]
+    )
     redacted = _redacted_validation_errors(error)
-    assert redacted == [{
-        "type": "value_error", "loc": ("body", "access_token"), "msg": "Value error",
-    }]
+    assert redacted == [
+        {
+            "type": "value_error",
+            "loc": ("body", "access_token"),
+            "msg": "Value error",
+        }
+    ]
     assert "secret" not in str(redacted)
 
 
 @pytest.mark.asyncio
 async def test_forbidden_stable_file_id_is_concealed_as_not_found():
     file_id = uuid4()
-    request = Request({
-        "type": "http", "method": "GET",
-        "path": f"/api/v1/terminal/files/{file_id}",
-        "headers": [], "query_string": b"", "server": ("test", 80),
-        "client": ("test", 1), "scheme": "http",
-    })
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": f"/api/v1/terminal/files/{file_id}",
+            "headers": [],
+            "query_string": b"",
+            "server": ("test", 80),
+            "client": ("test", 1),
+            "scheme": "http",
+        }
+    )
     response = await conceal_stable_file_forbidden(
-        request, HTTPException(status_code=403, detail="update denied"),
+        request,
+        HTTPException(status_code=403, detail="update denied"),
     )
     assert response.status_code == 404
     assert b"update denied" not in response.body
@@ -344,24 +440,36 @@ async def test_public_share_never_renders_same_origin_active_html(monkeypatch):
 @pytest.mark.asyncio
 async def test_recursive_delete_checks_every_active_room_before_any_tombstone(monkeypatch):
     first = SimpleNamespace(
-        id=uuid4(), current_version_id=uuid4(), deleted_at=None, purge_after=None,
-        deleted_by_user_id=None, deleted_by_admin_id=None,
+        id=uuid4(),
+        current_version_id=uuid4(),
+        deleted_at=None,
+        purge_after=None,
+        deleted_by_user_id=None,
+        deleted_by_admin_id=None,
     )
     blocked = SimpleNamespace(
-        id=uuid4(), current_version_id=uuid4(), deleted_at=None, purge_after=None,
-        deleted_by_user_id=None, deleted_by_admin_id=None,
+        id=uuid4(),
+        current_version_id=uuid4(),
+        deleted_at=None,
+        purge_after=None,
+        deleted_by_user_id=None,
+        deleted_by_admin_id=None,
     )
 
     async def assert_room(_db, file):
         if file is blocked:
             raise workspace_service.WorkspaceFileActiveEditConflict(
-                "active", room_id=uuid4(), current_version_id=file.current_version_id,
+                "active",
+                room_id=uuid4(),
+                current_version_id=file.current_version_id,
             )
 
     monkeypatch.setattr(workspace_service, "assert_no_active_office_room", assert_room)
     with pytest.raises(workspace_service.WorkspaceFileActiveEditConflict):
         await workspace_service._mark_files_deleted_locked(
-            SimpleNamespace(), [first, blocked], user_id=uuid4(),
+            SimpleNamespace(),
+            [first, blocked],
+            user_id=uuid4(),
         )
     assert first.deleted_at is None
     assert blocked.deleted_at is None
@@ -374,17 +482,29 @@ async def test_only_trusted_same_org_live_tool_files_become_artifacts(monkeypatc
     file_id = uuid4()
     version_id = uuid4()
     workspace = SimpleNamespace(
-        id=workspace_id, organization_id=org_id, name="个人空间", slug="personal",
+        id=workspace_id,
+        organization_id=org_id,
+        name="个人空间",
+        slug="personal",
     )
     file = SimpleNamespace(
-        id=file_id, workspace_id=workspace_id, path="结果/report.txt",
+        id=file_id,
+        workspace_id=workspace_id,
+        path="结果/report.txt",
         metadata_={"name": "report.txt", "mime": "text/plain"},
-        current_version_id=version_id, size=2, parse_status="ready",
-        created_at=datetime.now(UTC), deleted_at=None,
+        current_version_id=version_id,
+        size=2,
+        parse_status="ready",
+        created_at=datetime.now(UTC),
+        deleted_at=None,
     )
     version = SimpleNamespace(
-        id=version_id, workspace_file_id=file_id, version_no=1,
-        metadata_=dict(file.metadata_), size=2, parse_status="ready",
+        id=version_id,
+        workspace_file_id=file_id,
+        version_no=1,
+        metadata_=dict(file.metadata_),
+        size=2,
+        parse_status="ready",
     )
 
     class FakeDb:
@@ -404,8 +524,12 @@ async def test_only_trusted_same_org_live_tool_files_become_artifacts(monkeypatc
     monkeypatch.setattr(workspace_service, "get_file", get_file)
     monkeypatch.setattr(workspace_service, "get_workspace", get_workspace)
     common = {
-        "file_id": str(file_id), "version_id": str(version_id), "scope": "turn",
-        "follow_latest": True, "source": "tool_result", "operation": "create",
+        "file_id": str(file_id),
+        "version_id": str(version_id),
+        "scope": "turn",
+        "follow_latest": True,
+        "source": "tool_result",
+        "operation": "create",
         "workspace_id": str(workspace_id),
     }
     verified, artifacts = await nodes._verified_tool_file_records(
@@ -432,21 +556,35 @@ async def test_copy_replay_card_keeps_original_result_without_later_move_leak(mo
     file_id = uuid4()
     version_id = uuid4()
     current_workspace = SimpleNamespace(
-        id=current_workspace_id, organization_id=org_id, name="秘密目标", slug="secret",
+        id=current_workspace_id,
+        organization_id=org_id,
+        name="秘密目标",
+        slug="secret",
     )
     original_workspace = SimpleNamespace(
-        id=original_workspace_id, organization_id=org_id, name="技术部", slug="technology",
+        id=original_workspace_id,
+        organization_id=org_id,
+        name="技术部",
+        slug="technology",
     )
     file = SimpleNamespace(
-        id=file_id, workspace_id=current_workspace_id, path="后来/移动位置.txt",
+        id=file_id,
+        workspace_id=current_workspace_id,
+        path="后来/移动位置.txt",
         metadata_={"name": "后来位置.txt", "mime": "text/plain"},
-        current_version_id=uuid4(), size=2, parse_status="ready",
-        created_at=datetime.now(UTC), deleted_at=None,
+        current_version_id=uuid4(),
+        size=2,
+        parse_status="ready",
+        created_at=datetime.now(UTC),
+        deleted_at=None,
     )
     version = SimpleNamespace(
-        id=version_id, workspace_file_id=file_id, version_no=1,
+        id=version_id,
+        workspace_file_id=file_id,
+        version_no=1,
         metadata_={"name": "交付.txt", "mime": "text/plain"},
-        size=2, parse_status="ready",
+        size=2,
+        parse_status="ready",
     )
     mutation = SimpleNamespace(
         workspace_id=original_workspace_id,
@@ -481,11 +619,17 @@ async def test_copy_replay_card_keeps_original_result_without_later_move_leak(mo
     monkeypatch.setattr(workspace_service, "get_workspace", get_workspace)
     verified, artifacts = await nodes._verified_tool_file_records(
         {"org_id": str(org_id), "workspace_id": str(current_workspace_id)},
-        [{
-            "file_id": str(file_id), "version_id": str(version_id), "scope": "turn",
-            "follow_latest": True, "source": "tool_result", "operation": "copy",
-            "tool_name": "workspace_copy_file",
-        }],
+        [
+            {
+                "file_id": str(file_id),
+                "version_id": str(version_id),
+                "scope": "turn",
+                "follow_latest": True,
+                "source": "tool_result",
+                "operation": "copy",
+                "tool_name": "workspace_copy_file",
+            }
+        ],
         None,
         task_id=str(uuid4()),
         task_title="测试",
@@ -506,28 +650,51 @@ async def test_create_replay_reauthorizes_live_location_and_returns_original_sna
     later_version_id = uuid4()
     principal = SimpleNamespace(id=uuid4())
     original_workspace = SimpleNamespace(
-        id=original_workspace_id, name="技术部", slug="technology",
+        id=original_workspace_id,
+        name="技术部",
+        slug="technology",
     )
     current_workspace = SimpleNamespace(
-        id=current_workspace_id, name="秘密空间", slug="secret",
+        id=current_workspace_id,
+        name="秘密空间",
+        slug="secret",
     )
     live = SimpleNamespace(
-        id=file_id, workspace_id=current_workspace_id, path="后来/秘密.txt",
-        current_version_id=later_version_id, created_at=datetime.now(UTC),
-        metadata_={"name": "秘密.txt"}, size=99, content_hash="b" * 64,
-        content_ref="oss://later", content=None, extracted_text=None,
-        parse_status="ready", parse_kind="text", parse_error=None,
+        id=file_id,
+        workspace_id=current_workspace_id,
+        path="后来/秘密.txt",
+        current_version_id=later_version_id,
+        created_at=datetime.now(UTC),
+        metadata_={"name": "秘密.txt"},
+        size=99,
+        content_hash="b" * 64,
+        content_ref="oss://later",
+        content=None,
+        extracted_text=None,
+        parse_status="ready",
+        parse_kind="text",
+        parse_error=None,
     )
     result_version = SimpleNamespace(
-        id=result_version_id, workspace_file_id=file_id, version_no=1,
-        storage_version_id=None, storage_etag=None, size=2,
-        content_hash="a" * 64, content_ref="oss://original", content=None,
-        extracted_text="ok", parse_status="ready", parse_kind="text",
-        parse_error=None, metadata_={"name": "交付.txt"},
+        id=result_version_id,
+        workspace_file_id=file_id,
+        version_no=1,
+        storage_version_id=None,
+        storage_etag=None,
+        size=2,
+        content_hash="a" * 64,
+        content_ref="oss://original",
+        content=None,
+        extracted_text="ok",
+        parse_status="ready",
+        parse_kind="text",
+        parse_error=None,
+        metadata_={"name": "交付.txt"},
         created_at=datetime.now(UTC),
     )
     mutation = SimpleNamespace(
-        result_file_id=file_id, result_version_id=result_version_id,
+        result_file_id=file_id,
+        result_version_id=result_version_id,
         workspace_id=original_workspace_id,
         result={"workspace_id": str(original_workspace_id), "path": "原始/交付.txt"},
     )
@@ -563,7 +730,9 @@ async def test_create_replay_reauthorizes_live_location_and_returns_original_sna
     monkeypatch.setattr(nodes.workspace_permission_service, "capabilities", capabilities)
 
     snapshot, workspace, _ = await nodes._authorized_create_replay(
-        {"workspace_id": str(original_workspace_id)}, mutation, principal,
+        {"workspace_id": str(original_workspace_id)},
+        mutation,
+        principal,
     )
     assert snapshot.path == "原始/交付.txt"
     assert snapshot.current_version_id == result_version_id
@@ -572,7 +741,9 @@ async def test_create_replay_reauthorizes_live_location_and_returns_original_sna
 
     allowed.remove(str(current_workspace_id))
     denied, denied_workspace, _ = await nodes._authorized_create_replay(
-        {"workspace_id": str(original_workspace_id)}, mutation, principal,
+        {"workspace_id": str(original_workspace_id)},
+        mutation,
+        principal,
     )
     assert denied is None
     assert denied_workspace is None
@@ -587,7 +758,9 @@ async def test_concurrent_mutation_claim_replays_unique_winner_instead_of_500():
     payload = {"target_path": "result.txt"}
     request_hash = workspace_service._stable_request_hash({"operation": "copy", **payload})
     winner = SimpleNamespace(
-        request_hash=request_hash, operation="copy", status="completed",
+        request_hash=request_hash,
+        operation="copy",
+        status="completed",
     )
 
     class Result:
@@ -621,8 +794,13 @@ async def test_concurrent_mutation_claim_replays_unique_winner_instead_of_500():
             raise IntegrityError("insert", {}, RuntimeError("duplicate"))
 
     mutation, replayed = await workspace_service.begin_file_mutation(
-        FakeDb(), workspace=workspace, file=file, actor_type="user",
-        actor_id=str(actor_id), operation="copy", idempotency_key="copy-race-0001",
+        FakeDb(),
+        workspace=workspace,
+        file=file,
+        actor_type="user",
+        actor_id=str(actor_id),
+        operation="copy",
+        idempotency_key="copy-race-0001",
         payload=payload,
     )
     assert mutation is winner
@@ -666,7 +844,8 @@ async def test_concurrent_same_path_create_returns_the_winning_file_conflict():
     workspace = SimpleNamespace(id=uuid4())
     with pytest.raises(workspace_service.WorkspaceFilePathConflict) as raised:
         await workspace_service.upsert_file(
-            FakeDb(), workspace,
+            FakeDb(),
+            workspace,
             workspace_service.WorkspaceFileCreate(path="共享/同名.txt", content="data"),
         )
     assert raised.value.file_id == str(winner.id)

@@ -49,6 +49,185 @@ MAX_ARCHIVE_FILES = 20
 MAX_ARCHIVE_FILE_BYTES = 5 * 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 40_000_000
 
+_ALLOWED_ACTIONS = {
+    "spreadsheet": {"inspect", "create", "edit", "convert"},
+    "document": {"inspect", "create", "edit", "convert"},
+    "presentation": {"inspect", "create", "edit", "convert"},
+    "pdf": {"inspect", "create", "merge", "split", "extract_pages", "convert"},
+    "text": {"inspect", "create", "edit", "convert"},
+    "web": {"search", "fetch", "download"},
+    "image": {"inspect", "convert", "resize", "crop", "compress", "ocr"},
+    "archive": {"list", "extract", "create"},
+}
+
+
+def _assert_safe_zip_package(path: Path) -> None:
+    with path.open("rb") as handle:
+        signature = handle.read(4)
+    if signature != b"PK\x03\x04":
+        return
+    try:
+        with zipfile.ZipFile(path) as package:
+            infos = package.infolist()
+            if len(infos) > 10_000:
+                raise BuiltinToolError("文件包包含的项目过多，已拒绝处理")
+            expanded = 0
+            for info in infos:
+                member = PurePosixPath(info.filename.replace("\\", "/"))
+                if member.is_absolute() or ".." in member.parts:
+                    raise BuiltinToolError("文件包包含不安全路径，已拒绝处理")
+                expanded += max(0, int(info.file_size))
+                if expanded > 500 * 1024 * 1024:
+                    raise BuiltinToolError("文件解压后的体积超过 500MB，已拒绝处理")
+                if info.compress_size and info.file_size / info.compress_size > 1_000:
+                    raise BuiltinToolError("文件压缩率异常，可能是压缩炸弹，已拒绝处理")
+    except zipfile.BadZipFile as exc:
+        raise BuiltinToolError("ZIP 或 Office 文件包已损坏") from exc
+
+
+def validate_builtin_request(
+    tool_kind: str, action: str, inputs: list[Path], params: dict
+) -> None:
+    """Fail closed at the Runner boundary even when a caller bypasses the model schema."""
+
+    if action not in _ALLOWED_ACTIONS.get(tool_kind, set()):
+        raise BuiltinToolError(f"不支持的文件操作：{tool_kind}.{action}")
+    for field in ("sheets", "slides", "operations", "pages"):
+        if field in params and isinstance(params[field], str):
+            raise BuiltinToolError(f"参数 {field} 必须是真实数组，不能是 JSON 字符串")
+    required_input = action in {
+        "inspect",
+        "edit",
+        "convert",
+        "merge",
+        "split",
+        "extract_pages",
+        "ocr",
+        "resize",
+        "crop",
+        "compress",
+        "list",
+        "extract",
+    }
+    if required_input and not inputs:
+        raise BuiltinToolError("该文件操作缺少输入文件")
+    for source in inputs:
+        _assert_safe_zip_package(source)
+    if tool_kind in {"document", "presentation", "text"} and action == "edit":
+        mode = str(
+            params.get("mode") or ("replace" if params.get("replace") else "append")
+        )
+        if tool_kind in {"document", "presentation"} and mode != "append":
+            raise BuiltinToolError("为避免丢失原格式，Office 文件只支持明确的追加编辑")
+
+
+def validate_output_file(path: Path) -> tuple[str, str]:
+    """Reopen every output and verify its real format before it leaves the sandbox."""
+
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise BuiltinToolError(f"输出文件为空：{path.name}")
+    suffix = path.suffix.lower().lstrip(".")
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    if suffix in {"xlsx", "xlsm", "xltx", "xltm"}:
+        try:
+            book = load_workbook(
+                path, read_only=True, keep_vba=suffix in {"xlsm", "xltm"}
+            )
+            if not book.sheetnames:
+                raise ValueError("workbook has no sheets")
+            book.close()
+        except Exception as exc:
+            raise BuiltinToolError(f"Excel 无法重新打开：{path.name}") from exc
+    elif suffix in {"docx", "docm", "dotx", "dotm"}:
+        try:
+            Document(path)
+        except Exception as exc:
+            raise BuiltinToolError(f"Word 无法重新打开：{path.name}") from exc
+    elif suffix in {"pptx", "pptm", "ppsx", "ppsm", "potx", "potm"}:
+        try:
+            presentation = Presentation(path)
+            if len(presentation.slides) < 1:
+                raise ValueError("presentation has no slides")
+        except Exception as exc:
+            raise BuiltinToolError(f"PowerPoint 无法重新打开：{path.name}") from exc
+    elif suffix in {"ods", "odt", "odp", "ots", "ott", "otp"}:
+        try:
+            with zipfile.ZipFile(path) as package:
+                names = set(package.namelist())
+            if "mimetype" not in names or "content.xml" not in names:
+                raise ValueError("invalid OpenDocument package")
+        except Exception as exc:
+            raise BuiltinToolError(f"OpenDocument 无法重新打开：{path.name}") from exc
+    elif suffix in {"xls", "doc", "ppt", "pps", "pot"}:
+        if not path.read_bytes()[:8] == bytes.fromhex("D0CF11E0A1B11AE1"):
+            raise BuiltinToolError(f"旧版 Office 文件头无效：{path.name}")
+    elif suffix == "pdf":
+        try:
+            reader = PdfReader(path, strict=True)
+            if len(reader.pages) < 1:
+                raise ValueError("PDF has no pages")
+            rendered = fitz.open(path)
+            rendered[0].get_pixmap(matrix=fitz.Matrix(0.25, 0.25), alpha=False)
+            rendered.close()
+        except Exception as exc:
+            raise BuiltinToolError(f"PDF 无法重新打开或渲染：{path.name}") from exc
+    elif suffix in {"txt", "md", "markdown", "csv", "tsv"}:
+        try:
+            path.read_text(encoding="utf-8-sig", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise BuiltinToolError(f"文本文件不是有效 UTF-8：{path.name}") from exc
+    elif suffix in {"png", "jpg", "jpeg", "webp", "tiff", "bmp"}:
+        try:
+            with Image.open(path) as image:
+                image.verify()
+        except Exception as exc:
+            raise BuiltinToolError(f"图片无法重新打开：{path.name}") from exc
+    elif suffix == "zip":
+        try:
+            with zipfile.ZipFile(path) as archive:
+                if archive.testzip() is not None:
+                    raise ValueError("corrupt archive member")
+        except Exception as exc:
+            raise BuiltinToolError(f"ZIP 无法重新打开：{path.name}") from exc
+    return suffix, mime
+
+
+def validate_output_semantics(
+    path: Path,
+    tool_kind: str,
+    action: str,
+    params: dict,
+) -> None:
+    """Check deterministic structure promised by create operations."""
+
+    if action != "create":
+        return
+    suffix = path.suffix.lower()
+    if tool_kind == "spreadsheet" and suffix in {".xlsx", ".xlsm"}:
+        book = load_workbook(path, read_only=True)
+        try:
+            expected = [
+                str(item.get("name") or f"Sheet{index + 1}")[:31]
+                for index, item in enumerate(params.get("sheets") or [])
+            ]
+            if expected and book.sheetnames != expected:
+                raise BuiltinToolError("Excel 工作表数量或名称与生成请求不一致")
+        finally:
+            book.close()
+    elif tool_kind == "document" and suffix == ".docx":
+        document = Document(path)
+        source_text = str(params.get("markdown") or params.get("content") or "").strip()
+        delivered_text = "\n".join(
+            paragraph.text for paragraph in document.paragraphs
+        ).strip()
+        if source_text and not delivered_text and not document.tables:
+            raise BuiltinToolError("Word 主要段落或表格未正确写入")
+    elif tool_kind == "presentation" and suffix == ".pptx":
+        presentation = Presentation(path)
+        expected_slides = len(params.get("slides") or [])
+        if len(presentation.slides) != expected_slides:
+            raise BuiltinToolError("PowerPoint 幻灯片数量与生成请求不一致")
+
 
 def _value(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
@@ -72,7 +251,7 @@ def _safe_output_name(value: str | None, default: str, suffix: str) -> str:
 def _libreoffice_convert(source: Path, output_dir: Path, target: str) -> Path:
     executable = shutil.which("libreoffice") or shutil.which("soffice")
     if not executable:
-        raise BuiltinToolError("LibreOffice is unavailable in Runner")
+        raise BuiltinToolError("文件兼容转换服务当前不可用")
     profile = Path(tempfile.mkdtemp(prefix="builtin-lo-"))
     try:
         result = subprocess.run(
@@ -92,13 +271,16 @@ def _libreoffice_convert(source: Path, output_dir: Path, target: str) -> Path:
             check=False,
         )
         if result.returncode:
-            raise BuiltinToolError((result.stderr or result.stdout or "LibreOffice conversion failed")[-2000:])
-        candidates = sorted(output_dir.glob(f"{source.stem}.*"), key=lambda item: item.stat().st_mtime)
+            detail = (result.stderr or result.stdout or "未知错误")[-1000:]
+            raise BuiltinToolError(f"文件格式转换失败：{detail}")
+        candidates = sorted(
+            output_dir.glob(f"{source.stem}.*"), key=lambda item: item.stat().st_mtime
+        )
         if not candidates:
-            raise BuiltinToolError("LibreOffice did not produce an output file")
+            raise BuiltinToolError("文件格式转换失败：没有生成目标文件")
         return candidates[-1]
     except subprocess.TimeoutExpired as exc:
-        raise BuiltinToolError("LibreOffice conversion exceeded 30 seconds") from exc
+        raise BuiltinToolError("文件格式转换超时，请缩小文件后重试") from exc
     finally:
         shutil.rmtree(profile, ignore_errors=True)
 
@@ -106,7 +288,11 @@ def _libreoffice_convert(source: Path, output_dir: Path, target: str) -> Path:
 def _load_tabular(path: Path):
     if path.suffix.lower() in {".csv", ".tsv"}:
         delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
-        rows = list(csv.reader(path.read_text(encoding="utf-8-sig").splitlines(), delimiter=delimiter))
+        rows = list(
+            csv.reader(
+                path.read_text(encoding="utf-8-sig").splitlines(), delimiter=delimiter
+            )
+        )
         book = Workbook()
         sheet = book.active
         sheet.title = path.stem[:31] or "Sheet1"
@@ -151,15 +337,21 @@ def _write_sheets(book: Workbook, sheets: list[dict]) -> None:
         _style_sheet(sheet)
 
 
-def _spreadsheet(action: str, inputs: list[Path], params: dict, output_dir: Path) -> dict:
+def _spreadsheet(
+    action: str, inputs: list[Path], params: dict, output_dir: Path
+) -> dict:
     if action == "inspect":
         if not inputs:
             raise BuiltinToolError("spreadsheet inspect requires one input file")
         book = _load_tabular(inputs[0])
         requested_sheet = str(params.get("sheet") or "").strip()
         if requested_sheet and requested_sheet not in book.sheetnames:
-            raise BuiltinToolError(f"spreadsheet sheet does not exist: {requested_sheet}")
-        selected_sheets = [book[requested_sheet]] if requested_sheet else list(book.worksheets)
+            raise BuiltinToolError(
+                f"spreadsheet sheet does not exist: {requested_sheet}"
+            )
+        selected_sheets = (
+            [book[requested_sheet]] if requested_sheet else list(book.worksheets)
+        )
         max_cols = min(max(int(params.get("max_columns", 30)), 1), 100)
         cell_range = str(params.get("range") or "").strip().upper()
         offset = max(int(params.get("offset", 0)), 0)
@@ -172,9 +364,13 @@ def _spreadsheet(action: str, inputs: list[Path], params: dict, output_dir: Path
                 try:
                     min_col, min_row, max_col, max_row = range_boundaries(cell_range)
                 except ValueError as exc:
-                    raise BuiltinToolError("spreadsheet range must be an A1 range such as A2:F200") from exc
+                    raise BuiltinToolError(
+                        "spreadsheet range must be an A1 range such as A2:F200"
+                    ) from exc
                 if max_col - min_col + 1 > 100 or max_row - min_row + 1 > 1000:
-                    raise BuiltinToolError("spreadsheet range exceeds 100 columns or 1000 rows")
+                    raise BuiltinToolError(
+                        "spreadsheet range exceeds 100 columns or 1000 rows"
+                    )
                 effective_max_col = min(max_col, min_col + max_cols - 1)
                 row_start = min_row
                 row_end = min(max_row, sheet.max_row)
@@ -197,36 +393,71 @@ def _spreadsheet(action: str, inputs: list[Path], params: dict, output_dir: Path
             any_more = any_more or has_more
             if next_offset is not None:
                 next_offsets.append(next_offset)
-            sheets.append({
-                "name": sheet.title,
-                "rows": rows,
-                "total_rows": sheet.max_row,
-                "total_columns": sheet.max_column,
-                "offset": (row_start - 1),
-                "limit": (row_end - row_start + 1) if row_end >= row_start else 0,
-                "range": cell_range or None,
-                "has_more": has_more,
-                "next_offset": next_offset,
-            })
-        return {"summary": {
-            "kind": "spreadsheet",
-            "sheets": sheets,
-            "has_more": any_more,
-            "next_offset": min(next_offsets) if next_offsets else None,
-        }, "outputs": []}
+            sheets.append(
+                {
+                    "name": sheet.title,
+                    "rows": rows,
+                    "total_rows": sheet.max_row,
+                    "total_columns": sheet.max_column,
+                    "offset": (row_start - 1),
+                    "limit": (row_end - row_start + 1) if row_end >= row_start else 0,
+                    "range": cell_range or None,
+                    "has_more": has_more,
+                    "next_offset": next_offset,
+                }
+            )
+        return {
+            "summary": {
+                "kind": "spreadsheet",
+                "sheets": sheets,
+                "has_more": any_more,
+                "next_offset": min(next_offsets) if next_offsets else None,
+            },
+            "outputs": [],
+        }
 
     if action == "create":
+        target = str(params.get("target_format") or "xlsx").lower().lstrip(".")
+        sheets_spec = params.get("sheets") or [
+            {"name": "Sheet1", "rows": params.get("rows") or []}
+        ]
+        if target in {"csv", "tsv"}:
+            if len(sheets_spec) != 1:
+                raise BuiltinToolError("CSV/TSV 只能包含一个工作表，请只指定一个工作表")
+            suffix = f".{target}"
+            output = output_dir / _safe_output_name(
+                params.get("output_name"), "workbook" + suffix, suffix
+            )
+            delimiter = "\t" if target == "tsv" else ","
+            with output.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.writer(handle, delimiter=delimiter)
+                writer.writerows(sheets_spec[0].get("rows") or [])
+            return {"summary": f"已创建 {target.upper()} 文件", "outputs": [output]}
+        if target not in {"xlsx", "xls"}:
+            raise BuiltinToolError(f"不支持创建此表格格式：{target}")
         book = Workbook()
-        _write_sheets(book, params.get("sheets") or [{"name": "Sheet1", "rows": params.get("rows") or []}])
+        _write_sheets(book, sheets_spec)
+        if target == "xls":
+            source = output_dir / "source.xlsx"
+            book.save(source)
+            produced = _libreoffice_convert(source, output_dir, "xls")
+            source.unlink(missing_ok=True)
+            final = output_dir / _safe_output_name(
+                params.get("output_name"), "workbook.xls", ".xls"
+            )
+            if produced != final:
+                produced.replace(final)
+            return {"summary": "已创建兼容格式 XLS 文件", "outputs": [final]}
     elif action == "edit":
-        if not inputs:
-            raise BuiltinToolError("spreadsheet edit requires one input file")
         source_suffix = inputs[0].suffix.lower()
         if source_suffix not in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
             raise BuiltinToolError(
-                "in-place spreadsheet edit requires XLSX/XLSM/XLTX/XLTM; convert legacy or text sheets to a new file first"
+                "表格编辑需要现代 Excel 文件；旧格式或文本表格请先转换为 XLSX"
             )
-        book = _load_tabular(inputs[0])
+        if source_suffix in {".xlsm", ".xltm"}:
+            book = load_workbook(inputs[0], data_only=False, keep_vba=False)
+        else:
+            book = _load_tabular(inputs[0])
         for operation in params.get("operations") or []:
             op = operation.get("type")
             sheet_name = str(operation.get("sheet") or book.sheetnames[0])
@@ -234,7 +465,9 @@ def _spreadsheet(action: str, inputs: list[Path], params: dict, output_dir: Path
                 book.create_sheet(sheet_name[:31])
             sheet = book[sheet_name[:31]]
             if op == "set_cell":
-                sheet[str(operation.get("cell") or "A1")] = _value(operation.get("value"))
+                sheet[str(operation.get("cell") or "A1")] = _value(
+                    operation.get("value")
+                )
             elif op == "append_rows":
                 for row in operation.get("rows") or []:
                     sheet.append([_value(value) for value in row])
@@ -250,37 +483,61 @@ def _spreadsheet(action: str, inputs: list[Path], params: dict, output_dir: Path
         if not inputs:
             raise BuiltinToolError("spreadsheet convert requires one input file")
         target = str(params.get("target_format") or "xlsx").lower().lstrip(".")
-        if target not in {"xlsx", "csv", "tsv", "ods", "pdf"}:
-            raise BuiltinToolError(f"Unsupported spreadsheet target format: {target}")
-        if target in {"ods", "pdf"}:
+        if target not in {"xlsx", "csv", "tsv", "ods", "pdf", "xls"}:
+            raise BuiltinToolError(f"不支持转换为此表格格式：{target}")
+        if target in {"ods", "pdf", "xls"}:
             produced = _libreoffice_convert(inputs[0], output_dir, target)
-            requested = _safe_output_name(params.get("output_name"), produced.name, f".{target}")
+            requested = _safe_output_name(
+                params.get("output_name"), produced.name, f".{target}"
+            )
             final = output_dir / requested
             if produced != final:
                 produced.replace(final)
             return {"summary": f"converted spreadsheet to {target}", "outputs": [final]}
         book = _load_tabular(inputs[0])
         if target in {"csv", "tsv"}:
+            requested_sheet = str(params.get("sheet") or "").strip()
+            if len(book.sheetnames) > 1 and not requested_sheet:
+                raise BuiltinToolError(
+                    "多工作表文件转 CSV/TSV 时必须指定 sheet，避免静默丢失数据"
+                )
+            if requested_sheet and requested_sheet not in book.sheetnames:
+                raise BuiltinToolError(f"指定的工作表不存在：{requested_sheet}")
             suffix = f".{target}"
-            output = output_dir / _safe_output_name(params.get("output_name"), inputs[0].stem, suffix)
+            output = output_dir / _safe_output_name(
+                params.get("output_name"), inputs[0].stem, suffix
+            )
             delimiter = "\t" if target == "tsv" else ","
             with output.open("w", encoding="utf-8-sig", newline="") as handle:
                 writer = csv.writer(handle, delimiter=delimiter)
-                for row in book[book.sheetnames[0]].iter_rows(values_only=True):
+                selected = requested_sheet or book.sheetnames[0]
+                for row in book[selected].iter_rows(values_only=True):
                     writer.writerow(list(row))
-            return {"summary": f"converted spreadsheet to {target}", "outputs": [output]}
+            return {
+                "summary": f"converted spreadsheet to {target}",
+                "outputs": [output],
+            }
     else:
         raise BuiltinToolError(f"Unsupported spreadsheet action: {action}")
 
     if action == "edit":
         source_suffix = inputs[0].suffix.lower()
+        if source_suffix in {".xlsm", ".xltm", ".xltx"}:
+            source_suffix = ".xlsx"
         output = output_dir / _safe_output_name(
-            params.get("output_name"), inputs[0].name, source_suffix,
+            params.get("output_name"),
+            inputs[0].stem + source_suffix,
+            source_suffix,
         )
     else:
-        output = output_dir / _safe_output_name(params.get("output_name"), "workbook.xlsx", ".xlsx")
+        output = output_dir / _safe_output_name(
+            params.get("output_name"), "workbook.xlsx", ".xlsx"
+        )
     book.save(output)
-    return {"summary": f"{action}d spreadsheet", "outputs": [output]}
+    summary = "表格文件已创建" if action == "create" else "表格文件已更新"
+    if action == "edit" and inputs[0].suffix.lower() in {".xlsm", ".xltm"}:
+        summary += "；原文件未覆盖，已生成不含宏的 XLSX 副本"
+    return {"summary": summary, "outputs": [output]}
 
 
 def _append_markdown(document: Document, markdown: str) -> None:
@@ -314,7 +571,9 @@ def _append_markdown(document: Document, markdown: str) -> None:
                     rows.append(cells)
                 index += 1
             if rows:
-                table = document.add_table(rows=len(rows), cols=max(len(row) for row in rows))
+                table = document.add_table(
+                    rows=len(rows), cols=max(len(row) for row in rows)
+                )
                 table.style = "Table Grid"
                 for row_index, row in enumerate(rows):
                     for column_index, value in enumerate(row):
@@ -338,60 +597,100 @@ def _document(action: str, inputs: list[Path], params: dict, output_dir: Path) -
         summary = {
             "kind": "document",
             "paragraphs": [paragraph.text for paragraph in document.paragraphs[:500]],
-            "tables": [[[cell.text for cell in row.cells] for row in table.rows] for table in document.tables[:20]],
+            "tables": [
+                [[cell.text for cell in row.cells] for row in table.rows]
+                for table in document.tables[:20]
+            ],
         }
         if temp:
             shutil.rmtree(temp, ignore_errors=True)
         return {"summary": summary, "outputs": []}
     if action == "create":
         document = Document()
-        _append_markdown(document, str(params.get("markdown") or params.get("content") or ""))
+        _append_markdown(
+            document, str(params.get("markdown") or params.get("content") or "")
+        )
+        target = str(params.get("target_format") or "docx").lower().lstrip(".")
+        if target not in {"docx", "doc"}:
+            raise BuiltinToolError(f"不支持创建此 Word 格式：{target}")
+        if target == "doc":
+            source = output_dir / "source.docx"
+            document.save(source)
+            produced = _libreoffice_convert(source, output_dir, "doc")
+            source.unlink(missing_ok=True)
+            final = output_dir / _safe_output_name(
+                params.get("output_name"), "document.doc", ".doc"
+            )
+            if produced != final:
+                produced.replace(final)
+            return {"summary": "已创建兼容格式 DOC 文件", "outputs": [final]}
     elif action == "edit":
         if not inputs:
             raise BuiltinToolError("document edit requires one DOCX input file")
         if inputs[0].suffix.lower() != ".docx":
-            raise BuiltinToolError("document edit currently requires DOCX; convert legacy files first")
+            raise BuiltinToolError(
+                "document edit currently requires DOCX; convert legacy files first"
+            )
         if params.get("replace"):
             document = Document()
         else:
             document = Document(inputs[0])
-        _append_markdown(document, str(params.get("markdown") or params.get("content") or ""))
+        _append_markdown(
+            document, str(params.get("markdown") or params.get("content") or "")
+        )
     elif action == "convert":
         if not inputs:
             raise BuiltinToolError("document convert requires one input file")
         target = str(params.get("target_format") or "pdf").lower().lstrip(".")
-        if target not in {"pdf", "docx", "odt", "rtf"}:
-            raise BuiltinToolError(f"Unsupported document target format: {target}")
+        if target not in {"pdf", "docx", "doc", "odt", "rtf"}:
+            raise BuiltinToolError(f"不支持转换为此 Word 格式：{target}")
         produced = _libreoffice_convert(inputs[0], output_dir, target)
-        final = output_dir / _safe_output_name(params.get("output_name"), produced.name, f".{target}")
+        final = output_dir / _safe_output_name(
+            params.get("output_name"), produced.name, f".{target}"
+        )
         if produced != final:
             produced.replace(final)
         return {"summary": f"converted document to {target}", "outputs": [final]}
     else:
         raise BuiltinToolError(f"Unsupported document action: {action}")
-    output = output_dir / _safe_output_name(params.get("output_name"), "document.docx", ".docx")
+    output = output_dir / _safe_output_name(
+        params.get("output_name"), "document.docx", ".docx"
+    )
     document.save(output)
-    return {"summary": f"{action}d document", "outputs": [output]}
+    return {
+        "summary": "Word 文件已创建" if action == "create" else "Word 文件已更新",
+        "outputs": [output],
+    }
 
 
 def _add_slides(presentation: Presentation, slides: list[dict]) -> None:
     for spec in slides:
-        layout = presentation.slide_layouts[1] if len(presentation.slide_layouts) > 1 else presentation.slide_layouts[0]
+        layout = (
+            presentation.slide_layouts[1]
+            if len(presentation.slide_layouts) > 1
+            else presentation.slide_layouts[0]
+        )
         slide = presentation.slides.add_slide(layout)
         if slide.shapes.title:
             slide.shapes.title.text = str(spec.get("title") or "")
         body = "\n".join(str(value) for value in (spec.get("bullets") or []))
-        placeholders = [shape for shape in slide.placeholders if shape != slide.shapes.title]
+        placeholders = [
+            shape for shape in slide.placeholders if shape != slide.shapes.title
+        ]
         if placeholders and hasattr(placeholders[0], "text_frame"):
             placeholders[0].text_frame.text = body
         elif body:
-            box = slide.shapes.add_textbox(Inches(1), Inches(1.8), Inches(8), Inches(4.5))
+            box = slide.shapes.add_textbox(
+                Inches(1), Inches(1.8), Inches(8), Inches(4.5)
+            )
             box.text_frame.text = body
         if spec.get("notes") and slide.notes_slide.notes_text_frame:
             slide.notes_slide.notes_text_frame.text = str(spec["notes"])
 
 
-def _presentation(action: str, inputs: list[Path], params: dict, output_dir: Path) -> dict:
+def _presentation(
+    action: str, inputs: list[Path], params: dict, output_dir: Path
+) -> dict:
     if action == "inspect":
         if not inputs:
             raise BuiltinToolError("presentation inspect requires one input file")
@@ -419,6 +718,20 @@ def _presentation(action: str, inputs: list[Path], params: dict, output_dir: Pat
     if action == "create":
         presentation = Presentation()
         _add_slides(presentation, params.get("slides") or [])
+        target = str(params.get("target_format") or "pptx").lower().lstrip(".")
+        if target not in {"pptx", "ppt"}:
+            raise BuiltinToolError(f"不支持创建此 PowerPoint 格式：{target}")
+        if target == "ppt":
+            source = output_dir / "source.pptx"
+            presentation.save(source)
+            produced = _libreoffice_convert(source, output_dir, "ppt")
+            source.unlink(missing_ok=True)
+            final = output_dir / _safe_output_name(
+                params.get("output_name"), "presentation.ppt", ".ppt"
+            )
+            if produced != final:
+                produced.replace(final)
+            return {"summary": "已创建兼容格式 PPT 文件", "outputs": [final]}
     elif action == "edit":
         if not inputs or inputs[0].suffix.lower() != ".pptx":
             raise BuiltinToolError("presentation edit requires one PPTX input file")
@@ -428,109 +741,218 @@ def _presentation(action: str, inputs: list[Path], params: dict, output_dir: Pat
         if not inputs:
             raise BuiltinToolError("presentation convert requires one input file")
         target = str(params.get("target_format") or "pdf").lower().lstrip(".")
-        if target not in {"pdf", "pptx", "odp"}:
-            raise BuiltinToolError(f"Unsupported presentation target format: {target}")
+        if target not in {"pdf", "pptx", "ppt", "odp"}:
+            raise BuiltinToolError(f"不支持转换为此 PowerPoint 格式：{target}")
         produced = _libreoffice_convert(inputs[0], output_dir, target)
-        final = output_dir / _safe_output_name(params.get("output_name"), produced.name, f".{target}")
+        final = output_dir / _safe_output_name(
+            params.get("output_name"), produced.name, f".{target}"
+        )
         if produced != final:
             produced.replace(final)
         return {"summary": f"converted presentation to {target}", "outputs": [final]}
     else:
         raise BuiltinToolError(f"Unsupported presentation action: {action}")
-    output = output_dir / _safe_output_name(params.get("output_name"), "presentation.pptx", ".pptx")
+    output = output_dir / _safe_output_name(
+        params.get("output_name"), "presentation.pptx", ".pptx"
+    )
     presentation.save(output)
-    return {"summary": f"{action}d presentation", "outputs": [output]}
+    return {
+        "summary": "PowerPoint 已创建" if action == "create" else "PowerPoint 已更新",
+        "outputs": [output],
+    }
+
+
+def _pdf_page_texts(
+    source: Path, max_pages: int, language: str
+) -> tuple[list[str], bool]:
+    reader = PdfReader(source)
+    pages = [(page.extract_text() or "").strip() for page in reader.pages[:max_pages]]
+    if any(pages):
+        return pages, False
+    try:
+        import pytesseract
+    except ImportError as exc:  # pragma: no cover - production image includes it
+        raise BuiltinToolError("扫描 PDF 需要 OCR，但 OCR 组件当前不可用") from exc
+    try:
+        pages = [
+            pytesseract.image_to_string(image, lang=language).strip()
+            for image in _ocr_images(source, max_pages)
+        ]
+    except Exception as exc:
+        raise BuiltinToolError(
+            "扫描 PDF 的 OCR 识别失败，请检查语言包或文件质量"
+        ) from exc
+    return pages, True
 
 
 def _pdf(action: str, inputs: list[Path], params: dict, output_dir: Path) -> dict:
     if action == "inspect":
-        if not inputs:
-            raise BuiltinToolError("pdf inspect requires one input file")
         reader = PdfReader(inputs[0])
         max_pages = min(max(int(params.get("max_pages", 20)), 1), 100)
-        return {"summary": {"kind": "pdf", "page_count": len(reader.pages),
-                            "pages": [(page.extract_text() or "")[:20_000] for page in reader.pages[:max_pages]]},
-                "outputs": []}
+        language = str(params.get("ocr_language") or "chi_sim+eng")
+        pages, ocr_used = _pdf_page_texts(inputs[0], max_pages, language)
+        return {
+            "summary": {
+                "kind": "pdf",
+                "page_count": len(reader.pages),
+                "pages": [text[:20_000] for text in pages],
+                "ocr_used": ocr_used,
+            },
+            "outputs": [],
+        }
     if action == "create":
         document = Document()
-        _append_markdown(document, str(params.get("markdown") or params.get("content") or ""))
+        _append_markdown(
+            document, str(params.get("markdown") or params.get("content") or "")
+        )
         temp_docx = output_dir / "source.docx"
         document.save(temp_docx)
         produced = _libreoffice_convert(temp_docx, output_dir, "pdf")
         temp_docx.unlink(missing_ok=True)
-        final = output_dir / _safe_output_name(params.get("output_name"), "document.pdf", ".pdf")
+        final = output_dir / _safe_output_name(
+            params.get("output_name"), "document.pdf", ".pdf"
+        )
         if produced != final:
             produced.replace(final)
-        return {"summary": "created PDF", "outputs": [final]}
-    if action == "edit":
-        operation = str(params.get("operation") or "merge")
+        return {"summary": "PDF 已创建", "outputs": [final]}
+    if action in {"merge", "split", "extract_pages"}:
         writer = PdfWriter()
-        if operation == "merge":
-            if not inputs:
-                raise BuiltinToolError("PDF merge requires input files")
+        if action == "merge":
             for source in inputs:
                 for page in PdfReader(source).pages:
                     writer.add_page(page)
-        elif operation in {"split", "extract_pages"}:
-            if not inputs:
-                raise BuiltinToolError("PDF page extraction requires one input file")
+            output = output_dir / _safe_output_name(
+                params.get("output_name"), "merged.pdf", ".pdf"
+            )
+            with output.open("wb") as handle:
+                writer.write(handle)
+            return {"summary": "PDF 合并完成", "outputs": [output]}
+        if action == "extract_pages":
             reader = PdfReader(inputs[0])
-            pages = params.get("pages") or [1]
+            pages = params.get("pages") or []
             for number in pages:
                 index = int(number) - 1
                 if index < 0 or index >= len(reader.pages):
-                    raise BuiltinToolError(f"PDF page {number} is out of range")
+                    raise BuiltinToolError(f"PDF 第 {number} 页超出范围")
                 writer.add_page(reader.pages[index])
-        else:
-            raise BuiltinToolError(f"Unsupported PDF edit operation: {operation}")
-        output = output_dir / _safe_output_name(params.get("output_name"), "output.pdf", ".pdf")
-        with output.open("wb") as handle:
-            writer.write(handle)
-        return {"summary": f"PDF {operation} completed", "outputs": [output]}
+            output = output_dir / _safe_output_name(
+                params.get("output_name"), "extracted.pdf", ".pdf"
+            )
+            with output.open("wb") as handle:
+                writer.write(handle)
+            return {"summary": "PDF 页面抽取完成", "outputs": [output]}
+        reader = PdfReader(inputs[0])
+        requested_pages = params.get("pages") or list(range(1, len(reader.pages) + 1))
+        outputs: list[Path] = []
+        requested_name = Path(str(params.get("output_name") or inputs[0].stem)).stem
+        for number in requested_pages:
+            index = int(number) - 1
+            if index < 0 or index >= len(reader.pages):
+                raise BuiltinToolError(f"PDF 第 {number} 页超出范围")
+            page_writer = PdfWriter()
+            page_writer.add_page(reader.pages[index])
+            output = output_dir / f"{requested_name}-第{number}页.pdf"
+            with output.open("wb") as handle:
+                page_writer.write(handle)
+            outputs.append(output)
+        return {"summary": f"PDF 已拆分为 {len(outputs)} 个文件", "outputs": outputs}
     if action == "convert":
-        if not inputs:
-            raise BuiltinToolError("pdf convert requires one input file")
         target = str(params.get("target_format") or "txt").lower().lstrip(".")
         if target != "txt":
-            raise BuiltinToolError("PDF conversion currently supports txt output")
-        text = "\n\n".join(page.extract_text() or "" for page in PdfReader(inputs[0]).pages)
-        output = output_dir / _safe_output_name(params.get("output_name"), inputs[0].stem, ".txt")
+            raise BuiltinToolError("PDF 当前只支持转换为 TXT")
+        max_pages = min(len(PdfReader(inputs[0]).pages), 100)
+        pages, ocr_used = _pdf_page_texts(
+            inputs[0],
+            max_pages,
+            str(params.get("ocr_language") or "chi_sim+eng"),
+        )
+        text = "\n\n".join(pages)
+        output = output_dir / _safe_output_name(
+            params.get("output_name"), inputs[0].stem, ".txt"
+        )
         output.write_text(text, encoding="utf-8")
-        return {"summary": "converted PDF to text", "outputs": [output]}
-    raise BuiltinToolError(f"Unsupported PDF action: {action}")
+        return {
+            "summary": {"message": "PDF 已转换为文本", "ocr_used": ocr_used},
+            "outputs": [output],
+        }
+    raise BuiltinToolError(f"不支持的 PDF 操作：{action}")
+
+
+def _markdown_to_plain_text(content: str) -> str:
+    """Conservative CommonMark-to-text conversion without executing embedded HTML."""
+    value = re.sub(r"```[^\n]*\n(.*?)```", r"\1", content, flags=re.DOTALL)
+    value = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", value)
+    value = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", value)
+    value = re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", value)
+    value = re.sub(r"(?m)^\s*(?:[-+*]|\d+[.)])\s+", "", value)
+    value = re.sub(r"(?<!\\)[*_~`]", "", value)
+    return value
 
 
 def _text(action: str, inputs: list[Path], params: dict, output_dir: Path) -> dict:
     if action == "inspect":
-        if not inputs:
-            raise BuiltinToolError("text inspect requires one input file")
-        content = inputs[0].read_text(encoding="utf-8-sig", errors="replace")
-        return {"summary": {"kind": "text", "characters": len(content), "content": content[:100_000]}, "outputs": []}
-    suffix = ".md" if str(params.get("format") or "").lower() in {"md", "markdown"} else ".txt"
+        try:
+            content = inputs[0].read_text(encoding="utf-8-sig", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise BuiltinToolError("文本文件不是有效 UTF-8，请先转换编码") from exc
+        offset = max(int(params.get("offset") or 0), 0)
+        limit = min(max(int(params.get("limit") or 100_000), 1), 100_000)
+        end = min(offset + limit, len(content))
+        return {
+            "summary": {
+                "kind": "text",
+                "characters": len(content),
+                "content": content[offset:end],
+                "offset": offset,
+                "limit": end - offset,
+                "has_more": end < len(content),
+                "next_offset": end if end < len(content) else None,
+            },
+            "outputs": [],
+        }
+    suffix = (
+        ".md"
+        if str(params.get("format") or "").lower() in {"md", "markdown"}
+        else ".txt"
+    )
     if action == "create":
         content = str(params.get("content") or "")
     elif action == "edit":
         if not inputs:
             raise BuiltinToolError("text edit requires one input file")
-        original = inputs[0].read_text(encoding="utf-8-sig", errors="replace")
-        if params.get("replace"):
+        try:
+            original = inputs[0].read_text(encoding="utf-8-sig", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise BuiltinToolError("文本文件不是有效 UTF-8，请先转换编码") from exc
+        if str(params.get("mode") or "append") == "replace":
             content = str(params.get("content") or "")
         else:
             content = original + str(params.get("content") or "")
-        suffix = inputs[0].suffix.lower() if inputs[0].suffix.lower() in {".txt", ".md"} else suffix
+        suffix = (
+            inputs[0].suffix.lower()
+            if inputs[0].suffix.lower() in {".txt", ".md"}
+            else suffix
+        )
     elif action == "convert":
         if not inputs:
             raise BuiltinToolError("text convert requires one input file")
-        content = inputs[0].read_text(encoding="utf-8-sig", errors="replace")
+        try:
+            content = inputs[0].read_text(encoding="utf-8-sig", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise BuiltinToolError("文本文件不是有效 UTF-8，请先转换编码") from exc
         target = str(params.get("target_format") or "txt").lower().lstrip(".")
         if target not in {"txt", "md"}:
-            raise BuiltinToolError(f"Unsupported text target format: {target}")
+            raise BuiltinToolError(f"不支持转换为此文本格式：{target}")
+        if target == "txt" and inputs[0].suffix.lower() in {".md", ".markdown"}:
+            content = _markdown_to_plain_text(content)
         suffix = f".{target}"
     else:
-        raise BuiltinToolError(f"Unsupported text action: {action}")
-    output = output_dir / _safe_output_name(params.get("output_name"), "document" + suffix, suffix)
+        raise BuiltinToolError(f"不支持的文本操作：{action}")
+    output = output_dir / _safe_output_name(
+        params.get("output_name"), "document" + suffix, suffix
+    )
     output.write_text(content, encoding="utf-8")
-    return {"summary": f"{action}d text file", "outputs": [output]}
+    return {"summary": "文本文件已处理", "outputs": [output]}
 
 
 class _ReadableHTMLParser(HTMLParser):
@@ -538,9 +960,28 @@ class _ReadableHTMLParser(HTMLParser):
 
     _SKIP_TAGS: ClassVar[set[str]] = {"script", "style", "noscript", "svg"}
     _BLOCK_TAGS: ClassVar[set[str]] = {
-        "article", "aside", "blockquote", "br", "div", "footer", "h1", "h2",
-        "h3", "h4", "h5", "h6", "header", "li", "main", "nav", "p", "section",
-        "table", "td", "th", "tr",
+        "article",
+        "aside",
+        "blockquote",
+        "br",
+        "div",
+        "footer",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "li",
+        "main",
+        "nav",
+        "p",
+        "section",
+        "table",
+        "td",
+        "th",
+        "tr",
     }
 
     def __init__(self) -> None:
@@ -741,8 +1182,12 @@ def _http_get(url: str, *, limit: int) -> tuple[str, bytes, str, str]:
         with opener.open(request, timeout=20) as response:
             raw = response.read(limit + 1)
             if len(raw) > limit:
-                raise BuiltinToolError(f"Remote response exceeds {limit // (1024 * 1024)}MB")
-            content_type = response.headers.get_content_type() or "application/octet-stream"
+                raise BuiltinToolError(
+                    f"Remote response exceeds {limit // (1024 * 1024)}MB"
+                )
+            content_type = (
+                response.headers.get_content_type() or "application/octet-stream"
+            )
             disposition = response.headers.get("Content-Disposition", "")
             return response.geturl(), raw, content_type, disposition
     except BuiltinToolError:
@@ -781,7 +1226,9 @@ def _web(action: str, inputs: list[Path], params: dict, output_dir: Path) -> dic
         if not query:
             raise BuiltinToolError("web search requires query")
         max_results = min(max(int(params.get("max_results", 5)), 1), 10)
-        url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+        url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode(
+            {"q": query}
+        )
         _, raw, content_type, _ = _http_get(url, limit=MAX_WEB_TEXT_BYTES)
         parser = _DuckDuckGoParser()
         parser.feed(_decode_web_text(raw, content_type))
@@ -803,7 +1250,10 @@ def _web(action: str, inputs: list[Path], params: dict, output_dir: Path) -> dic
         final_url, raw, content_type, _ = _http_get(url, limit=MAX_WEB_TEXT_BYTES)
         text = _decode_web_text(raw, content_type)
         title = ""
-        if content_type in {"text/html", "application/xhtml+xml"} or "<html" in text[:500].lower():
+        if (
+            content_type in {"text/html", "application/xhtml+xml"}
+            or "<html" in text[:500].lower()
+        ):
             parser = _ReadableHTMLParser()
             parser.feed(text)
             title, text = parser.result()
@@ -832,7 +1282,11 @@ def _web(action: str, inputs: list[Path], params: dict, output_dir: Path) -> dic
         output = output_dir / name
         output.write_bytes(raw)
         return {
-            "summary": {"url": final_url, "content_type": content_type, "size": len(raw)},
+            "summary": {
+                "url": final_url,
+                "content_type": content_type,
+                "size": len(raw),
+            },
             "outputs": [output],
         }
     raise BuiltinToolError(f"Unsupported web action: {action}")
@@ -848,7 +1302,9 @@ def _image_output_suffix(value: str | None, fallback: str = "png") -> tuple[str,
     return normalized.upper(), suffix
 
 
-def _save_image(image: Image.Image, output: Path, image_format: str, quality: int) -> None:
+def _save_image(
+    image: Image.Image, output: Path, image_format: str, quality: int
+) -> None:
     if image_format == "JPEG" and image.mode not in {"RGB", "L"}:
         background = Image.new("RGB", image.size, "white")
         if "A" in image.getbands():
@@ -871,7 +1327,11 @@ def _ocr_images(source: Path, max_pages: int) -> list[Image.Image]:
         try:
             for page in document[:max_pages]:
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-                images.append(Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples))
+                images.append(
+                    Image.frombytes(
+                        "RGB", (pixmap.width, pixmap.height), pixmap.samples
+                    )
+                )
         finally:
             document.close()
         return images
@@ -888,7 +1348,10 @@ def _image(action: str, inputs: list[Path], params: dict, output_dir: Path) -> d
             document = fitz.open(source)
             try:
                 return {
-                    "summary": {"kind": "scanned_document", "pages": document.page_count},
+                    "summary": {
+                        "kind": "scanned_document",
+                        "pages": document.page_count,
+                    },
                     "outputs": [],
                 }
             finally:
@@ -912,19 +1375,30 @@ def _image(action: str, inputs: list[Path], params: dict, output_dir: Path) -> d
             raise BuiltinToolError("OCR runtime is unavailable") from exc
         language = str(params.get("language") or "chi_sim+eng")
         max_pages = min(max(int(params.get("max_pages", 10)), 1), 20)
-        texts = [pytesseract.image_to_string(image, lang=language) for image in _ocr_images(source, max_pages)]
+        texts = [
+            pytesseract.image_to_string(image, lang=language)
+            for image in _ocr_images(source, max_pages)
+        ]
         content = "\n\n".join(text.strip() for text in texts).strip()
         outputs: list[Path] = []
         if params.get("output_name"):
-            output = output_dir / _safe_output_name(params.get("output_name"), "ocr.txt", ".txt")
+            output = output_dir / _safe_output_name(
+                params.get("output_name"), "ocr.txt", ".txt"
+            )
             output.write_text(content, encoding="utf-8")
             outputs.append(output)
         return {
-            "summary": {"language": language, "pages": len(texts), "content": content[:100_000]},
+            "summary": {
+                "language": language,
+                "pages": len(texts),
+                "content": content[:100_000],
+            },
             "outputs": outputs,
         }
     if source.suffix.lower() == ".pdf":
-        raise BuiltinToolError(f"image {action} does not accept PDF; use ocr for scanned PDFs")
+        raise BuiltinToolError(
+            f"image {action} does not accept PDF; use ocr for scanned PDFs"
+        )
     with Image.open(source) as opened:
         image = ImageOps.exif_transpose(opened).copy()
     image_format, suffix = _image_output_suffix(
@@ -945,7 +1419,12 @@ def _image(action: str, inputs: list[Path], params: dict, output_dir: Path) -> d
         if not isinstance(box, list) or len(box) != 4:
             raise BuiltinToolError("image crop requires box=[left, top, right, bottom]")
         coordinates = tuple(int(value) for value in box)
-        if coordinates[0] < 0 or coordinates[1] < 0 or coordinates[2] > image.width or coordinates[3] > image.height:
+        if (
+            coordinates[0] < 0
+            or coordinates[1] < 0
+            or coordinates[2] > image.width
+            or coordinates[3] > image.height
+        ):
             raise BuiltinToolError("Crop box is outside the image")
         if coordinates[2] <= coordinates[0] or coordinates[3] <= coordinates[1]:
             raise BuiltinToolError("Crop box has no area")
@@ -953,7 +1432,9 @@ def _image(action: str, inputs: list[Path], params: dict, output_dir: Path) -> d
     elif action not in {"convert", "compress"}:
         raise BuiltinToolError(f"Unsupported image action: {action}")
     quality = min(max(int(params.get("quality", 85)), 1), 100)
-    output = output_dir / _safe_output_name(params.get("output_name"), "image" + suffix, suffix)
+    output = output_dir / _safe_output_name(
+        params.get("output_name"), "image" + suffix, suffix
+    )
     _save_image(image, output, image_format, quality)
     return {
         "summary": {"action": action, "width": image.width, "height": image.height},
@@ -1001,25 +1482,34 @@ def _archive_extract(source: Path, output_dir: Path) -> list[Path]:
         with zipfile.ZipFile(source) as archive:
             members = [item for item in archive.infolist() if not item.is_dir()]
             if len(members) > MAX_ARCHIVE_FILES:
-                raise BuiltinToolError(f"Archive contains more than {MAX_ARCHIVE_FILES} files")
+                raise BuiltinToolError(
+                    f"Archive contains more than {MAX_ARCHIVE_FILES} files"
+                )
             for item in members:
                 if item.flag_bits & 0x1:
                     raise BuiltinToolError("Encrypted ZIP files are not supported")
                 if stat.S_IFMT(item.external_attr >> 16) == stat.S_IFLNK:
                     raise BuiltinToolError("Archive links are not supported")
                 if item.file_size > MAX_ARCHIVE_FILE_BYTES:
-                    raise BuiltinToolError(f"Archive member {item.filename} exceeds 5MB")
+                    raise BuiltinToolError(
+                        f"Archive member {item.filename} exceeds 5MB"
+                    )
                 relative = _safe_archive_path(item.filename)
                 target = output_dir.joinpath(*relative.parts)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(item) as source_file, target.open("wb") as target_file:
+                with (
+                    archive.open(item) as source_file,
+                    target.open("wb") as target_file,
+                ):
                     shutil.copyfileobj(source_file, target_file)
                 outputs.append(target)
         return outputs
     with tarfile.open(source, "r:gz" if kind == "tar.gz" else "r:") as archive:
         members = [item for item in archive.getmembers() if item.isfile()]
         if len(members) > MAX_ARCHIVE_FILES:
-            raise BuiltinToolError(f"Archive contains more than {MAX_ARCHIVE_FILES} files")
+            raise BuiltinToolError(
+                f"Archive contains more than {MAX_ARCHIVE_FILES} files"
+            )
         for item in members:
             if item.issym() or item.islnk():
                 raise BuiltinToolError("Archive links are not supported")
@@ -1063,20 +1553,29 @@ def _archive(action: str, inputs: list[Path], params: dict, output_dir: Path) ->
         if kind not in {"zip", "tar", "tar.gz", "tgz"}:
             raise BuiltinToolError("archive format must be zip, tar or tar.gz")
         suffix = ".zip" if kind == "zip" else (".tar" if kind == "tar" else ".tar.gz")
-        output = output_dir / _safe_output_name(params.get("output_name"), "archive" + suffix, suffix)
+        output = output_dir / _safe_output_name(
+            params.get("output_name"), "archive" + suffix, suffix
+        )
         if kind == "zip":
-            with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            with zipfile.ZipFile(
+                output, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
                 for source in inputs:
                     archive.write(source, arcname=source.name)
         else:
             with tarfile.open(output, "w" if kind == "tar" else "w:gz") as archive:
                 for source in inputs:
                     archive.add(source, arcname=source.name, recursive=False)
-        return {"summary": {"created": output.name, "files": len(inputs)}, "outputs": [output]}
+        return {
+            "summary": {"created": output.name, "files": len(inputs)},
+            "outputs": [output],
+        }
     raise BuiltinToolError(f"Unsupported archive action: {action}")
 
 
-def execute_builtin(tool_kind: str, action: str, inputs: list[Path], params: dict, output_dir: Path) -> dict:
+def execute_builtin(
+    tool_kind: str, action: str, inputs: list[Path], params: dict, output_dir: Path
+) -> dict:
     handlers = {
         "spreadsheet": _spreadsheet,
         "document": _document,
@@ -1090,9 +1589,18 @@ def execute_builtin(tool_kind: str, action: str, inputs: list[Path], params: dic
     handler = handlers.get(tool_kind)
     if handler is None:
         raise BuiltinToolError(f"Unsupported builtin tool kind: {tool_kind}")
+    validate_builtin_request(tool_kind, action, inputs, params)
     result = handler(action, inputs, params, output_dir)
-    result["mime_types"] = {
-        path.name: mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        for path in result.get("outputs") or []
-    }
+    mime_types: dict[str, str] = {}
+    output_verification: dict[str, dict[str, str]] = {}
+    for path in result.get("outputs") or []:
+        detected_format, detected_mime = validate_output_file(path)
+        validate_output_semantics(path, tool_kind, action, params)
+        mime_types[path.name] = detected_mime
+        output_verification[path.name] = {
+            "detected_format": detected_format,
+            "detected_mime_type": detected_mime,
+        }
+    result["mime_types"] = mime_types
+    result["output_verification"] = output_verification
     return result

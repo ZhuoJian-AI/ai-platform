@@ -59,6 +59,16 @@ from app.services import (
     workspace_service,
 )
 from app.services import model_gateway as llm_client
+from app.services.file_capability_registry import (
+    FILE_CREATE_TOOL_NAMES,
+    FILE_TOOL_OPERATIONS,
+    LEGACY_FAMILY_TO_TOOL,
+    FileToolValidationError,
+    file_tool_definitions,
+    normalize_file_tool_call,
+    platform_tool_enabled,
+    validate_artifact_bytes,
+)
 from app.services.rag_service import retrieve as rag_retrieve
 from app.services.skill_store_service import SKILL_MANIFEST_PATH
 from app.services.skill_store_service import get_file_by_path as get_skill_file_by_path
@@ -97,6 +107,7 @@ async def _task_source_fields(db: Any, state: AgentState) -> dict[str, str | Non
         "source_task_id": task_id,
         "source_task_title": task.title if task is not None else None,
     }
+
 
 GENERAL_SYSTEM_PROMPT = (
     "你是组织智能助手。默认用 Markdown 直接回答；只有用户明确要求生成、编辑、转换或导出文件时，"
@@ -171,6 +182,7 @@ def _requires_file_artifact(request: str) -> bool:
     delivery = re.search(r"(?:生成|创建|制作|导出|保存|交付|下载|produce|create|export|save)", text)
     return bool(file_kind and delivery)
 
+
 def _emit(event: dict) -> None:
     """经 stream_writer 下发事件（流式分支；非流式分支 writer 为 no-op）。"""
     try:
@@ -182,293 +194,529 @@ def _emit(event: dict) -> None:
 
 # ── 内置工作空间文件工具 ─────────────────────────────────────────────────
 
+STRICT_FILE_TOOL_NAMES = set(FILE_TOOL_OPERATIONS)
+LEGACY_FILE_TOOL_NAMES = set(LEGACY_FAMILY_TO_TOOL.values())
 PLATFORM_TOOL_NAMES = {
-    "spreadsheet_tool", "document_tool", "presentation_tool", "pdf_tool", "text_tool",
-    "image_tool", "archive_tool", "web_tool",
+    *STRICT_FILE_TOOL_NAMES,
+    *LEGACY_FILE_TOOL_NAMES,
+    "image_tool",
+    "archive_tool",
+    "web_tool",
 }
 ALWAYS_AVAILABLE_TOOL_NAMES = {"web_tool"}
 BUSINESS_ASSISTANT_FILE_TOOL_NAMES = {
-    "workspace_list", "workspace_search", "workspace_get_file", "workspace_list_files",
-    "workspace_read_file", "workspace_create_file", "workspace_write_file",
-    "workspace_update_file", "workspace_list_versions",
-    "spreadsheet_tool", "document_tool", "presentation_tool", "pdf_tool", "text_tool",
-    "image_tool", "archive_tool",
+    "workspace_list",
+    "workspace_search",
+    "workspace_get_file",
+    "workspace_list_files",
+    "workspace_read_file",
+    "workspace_create_file",
+    "workspace_write_file",
+    "workspace_update_file",
+    "workspace_list_versions",
+    *STRICT_FILE_TOOL_NAMES,
+    "image_tool",
+    "archive_tool",
 }
 BUILTIN_TOOL_NAMES = {
-    "workspace_list", "workspace_search", "workspace_get_file", "workspace_list_files", "workspace_read_file",
-    "workspace_create_file", "workspace_write_file", "workspace_update_file",
-    "workspace_rename_file", "workspace_move_file",
-    "workspace_copy_file", "workspace_delete_file", "workspace_list_versions", "workspace_restore_version",
-    *PLATFORM_TOOL_NAMES, "image_generation_tool",
+    "workspace_list",
+    "workspace_search",
+    "workspace_get_file",
+    "workspace_list_files",
+    "workspace_read_file",
+    "workspace_create_file",
+    "workspace_write_file",
+    "workspace_update_file",
+    "workspace_rename_file",
+    "workspace_move_file",
+    "workspace_copy_file",
+    "workspace_delete_file",
+    "workspace_list_versions",
+    "workspace_restore_version",
+    *PLATFORM_TOOL_NAMES,
+    "image_generation_tool",
 }
 # Kept executable for old persisted calls, but no longer advertised to new LLM rounds.
 LEGACY_BUILTIN_TOOL_NAMES = {"generate_docx"}
 
 
 def _builtin_tool_defs(
-    *, include_workspace: bool = True, include_image_generation: bool = False,
+    *,
+    include_workspace: bool = True,
+    include_image_generation: bool = False,
 ) -> list[dict]:
     """内置工作空间文件工具的 OpenAI function-tool 定义。"""
     tools = [
-        {"type": "function", "function": {
-            "name": "workspace_list",
-            "description": "实时列出当前用户全部可读工作空间及角色能力；不要求先点名或引用文件。",
-            "parameters": {"type": "object", "properties": {
-                "limit": {"type": "integer", "minimum": 1, "maximum": 500},
-                "offset": {"type": "integer", "minimum": 0},
-            }},
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_search",
-            "description": "搜索当前用户所有实时可读工作空间，返回稳定文件、版本、路径和 capabilities。",
-            "parameters": {"type": "object", "properties": {
-                "query": {"type": "string"},
-                "workspace_id": {"type": "string"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 500},
-                "offset": {"type": "integer", "minimum": 0},
-            }},
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_get_file",
-            "description": "按稳定 file_id 获取文件元数据、当前版本、路径和实时 capabilities。",
-            "parameters": {"type": "object", "properties": {
-                "file_id": {"type": "string"},
-                "version_id": {"type": "string"},
-            }, "required": ["file_id"]},
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_list_files",
-            "description": "兼容工具；省略 workspace_id 时列出所有实时可读空间的文件。",
-            "parameters": {"type": "object", "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 500},
-                "offset": {"type": "integer", "minimum": 0},
-            }},
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_read_file",
-            "description": (
-                "按稳定 file_id 读取任一实时可读空间中的文件；兼容 workspace_id + path。"
-                "用户消息含 @UUID 时直接作为 file_id；"
-                "若[已解析的文件引用]已经注入内容，无需重复调用。大文件结果包含 has_more 与 next_offset，"
-                "必须按 next_offset 继续读取，不能把当前页当作完整文件。"
-            ),
-            "parameters": {"type": "object", "properties": {
-                "file_id": {"type": "string", "description": "工作空间文件 UUID"},
-                "version_id": {"type": "string", "description": "可选的精确历史版本 UUID"},
-                "path": {"type": "string", "description": "相对工作空间根的 POSIX 路径"},
-                "offset": {"type": "integer", "minimum": 1,
-                           "description": "从第几行开始读取（1-based，默认 1）"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 1000,
-                          "description": "最多读取多少行（默认 200，最大 1000）"}},
-            },
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_create_file",
-            "description": "在有实时 create 权限的目标工作空间原子创建一个新文本文件；路径已存在时返回冲突。",
-            "parameters": {"type": "object", "properties": {
-                "target_workspace_id": {"type": "string"},
-                "path": {"type": "string"},
-                "content": {"type": "string"},
-            }, "required": ["path", "content"]},
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_write_file",
-            "description": "兼容写工具；file_id 存在时原位更新并生成新版本，否则按 path 新建文本文件。",
-            "parameters": {"type": "object", "properties": {
-                "file_id": {"type": "string"}, "path": {"type": "string"}, "content": {"type": "string"},
-                "base_version_id": {"type": "string"}, "idempotency_key": {"type": "string", "minLength": 8},
-            }, "required": ["content"]},
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_update_file",
-            "description": "按 file_id 原位更新文本内容；必须带读取到的 base_version_id，重试复用 idempotency_key。",
-            "parameters": {"type": "object", "properties": {
-                "file_id": {"type": "string"}, "content": {"type": "string"},
-                "base_version_id": {"type": "string"}, "idempotency_key": {"type": "string", "minLength": 8},
-            }, "required": ["file_id", "content", "base_version_id"]},
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_rename_file",
-            "description": "按 file_id 重命名同一文件并保留稳定 ID。",
-            "parameters": {"type": "object", "properties": {
-                "file_id": {"type": "string"}, "new_name": {"type": "string"},
-                "base_version_id": {"type": "string"}, "idempotency_key": {"type": "string", "minLength": 8},
-            }, "required": ["file_id", "new_name", "base_version_id"]},
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_move_file",
-            "description": "按 file_id 移动/改名文件并保留稳定 ID；可指定有新建权限的目标工作空间。",
-            "parameters": {"type": "object", "properties": {
-                "file_id": {"type": "string"}, "target_path": {"type": "string"},
-                "target_workspace_id": {"type": "string"},
-                "base_version_id": {"type": "string"}, "idempotency_key": {"type": "string", "minLength": 8},
-            }, "required": ["file_id", "target_path", "base_version_id"]},
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_copy_file",
-            "description": "复制 file_id 到有新建权限的目标工作空间，返回新的稳定 file_id。",
-            "parameters": {"type": "object", "properties": {
-                "file_id": {"type": "string"}, "target_workspace_id": {"type": "string"},
-                "target_path": {"type": "string"},
-                "base_version_id": {"type": "string"},
-                "idempotency_key": {"type": "string", "minLength": 8},
-            }, "required": ["file_id", "target_workspace_id", "base_version_id"]},
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_delete_file",
-            "description": "按 file_id 删除有实时 delete 权限的文件；兼容 workspace_id + path。",
-            "parameters": {"type": "object", "properties": {
-                "file_id": {"type": "string"}, "path": {"type": "string"},
-                "base_version_id": {"type": "string"},
-                "idempotency_key": {"type": "string", "minLength": 8},
-            }, "required": ["file_id", "base_version_id"]},
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_list_versions",
-            "description": "按 file_id 列出不可变版本。",
-            "parameters": {"type": "object", "properties": {
-                "file_id": {"type": "string"},
-            }, "required": ["file_id"]},
-        }},
-        {"type": "function", "function": {
-            "name": "workspace_restore_version",
-            "description": "把 file_id 恢复到指定 version_id，并创建新的当前版本。",
-            "parameters": {"type": "object", "properties": {
-                "file_id": {"type": "string"}, "version_id": {"type": "string"},
-                "base_version_id": {"type": "string"}, "idempotency_key": {"type": "string", "minLength": 8},
-            }, "required": ["file_id", "version_id", "base_version_id"]},
-        }},
-        {"type": "function", "function": {
-            "name": "spreadsheet_tool",
-            "description": "检查、创建、编辑或转换 Excel/CSV/TSV/ODS 表格。没有专业 Skill 时使用此通用工具。",
-            "parameters": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
-                "input_file_ids": {"type": "array", "items": {"type": "string"}},
-                "output_name": {"type": "string"},
-                "sheets": {"type": "array", "items": {"type": "object", "properties": {
-                    "name": {"type": "string"},
-                    "rows": {"type": "array", "items": {"type": "array", "items": {}}},
-                }}},
-                "operations": {"type": "array", "items": {"type": "object"}},
-                "target_format": {"type": "string"},
-                "sheet": {"type": "string", "description": "inspect 时可选的工作表名称"},
-                "range": {"type": "string", "description": "inspect 时可选 A1 范围，例如 A2:F200"},
-                "offset": {"type": "integer", "minimum": 0, "description": "inspect 分页的零基行偏移"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 1000,
-                          "description": "inspect 每次读取行数"},
-                "max_rows": {"type": "integer", "description": "兼容旧客户端；优先使用 limit"},
-                "max_columns": {"type": "integer", "minimum": 1, "maximum": 100},
-            }, "required": ["action"]},
-        }},
-        {"type": "function", "function": {
-            "name": "document_tool",
-            "description": "检查、创建、编辑或转换 Word/DOCX/DOC/ODT/RTF 文档；正文使用 Markdown。",
-            "parameters": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
-                "input_file_ids": {"type": "array", "items": {"type": "string"}},
-                "output_name": {"type": "string"}, "markdown": {"type": "string"},
-                "replace": {"type": "boolean"}, "target_format": {"type": "string"},
-            }, "required": ["action"]},
-        }},
-        {"type": "function", "function": {
-            "name": "presentation_tool",
-            "description": "检查、创建、追加编辑或转换 PowerPoint/PPTX/PPT/ODP 演示文稿。",
-            "parameters": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
-                "input_file_ids": {"type": "array", "items": {"type": "string"}},
-                "output_name": {"type": "string"},
-                "slides": {"type": "array", "items": {"type": "object", "properties": {
-                    "title": {"type": "string"},
-                    "bullets": {"type": "array", "items": {"type": "string"}},
-                    "notes": {"type": "string"},
-                }}},
-                "target_format": {"type": "string"},
-            }, "required": ["action"]},
-        }},
-        {"type": "function", "function": {
-            "name": "pdf_tool",
-            "description": "检查、创建、合并、提取页面或转换 PDF。edit 时 operation 可为 merge、split、extract_pages。",
-            "parameters": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
-                "input_file_ids": {"type": "array", "items": {"type": "string"}},
-                "output_name": {"type": "string"}, "markdown": {"type": "string"},
-                "operation": {"type": "string", "enum": ["merge", "split", "extract_pages"]},
-                "pages": {"type": "array", "items": {"type": "integer"}},
-                "target_format": {"type": "string"}, "max_pages": {"type": "integer"},
-            }, "required": ["action"]},
-        }},
-        {"type": "function", "function": {
-            "name": "text_tool",
-            "description": "检查、创建、编辑或转换 UTF-8 TXT/Markdown 文本文件。",
-            "parameters": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
-                "input_file_ids": {"type": "array", "items": {"type": "string"}},
-                "output_name": {"type": "string"}, "content": {"type": "string"},
-                "replace": {"type": "boolean"}, "format": {"type": "string"},
-                "target_format": {"type": "string"},
-            }, "required": ["action"]},
-        }},
-        {"type": "function", "function": {
-            "name": "image_tool",
-            "description": "检查、转换、缩放、裁剪、压缩图片，或对图片/扫描 PDF 执行中英文 OCR。",
-            "parameters": {"type": "object", "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["inspect", "convert", "resize", "crop", "compress", "ocr"],
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_list",
+                "description": "实时列出当前用户全部可读工作空间及角色能力；不要求先点名或引用文件。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                        "offset": {"type": "integer", "minimum": 0},
+                    },
                 },
-                "input_file_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
-                "output_name": {"type": "string"},
-                "target_format": {"type": "string", "enum": ["png", "jpg", "jpeg", "webp", "tiff", "bmp"]},
-                "width": {"type": "integer", "minimum": 1},
-                "height": {"type": "integer", "minimum": 1},
-                "keep_aspect": {"type": "boolean"},
-                "quality": {"type": "integer", "minimum": 1, "maximum": 100},
-                "box": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4},
-                "language": {"type": "string", "description": "Tesseract 语言，如 chi_sim+eng"},
-                "max_pages": {"type": "integer", "minimum": 1, "maximum": 20},
-            }, "required": ["action", "input_file_ids"]},
-        }},
-        {"type": "function", "function": {
-            "name": "archive_tool",
-            "description": "安全查看、解压或创建 ZIP/TAR/TAR.GZ；解压结果写回当前工作空间。",
-            "parameters": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "extract", "create"]},
-                "input_file_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 20},
-                "output_name": {"type": "string"},
-                "format": {"type": "string", "enum": ["zip", "tar", "tar.gz"]},
-            }, "required": ["action", "input_file_ids"]},
-        }},
-        {"type": "function", "function": {
-            "name": "web_tool",
-            "description": (
-                "搜索公开网页、提取指定网页正文，或把公开 URL 下载到工作空间。"
-                "禁止访问 localhost、内网与云元数据地址；涉及专业流程时仍优先使用已绑定 Skill。"
-            ),
-            "parameters": {"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["search", "fetch", "download"]},
-                "query": {"type": "string"},
-                "url": {"type": "string"},
-                "max_results": {"type": "integer", "minimum": 1, "maximum": 10},
-                "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000},
-                "output_name": {"type": "string"},
-            }, "required": ["action"]},
-        }},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_search",
+                "description": "搜索当前用户所有实时可读工作空间，返回稳定文件、版本、路径和 capabilities。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "workspace_id": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                        "offset": {"type": "integer", "minimum": 0},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_get_file",
+                "description": "按稳定 file_id 获取文件元数据、当前版本、路径和实时 capabilities。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string"},
+                        "version_id": {"type": "string"},
+                    },
+                    "required": ["file_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_list_files",
+                "description": "兼容工具；省略 workspace_id 时列出所有实时可读空间的文件。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                        "offset": {"type": "integer", "minimum": 0},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_read_file",
+                "description": (
+                    "按稳定 file_id 读取任一实时可读空间中的文件；兼容 workspace_id + path。"
+                    "用户消息含 @UUID 时直接作为 file_id；"
+                    "若[已解析的文件引用]已经注入内容，无需重复调用。大文件结果包含 has_more 与 next_offset，"
+                    "必须按 next_offset 继续读取，不能把当前页当作完整文件。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string", "description": "工作空间文件 UUID"},
+                        "version_id": {"type": "string", "description": "可选的精确历史版本 UUID"},
+                        "path": {"type": "string", "description": "相对工作空间根的 POSIX 路径"},
+                        "offset": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "从第几行开始读取（1-based，默认 1）",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1000,
+                            "description": "最多读取多少行（默认 200，最大 1000）",
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_create_file",
+                "description": "在有实时 create 权限的目标工作空间原子创建一个新文本文件；路径已存在时返回冲突。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target_workspace_id": {"type": "string"},
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_write_file",
+                "description": "兼容写工具；file_id 存在时原位更新并生成新版本，否则按 path 新建文本文件。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string"},
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                        "base_version_id": {"type": "string"},
+                        "idempotency_key": {"type": "string", "minLength": 8},
+                    },
+                    "required": ["content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_update_file",
+                "description": (
+                    "按 file_id 原位更新文本内容；必须带读取到的 base_version_id，重试复用 idempotency_key。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string"},
+                        "content": {"type": "string"},
+                        "base_version_id": {"type": "string"},
+                        "idempotency_key": {"type": "string", "minLength": 8},
+                    },
+                    "required": ["file_id", "content", "base_version_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_rename_file",
+                "description": "按 file_id 重命名同一文件并保留稳定 ID。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string"},
+                        "new_name": {"type": "string"},
+                        "base_version_id": {"type": "string"},
+                        "idempotency_key": {"type": "string", "minLength": 8},
+                    },
+                    "required": ["file_id", "new_name", "base_version_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_move_file",
+                "description": "按 file_id 移动/改名文件并保留稳定 ID；可指定有新建权限的目标工作空间。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string"},
+                        "target_path": {"type": "string"},
+                        "target_workspace_id": {"type": "string"},
+                        "base_version_id": {"type": "string"},
+                        "idempotency_key": {"type": "string", "minLength": 8},
+                    },
+                    "required": ["file_id", "target_path", "base_version_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_copy_file",
+                "description": "复制 file_id 到有新建权限的目标工作空间，返回新的稳定 file_id。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string"},
+                        "target_workspace_id": {"type": "string"},
+                        "target_path": {"type": "string"},
+                        "base_version_id": {"type": "string"},
+                        "idempotency_key": {"type": "string", "minLength": 8},
+                    },
+                    "required": ["file_id", "target_workspace_id", "base_version_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_delete_file",
+                "description": "按 file_id 删除有实时 delete 权限的文件；兼容 workspace_id + path。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string"},
+                        "path": {"type": "string"},
+                        "base_version_id": {"type": "string"},
+                        "idempotency_key": {"type": "string", "minLength": 8},
+                    },
+                    "required": ["file_id", "base_version_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_list_versions",
+                "description": "按 file_id 列出不可变版本。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string"},
+                    },
+                    "required": ["file_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_restore_version",
+                "description": "把 file_id 恢复到指定 version_id，并创建新的当前版本。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string"},
+                        "version_id": {"type": "string"},
+                        "base_version_id": {"type": "string"},
+                        "idempotency_key": {"type": "string", "minLength": 8},
+                    },
+                    "required": ["file_id", "version_id", "base_version_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "spreadsheet_tool",
+                "description": "检查、创建、编辑或转换 Excel/CSV/TSV/ODS 表格。没有专业 Skill 时使用此通用工具。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
+                        "input_file_ids": {"type": "array", "items": {"type": "string"}},
+                        "output_name": {"type": "string"},
+                        "sheets": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "rows": {"type": "array", "items": {"type": "array", "items": {}}},
+                                },
+                            },
+                        },
+                        "operations": {"type": "array", "items": {"type": "object"}},
+                        "target_format": {"type": "string"},
+                        "sheet": {"type": "string", "description": "inspect 时可选的工作表名称"},
+                        "range": {"type": "string", "description": "inspect 时可选 A1 范围，例如 A2:F200"},
+                        "offset": {"type": "integer", "minimum": 0, "description": "inspect 分页的零基行偏移"},
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1000,
+                            "description": "inspect 每次读取行数",
+                        },
+                        "max_rows": {"type": "integer", "description": "兼容旧客户端；优先使用 limit"},
+                        "max_columns": {"type": "integer", "minimum": 1, "maximum": 100},
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "document_tool",
+                "description": "检查、创建、编辑或转换 Word/DOCX/DOC/ODT/RTF 文档；正文使用 Markdown。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
+                        "input_file_ids": {"type": "array", "items": {"type": "string"}},
+                        "output_name": {"type": "string"},
+                        "markdown": {"type": "string"},
+                        "replace": {"type": "boolean"},
+                        "target_format": {"type": "string"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "presentation_tool",
+                "description": "检查、创建、追加编辑或转换 PowerPoint/PPTX/PPT/ODP 演示文稿。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
+                        "input_file_ids": {"type": "array", "items": {"type": "string"}},
+                        "output_name": {"type": "string"},
+                        "slides": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": {"type": "string"},
+                                    "bullets": {"type": "array", "items": {"type": "string"}},
+                                    "notes": {"type": "string"},
+                                },
+                            },
+                        },
+                        "target_format": {"type": "string"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "pdf_tool",
+                "description": (
+                    "检查、创建、合并、提取页面或转换 PDF。edit 时 operation 可为 merge、split、extract_pages。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
+                        "input_file_ids": {"type": "array", "items": {"type": "string"}},
+                        "output_name": {"type": "string"},
+                        "markdown": {"type": "string"},
+                        "operation": {"type": "string", "enum": ["merge", "split", "extract_pages"]},
+                        "pages": {"type": "array", "items": {"type": "integer"}},
+                        "target_format": {"type": "string"},
+                        "max_pages": {"type": "integer"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "text_tool",
+                "description": "检查、创建、编辑或转换 UTF-8 TXT/Markdown 文本文件。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["inspect", "create", "edit", "convert"]},
+                        "input_file_ids": {"type": "array", "items": {"type": "string"}},
+                        "output_name": {"type": "string"},
+                        "content": {"type": "string"},
+                        "replace": {"type": "boolean"},
+                        "format": {"type": "string"},
+                        "target_format": {"type": "string"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "image_tool",
+                "description": "检查、转换、缩放、裁剪、压缩图片，或对图片/扫描 PDF 执行中英文 OCR。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["inspect", "convert", "resize", "crop", "compress", "ocr"],
+                        },
+                        "input_file_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+                        "output_name": {"type": "string"},
+                        "target_format": {"type": "string", "enum": ["png", "jpg", "jpeg", "webp", "tiff", "bmp"]},
+                        "width": {"type": "integer", "minimum": 1},
+                        "height": {"type": "integer", "minimum": 1},
+                        "keep_aspect": {"type": "boolean"},
+                        "quality": {"type": "integer", "minimum": 1, "maximum": 100},
+                        "box": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4},
+                        "language": {"type": "string", "description": "Tesseract 语言，如 chi_sim+eng"},
+                        "max_pages": {"type": "integer", "minimum": 1, "maximum": 20},
+                    },
+                    "required": ["action", "input_file_ids"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "archive_tool",
+                "description": "安全查看、解压或创建 ZIP/TAR/TAR.GZ；解压结果写回当前工作空间。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list", "extract", "create"]},
+                        "input_file_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 20},
+                        "output_name": {"type": "string"},
+                        "format": {"type": "string", "enum": ["zip", "tar", "tar.gz"]},
+                    },
+                    "required": ["action", "input_file_ids"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_tool",
+                "description": (
+                    "搜索公开网页、提取指定网页正文，或把公开 URL 下载到工作空间。"
+                    "禁止访问 localhost、内网与云元数据地址；涉及专业流程时仍优先使用已绑定 Skill。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["search", "fetch", "download"]},
+                        "query": {"type": "string"},
+                        "url": {"type": "string"},
+                        "max_results": {"type": "integer", "minimum": 1, "maximum": 10},
+                        "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000},
+                        "output_name": {"type": "string"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
     ]
+    # New model rounds only see operation-specific, closed schemas.  Hidden
+    # legacy aliases remain executable so persisted calls do not break.
+    tools = [
+        item for item in tools if str((item.get("function") or {}).get("name") or "") not in LEGACY_FILE_TOOL_NAMES
+    ]
+    tools.extend(file_tool_definitions())
     if include_image_generation:
-        tools.append({"type": "function", "function": {
-            "name": "image_generation_tool",
-            "description": (
-                "使用当前组织配置的专用生图模型生成真实图片，并保存到当前工作空间。"
-                "仅在用户明确要求生成图片、插画、海报或视觉素材时调用。"
-            ),
-            "parameters": {"type": "object", "properties": {
-                "prompt": {"type": "string", "description": "完整、具体的生图提示词"},
-                "output_name": {"type": "string", "description": "输出文件名；系统统一保存为 PNG"},
-                "size": {"type": "string", "description": "如 1024x1024、1536x1024、1024x1536 或 auto"},
-                "quality": {"type": "string", "enum": ["auto", "low", "medium", "high"]},
-            }, "required": ["prompt"]},
-        }})
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "image_generation_tool",
+                    "description": (
+                        "使用当前组织配置的专用生图模型生成真实图片，并保存到当前工作空间。"
+                        "仅在用户明确要求生成图片、插画、海报或视觉素材时调用。"
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string", "description": "完整、具体的生图提示词"},
+                            "output_name": {"type": "string", "description": "输出文件名；系统统一保存为 PNG"},
+                            "size": {"type": "string", "description": "如 1024x1024、1536x1024、1024x1536 或 auto"},
+                            "quality": {"type": "string", "enum": ["auto", "low", "medium", "high"]},
+                        },
+                        "required": ["prompt"],
+                    },
+                },
+            }
+        )
     for item in tools:
         function = item.get("function") or {}
         properties = (function.get("parameters") or {}).get("properties")
@@ -481,38 +729,42 @@ def _builtin_tool_defs(
                 "description": "可选工作空间 UUID；list 省略时覆盖所有可读空间，path 操作省略时使用个人空间",
             }
         if tool_name in {
-            "workspace_write_file", "generate_docx", "image_generation_tool", *PLATFORM_TOOL_NAMES,
+            "workspace_write_file",
+            "generate_docx",
+            "image_generation_tool",
+            "image_tool",
+            "archive_tool",
+            "web_tool",
         }:
             properties["target_workspace_id"] = {
                 "type": "string",
                 "description": "新建输出目标；省略时使用个人空间。按 file_id 更新时由文件确定空间",
             }
-        if tool_name in PLATFORM_TOOL_NAMES:
-            properties.update({
-                "target_file_id": {
-                    "type": "string",
-                    "description": "可选：单个产出原位更新的稳定文件 UUID；不传则创建新文件",
-                },
-                "base_version_id": {
-                    "type": "string",
-                    "description": "target_file_id 存在时必填：开始编辑时读取到的版本 UUID",
-                },
-                "idempotency_key": {
-                    "type": "string",
-                    "minLength": 8,
-                    "description": "target_file_id 存在时必填：同一次重试必须复用",
-                },
-                "output_path": {
-                    "type": "string",
-                    "description": "创建新文件时的目标相对路径；省略则生成隔离输出路径",
-                },
-            })
+        if tool_name in {"image_tool", "archive_tool", "web_tool"}:
+            properties.update(
+                {
+                    "target_file_id": {
+                        "type": "string",
+                        "description": "可选：单个产出原位更新的稳定文件 UUID；不传则创建新文件",
+                    },
+                    "base_version_id": {
+                        "type": "string",
+                        "description": "target_file_id 存在时必填：开始编辑时读取到的版本 UUID",
+                    },
+                    "idempotency_key": {
+                        "type": "string",
+                        "minLength": 8,
+                        "description": "target_file_id 存在时必填：同一次重试必须复用",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "description": "创建新文件时的目标相对路径；省略则生成隔离输出路径",
+                    },
+                }
+            )
     if include_workspace:
         return tools
-    return [
-        tool for tool in tools
-        if tool.get("function", {}).get("name") in ALWAYS_AVAILABLE_TOOL_NAMES
-    ]
+    return [tool for tool in tools if tool.get("function", {}).get("name") in ALWAYS_AVAILABLE_TOOL_NAMES]
 
 
 async def _runner_input(file) -> dict:
@@ -565,8 +817,13 @@ async def _validated_runner_output(
     detected_format = str(actual.get("detected_format") or "")
     format_verified = actual.get("format_verified") is True and bool(detected_format)
     return (
-        content_ref, actual_size, mime, actual_etag, actual_hash,
-        detected_format, format_verified,
+        content_ref,
+        actual_size,
+        mime,
+        actual_etag,
+        actual_hash,
+        detected_format,
+        format_verified,
     )
 
 
@@ -606,9 +863,7 @@ async def _resolve_tool_workspace(
         # cross-tenant discovery or mutation authority.
         if str(workspace.id) != default_id:
             return None, principal, "工作空间不存在或无权访问"
-    elif not (
-        await workspace_permission_service.capabilities(db, workspace, principal)
-    ).get(capability, False):
+    elif not (await workspace_permission_service.capabilities(db, workspace, principal)).get(capability, False):
         return None, principal, "工作空间权限已撤销或不允许此操作"
     return workspace, principal, None
 
@@ -630,9 +885,7 @@ async def _authorized_file(state: AgentState, value: object, user, *, capability
         # Admin playground agents retain their single configured workspace.
         if str(file.workspace_id) != str(state.get("workspace_id") or ""):
             return None, None, principal
-    elif not (
-        await workspace_permission_service.capabilities(db, workspace, principal)
-    ).get(capability, False):
+    elif not (await workspace_permission_service.capabilities(db, workspace, principal)).get(capability, False):
         return None, None, principal
     return file, workspace, principal
 
@@ -651,7 +904,10 @@ async def _authorized_create_replay(state: AgentState, mutation, user):
     if not mutation.result_file_id or not mutation.result_version_id:
         return None, None, user
     live, _live_workspace, principal = await _authorized_file(
-        state, mutation.result_file_id, user, capability="read",
+        state,
+        mutation.result_file_id,
+        user,
+        capability="read",
     )
     if live is None:
         return None, None, principal
@@ -659,7 +915,8 @@ async def _authorized_create_replay(state: AgentState, mutation, user):
     original_workspace_id = result.get("workspace_id") or mutation.workspace_id
     try:
         original_workspace = await workspace_service.get_workspace(
-            db, UUID(str(original_workspace_id)),
+            db,
+            UUID(str(original_workspace_id)),
         )
     except (TypeError, ValueError):
         original_workspace = None
@@ -668,13 +925,13 @@ async def _authorized_create_replay(state: AgentState, mutation, user):
     if principal is None:
         if str(original_workspace.id) != str(state.get("workspace_id") or ""):
             return None, None, principal
-    elif not (
-        await workspace_permission_service.capabilities(db, original_workspace, principal)
-    ).get("read", False):
+    elif not (await workspace_permission_service.capabilities(db, original_workspace, principal)).get("read", False):
         return None, None, principal
     try:
         snapshot, _ = await workspace_service.file_snapshot_at_version(
-            db, live, UUID(str(mutation.result_version_id)),
+            db,
+            live,
+            UUID(str(mutation.result_version_id)),
         )
     except (TypeError, ValueError, workspace_service.WorkspaceFileVersionNotFound):
         return None, None, principal
@@ -683,9 +940,8 @@ async def _authorized_create_replay(state: AgentState, mutation, user):
         # Older durable claims did not store the result path.  It is safe to
         # use the live path only while the file is still exactly at the
         # original result generation/location; otherwise fail closed.
-        if (
-            str(live.workspace_id) != str(original_workspace.id)
-            or str(live.current_version_id or "") != str(mutation.result_version_id)
+        if str(live.workspace_id) != str(original_workspace.id) or str(live.current_version_id or "") != str(
+            mutation.result_version_id
         ):
             return None, None, principal
         original_path = live.path
@@ -700,13 +956,18 @@ async def _authorized_create_replay(state: AgentState, mutation, user):
 
 async def _authorized_input_file(state: AgentState, value: object, user):
     file, _workspace, principal = await _authorized_file(
-        state, value, user, capability="read",
+        state,
+        value,
+        user,
+        capability="read",
     )
     version_id = _referenced_version_id(state, str(value))
     if file is not None and version_id is not None:
         try:
             file, _ = await workspace_service.file_snapshot_at_version(
-                get_deps()["db"], file, version_id,
+                get_deps()["db"],
+                file,
+                version_id,
             )
         except workspace_service.WorkspaceFileVersionNotFound:
             return None, principal
@@ -752,9 +1013,7 @@ async def _workspace_file_identity(db, file, workspace, user) -> dict:
         "canonical_path": f"{workspace.name}:/{str(file.path).lstrip('/')}",
         "version_id": current_version_id,
         "current_version_id": current_version_id,
-        "mutation_result_version_id": (
-            str(getattr(file, "mutation_result_version_id", "") or "") or None
-        ),
+        "mutation_result_version_id": (str(getattr(file, "mutation_result_version_id", "") or "") or None),
         "previous_version_id": str(previous_version_id) if previous_version_id else None,
         "current_version_no": int(version.version_no) if version is not None else None,
         "content_hash": file.content_hash,
@@ -776,9 +1035,7 @@ def _remember_tool_file(
     if not file_id:
         return
     version_id = (
-        identity.get("mutation_result_version_id")
-        or identity.get("version_id")
-        or identity.get("current_version_id")
+        identity.get("mutation_result_version_id") or identity.get("version_id") or identity.get("current_version_id")
     )
     record = {
         "file_id": file_id,
@@ -796,15 +1053,14 @@ def _remember_tool_file(
         "size": identity.get("size"),
         "parse_status": identity.get("parse_status"),
         "created_new": bool(
-            operation in {"create", "write", "copy", "output"}
-            and not identity.get("previous_version_id")
+            operation in {"create", "write", "copy", "output"} and not identity.get("previous_version_id")
         ),
+        "tool_call_id": identity.get("tool_call_id"),
     }
     accesses = state.setdefault("file_accesses_v1", [])
     marker = (record["file_id"], record["version_id"], operation, tool_name)
     if marker not in {
-        (item.get("file_id"), item.get("version_id"), item.get("operation"), item.get("tool_name"))
-        for item in accesses
+        (item.get("file_id"), item.get("version_id"), item.get("operation"), item.get("tool_name")) for item in accesses
     }:
         accesses.append(record)
     refs = state.setdefault("tool_file_refs", [])
@@ -835,8 +1091,7 @@ def _remember_structured_tool_result(
         candidates.append(payload)
     outputs = payload.get("outputs")
     if isinstance(outputs, list) and (
-        tool_name in PLATFORM_TOOL_NAMES
-        or tool_name in {"image_generation_tool", "run_skill_script"}
+        tool_name in PLATFORM_TOOL_NAMES or tool_name in {"image_generation_tool", "run_skill_script"}
     ):
         candidates.extend(item for item in outputs if isinstance(item, dict))
     operation = direct_operations.get(tool_name, "output")
@@ -887,15 +1142,8 @@ async def _verified_tool_file_records(
         except (TypeError, ValueError):
             continue
         file = await workspace_service.get_file(db, file_id)
-        workspace = (
-            await workspace_service.get_workspace(db, file.workspace_id)
-            if file is not None else None
-        )
-        if (
-            file is None
-            or workspace is None
-            or str(workspace.organization_id) != str(state.get("org_id") or "")
-        ):
+        workspace = await workspace_service.get_workspace(db, file.workspace_id) if file is not None else None
+        if file is None or workspace is None or str(workspace.organization_id) != str(state.get("org_id") or ""):
             continue
         if principal is None:
             if str(workspace.id) != str(state.get("workspace_id") or ""):
@@ -914,8 +1162,10 @@ async def _verified_tool_file_records(
                 version = None
             if version is None or str(version.workspace_file_id) != str(file.id):
                 continue
-        resolved_version_id = str(version.id) if version is not None else (
-            str(file.current_version_id) if file.current_version_id else None
+        resolved_version_id = (
+            str(version.id)
+            if version is not None
+            else (str(file.current_version_id) if file.current_version_id else None)
         )
         presentation_workspace = workspace
         presentation_path = file.path
@@ -925,16 +1175,24 @@ async def _verified_tool_file_records(
             # workspace above, but render only the immutable mutation result;
             # otherwise the replay would disclose a later workspace/path and
             # falsely present that later state as this request's output.
-            mutation = (await db.execute(select(WorkspaceFileMutation).where(
-                WorkspaceFileMutation.operation == "copy",
-                WorkspaceFileMutation.status == "completed",
-                WorkspaceFileMutation.result_file_id == file.id,
-                WorkspaceFileMutation.result_version_id == version.id,
-            ).order_by(WorkspaceFileMutation.created_at.desc()).limit(1))).scalar_one_or_none()
+            mutation = (
+                await db.execute(
+                    select(WorkspaceFileMutation)
+                    .where(
+                        WorkspaceFileMutation.operation == "copy",
+                        WorkspaceFileMutation.status == "completed",
+                        WorkspaceFileMutation.result_file_id == file.id,
+                        WorkspaceFileMutation.result_version_id == version.id,
+                    )
+                    .order_by(WorkspaceFileMutation.created_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
             if mutation is None:
                 continue
             result_workspace = await workspace_service.get_workspace(
-                db, UUID(str(mutation.workspace_id)),
+                db,
+                UUID(str(mutation.workspace_id)),
             )
             result_path = str((mutation.result or {}).get("target_path") or "")
             if (
@@ -945,7 +1203,9 @@ async def _verified_tool_file_records(
                 continue
             if principal is not None and not (
                 await workspace_permission_service.capabilities(
-                    db, result_workspace, principal,
+                    db,
+                    result_workspace,
+                    principal,
                 )
             ).get("read"):
                 continue
@@ -955,9 +1215,7 @@ async def _verified_tool_file_records(
         if marker in seen:
             continue
         seen.add(marker)
-        canonical_path = (
-            f"{presentation_workspace.name}:/{str(presentation_path).lstrip('/')}"
-        )
+        canonical_path = f"{presentation_workspace.name}:/{str(presentation_path).lstrip('/')}"
         record = {
             "file_id": str(file.id),
             "scope": "turn",
@@ -976,7 +1234,7 @@ async def _verified_tool_file_records(
         metadata = dict((version.metadata_ if version is not None else file.metadata_) or {})
         path = presentation_path
         presentation = presentation_dict(path, metadata, created_at=file.created_at)
-        artifacts.append({
+        artifact = {
             "file_id": str(file.id),
             "display_name": presentation["display_name"],
             "mime_type": metadata.get("mime"),
@@ -988,19 +1246,19 @@ async def _verified_tool_file_records(
             "workspace_name": presentation_workspace.name,
             "workspace_path": path,
             "canonical_path": canonical_path,
-            "internal_url": (
-                f"/f/{file.id}?version={resolved_version_id}"
-                if resolved_version_id else f"/f/{file.id}"
-            ),
+            "internal_url": (f"/f/{file.id}?version={resolved_version_id}" if resolved_version_id else f"/f/{file.id}"),
             "operation": operation,
             "created_new": bool(candidate.get("created_new")),
-            "checksum_sha256": version.content_hash if version is not None else file.content_hash,
+            "checksum_sha256": (
+                getattr(version, "content_hash", None) if version is not None else getattr(file, "content_hash", None)
+            ),
             "source": {
                 "kind": presentation["source_kind"],
                 "created_by_user_id": str(getattr(user, "id", "") or "") or None,
                 "task_id": task_id,
                 "task_title": task_title,
                 "run_id": state.get("run_id"),
+                "tool_call_id": candidate.get("tool_call_id"),
                 "request_id": state.get("client_request_id"),
                 "application_id": state.get("application_id"),
                 "module_key": (state.get("page_context") or {}).get("module_key"),
@@ -1010,7 +1268,9 @@ async def _verified_tool_file_records(
                 "skill_version": skill.get("version_no") or presentation["skill_version"],
                 **dict((state.get("business_action_provenance") or [{}])[-1]),
             },
-        })
+        }
+        artifact["provenance"] = dict(artifact["source"])
+        artifacts.append(artifact)
     return verified, artifacts
 
 
@@ -1026,80 +1286,153 @@ def _relative_platform_output_path(value: object, workspace_name: str) -> str:
     path = str(value or "").strip().replace("\\", "/")
     prefix = f"{workspace_name}:/" if workspace_name else ""
     if prefix and path.casefold().startswith(prefix.casefold()):
-        path = path[len(prefix):].lstrip("/")
+        path = path[len(prefix) :].lstrip("/")
     return path
 
 
+def _file_tool_error(
+    code: str,
+    message_zh: str,
+    correction_hint: str,
+    *,
+    retryable: bool = False,
+    status: str = "error",
+    **extra: object,
+) -> str:
+    """Return the stable, model-correctable error envelope for file tools."""
+
+    return json.dumps(
+        {
+            "status": status,
+            "code": code,
+            "messageZh": message_zh,
+            "retryable": retryable,
+            "correctionHint": correction_hint,
+            # Keep ``error`` during the API transition for older model adapters.
+            "error": message_zh,
+            **extra,
+        },
+        ensure_ascii=False,
+    )
+
+
 async def _execute_platform_file_tool(
-    state: AgentState, name: str, params: dict, ws, user,
+    state: AgentState,
+    name: str,
+    params: dict,
+    ws,
+    user,
 ) -> str:
     """Authorize files, call Runner's immutable builtin lane, and persist outputs."""
     if state.get("exec_mode") != "craft":
-        return json.dumps({"status": "error", "error": "请切换到 Craft 模式执行文件工具"}, ensure_ascii=False)
+        return _file_tool_error(
+            "craft_mode_required",
+            "请切换到 Craft 模式执行文件工具",
+            "切换到 Craft 模式后重新提交",
+        )
     deps = get_deps()
     db = deps["db"]
     params = dict(params)
+    canonical_tool_name = name
+    if name in STRICT_FILE_TOOL_NAMES | LEGACY_FILE_TOOL_NAMES:
+        try:
+            tool_kind, action, params, canonical_tool_name = normalize_file_tool_call(name, params)
+        except FileToolValidationError as exc:
+            return _file_tool_error(exc.code, exc.message_zh, exc.correction_hint)
+    else:
+        tool_kind = name.removesuffix("_tool")
+        action = str(params.get("action") or "").strip().lower()
     if state.get("application_id") and not params.get("target_file_id"):
         # The model-facing schema omits target_workspace_id, but execution must
         # also ignore undeclared arguments from a provider.  Only the server-
         # validated TaskRunRequest target is allowed for new business outputs.
         params["target_workspace_id"] = state.get("workspace_id")
-    tool_kind = name.removesuffix("_tool")
-    action = str(params.get("action") or "").strip().lower()
     produces_output = action not in {"inspect", "ocr", "list", "search", "fetch"}
     target_file_id = str(params.get("target_file_id") or "").strip()
     target_file = None
     if target_file_id:
         if not produces_output:
-            return json.dumps({
-                "status": "error", "error": "target_file_id is only valid for output actions",
-            })
+            return _file_tool_error(
+                "target_file_not_allowed",
+                "当前操作不允许指定目标文件",
+                "移除 target_file_id，或改用文件编辑/转换工具",
+            )
         if not params.get("base_version_id"):
-            return json.dumps({
-                "status": "error",
-                "error": "target_file_id requires base_version_id",
-            })
+            return _file_tool_error(
+                "base_version_required",
+                "修改文件时必须提供基础版本",
+                "读取文件的最新版本后同时传入 fileId 和 baseVersionId",
+            )
         target_file, ws, user = await _authorized_file(
-            state, target_file_id, user, capability="update",
+            state,
+            target_file_id,
+            user,
+            capability="update",
         )
         if target_file is None:
-            return json.dumps({
-                "status": "error", "error": "target file not found or update denied",
-            })
+            return _file_tool_error(
+                "target_file_unavailable",
+                "目标文件不存在或当前用户无权修改",
+                "重新选择有修改权限的文件",
+            )
     else:
         ws, user, workspace_error = await _resolve_tool_workspace(
-            state, params, user,
+            state,
+            params,
+            user,
             capability="create" if produces_output else "read",
             parameter="target_workspace_id",
         )
         if workspace_error and not (name == "web_tool" and action in {"search", "fetch"}):
-            return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
+            return _file_tool_error(
+                "workspace_permission_denied",
+                workspace_error,
+                "选择个人空间或当前用户有相应权限的工作空间",
+            )
     requested_ids = params.get("input_file_ids")
     if requested_ids is None:
         requested_ids = [] if name == "web_tool" else (state.get("referenced_file_ids") or [])
     if not isinstance(requested_ids, list):
-        return json.dumps({"status": "error", "error": "input_file_ids must be an array"})
+        return _file_tool_error(
+            "invalid_input_file_ids",
+            "输入文件列表格式错误",
+            "请传入文件 ID 数组",
+        )
     if target_file is not None and target_file_id not in {str(value) for value in requested_ids}:
         requested_ids = [*requested_ids, target_file_id]
     if len(requested_ids) > 20:
-        return json.dumps({"status": "error", "error": "At most 20 input files are allowed"})
+        return _file_tool_error(
+            "too_many_input_files",
+            "一次最多处理 20 个输入文件",
+            "减少本轮文件数量后重试",
+        )
     runner_inputs: list[dict] = []
     runner_input_identities: list[dict] = []
     for value in requested_ids:
         file, user = await _authorized_input_file(state, value, user)
         if file is None:
-            return json.dumps({"status": "error", "error": f"Input file {value} is unavailable"})
+            return _file_tool_error(
+                "input_file_unavailable",
+                f"输入文件 {value} 不存在或当前用户无权读取",
+                "重新选择有读取权限的文件",
+            )
         runner_inputs.append(await _runner_input(file))
         input_workspace = await workspace_service.get_workspace(db, file.workspace_id)
         if input_workspace is not None:
-            runner_input_identities.append(
-                await _workspace_file_identity(db, file, input_workspace, user)
-            )
+            runner_input_identities.append(await _workspace_file_identity(db, file, input_workspace, user))
     runner_params = {
-        key: value for key, value in params.items()
-        if key not in {
-            "input_file_ids", "target_workspace_id", "target_file_id",
-            "base_version_id", "idempotency_key", "output_path", "_mutation_key",
+        key: value
+        for key, value in params.items()
+        if key
+        not in {
+            "input_file_ids",
+            "target_workspace_id",
+            "target_file_id",
+            "base_version_id",
+            "idempotency_key",
+            "output_path",
+            "_mutation_key",
+            "_tool_call_id",
         }
     }
     try:
@@ -1116,22 +1449,37 @@ async def _execute_platform_file_tool(
         task_source = await _task_source_fields(db, state)
         outputs = list(result.get("outputs") or [])
         if target_file is not None and len(outputs) != 1:
-            return json.dumps({
-                "status": "error",
-                "error": "target_file_id requires exactly one Runner output",
-            })
+            return _file_tool_error(
+                "ambiguous_target_file_output",
+                "修改已有文件时必须且只能生成一个结果文件",
+                "把任务拆成一次只修改一个文件",
+            )
         if params.get("output_path") and len(outputs) > 1:
-            return json.dumps({
-                "status": "error", "error": "output_path is ambiguous for multiple outputs",
-            })
+            return _file_tool_error(
+                "ambiguous_output_path",
+                "多个结果文件不能共用一个保存路径",
+                "移除 output_path，或把任务拆成单文件操作",
+            )
         if result.get("outputs") and ws is None:
-            return json.dumps({"status": "error", "error": "下载文件前请先绑定工作空间"}, ensure_ascii=False)
+            return _file_tool_error(
+                "workspace_required",
+                "生成文件前必须绑定工作空间",
+                "选择个人空间或有创建权限的部门空间",
+            )
         if result.get("outputs") and not produces_output:
             ws, user, workspace_error = await _resolve_tool_workspace(
-                state, params, user, capability="create", parameter="target_workspace_id",
+                state,
+                params,
+                user,
+                capability="create",
+                parameter="target_workspace_id",
             )
             if workspace_error:
-                return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
+                return _file_tool_error(
+                    "workspace_permission_denied",
+                    workspace_error,
+                    "选择个人空间或当前用户有创建权限的工作空间",
+                )
         task_part = state.get("task_id") or "playground"
         for output_index, item in enumerate(outputs):
             output_mutation_key = f"{params.get('_mutation_key')}-{output_index}"
@@ -1140,7 +1488,8 @@ async def _execute_platform_file_tool(
             safe_parts = [part for part in relative.parts if part not in {"", ".", ".."}]
             relative_path = "/".join(safe_parts) or original
             requested_path = _relative_platform_output_path(
-                params.get("output_path"), str(getattr(ws, "name", "") or ""),
+                params.get("output_path"),
+                str(getattr(ws, "name", "") or ""),
             )
             path = requested_path or (
                 f"平台工具输出/{task_part}/{hashlib.sha256(output_mutation_key.encode()).hexdigest()[:12]}-{relative_path}"
@@ -1155,11 +1504,20 @@ async def _execute_platform_file_tool(
             format_verified = False
             if item.get("content_ref"):
                 (
-                    content_ref, output_size, mime, actual_etag, content_hash,
-                    detected_format, format_verified,
-                ) = (
-                    await _validated_runner_output(item, mime)
-                )
+                    content_ref,
+                    output_size,
+                    mime,
+                    actual_etag,
+                    content_hash,
+                    detected_format,
+                    format_verified,
+                ) = await _validated_runner_output(item, mime)
+                if name in STRICT_FILE_TOOL_NAMES | LEGACY_FILE_TOOL_NAMES and not format_verified:
+                    raise FileToolValidationError(
+                        "format_not_verified",
+                        "文件格式没有通过平台验证",
+                        "请重新生成或转换后再试",
+                    )
             else:
                 raw = base64.b64decode(item.get("content_base64") or "", validate=True)
                 if not raw:
@@ -1167,27 +1525,34 @@ async def _execute_platform_file_tool(
                 output_size = len(raw)
                 content_hash = hashlib.sha256(raw).hexdigest()
                 inline_content = base64.b64encode(raw).decode("ascii")
+                if name in STRICT_FILE_TOOL_NAMES | LEGACY_FILE_TOOL_NAMES:
+                    detected_format, verified_mime = validate_artifact_bytes(original, raw)
+                    mime = verified_mime
+                    format_verified = True
             output_meta = enrich_metadata(
                 target_file.path if target_file is not None else path,
                 {
-                **((target_file.metadata_ or {}) if target_file is not None else {}),
-                "binary": True,
-                "mime": mime,
-                "name": (
-                    clean_display_name(target_file.path, target_file.metadata_ or {})
-                    if target_file is not None else (
-                        PurePosixPath(path).name if params.get("output_path") else original
-                    )
-                ),
-                "storage_backend": "oss_gateway" if content_ref else "postgres_base64",
-                **({"etag": actual_etag} if actual_etag else {}),
-                **({
-                    "artifact_format_verified": True,
-                    "detected_artifact_format": detected_format,
-                } if format_verified else {}),
-                "generated_by": "platform_file_tool",
-                "platform_tool": name,
-                **({"task_id": str(state["task_id"])} if state.get("task_id") else {}),
+                    **((target_file.metadata_ or {}) if target_file is not None else {}),
+                    "binary": True,
+                    "mime": mime,
+                    "name": (
+                        clean_display_name(target_file.path, target_file.metadata_ or {})
+                        if target_file is not None
+                        else (PurePosixPath(path).name if params.get("output_path") else original)
+                    ),
+                    "storage_backend": "oss_gateway" if content_ref else "postgres_base64",
+                    **({"etag": actual_etag} if actual_etag else {}),
+                    **(
+                        {
+                            "artifact_format_verified": True,
+                            "detected_artifact_format": detected_format,
+                        }
+                        if format_verified
+                        else {}
+                    ),
+                    "generated_by": "platform_file_tool",
+                    "platform_tool": canonical_tool_name,
+                    **({"task_id": str(state["task_id"])} if state.get("task_id") else {}),
                 },
                 source_kind="platform_tool",
                 **task_source,
@@ -1203,30 +1568,37 @@ async def _execute_platform_file_tool(
                     parameter="target_workspace_id",
                 )
                 if workspace_error:
-                    return json.dumps({
-                        "status": "error", "error": "target workspace create permission was revoked",
-                    }, ensure_ascii=False)
+                    return _file_tool_error(
+                        "workspace_permission_revoked",
+                        "文件生成期间工作空间创建权限已被收回，未保存文件",
+                        "刷新权限后重新选择可写入的工作空间",
+                    )
             if target_file is None and params.get("output_path"):
                 existing = await workspace_service.get_file_by_path(db, ws.id, path)
                 if existing is not None:
-                    return json.dumps({
-                        "status": "conflict",
-                        "error": "output_path already exists; use target_file_id with its base version",
-                        "file_id": str(existing.id),
-                        "current_version_id": (
-                            str(existing.current_version_id) if existing.current_version_id else None
-                        ),
-                    })
+                    return _file_tool_error(
+                        "output_path_conflict",
+                        "保存位置已有同名文件，未覆盖现有内容",
+                        "改用新文件名，或读取现有文件版本后执行版本化修改",
+                        status="conflict",
+                        file_id=str(existing.id),
+                        current_version_id=(str(existing.current_version_id) if existing.current_version_id else None),
+                    )
             if target_file is not None:
                 # Re-resolve authorization immediately before the mutation;
                 # Runner execution time must not bridge a role revocation.
                 target_file, ws, user = await _authorized_file(
-                    state, target_file_id, user, capability="update",
+                    state,
+                    target_file_id,
+                    user,
+                    capability="update",
                 )
                 if target_file is None:
-                    return json.dumps({
-                        "status": "error", "error": "target file update permission was revoked",
-                    })
+                    return _file_tool_error(
+                        "file_permission_revoked",
+                        "文件生成期间修改权限已被收回，未覆盖目标文件",
+                        "刷新权限后重新选择可修改的文件",
+                    )
                 try:
                     saved = await workspace_service.replace_file_artifact(
                         db,
@@ -1243,32 +1615,43 @@ async def _execute_platform_file_tool(
                         created_by_user_id=user.id,
                     )
                 except workspace_service.WorkspaceFileVersionConflict as exc:
-                    return json.dumps({
-                        "status": "conflict", "error": str(exc),
-                        "current_version_id": exc.current_version_id,
-                        "latest_version_id": exc.current_version_id,
-                    }, ensure_ascii=False)
-                except workspace_service.WorkspaceFileIdempotencyConflict as exc:
-                    return json.dumps({
-                        "status": "conflict", "error": str(exc),
-                        "current_version_id": str(target_file.current_version_id),
-                        "latest_version_id": str(target_file.current_version_id),
-                    }, ensure_ascii=False)
+                    return _file_tool_error(
+                        "file_version_conflict",
+                        "文件已经产生新版本，本次修改未覆盖最新内容",
+                        "重新读取最新版本后再修改",
+                        status="conflict",
+                        current_version_id=exc.current_version_id,
+                        latest_version_id=exc.current_version_id,
+                    )
+                except workspace_service.WorkspaceFileIdempotencyConflict:
+                    return _file_tool_error(
+                        "idempotency_conflict",
+                        "重复请求的内容与首次请求不一致，已停止写入",
+                        "使用新的请求标识重新提交",
+                        status="conflict",
+                        current_version_id=str(target_file.current_version_id),
+                        latest_version_id=str(target_file.current_version_id),
+                    )
                 except workspace_service.WorkspaceFileActiveEditConflict as exc:
-                    return json.dumps({
-                        "status": "conflict",
-                        "code": "workspace_file_active_edit_conflict",
-                        "error": str(exc),
-                        "room_id": exc.room_id,
-                        "current_version_id": exc.current_version_id,
-                        "latest_version_id": exc.current_version_id,
-                    }, ensure_ascii=False)
+                    return _file_tool_error(
+                        "workspace_file_active_edit_conflict",
+                        "文件正在被协作编辑，本次修改未覆盖现有内容",
+                        "等待协作编辑结束并读取最新版本后重试",
+                        status="conflict",
+                        room_id=exc.room_id,
+                        current_version_id=exc.current_version_id,
+                        latest_version_id=exc.current_version_id,
+                    )
                 if inline_content is not None:
                     await workspace_service.reparse_file(db, saved)
                 if user is not None:
                     await workspace_governance_service.audit(
-                        db, ws, "file_updated", user_id=user.id,
-                        file=saved, version_id=saved.current_version_id,
+                        db,
+                        ws,
+                        "file_updated",
+                        user_id=user.id,
+                        file=saved,
+                        version_id=saved.current_version_id,
                         metadata={"tool": name},
                     )
             else:
@@ -1292,20 +1675,28 @@ async def _execute_platform_file_tool(
                 )
                 if replayed:
                     saved, replay_workspace, user = await _authorized_create_replay(
-                        state, mutation, user,
+                        state,
+                        mutation,
+                        user,
                     )
                     if saved is None or replay_workspace is None:
-                        return json.dumps({
-                            "status": "conflict", "error": "idempotent output is unavailable",
-                        })
+                        return _file_tool_error(
+                            "idempotent_result_unavailable",
+                            "重复请求对应的历史文件已经不可用",
+                            "使用新的请求标识重新生成文件",
+                            status="conflict",
+                        )
                     ws = replay_workspace
                 elif content_ref:
                     try:
                         saved = await workspace_service.upsert_file(
-                            db, ws,
+                            db,
+                            ws,
                             WorkspaceFileCreate(path=path, content="", metadata=output_meta),
-                            content_ref=content_ref, raw_size=output_size,
-                            raw_content_hash=content_hash, created_by_user_id=user.id,
+                            content_ref=content_ref,
+                            raw_size=output_size,
+                            raw_content_hash=content_hash,
+                            created_by_user_id=user.id,
                         )
                         saved.content = None
                         saved.parse_status = "queued"
@@ -1318,7 +1709,12 @@ async def _execute_platform_file_tool(
                     try:
                         raw = base64.b64decode(inline_content or "", validate=True)
                         saved = await workspace_service.ingest_uploaded_file(
-                            db, ws, path=path, filename=original, content_type=mime, raw=raw,
+                            db,
+                            ws,
+                            path=path,
+                            filename=original,
+                            content_type=mime,
+                            raw=raw,
                             created_by_user_id=user.id,
                         )
                         saved.metadata_ = output_meta
@@ -1329,7 +1725,9 @@ async def _execute_platform_file_tool(
                         raise
                 if not replayed:
                     await workspace_service.complete_file_mutation(
-                        db, mutation, result_file=saved,
+                        db,
+                        mutation,
+                        result_file=saved,
                         result={
                             "file_id": str(saved.id),
                             "workspace_id": str(ws.id),
@@ -1339,25 +1737,34 @@ async def _execute_platform_file_tool(
             await db.flush()
             identity = await _workspace_file_identity(db, saved, ws, user)
             display_name = clean_display_name(saved.path, saved.metadata_ or {})
-            output_items.append({
-                **identity,
-                "display_name": display_name,
-                "name": display_name,
-                "parse_status": saved.parse_status,
-            })
-        return json.dumps({
-            "status": "success",
-            "tool": name,
-            "action": action,
-            "summary": result.get("summary"),
-            "outputs": output_items,
-            "latency_ms": latency,
-        }, ensure_ascii=False)
+            output_items.append(
+                {
+                    **identity,
+                    "display_name": display_name,
+                    "name": display_name,
+                    "parse_status": saved.parse_status,
+                    "tool_call_id": params.get("_tool_call_id"),
+                }
+            )
+        return json.dumps(
+            {
+                "status": "success",
+                "tool": canonical_tool_name,
+                "action": action,
+                "summary": result.get("summary"),
+                "outputs": output_items,
+                "latency_ms": latency,
+            },
+            ensure_ascii=False,
+        )
     except workspace_service.WorkspaceFileUnsupportedTextUpdate:
-        return json.dumps({
-            "status": "error",
-            "error": "输出格式与目标文件不兼容；请另建文件或使用匹配格式的文件工具",
-        }, ensure_ascii=False)
+        return _file_tool_error(
+            "incompatible_target_format",
+            "输出格式与目标文件不兼容",
+            "另建文件或使用与目标文件匹配的编辑工具",
+        )
+    except FileToolValidationError as exc:
+        return _file_tool_error(exc.code, exc.message_zh, exc.correction_hint)
     except Exception as exc:  # noqa: BLE001
         # Storage/Runner exceptions can embed presigned URLs, object keys, or input
         # excerpts.  Keep the diagnostic category without copying the downstream
@@ -1368,9 +1775,11 @@ async def _execute_platform_file_tool(
             action=action,
             error_type=type(exc).__name__,
         )
-        return json.dumps(
-            {"status": "error", "error": "文件工具执行失败，请重试或检查文件状态"},
-            ensure_ascii=False,
+        return _file_tool_error(
+            "file_executor_failed",
+            "文件工具执行失败",
+            "请重试；若仍失败，请检查输入文件是否损坏或格式是否受支持",
+            retryable=True,
         )
 
 
@@ -1387,7 +1796,8 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
     user = deps.get("user")
     ws = await workspace_service.get_workspace(db, UUID(ws_id)) if ws_id else None
     no_workspace_web_action = name == "web_tool" and str(params.get("action") or "").lower() in {
-        "search", "fetch",
+        "search",
+        "fetch",
     }
     if ws is None and user is None and not no_workspace_web_action:
         return "no workspace bound to this task"
@@ -1403,14 +1813,20 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 if state.get("exec_mode") != "craft":
                     return json.dumps({"status": "error", "error": "请切换到 Craft 模式执行生图"}, ensure_ascii=False)
                 ws, user, workspace_error = await _resolve_tool_workspace(
-                    state, params, user, capability="create", parameter="target_workspace_id",
+                    state,
+                    params,
+                    user,
+                    capability="create",
+                    parameter="target_workspace_id",
                 )
                 if workspace_error:
                     return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
                 if ws is None or user is None:
                     return json.dumps({"status": "error", "error": "请先绑定工作空间"}, ensure_ascii=False)
                 scoped = await multimodal_service.resolve_image_generation(
-                    db, UUID(state["org_id"]), dept_id=state.get("department_id"),
+                    db,
+                    UUID(state["org_id"]),
+                    dept_id=state.get("department_id"),
                     team_id=state.get("team_id"),
                 )
                 if scoped is None:
@@ -1421,7 +1837,11 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 if len(prompt) > 12000:
                     return json.dumps({"status": "error", "error": "prompt is too long"}, ensure_ascii=False)
                 dlp = await scan_request(
-                    db, prompt, str(state["org_id"]), state.get("department_id"), state.get("team_id"),
+                    db,
+                    prompt,
+                    str(state["org_id"]),
+                    state.get("department_id"),
+                    state.get("team_id"),
                 )
                 if dlp.blocked:
                     return json.dumps({"status": "error", "error": "生图提示词被安全策略拦截"}, ensure_ascii=False)
@@ -1432,7 +1852,10 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     return json.dumps({"status": "error", "error": "不支持的图片尺寸"}, ensure_ascii=False)
                 started = datetime.now(UTC)
                 result = await llm_client.generate_image(
-                    scoped.provider, scoped.model, prompt=prompt, size=size,
+                    scoped.provider,
+                    scoped.model,
+                    prompt=prompt,
+                    size=size,
                     quality=str(params.get("quality") or "auto"),
                     endpoint_path=str(generation.get("endpoint_path") or "/images/generations"),
                     db=db,
@@ -1444,44 +1867,79 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 requested = PurePosixPath(str(params.get("output_name") or "generated-image.png")).name
                 stem = PurePosixPath(requested).stem or "generated-image"
                 safe_stem = (
-                    re.sub(r"[^\w\-.\u4e00-\u9fff]+", "-", stem, flags=re.UNICODE).strip("-.")
-                    or "generated-image"
+                    re.sub(r"[^\w\-.\u4e00-\u9fff]+", "-", stem, flags=re.UNICODE).strip("-.") or "generated-image"
                 )
                 filename = f"{safe_stem}.png"
                 stamp = started.strftime("%Y%m%d-%H%M%S")
                 task_part = state.get("task_id") or "playground"
                 path = f"平台工具输出/{task_part}/{stamp}-{uuid4().hex[:8]}-{filename}"
                 saved = await workspace_service.ingest_uploaded_file(
-                    db, ws, path=path, filename=filename, content_type="image/png", raw=raw,
+                    db,
+                    ws,
+                    path=path,
+                    filename=filename,
+                    content_type="image/png",
+                    raw=raw,
                 )
                 task_source = await _task_source_fields(db, state)
-                saved.metadata_ = enrich_metadata(saved.path, {
-                    **(saved.metadata_ or {}), "generated_by": "image_generation_tool",
-                    "provider_id": result.provider_id, "model": result.model_served,
-                    "width": width, "height": height, "task_id": str(task_part),
-                }, source_kind="platform_tool", **task_source)
-                await workspace_service.sync_current_version(db, saved)
-                db.add(AuditLog(
-                    request_id=f"image-generation-{uuid4().hex}",
-                    organization_id=str(state["org_id"]), department_id=state.get("department_id"),
-                    team_id=state.get("team_id"), provider_id=result.provider_id,
-                    event_type="image_generation", direction="outbound",
-                    model_requested=scoped.model, model_served=result.model_served,
-                    latency_ms=max(0, int((datetime.now(UTC) - started).total_seconds() * 1000)),
-                    status_code=200, metadata_={
-                        "file_id": str(saved.id), "sha256": saved.content_hash,
-                        "mime": "image/png", "width": width, "height": height,
+                saved.metadata_ = enrich_metadata(
+                    saved.path,
+                    {
+                        **(saved.metadata_ or {}),
+                        "generated_by": "image_generation_tool",
+                        "provider_id": result.provider_id,
+                        "model": result.model_served,
+                        "width": width,
+                        "height": height,
+                        "task_id": str(task_part),
                     },
-                ))
+                    source_kind="platform_tool",
+                    **task_source,
+                )
+                await workspace_service.sync_current_version(db, saved)
+                db.add(
+                    AuditLog(
+                        request_id=f"image-generation-{uuid4().hex}",
+                        organization_id=str(state["org_id"]),
+                        department_id=state.get("department_id"),
+                        team_id=state.get("team_id"),
+                        provider_id=result.provider_id,
+                        event_type="image_generation",
+                        direction="outbound",
+                        model_requested=scoped.model,
+                        model_served=result.model_served,
+                        latency_ms=max(0, int((datetime.now(UTC) - started).total_seconds() * 1000)),
+                        status_code=200,
+                        metadata_={
+                            "file_id": str(saved.id),
+                            "sha256": saved.content_hash,
+                            "mime": "image/png",
+                            "width": width,
+                            "height": height,
+                        },
+                    )
+                )
                 await db.flush()
-                return json.dumps({
-                    "status": "success", "tool": name,
-                    "outputs": [{"file_id": str(saved.id), "display_name": filename,
-                                 "name": filename, "path": saved.path,
-                                 "mime_type": "image/png", "width": width, "height": height,
-                                 "parse_status": saved.parse_status}],
-                    "revised_prompt": result.revised_prompt,
-                }, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        "status": "success",
+                        "tool": name,
+                        "outputs": [
+                            {
+                                "file_id": str(saved.id),
+                                "display_name": filename,
+                                "name": filename,
+                                "path": saved.path,
+                                "mime_type": "image/png",
+                                "width": width,
+                                "height": height,
+                                "parse_status": saved.parse_status,
+                            }
+                        ],
+                        "revised_prompt": result.revised_prompt,
+                    },
+                    ensure_ascii=False,
+                )
             if name in PLATFORM_TOOL_NAMES:
                 return await _execute_platform_file_tool(state, name, params, ws, user)
             if name == "workspace_list":
@@ -1490,7 +1948,11 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     readable_workspaces = await scope_service.list_workspaces_for_user(db, user)
                 else:
                     selected_ws, user, workspace_error = await _resolve_tool_workspace(
-                        state, params, user, capability="read", parameter="workspace_id",
+                        state,
+                        params,
+                        user,
+                        capability="read",
+                        parameter="workspace_id",
                     )
                     if workspace_error:
                         return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
@@ -1500,7 +1962,7 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     result_offset = max(0, int(params.get("offset") or 0))
                 except (TypeError, ValueError):
                     return json.dumps({"status": "error", "error": "limit and offset must be integers"})
-                page = readable_workspaces[result_offset:result_offset + result_limit]
+                page = readable_workspaces[result_offset : result_offset + result_limit]
                 items = []
                 for readable in page:
                     capabilities = (
@@ -1508,28 +1970,37 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                         if user is not None
                         else {"read": True, "create": True, "update": True, "delete": True}
                     )
-                    items.append({
-                        "workspace_id": str(readable.id),
-                        "workspace_name": readable.name,
-                        "workspace_slug": readable.slug,
-                        "scope_type": readable.scope_type,
-                        "scope_id": str(readable.scope_id) if readable.scope_id else None,
-                        "effective_capabilities": capabilities,
-                    })
+                    items.append(
+                        {
+                            "workspace_id": str(readable.id),
+                            "workspace_name": readable.name,
+                            "workspace_slug": readable.slug,
+                            "scope_type": readable.scope_type,
+                            "scope_id": str(readable.scope_id) if readable.scope_id else None,
+                            "effective_capabilities": capabilities,
+                        }
+                    )
                 has_more = result_offset + len(page) < len(readable_workspaces)
-                return json.dumps({
-                    "items": items,
-                    "offset": result_offset,
-                    "limit": result_limit,
-                    "has_more": has_more,
-                    "next_offset": result_offset + len(page) if has_more else None,
-                }, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        "items": items,
+                        "offset": result_offset,
+                        "limit": result_limit,
+                        "has_more": has_more,
+                        "next_offset": result_offset + len(page) if has_more else None,
+                    },
+                    ensure_ascii=False,
+                )
             if name in {"workspace_search", "workspace_list_files"}:
                 user = await _fresh_user_principal(db, user)
                 requested_workspace_id = str(params.get("workspace_id") or "").strip()
                 if requested_workspace_id:
                     selected_ws, user, workspace_error = await _resolve_tool_workspace(
-                        state, params, user, capability="read", parameter="workspace_id",
+                        state,
+                        params,
+                        user,
+                        capability="read",
+                        parameter="workspace_id",
                     )
                     if workspace_error:
                         return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
@@ -1538,7 +2009,11 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     readable_workspaces = await scope_service.list_workspaces_for_user(db, user)
                 else:
                     selected_ws, user, workspace_error = await _resolve_tool_workspace(
-                        state, params, user, capability="read", parameter="workspace_id",
+                        state,
+                        params,
+                        user,
+                        capability="read",
+                        parameter="workspace_id",
                     )
                     if workspace_error:
                         return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
@@ -1559,36 +2034,52 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 )
                 found = [
                     await _workspace_file_identity(
-                        db, file, workspace_by_id[str(file.workspace_id)], user,
+                        db,
+                        file,
+                        workspace_by_id[str(file.workspace_id)],
+                        user,
                     )
                     for file in found_rows
                 ]
-                return json.dumps({
-                    "items": found,
-                    "offset": result_offset,
-                    "limit": result_limit,
-                    "has_more": has_more,
-                    "next_offset": result_offset + len(found) if has_more else None,
-                }, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        "items": found,
+                        "offset": result_offset,
+                        "limit": result_limit,
+                        "has_more": has_more,
+                        "next_offset": result_offset + len(found) if has_more else None,
+                    },
+                    ensure_ascii=False,
+                )
             if name == "workspace_get_file":
                 file, file_ws, user = await _authorized_file(
-                    state, params.get("file_id"), user, capability="read",
+                    state,
+                    params.get("file_id"),
+                    user,
+                    capability="read",
                 )
                 if file is None:
                     return json.dumps({"status": "error", "error": "file not found"})
                 version_id = _referenced_version_id(
-                    state, str(file.id), params.get("version_id"),
+                    state,
+                    str(file.id),
+                    params.get("version_id"),
                 )
                 if version_id is not None:
                     try:
                         file, _ = await workspace_service.file_snapshot_at_version(
-                            db, file, version_id,
+                            db,
+                            file,
+                            version_id,
                         )
                     except workspace_service.WorkspaceFileVersionNotFound:
                         return json.dumps({"status": "error", "error": "file version not found"})
                 identity = await _workspace_file_identity(db, file, file_ws, user)
                 _remember_tool_file(
-                    state, identity, operation="metadata_read", tool_name=name,
+                    state,
+                    identity,
+                    operation="metadata_read",
+                    tool_name=name,
                 )
                 return json.dumps(identity, ensure_ascii=False)
             if name == "workspace_read_file":
@@ -1598,11 +2089,18 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 file_ws = None
                 if file_id:
                     f, file_ws, user = await _authorized_file(
-                        state, file_id, user, capability="read",
+                        state,
+                        file_id,
+                        user,
+                        capability="read",
                     )
                 elif path:
                     file_ws, user, workspace_error = await _resolve_tool_workspace(
-                        state, params, user, capability="read", parameter="workspace_id",
+                        state,
+                        params,
+                        user,
+                        capability="read",
+                        parameter="workspace_id",
                     )
                     if workspace_error:
                         return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
@@ -1612,7 +2110,9 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 if f is None:
                     return "file not found"
                 version_id = _referenced_version_id(
-                    state, str(f.id), params.get("version_id"),
+                    state,
+                    str(f.id),
+                    params.get("version_id"),
                 )
                 if version_id is not None:
                     try:
@@ -1629,27 +2129,38 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     )
                 identity = await _workspace_file_identity(db, f, file_ws, user)
                 _remember_tool_file(state, identity, operation="read", tool_name=name)
-                return json.dumps({
-                    **identity,
-                    **workspace_service.paginate_file_content(f, offset=offset, limit=limit),
-                }, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        **identity,
+                        **workspace_service.paginate_file_content(f, offset=offset, limit=limit),
+                    },
+                    ensure_ascii=False,
+                )
             if name in {"workspace_create_file", "workspace_write_file", "workspace_update_file"}:
                 file_id = str(params.get("file_id") or "").strip()
                 if name == "workspace_create_file" and file_id:
-                    return json.dumps({
-                        "status": "error", "error": "workspace_create_file does not update existing files",
-                    })
+                    return json.dumps(
+                        {
+                            "status": "error",
+                            "error": "workspace_create_file does not update existing files",
+                        }
+                    )
                 if file_id:
                     f, file_ws, user = await _authorized_file(
-                        state, file_id, user, capability="update",
+                        state,
+                        file_id,
+                        user,
+                        capability="update",
                     )
                     if f is None:
                         return json.dumps({"status": "error", "error": "file not found or update denied"})
                     if not params.get("base_version_id"):
-                        return json.dumps({
-                            "status": "error",
-                            "error": "base_version_id is required",
-                        })
+                        return json.dumps(
+                            {
+                                "status": "error",
+                                "error": "base_version_id is required",
+                            }
+                        )
                     try:
                         updated = await workspace_service.update_file(
                             db,
@@ -1662,36 +2173,57 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                             created_by_user_id=getattr(user, "id", None),
                         )
                     except workspace_service.WorkspaceFileVersionConflict as exc:
-                        return json.dumps({
-                            "status": "conflict", "error": str(exc),
-                            "current_version_id": exc.current_version_id,
-                        }, ensure_ascii=False)
+                        return json.dumps(
+                            {
+                                "status": "conflict",
+                                "error": str(exc),
+                                "current_version_id": exc.current_version_id,
+                            },
+                            ensure_ascii=False,
+                        )
                     except workspace_service.WorkspaceFileIdempotencyConflict as exc:
                         return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
                     except workspace_service.WorkspaceFileActiveEditConflict as exc:
-                        return json.dumps({
-                            "status": "conflict",
-                            "code": "workspace_file_active_edit_conflict",
-                            "error": str(exc),
-                            "room_id": exc.room_id,
-                            "current_version_id": exc.current_version_id,
-                        }, ensure_ascii=False)
+                        return json.dumps(
+                            {
+                                "status": "conflict",
+                                "code": "workspace_file_active_edit_conflict",
+                                "error": str(exc),
+                                "room_id": exc.room_id,
+                                "current_version_id": exc.current_version_id,
+                            },
+                            ensure_ascii=False,
+                        )
                     except workspace_service.WorkspaceFileUnsupportedTextUpdate as exc:
-                        return json.dumps({
-                            "status": "unsupported_format",
-                            "error": str(exc),
-                        }, ensure_ascii=False)
+                        return json.dumps(
+                            {
+                                "status": "unsupported_format",
+                                "error": str(exc),
+                            },
+                            ensure_ascii=False,
+                        )
                     if user is not None:
                         await workspace_governance_service.audit(
-                            db, file_ws, "file_updated", user_id=user.id,
-                            file=updated, version_id=updated.current_version_id,
+                            db,
+                            file_ws,
+                            "file_updated",
+                            user_id=user.id,
+                            file=updated,
+                            version_id=updated.current_version_id,
                         )
-                    return json.dumps({
-                        "status": "success",
-                        **await _workspace_file_identity(db, updated, file_ws, user),
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "success",
+                            **await _workspace_file_identity(db, updated, file_ws, user),
+                        },
+                        ensure_ascii=False,
+                    )
                 file_ws, user, workspace_error = await _resolve_tool_workspace(
-                    state, params, user, capability="create", parameter="target_workspace_id",
+                    state,
+                    params,
+                    user,
+                    capability="create",
+                    parameter="target_workspace_id",
                 )
                 if workspace_error:
                     return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
@@ -1707,37 +2239,48 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     idempotency_key=str(params.get("_mutation_key") or params.get("idempotency_key") or ""),
                     payload={
                         "path": str(params.get("path") or ""),
-                        "content_hash": hashlib.sha256(
-                            str(params.get("content") or "").encode("utf-8")
-                        ).hexdigest(),
+                        "content_hash": hashlib.sha256(str(params.get("content") or "").encode("utf-8")).hexdigest(),
                     },
                 )
                 if replayed:
                     created, replay_workspace, user = await _authorized_create_replay(
-                        state, mutation, user,
+                        state,
+                        mutation,
+                        user,
                     )
                     if created is None or replay_workspace is None:
-                        return json.dumps({
-                            "status": "conflict", "error": "idempotent create result is unavailable",
-                        })
-                    return json.dumps({
-                        "status": "success", "replayed": True,
-                        **await _workspace_file_identity(db, created, replay_workspace, user),
-                    }, ensure_ascii=False)
+                        return json.dumps(
+                            {
+                                "status": "conflict",
+                                "error": "idempotent create result is unavailable",
+                            }
+                        )
+                    return json.dumps(
+                        {
+                            "status": "success",
+                            "replayed": True,
+                            **await _workspace_file_identity(db, created, replay_workspace, user),
+                        },
+                        ensure_ascii=False,
+                    )
                 existing = await workspace_service.get_file_by_path(
-                    db, file_ws.id, str(params.get("path") or ""),
+                    db,
+                    file_ws.id,
+                    str(params.get("path") or ""),
                 )
                 if existing is not None:
                     await db.delete(mutation)
                     await db.flush()
-                    return json.dumps({
-                        "status": "conflict",
-                        "error": "path already exists; update it by file_id with base_version_id",
-                        "file_id": str(existing.id),
-                        "current_version_id": (
-                            str(existing.current_version_id) if existing.current_version_id else None
-                        ),
-                    })
+                    return json.dumps(
+                        {
+                            "status": "conflict",
+                            "error": "path already exists; update it by file_id with base_version_id",
+                            "file_id": str(existing.id),
+                            "current_version_id": (
+                                str(existing.current_version_id) if existing.current_version_id else None
+                            ),
+                        }
+                    )
                 # 记录产出文件来源，供对话展示和审计使用。工作空间文件拥有
                 # 独立生命周期，删除任务或消息不会删除已经交付的文件。
                 meta: dict = {}
@@ -1762,7 +2305,9 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     await db.flush()
                     raise
                 await workspace_service.complete_file_mutation(
-                    db, mutation, result_file=created,
+                    db,
+                    mutation,
+                    result_file=created,
                     result={
                         "file_id": str(created.id),
                         "workspace_id": str(file_ws.id),
@@ -1771,16 +2316,26 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 )
                 if user is not None:
                     await workspace_governance_service.audit(
-                        db, file_ws, "file_written", user_id=user.id,
-                        file=created, version_id=created.current_version_id,
+                        db,
+                        file_ws,
+                        "file_written",
+                        user_id=user.id,
+                        file=created,
+                        version_id=created.current_version_id,
                     )
-                return json.dumps({
-                    "status": "success",
-                    **await _workspace_file_identity(db, created, file_ws, user),
-                }, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        "status": "success",
+                        **await _workspace_file_identity(db, created, file_ws, user),
+                    },
+                    ensure_ascii=False,
+                )
             if name in {"workspace_rename_file", "workspace_move_file"}:
                 f, file_ws, user = await _authorized_file(
-                    state, params.get("file_id"), user, capability="update",
+                    state,
+                    params.get("file_id"),
+                    user,
+                    capability="update",
                 )
                 if f is None:
                     return json.dumps({"status": "error", "error": "file not found or update denied"})
@@ -1794,17 +2349,24 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     if user is not None and not (
                         await workspace_permission_service.capabilities(db, file_ws, user)
                     ).get("delete", False):
-                        return json.dumps({
-                            "status": "error",
-                            "error": "跨工作空间移动还需要源工作空间删除权限；可改用复制保留源文件",
-                        }, ensure_ascii=False)
+                        return json.dumps(
+                            {
+                                "status": "error",
+                                "error": "跨工作空间移动还需要源工作空间删除权限；可改用复制保留源文件",
+                            },
+                            ensure_ascii=False,
+                        )
                     target_ws, user, workspace_error = await _resolve_tool_workspace(
-                        state, params, user, capability="create",
+                        state,
+                        params,
+                        user,
+                        capability="create",
                         parameter="target_workspace_id",
                     )
                     if workspace_error:
                         return json.dumps(
-                            {"status": "error", "error": workspace_error}, ensure_ascii=False,
+                            {"status": "error", "error": workspace_error},
+                            ensure_ascii=False,
                         )
                 target_path = str(params.get("target_path") or "").strip()
                 rename_to = None
@@ -1813,7 +2375,9 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     rename_to = new_name or None
                 try:
                     moved = await workspace_service.move_file(
-                        db, f, target_path,
+                        db,
+                        f,
+                        target_path,
                         base_version_id=UUID(str(params.get("base_version_id") or "")),
                         idempotency_key=str(params.get("_mutation_key") or params.get("idempotency_key") or ""),
                         target_workspace=target_ws,
@@ -1821,127 +2385,182 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                         created_by_user_id=getattr(user, "id", None),
                     )
                 except workspace_service.WorkspaceFileVersionConflict as exc:
-                    return json.dumps({
-                        "status": "conflict", "error": str(exc),
-                        "current_version_id": exc.current_version_id,
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "conflict",
+                            "error": str(exc),
+                            "current_version_id": exc.current_version_id,
+                        },
+                        ensure_ascii=False,
+                    )
                 except workspace_service.WorkspaceFileIdempotencyConflict as exc:
                     return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
                 except workspace_service.WorkspaceFileActiveEditConflict as exc:
-                    return json.dumps({
-                        "status": "conflict",
-                        "code": "workspace_file_active_edit_conflict",
-                        "error": str(exc),
-                        "room_id": exc.room_id,
-                        "current_version_id": exc.current_version_id,
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "conflict",
+                            "code": "workspace_file_active_edit_conflict",
+                            "error": str(exc),
+                            "room_id": exc.room_id,
+                            "current_version_id": exc.current_version_id,
+                        },
+                        ensure_ascii=False,
+                    )
                 except workspace_service.WorkspaceFilePathConflict as exc:
-                    return json.dumps({
-                        "status": "conflict",
-                        "code": "workspace_file_path_conflict",
-                        "error": str(exc),
-                        "file_id": exc.file_id,
-                        "current_version_id": exc.current_version_id,
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "conflict",
+                            "code": "workspace_file_path_conflict",
+                            "error": str(exc),
+                            "file_id": exc.file_id,
+                            "current_version_id": exc.current_version_id,
+                        },
+                        ensure_ascii=False,
+                    )
                 except ValueError as exc:
-                    return json.dumps({
-                        "status": "conflict", "error": str(exc),
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "conflict",
+                            "error": str(exc),
+                        },
+                        ensure_ascii=False,
+                    )
                 if user is not None:
                     await workspace_governance_service.audit(
-                        db, target_ws, "file_moved", user_id=user.id,
-                        file=moved, version_id=moved.current_version_id,
+                        db,
+                        target_ws,
+                        "file_moved",
+                        user_id=user.id,
+                        file=moved,
+                        version_id=moved.current_version_id,
                         metadata={
                             "source_workspace_id": str(file_ws.id),
                             "target_workspace_id": str(target_ws.id),
                         },
                     )
-                return json.dumps({
-                    "status": "success",
-                    **await _workspace_file_identity(db, moved, target_ws, user),
-                }, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        "status": "success",
+                        **await _workspace_file_identity(db, moved, target_ws, user),
+                    },
+                    ensure_ascii=False,
+                )
             if name == "workspace_copy_file":
                 source, _source_ws, user = await _authorized_file(
-                    state, params.get("file_id"), user, capability="read",
+                    state,
+                    params.get("file_id"),
+                    user,
+                    capability="read",
                 )
                 if source is None:
                     return json.dumps({"status": "error", "error": "file not found"})
                 target_ws, user, workspace_error = await _resolve_tool_workspace(
-                    state, params, user, capability="create", parameter="target_workspace_id",
+                    state,
+                    params,
+                    user,
+                    capability="create",
+                    parameter="target_workspace_id",
                 )
                 if workspace_error:
                     return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
                 target_path = str(params.get("target_path") or source.path)
                 try:
                     copied = await workspace_service.copy_file(
-                        db, source, target_ws, target_path,
+                        db,
+                        source,
+                        target_ws,
+                        target_path,
                         base_version_id=UUID(str(params.get("base_version_id") or "")),
-                        idempotency_key=str(
-                            params.get("_mutation_key") or params.get("idempotency_key") or ""
-                        ),
+                        idempotency_key=str(params.get("_mutation_key") or params.get("idempotency_key") or ""),
                         actor_type="user" if user is not None else "admin",
                         actor_id=str(getattr(user, "id", None) or "playground"),
                         created_by_user_id=getattr(user, "id", None),
                     )
                 except workspace_service.WorkspaceFileVersionConflict as exc:
-                    return json.dumps({
-                        "status": "conflict", "error": str(exc),
-                        "current_version_id": exc.current_version_id,
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "conflict",
+                            "error": str(exc),
+                            "current_version_id": exc.current_version_id,
+                        },
+                        ensure_ascii=False,
+                    )
                 except workspace_service.WorkspaceFileIdempotencyConflict as exc:
                     return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
                 live_result_workspace_id = getattr(
-                    copied, "mutation_result_live_workspace_id", None,
+                    copied,
+                    "mutation_result_live_workspace_id",
+                    None,
                 )
                 if live_result_workspace_id is not None:
                     live_result_workspace = await workspace_service.get_workspace(
-                        db, live_result_workspace_id,
+                        db,
+                        live_result_workspace_id,
                     )
                     user = await _fresh_user_principal(db, user)
                     if live_result_workspace is None or (
                         user is not None
-                        and not (await workspace_permission_service.capabilities(
-                            db, live_result_workspace, user,
-                        )).get("read")
+                        and not (
+                            await workspace_permission_service.capabilities(
+                                db,
+                                live_result_workspace,
+                                user,
+                            )
+                        ).get("read")
                     ):
-                        return json.dumps({
-                            "status": "error",
-                            "error": "copy result is no longer accessible",
-                        })
+                        return json.dumps(
+                            {
+                                "status": "error",
+                                "error": "copy result is no longer accessible",
+                            }
+                        )
                 if user is not None:
                     await workspace_governance_service.audit(
-                        db, target_ws, "file_copied", user_id=user.id,
-                        file=copied, version_id=copied.current_version_id,
+                        db,
+                        target_ws,
+                        "file_copied",
+                        user_id=user.id,
+                        file=copied,
+                        version_id=copied.current_version_id,
                         metadata={"source_file_id": str(source.id)},
                     )
-                return json.dumps({
-                    "status": "success",
-                    **await _workspace_file_identity(db, copied, target_ws, user),
-                }, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        "status": "success",
+                        **await _workspace_file_identity(db, copied, target_ws, user),
+                    },
+                    ensure_ascii=False,
+                )
             if name == "workspace_delete_file":
                 if params.get("file_id"):
                     try:
                         f = await workspace_service.get_file_including_deleted(
-                            db, UUID(str(params.get("file_id"))),
+                            db,
+                            UUID(str(params.get("file_id"))),
                         )
                     except (TypeError, ValueError):
                         f = None
-                    file_ws = (
-                        await workspace_service.get_workspace(db, f.workspace_id)
-                        if f is not None else None
-                    )
+                    file_ws = await workspace_service.get_workspace(db, f.workspace_id) if f is not None else None
                     user = await _fresh_user_principal(db, user)
                     if f is not None and file_ws is not None:
                         if user is None:
                             if str(file_ws.id) != str(state.get("workspace_id") or ""):
                                 f = None
-                        elif not (await workspace_permission_service.capabilities(
-                            db, file_ws, user,
-                        )).get("delete", False):
+                        elif not (
+                            await workspace_permission_service.capabilities(
+                                db,
+                                file_ws,
+                                user,
+                            )
+                        ).get("delete", False):
                             f = None
                 else:
                     file_ws, user, workspace_error = await _resolve_tool_workspace(
-                        state, params, user, capability="delete", parameter="workspace_id",
+                        state,
+                        params,
+                        user,
+                        capability="delete",
+                        parameter="workspace_id",
                     )
                     if workspace_error:
                         return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
@@ -1951,55 +2570,79 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 deleted_identity = await _workspace_file_identity(db, f, file_ws, user)
                 try:
                     await workspace_service.soft_delete_file(
-                        db, f,
+                        db,
+                        f,
                         user_id=getattr(user, "id", None),
                         base_version_id=UUID(str(params.get("base_version_id") or "")),
-                        idempotency_key=str(
-                            params.get("_mutation_key") or params.get("idempotency_key") or ""
-                        ),
+                        idempotency_key=str(params.get("_mutation_key") or params.get("idempotency_key") or ""),
                         mutation_actor_type="user" if user is not None else "system",
                         mutation_actor_id=str(getattr(user, "id", None) or "playground"),
                     )
                 except workspace_service.WorkspaceFileVersionConflict as exc:
-                    return json.dumps({
-                        "status": "conflict", "error": str(exc),
-                        "current_version_id": exc.current_version_id,
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "conflict",
+                            "error": str(exc),
+                            "current_version_id": exc.current_version_id,
+                        },
+                        ensure_ascii=False,
+                    )
                 except workspace_service.WorkspaceFileIdempotencyConflict as exc:
                     return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
                 except workspace_service.WorkspaceFileActiveEditConflict as exc:
-                    return json.dumps({
-                        "status": "conflict",
-                        "code": "workspace_file_active_edit_conflict",
-                        "error": str(exc),
-                        "room_id": exc.room_id,
-                        "current_version_id": exc.current_version_id,
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "conflict",
+                            "code": "workspace_file_active_edit_conflict",
+                            "error": str(exc),
+                            "room_id": exc.room_id,
+                            "current_version_id": exc.current_version_id,
+                        },
+                        ensure_ascii=False,
+                    )
                 if user is not None:
                     await workspace_governance_service.audit(
-                        db, file_ws, "file_deleted", user_id=user.id,
-                        file=f, version_id=f.current_version_id,
+                        db,
+                        file_ws,
+                        "file_deleted",
+                        user_id=user.id,
+                        file=f,
+                        version_id=f.current_version_id,
                     )
                 return json.dumps({"status": "success", **deleted_identity}, ensure_ascii=False)
             if name == "workspace_list_versions":
                 f, file_ws, user = await _authorized_file(
-                    state, params.get("file_id"), user, capability="read",
+                    state,
+                    params.get("file_id"),
+                    user,
+                    capability="read",
                 )
                 if f is None:
                     return json.dumps({"status": "error", "error": "file not found"})
                 versions = await workspace_governance_service.list_versions(db, f)
-                return json.dumps({
-                    **await _workspace_file_identity(db, f, file_ws, user),
-                    "versions": [{
-                        "version_id": str(version.id), "version_no": int(version.version_no),
-                        "size": int(version.size), "content_hash": version.content_hash,
-                        "created_at": version.created_at.isoformat(),
-                        "internal_url": f"/f/{f.id}?version={version.id}",
-                    } for version in versions],
-                }, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        **await _workspace_file_identity(db, f, file_ws, user),
+                        "versions": [
+                            {
+                                "version_id": str(version.id),
+                                "version_no": int(version.version_no),
+                                "size": int(version.size),
+                                "content_hash": version.content_hash,
+                                "created_at": version.created_at.isoformat(),
+                                "internal_url": f"/f/{f.id}?version={version.id}",
+                            }
+                            for version in versions
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
             if name == "workspace_restore_version":
                 f, file_ws, user = await _authorized_file(
-                    state, params.get("file_id"), user, capability="update",
+                    state,
+                    params.get("file_id"),
+                    user,
+                    capability="update",
                 )
                 try:
                     version = await db.get(WorkspaceFileVersion, UUID(str(params.get("version_id") or "")))
@@ -2009,40 +2652,61 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     return json.dumps({"status": "error", "error": "file version not found"})
                 try:
                     restored = await workspace_service.restore_file_version(
-                        db, f, version,
+                        db,
+                        f,
+                        version,
                         base_version_id=UUID(str(params.get("base_version_id") or "")),
                         idempotency_key=str(params.get("_mutation_key") or params.get("idempotency_key") or ""),
                         created_by_user_id=getattr(user, "id", None),
                     )
                 except workspace_service.WorkspaceFileVersionConflict as exc:
-                    return json.dumps({
-                        "status": "conflict", "error": str(exc),
-                        "current_version_id": exc.current_version_id,
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "conflict",
+                            "error": str(exc),
+                            "current_version_id": exc.current_version_id,
+                        },
+                        ensure_ascii=False,
+                    )
                 except workspace_service.WorkspaceFileIdempotencyConflict as exc:
                     return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
                 except workspace_service.WorkspaceFileActiveEditConflict as exc:
-                    return json.dumps({
-                        "status": "conflict",
-                        "code": "workspace_file_active_edit_conflict",
-                        "error": str(exc),
-                        "room_id": exc.room_id,
-                        "current_version_id": exc.current_version_id,
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "conflict",
+                            "code": "workspace_file_active_edit_conflict",
+                            "error": str(exc),
+                            "room_id": exc.room_id,
+                            "current_version_id": exc.current_version_id,
+                        },
+                        ensure_ascii=False,
+                    )
                 if user is not None:
                     await workspace_governance_service.audit(
-                        db, file_ws, "version_restored", user_id=user.id,
-                        file=restored, version_id=restored.current_version_id,
+                        db,
+                        file_ws,
+                        "version_restored",
+                        user_id=user.id,
+                        file=restored,
+                        version_id=restored.current_version_id,
                         metadata={"restored_from": str(version.id)},
                     )
-                return json.dumps({
-                    "status": "success",
-                    **await _workspace_file_identity(db, restored, file_ws, user),
-                }, ensure_ascii=False)
+                return json.dumps(
+                    {
+                        "status": "success",
+                        **await _workspace_file_identity(db, restored, file_ws, user),
+                    },
+                    ensure_ascii=False,
+                )
             if name == "generate_docx":
                 from app.tools.docx_builder import markdown_to_docx_bytes
+
                 ws, user, workspace_error = await _resolve_tool_workspace(
-                    state, params, user, capability="create", parameter="target_workspace_id",
+                    state,
+                    params,
+                    user,
+                    capability="create",
+                    parameter="target_workspace_id",
                 )
                 if workspace_error:
                     return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
@@ -2055,10 +2719,7 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     ws,
                     path=filename,
                     filename=filename,
-                    content_type=(
-                        "application/vnd.openxmlformats-officedocument."
-                        "wordprocessingml.document"
-                    ),
+                    content_type=("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
                     raw=raw,
                     created_by_user_id=getattr(user, "id", None),
                 )
@@ -2076,6 +2737,7 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
 
 
 # ── load_config ────────────────────────────────────────────────────────
+
 
 async def load_config(state: AgentState) -> dict:
     """加载配置，创建 AgentRun（status=running），注入首轮 user 消息。
@@ -2150,10 +2812,14 @@ async def _runtime_skill_summary(db, folder: SkillFolder) -> dict | None:
         executable = manifest.runtime in {"python", "node"}
         package_format = "legacy"
     return {
-        "id": str(folder.id), "name": folder.name, "slug": folder.slug,
-        "description": description[:1000], "scope_type": folder.scope_type,
+        "id": str(folder.id),
+        "name": folder.name,
+        "slug": folder.slug,
+        "description": description[:1000],
+        "scope_type": folder.scope_type,
         "scope_id": str(folder.scope_id) if folder.scope_id else None,
-        "is_executable": executable, "package_format": package_format,
+        "is_executable": executable,
+        "package_format": package_format,
     }
 
 
@@ -2175,8 +2841,9 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
             tpl = None
         if tpl is not None and tpl.system_prompt:
             base_prompt = f"{tpl.system_prompt.rstrip()}\n\n{GENERAL_SYSTEM_PROMPT}"
-            tpl_traces.append({"category": "template", "title": "场景模板注入",
-                                "slug": tpl.slug, "chars": len(tpl.system_prompt)})
+            tpl_traces.append(
+                {"category": "template", "title": "场景模板注入", "slug": tpl.slug, "chars": len(tpl.system_prompt)}
+            )
             if not state.get("model_alias") or state.get("model_alias") == "default":
                 if tpl.model_alias and tpl.model_alias != "default":
                     state["model_alias"] = tpl.model_alias
@@ -2198,7 +2865,9 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
     referenced_file_ids: list[str] = []
     access_summary: dict = {"roles": [], "workspaces": []}
     workspace_intent: dict = {
-        "read_workspace_ids": [], "write_workspace_ids": [], "ambiguous_names": [],
+        "read_workspace_ids": [],
+        "write_workspace_ids": [],
+        "ambiguous_names": [],
     }
 
     if user is not None:
@@ -2211,27 +2880,35 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
         visible_by_id = {str(folder.id): (folder, summary) for folder, summary in visible_rows}
 
         default_folders = await skill_scope_service.assert_bound_skills_visible(
-            db, user, default_skill_ids,
+            db,
+            user,
+            default_skill_ids,
         )
         invoked_folders = await skill_scope_service.assert_bound_skills_visible(
-            db, user, list(state.get("invoked_skill_ids") or []),
+            db,
+            user,
+            list(state.get("invoked_skill_ids") or []),
         )
         invoked_id_order = [str(folder.id) for folder in invoked_folders]
         default_id_order = [str(folder.id) for folder in default_folders]
-        ordered_ids = list(dict.fromkeys([
-            *invoked_id_order, *default_id_order, *(str(folder.id) for folder, _ in visible_rows),
-        ]))
+        ordered_ids = list(
+            dict.fromkeys(
+                [
+                    *invoked_id_order,
+                    *default_id_order,
+                    *(str(folder.id) for folder, _ in visible_rows),
+                ]
+            )
+        )
         skill_catalog = [visible_by_id[sid][1] for sid in ordered_ids if sid in visible_by_id]
         skill_ids = [row["id"] for row in skill_catalog]
         default_skills = [
-            {**visible_by_id[sid][1], "is_default": True}
-            for sid in default_id_order if sid in visible_by_id
+            {**visible_by_id[sid][1], "is_default": True} for sid in default_id_order if sid in visible_by_id
         ]
         # Trust server-side snapshots, not client names/descriptions, after UUID authorization succeeds.
         explicit_ids = set(invoked_id_order)
         referenced_skills = [
-            {**visible_by_id[sid][1], "activation": "explicit"}
-            for sid in invoked_id_order if sid in visible_by_id
+            {**visible_by_id[sid][1], "activation": "explicit"} for sid in invoked_id_order if sid in visible_by_id
         ]
         bound_rags = await scope_service.assert_bound_rags_visible(db, user, rag_ids)
         rag_ids = [str(r.id) for r in bound_rags]
@@ -2242,7 +2919,7 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
         for row in skill_catalog:
             slug_to_rows.setdefault(row["slug"], []).append(row)
         seen_slugs: set[str] = set()
-        for m in re.finditer(r'(?<![\w/])/([a-z0-9][a-z0-9-]*)', state.get("request", "") or ""):
+        for m in re.finditer(r"(?<![\w/])/([a-z0-9][a-z0-9-]*)", state.get("request", "") or ""):
             slug = m.group(1)
             matches = slug_to_rows.get(slug, [])
             if len(matches) > 1:
@@ -2263,7 +2940,7 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
                 seen_fids.add(fid)
                 referenced_file_ids.append(fid)
         for m in re.finditer(
-            r'(?<![\w])@([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})',
+            r"(?<![\w])@([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
             state.get("request", "") or "",
         ):
             fid = m.group(1)
@@ -2273,9 +2950,7 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
 
         access_summary = await workspace_permission_service.effective_access(db, user)
         referenced_workspace_ids: list[str] = [
-            str(item.get("workspace_id"))
-            for item in (state.get("attachment_files") or [])
-            if item.get("workspace_id")
+            str(item.get("workspace_id")) for item in (state.get("attachment_files") or []) if item.get("workspace_id")
         ]
         for fid in referenced_file_ids:
             try:
@@ -2285,9 +2960,7 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
             if file is None:
                 continue
             workspace = await workspace_service.get_workspace(db, file.workspace_id)
-            if workspace is not None and (
-                await workspace_permission_service.capabilities(db, workspace, user)
-            )["read"]:
+            if workspace is not None and (await workspace_permission_service.capabilities(db, workspace, user))["read"]:
                 referenced_workspace_ids.append(str(workspace.id))
         workspace_intent = workspace_permission_service.resolve_workspace_intent(
             access_summary,
@@ -2314,13 +2987,21 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
 
     messages: list[dict] = [{"role": "user", "content": state.get("request", "")}]
 
-    _emit({"type": "step", "step": "load_config", "mode": "general",
-           "skills": len(skill_ids), "ontologies": len(ontology_ids), "rags": len(rag_ids),
-           "default_skills": len(default_skills),
-           "referenced_skills": len(referenced_skills),
-           "referenced_files": len(referenced_file_ids),
-           "template": bool(tpl_traces),
-           "run_id": run.id})
+    _emit(
+        {
+            "type": "step",
+            "step": "load_config",
+            "mode": "general",
+            "skills": len(skill_ids),
+            "ontologies": len(ontology_ids),
+            "rags": len(rag_ids),
+            "default_skills": len(default_skills),
+            "referenced_skills": len(referenced_skills),
+            "referenced_files": len(referenced_file_ids),
+            "template": bool(tpl_traces),
+            "run_id": run.id,
+        }
+    )
     for t in tpl_traces:
         _emit({"type": "trace", **t})
     return {
@@ -2360,6 +3041,7 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
 
 # ── retrieve_rag ───────────────────────────────────────────────────────
 
+
 async def retrieve_rag(state: AgentState) -> dict:
     """检索 RAG 命中注入 rag_context。
 
@@ -2395,9 +3077,15 @@ async def retrieve_rag(state: AgentState) -> dict:
                 team_id=state.get("team_id"),
             )
             for h in hits:
-                merged.append({"content": h["content"], "score": h["score"],
-                               "document_id": h["document_id"], "collection_id": cid,
-                               "metadata": h.get("metadata") or {}})
+                merged.append(
+                    {
+                        "content": h["content"],
+                        "score": h["score"],
+                        "document_id": h["document_id"],
+                        "collection_id": cid,
+                        "metadata": h.get("metadata") or {},
+                    }
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("agent_rag_retrieve_failed", coll=str(cid), error=str(exc))
 
@@ -2406,23 +3094,32 @@ async def retrieve_rag(state: AgentState) -> dict:
     preview = [h["content"][:120] for h in merged[:3]]
     # 命中 metadata.retriever='keyword_fallback' 说明向量通道不可用、走了关键词兜底
     retriever = next(
-        (h.get("metadata", {}).get("retriever") for h in merged
-         if isinstance(h.get("metadata"), dict) and h["metadata"].get("retriever")),
+        (
+            h.get("metadata", {}).get("retriever")
+            for h in merged
+            if isinstance(h.get("metadata"), dict) and h["metadata"].get("retriever")
+        ),
         "vector",
     )
     title = "知识库检索" if retriever == "vector" else "知识库检索（关键词兜底）"
-    trace = {"category": "rag", "title": title, "retriever": retriever,
-             "collections": len(coll_ids), "hits": len(merged), "preview": preview}
+    trace = {
+        "category": "rag",
+        "title": title,
+        "retriever": retriever,
+        "collections": len(coll_ids),
+        "hits": len(merged),
+        "preview": preview,
+    }
     _emit({"type": "trace", **trace})
     return {
         "rag_context": merged,
-        "steps": [*state.get("steps", []), {"step": "rag", "hits": len(merged),
-                                            "collections": len(coll_ids)}],
+        "steps": [*state.get("steps", []), {"step": "rag", "hits": len(merged), "collections": len(coll_ids)}],
         "traces": [*state.get("traces", []), trace],
     }
 
 
 # ── load_memory ────────────────────────────────────────────────────────
+
 
 async def load_memory(state: AgentState) -> dict:
     """载入记忆前置到 messages。
@@ -2509,9 +3206,10 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
             )
             for file in file_rows.scalars().all():
                 workspace = await workspace_service.get_workspace(db, file.workspace_id)
-                if workspace is not None and (
-                    await workspace_permission_service.capabilities(db, workspace, user)
-                )["read"]:
+                if (
+                    workspace is not None
+                    and (await workspace_permission_service.capabilities(db, workspace, user))["read"]
+                ):
                     available_files[str(file.id)] = file
 
         past = []
@@ -2529,19 +3227,18 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
                     file = available_files.get(file_id)
                     available = bool(
                         file is not None
-                        and (
-                            not expected_workspace_id
-                            or expected_workspace_id == str(file.workspace_id)
-                        )
+                        and (not expected_workspace_id or expected_workspace_id == str(file.workspace_id))
                     )
-                    refs.append({
-                        "file_id": file_id,
-                        "name": str(attachment.get("name") or attachment.get("path") or file_id),
-                        "scope": str(attachment.get("scope") or "turn"),
-                        "version_id": attachment.get("version_id"),
-                        "follow_latest": bool(attachment.get("follow_latest", True)),
-                        "status": "available" if available else "unavailable",
-                    })
+                    refs.append(
+                        {
+                            "file_id": file_id,
+                            "name": str(attachment.get("name") or attachment.get("path") or file_id),
+                            "scope": str(attachment.get("scope") or "turn"),
+                            "version_id": attachment.get("version_id"),
+                            "follow_latest": bool(attachment.get("follow_latest", True)),
+                            "status": "available" if available else "unavailable",
+                        }
+                    )
                 if refs:
                     content += "\n\n[历史文件引用]\n" + json.dumps(refs, ensure_ascii=False)
             past.append({"role": message.role, "content": content})
@@ -2554,31 +3251,36 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
     if user is not None and not state.get("application_id"):
         scopes = scope_service.effective_scope_set(user)  # [(type, id|None)]
         try:
-            mem_context = await memory_service.load_memory_for_scopes(
-                db, UUID(state["org_id"]), scopes)
+            mem_context = await memory_service.load_memory_for_scopes(db, UUID(state["org_id"]), scopes)
         except Exception as exc:  # noqa: BLE001
             logger.warning("load_memory_failed", error=str(exc))
 
     trace_title = "当前任务上下文载入" if state.get("application_id") else "长期记忆载入"
-    trace = {"category": "memory", "subtype": "load", "title": trace_title,
-             "history": len(past), "facts": len(mem_context)}
+    trace = {
+        "category": "memory",
+        "subtype": "load",
+        "title": trace_title,
+        "history": len(past),
+        "facts": len(mem_context),
+    }
     _emit({"type": "trace", **trace})
     return {
         "messages": past + current,
         "memory_context": mem_context,
-        "steps": [*state.get("steps", []), {"step": "memory", "history": len(past),
-                                            "facts": len(mem_context)}],
+        "steps": [*state.get("steps", []), {"step": "memory", "history": len(past), "facts": len(mem_context)}],
         "traces": [*state.get("traces", []), trace],
     }
 
 
 # ── DSH platform capability assembly ───────────────────────────────────
 
+
 async def _prepare_current_turn_images(state: AgentState, db, user) -> list[multimodal_service.PreparedImage]:
     """Load only the current turn's authorized image attachments and run best-effort OCR DLP."""
     snapshots = state.get("attachment_files") or []
     image_snapshots = [
-        item for item in snapshots
+        item
+        for item in snapshots
         if PurePosixPath(str(item.get("name") or item.get("path") or "")).suffix.lower()
         in multimodal_service.ALLOWED_IMAGE_SUFFIXES
     ]
@@ -2595,26 +3297,35 @@ async def _prepare_current_turn_images(state: AgentState, db, user) -> list[mult
         if file is None:
             raise ValueError("图片附件已不存在或无权访问")
         workspace = await workspace_service.get_workspace(db, file.workspace_id)
-        if workspace is None or user is None or not (
-            await workspace_permission_service.capabilities(db, workspace, user)
-        )["read"]:
+        if (
+            workspace is None
+            or user is None
+            or not (await workspace_permission_service.capabilities(db, workspace, user))["read"]
+        ):
             raise ValueError("图片附件已不存在或无权访问")
         raw = await workspace_service.load_file_bytes(file)
         meta = file.metadata_ or {}
         image = multimodal_service.prepare_image_bytes(
-            file_id=str(file.id), name=str(meta.get("name") or item.get("name") or file.path),
-            declared_mime=str(meta.get("mime") or "") or None, raw=raw,
+            file_id=str(file.id),
+            name=str(meta.get("name") or item.get("name") or file.path),
+            declared_mime=str(meta.get("mime") or "") or None,
+            raw=raw,
         )
         prepared.append(image)
 
         # OCR is only a DLP pre-check. Failure does not turn OCR into a prerequisite for vision.
         try:
             ocr, _ = await skill_runner_client.execute_builtin(
-                tool_kind="image", action="ocr", params={"language": "chi_sim+eng", "max_pages": 1},
-                inputs=[{
-                    "file_id": image.file_id, "name": image.name,
-                    "content_base64": base64.b64encode(image.raw).decode("ascii"),
-                }],
+                tool_kind="image",
+                action="ocr",
+                params={"language": "chi_sim+eng", "max_pages": 1},
+                inputs=[
+                    {
+                        "file_id": image.file_id,
+                        "name": image.name,
+                        "content_base64": base64.b64encode(image.raw).decode("ascii"),
+                    }
+                ],
                 execution_id=f"vision-dlp-{state.get('task_id') or 'playground'}-{uuid4().hex[:8]}",
                 timeout_seconds=min(settings.skill_runner_timeout_seconds, 45),
             )
@@ -2622,7 +3333,11 @@ async def _prepare_current_turn_images(state: AgentState, db, user) -> list[mult
             ocr_text = str(summary.get("content") or summary.get("text") or "").strip()
             if ocr_text:
                 dlp = await scan_request(
-                    db, ocr_text, str(state["org_id"]), state.get("department_id"), state.get("team_id"),
+                    db,
+                    ocr_text,
+                    str(state["org_id"]),
+                    state.get("department_id"),
+                    state.get("team_id"),
                 )
                 # Redacting extracted text cannot redact pixels, so raw image transmission must stop.
                 if dlp.blocked or dlp.redacted_text is not None:
@@ -2636,7 +3351,8 @@ async def _prepare_current_turn_images(state: AgentState, db, user) -> list[mult
 
 
 def _attach_images_to_current_user_message(
-    messages: list[dict], images: list[multimodal_service.PreparedImage],
+    messages: list[dict],
+    images: list[multimodal_service.PreparedImage],
 ) -> None:
     for message in reversed(messages):
         if message.get("role") != "user":
@@ -2645,16 +3361,17 @@ def _attach_images_to_current_user_message(
         text = original if isinstance(original, str) else ""
         message["content"] = [
             {"type": "text", "text": text},
-            *[
-                {"type": "image_url", "image_url": {"url": image.data_url, "detail": "auto"}}
-                for image in images
-            ],
+            *[{"type": "image_url", "image_url": {"url": image.data_url, "detail": "auto"}} for image in images],
         ]
         return
 
 
 async def _configure_visual_turn(
-    state: AgentState, db, user, messages: list[dict], system_prompt: str,
+    state: AgentState,
+    db,
+    user,
+    messages: list[dict],
+    system_prompt: str,
 ) -> tuple[Any | None, str | None, str]:
     """Resolve the main provider and apply direct-vision or scoped fallback routing once per turn."""
     images = await _prepare_current_turn_images(state, db, user)
@@ -2662,80 +3379,132 @@ async def _configure_visual_turn(
         # Preserve the existing routing path for text-only turns (and its test/failover behavior).
         return None, None, system_prompt
     provider, model = await llm_client.resolve_provider(
-        db, UUID(state["org_id"]), state.get("model_alias", "default"),
-        dept_id=state.get("department_id"), team_id=state.get("team_id"),
+        db,
+        UUID(state["org_id"]),
+        state.get("model_alias", "default"),
+        dept_id=state.get("department_id"),
+        team_id=state.get("team_id"),
     )
     vision_enabled, _ = await multimodal_service.organization_feature_flags(db, UUID(state["org_id"]))
     direct = bool(
-        vision_enabled and provider.provider_type != "anthropic"
+        vision_enabled
+        and provider.provider_type != "anthropic"
         and multimodal_service.provider_model_supports_vision(provider, model)
     )
-    _emit({"type": "vision_preprocess", "status": "ready", "images": len(images),
-           "mode": "direct" if direct else "fallback"})
+    _emit(
+        {
+            "type": "vision_preprocess",
+            "status": "ready",
+            "images": len(images),
+            "mode": "direct" if direct else "fallback",
+        }
+    )
     if direct:
         _attach_images_to_current_user_message(messages, images)
-        db.add(AuditLog(
-            request_id=f"vision-{uuid4().hex}", organization_id=str(state["org_id"]),
-            department_id=state.get("department_id"), team_id=state.get("team_id"),
-            provider_id=str(provider.id), event_type="vision_input", direction="outbound",
-            model_requested=model, model_served=model, status_code=200, dlp_violations=[],
-            metadata_={
-                "mode": "direct", "images": [
-                    {"file_id": image.file_id, "sha256": image.sha256, "mime": image.mime_type,
-                     "width": image.width, "height": image.height}
-                    for image in images
-                ],
-            },
-        ))
+        db.add(
+            AuditLog(
+                request_id=f"vision-{uuid4().hex}",
+                organization_id=str(state["org_id"]),
+                department_id=state.get("department_id"),
+                team_id=state.get("team_id"),
+                provider_id=str(provider.id),
+                event_type="vision_input",
+                direction="outbound",
+                model_requested=model,
+                model_served=model,
+                status_code=200,
+                dlp_violations=[],
+                metadata_={
+                    "mode": "direct",
+                    "images": [
+                        {
+                            "file_id": image.file_id,
+                            "sha256": image.sha256,
+                            "mime": image.mime_type,
+                            "width": image.width,
+                            "height": image.height,
+                        }
+                        for image in images
+                    ],
+                },
+            )
+        )
         return provider, model, system_prompt
 
     fallback = await multimodal_service.resolve_vision_fallback(
-        db, UUID(state["org_id"]), dept_id=state.get("department_id"), team_id=state.get("team_id"),
+        db,
+        UUID(state["org_id"]),
+        dept_id=state.get("department_id"),
+        team_id=state.get("team_id"),
     )
     if fallback is None:
         raise RuntimeError("当前组织未配置视觉模型；仍可使用 OCR 或 image_tool 处理图片")
-    visual_messages = [{
-        "role": "user",
-        "content": [
-            {"type": "text", "text": (
-                "请准确分析这些图片，输出结构化中文描述。包括可见对象、文字、表格/图表、空间关系、"
-                "重要细节与不确定之处。不要猜测图片中不存在的信息。"
-            )},
-            *[
-                {"type": "image_url", "image_url": {"url": image.data_url, "detail": "auto"}}
-                for image in images
+    visual_messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "请准确分析这些图片，输出结构化中文描述。包括可见对象、文字、表格/图表、空间关系、"
+                        "重要细节与不确定之处。不要猜测图片中不存在的信息。"
+                    ),
+                },
+                *[{"type": "image_url", "image_url": {"url": image.data_url, "detail": "auto"}} for image in images],
             ],
-        ],
-    }]
+        }
+    ]
     visual = await llm_client.chat(
-        db, UUID(state["org_id"]), fallback.model, visual_messages,
+        db,
+        UUID(state["org_id"]),
+        fallback.model,
+        visual_messages,
         system_prompt="你是视觉信息提取器，只描述图片中可验证的内容。",
-        provider_override=fallback.provider, model_override=fallback.model,
-        dept_id=state.get("department_id"), team_id=state.get("team_id"),
+        provider_override=fallback.provider,
+        model_override=fallback.model,
+        dept_id=state.get("department_id"),
+        team_id=state.get("team_id"),
     )
     description = (visual.content or "").strip()
     if not description:
         raise RuntimeError("视觉回退模型未返回有效描述")
-    db.add(AuditLog(
-        request_id=f"vision-fallback-{uuid4().hex}", organization_id=str(state["org_id"]),
-        department_id=state.get("department_id"), team_id=state.get("team_id"),
-        provider_id=str(fallback.provider.id), event_type="vision_fallback", direction="outbound",
-        model_requested=fallback.model, model_served=visual.model_served, status_code=200,
-        input_tokens=visual.usage.get("input_tokens"), output_tokens=visual.usage.get("output_tokens"),
-        dlp_violations=[], metadata_={
-            "mode": "fallback", "images": [
-                {"file_id": image.file_id, "sha256": image.sha256, "mime": image.mime_type,
-                 "width": image.width, "height": image.height}
-                for image in images
-            ],
-        },
-    ))
+    db.add(
+        AuditLog(
+            request_id=f"vision-fallback-{uuid4().hex}",
+            organization_id=str(state["org_id"]),
+            department_id=state.get("department_id"),
+            team_id=state.get("team_id"),
+            provider_id=str(fallback.provider.id),
+            event_type="vision_fallback",
+            direction="outbound",
+            model_requested=fallback.model,
+            model_served=visual.model_served,
+            status_code=200,
+            input_tokens=visual.usage.get("input_tokens"),
+            output_tokens=visual.usage.get("output_tokens"),
+            dlp_violations=[],
+            metadata_={
+                "mode": "fallback",
+                "images": [
+                    {
+                        "file_id": image.file_id,
+                        "sha256": image.sha256,
+                        "mime": image.mime_type,
+                        "width": image.width,
+                        "height": image.height,
+                    }
+                    for image in images
+                ],
+            },
+        )
+    )
     system_prompt = (
         f"{system_prompt}\n\n[视觉回退模型对本轮图片的结构化描述]\n{description}\n"
         "以上描述来自平台配置的视觉模型；主模型不得声称直接看到了原图。"
     )
     _emit({"type": "vision_preprocess", "status": "completed", "images": len(images), "mode": "fallback"})
     return provider, model, system_prompt
+
 
 def _enterprise_action_parameters(input_schema: dict | None, operation: str) -> dict:
     parameters = copy.deepcopy(input_schema or {"type": "object", "properties": {}})
@@ -2757,13 +3526,15 @@ def _enterprise_action_parameters(input_schema: dict | None, operation: str) -> 
 
 
 def _enterprise_export_file_tool_name(action_tool_name: str) -> str:
-    """Keep the derived tool name inside OpenAI's 64-character limit."""
+    """Expose one stable composite export route for the current page."""
 
-    return f"{action_tool_name[:59]}_file"
+    del action_tool_name
+    return "business_export_to_workspace_file"
 
 
 def _enterprise_export_file_parameters(
-    input_schema: dict | None, supported_formats: list[str] | None = None,
+    input_schema: dict | None,
+    supported_formats: list[str] | None = None,
 ) -> dict:
     """Build a model-facing schema for the trusted paged-dataset executor."""
 
@@ -2777,12 +3548,11 @@ def _enterprise_export_file_parameters(
         "description": "交付到当前选定工作空间的文件名，建议以 .xlsx 或 .csv 结尾",
     }
     properties["target_format"] = {
-        "type": "string", "enum": supported_formats or ["xlsx", "csv"], "default": "xlsx",
+        "type": "string",
+        "enum": supported_formats or ["xlsx", "csv"],
+        "default": "xlsx",
     }
-    required = [
-        item for item in parameters.get("required", [])
-        if item not in {"snapshotId", "nextCursor"}
-    ]
+    required = [item for item in parameters.get("required", []) if item not in {"snapshotId", "nextCursor"}]
     if "output_name" not in required:
         required.append("output_name")
     parameters["required"] = required
@@ -2856,16 +3626,21 @@ async def _execute_enterprise_export_file(
     application = entry["application"]
     action = entry["action"]
     action_params = {
-        key: value for key, value in params.items()
+        key: value
+        for key, value in params.items()
         if key not in {"output_name", "target_format", "snapshotId", "nextCursor"}
     }
     output_name = PurePosixPath(str(params.get("output_name") or "业务数据.xlsx")).name
     target_format = str(params.get("target_format") or "xlsx").casefold()
     supported_formats = set(entry.get("supported_formats") or ["xlsx", "csv"])
     if target_format not in supported_formats:
-        return json.dumps({
-            "status": "error", "error": f"当前平台未启用 {target_format} 文件生成能力",
-        }, ensure_ascii=False), False
+        return json.dumps(
+            {
+                "status": "error",
+                "error": f"当前平台未启用 {target_format} 文件生成能力",
+            },
+            ensure_ascii=False,
+        ), False
     if not output_name.casefold().endswith(f".{target_format}"):
         output_name = f"{PurePosixPath(output_name).stem or '业务数据'}.{target_format}"
 
@@ -2895,7 +3670,9 @@ async def _execute_enterprise_export_file(
             page_params,
             fresh_user,
             request_id=_enterprise_action_request_id(
-                state, f"{tool_call_id}:page:{page_number}", page_params,
+                state,
+                f"{tool_call_id}:page:{page_number}",
+                page_params,
             ),
             page_key=entry.get("page_key"),
             operation="export",
@@ -2922,41 +3699,61 @@ async def _execute_enterprise_export_file(
             or current_columns != columns
             or current_row_count != expected_row_count
         ):
-            return json.dumps({
-                "status": "error", "error": "导出分页的快照或字段发生变化，未交付残缺文件",
-            }, ensure_ascii=False), False
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "导出分页的快照或字段发生变化，未交付残缺文件",
+                },
+                ensure_ascii=False,
+            ), False
         if not all(isinstance(row, dict) for row in current_rows):
             return json.dumps({"status": "error", "error": "导出分页包含无效数据行"}, ensure_ascii=False), False
         if expected_row_count is not None and len(rows) + len(current_rows) > expected_row_count:
-            return json.dumps({
-                "status": "error", "error": "导出分页行数超过快照声明，未交付文件",
-            }, ensure_ascii=False), False
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "导出分页行数超过快照声明，未交付文件",
+                },
+                ensure_ascii=False,
+            ), False
         rows.extend(current_rows)
         next_cursor = current_cursor if isinstance(current_cursor, str) and current_cursor else None
         if next_cursor is None:
             break
         if not current_rows:
-            return json.dumps({
-                "status": "error", "error": "子系统返回空分页但仍要求继续，导出已停止",
-            }, ensure_ascii=False), False
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "子系统返回空分页但仍要求继续，导出已停止",
+                },
+                ensure_ascii=False,
+            ), False
         if next_cursor in seen_cursors:
-            return json.dumps({
-                "status": "error", "error": "子系统返回了重复游标，导出已停止",
-            }, ensure_ascii=False), False
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "子系统返回了重复游标，导出已停止",
+                },
+                ensure_ascii=False,
+            ), False
         seen_cursors.add(next_cursor)
 
     if expected_row_count is None or len(rows) != expected_row_count:
-        return json.dumps({
-            "status": "error",
-            "error": f"导出数据不完整：期望 {expected_row_count or 0} 行，实际 {len(rows)} 行",
-        }, ensure_ascii=False), False
+        return json.dumps(
+            {
+                "status": "error",
+                "error": f"导出数据不完整：期望 {expected_row_count or 0} 行，实际 {len(rows)} 行",
+            },
+            ensure_ascii=False,
+        ), False
     column_defs = columns or []
     column_keys = [str(item.get("key") or "") for item in column_defs if isinstance(item, dict)]
     if not column_keys and rows:
         column_keys = list(dict.fromkeys(key for row in rows for key in row))
     labels_by_key = {
         str(item.get("key") or ""): str(item.get("label") or item.get("key") or "")
-        for item in column_defs if isinstance(item, dict)
+        for item in column_defs
+        if isinstance(item, dict)
     }
 
     def spreadsheet_cell(value: Any) -> Any:
@@ -2968,69 +3765,81 @@ async def _execute_enterprise_export_file(
         [labels_by_key.get(key) or key for key in column_keys],
         *[[spreadsheet_cell(row.get(key)) for key in column_keys] for row in rows],
     ]
-    state.setdefault("business_action_provenance", []).append({
-        **(provenance or {}),
-        "snapshot_id": snapshot_id,
-        "snapshot_at": snapshot_at,
-        "row_count": expected_row_count,
-    })
+    state.setdefault("business_action_provenance", []).append(
+        {
+            **(provenance or {}),
+            "snapshot_id": snapshot_id,
+            "snapshot_at": snapshot_at,
+            "row_count": expected_row_count,
+        }
+    )
+
     def markdown_cell(value: Any) -> str:
         return str(spreadsheet_cell(value) if value is not None else "").replace("|", "\\|").replace("\n", "<br>")
 
-    markdown = "\n".join([
-        "# 业务数据导出",
-        "",
-        f"- 快照时间：{snapshot_at}",
-        f"- 数据行数：{expected_row_count}",
-        "",
-        "| " + " | ".join(labels_by_key.get(key) or key for key in column_keys) + " |",
-        "| " + " | ".join("---" for _ in column_keys) + " |",
-        *[
-            "| " + " | ".join(markdown_cell(row.get(key)) for key in column_keys) + " |"
-            for row in rows
-        ],
-    ])
+    markdown = "\n".join(
+        [
+            "# 业务数据导出",
+            "",
+            f"- 快照时间：{snapshot_at}",
+            f"- 数据行数：{expected_row_count}",
+            "",
+            "| " + " | ".join(labels_by_key.get(key) or key for key in column_keys) + " |",
+            "| " + " | ".join("---" for _ in column_keys) + " |",
+            *["| " + " | ".join(markdown_cell(row.get(key)) for key in column_keys) + " |" for row in rows],
+        ]
+    )
     if target_format in {"xlsx", "csv"}:
-        file_tool_name = "spreadsheet_tool"
+        file_tool_name = "spreadsheet_create"
         file_params = {
-            "action": "create", "output_name": output_name, "target_format": target_format,
+            "output_name": output_name,
+            "target_format": target_format,
             "sheets": [{"name": "业务数据", "rows": sheet_rows}],
         }
     elif target_format == "docx":
-        file_tool_name = "document_tool"
-        file_params = {"action": "create", "output_name": output_name, "markdown": markdown}
+        file_tool_name = "document_create"
+        file_params = {"output_name": output_name, "markdown": markdown, "target_format": "docx"}
     elif target_format == "pdf":
-        file_tool_name = "pdf_tool"
-        file_params = {"action": "create", "output_name": output_name, "markdown": markdown}
+        file_tool_name = "pdf_create"
+        file_params = {"output_name": output_name, "markdown": markdown}
     elif target_format in {"md", "txt"}:
-        file_tool_name = "text_tool"
+        file_tool_name = "text_create"
         file_params = {
-            "action": "create", "output_name": output_name,
-            "content": markdown, "format": "markdown" if target_format == "md" else "text",
+            "output_name": output_name,
+            "content": markdown,
+            "format": "md" if target_format == "md" else "txt",
         }
     else:  # pptx
-        file_tool_name = "presentation_tool"
-        slides = [{
-            "title": "业务数据导出",
-            "bullets": [f"快照时间：{snapshot_at}", f"数据行数：{expected_row_count}"],
-        }]
+        file_tool_name = "presentation_create"
+        slides = [
+            {
+                "title": "业务数据导出",
+                "bullets": [f"快照时间：{snapshot_at}", f"数据行数：{expected_row_count}"],
+            }
+        ]
         for offset in range(0, len(rows), 8):
-            slides.append({
-                "title": f"业务数据（{offset + 1}-{min(offset + 8, len(rows))}）",
-                "bullets": [
-                    "；".join(
-                        f"{labels_by_key.get(key) or key}：{spreadsheet_cell(row.get(key))}"
-                        for key in column_keys
-                    )
-                    for row in rows[offset:offset + 8]
-                ],
-            })
-        file_params = {"action": "create", "output_name": output_name, "slides": slides}
+            slides.append(
+                {
+                    "title": f"业务数据（{offset + 1}-{min(offset + 8, len(rows))}）",
+                    "bullets": [
+                        "；".join(
+                            f"{labels_by_key.get(key) or key}：{spreadsheet_cell(row.get(key))}" for key in column_keys
+                        )
+                        for row in rows[offset : offset + 8]
+                    ],
+                }
+            )
+        file_params = {"output_name": output_name, "slides": slides, "target_format": "pptx"}
     file_params["_mutation_key"] = _enterprise_action_request_id(
-        state, f"{tool_call_id}:artifact", {
-            "snapshotId": snapshot_id, "outputName": output_name, "format": target_format,
+        state,
+        f"{tool_call_id}:artifact",
+        {
+            "snapshotId": snapshot_id,
+            "outputName": output_name,
+            "format": target_format,
         },
     )
+    file_params["_tool_call_id"] = tool_call_id
     file_content = await _execute_platform_file_tool(
         state,
         file_tool_name,
@@ -3057,6 +3866,7 @@ async def _build_tools(
     exec_mode: str = "craft",
     application_id: str | None = None,
     page_context: dict | None = None,
+    request_text: str = "",
 ) -> tuple[list[dict], dict[str, dict]]:
     """加载技能文件夹 → 读取 skill.md manifest → OpenAI tools 列表 + name→(folder, endpoint) 映射。
 
@@ -3078,6 +3888,7 @@ async def _build_tools(
             context_module_key = context.get("module_key") if isinstance(context.get("module_key"), str) else None
             context_page_key = context.get("page_key") if isinstance(context.get("page_key"), str) else None
             from app.services.platform_tool_registry import active_platform_tool_names
+
             active_names = await active_platform_tool_names(db)
             for action in await subsystem_action_service.list_actions_for_user(
                 db,
@@ -3090,28 +3901,43 @@ async def _build_tools(
                 parameters = _enterprise_action_parameters(action.input_schema, action.operation)
                 if action.operation == "export":
                     format_tools = {
-                        "xlsx": "spreadsheet_tool", "csv": "spreadsheet_tool",
-                        "docx": "document_tool", "pptx": "presentation_tool",
-                        "pdf": "pdf_tool", "md": "text_tool", "txt": "text_tool",
+                        "xlsx": "spreadsheet_create",
+                        "csv": "spreadsheet_create",
+                        "docx": "document_create",
+                        "pptx": "presentation_create",
+                        "pdf": "pdf_create",
+                        "md": "text_create",
+                        "txt": "text_create",
                     }
                     supported_formats = [
-                        output_format for output_format, platform_tool in format_tools.items()
-                        if active_names is None or platform_tool in active_names
+                        output_format
+                        for output_format, platform_tool in format_tools.items()
+                        if platform_tool_enabled(platform_tool, active_names)
                     ]
                     if not supported_formats:
                         continue
                     export_file_tool_name = _enterprise_export_file_tool_name(tool_name)
-                    tools.append({"type": "function", "function": {
-                        "name": export_file_tool_name,
-                        "description": (
-                            f"{action.description or action.name}。由平台可信执行器读取同一权限快照的全部分页，"
-                            "直接生成 Excel、CSV、Word、PPT、PDF 或文本到当前员工选定的工作空间；"
-                            "模型不会接触或拼接全部数据行。"
-                        ),
-                        "parameters": _enterprise_export_file_parameters(
-                            action.input_schema, supported_formats,
-                        ),
-                    }})
+                    if export_file_tool_name in registry:
+                        # One page has one trusted composite export entry.  Do
+                        # not let a second manifest Action silently replace it.
+                        continue
+                    tools.append(
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": export_file_tool_name,
+                                "description": (
+                                    f"{action.description or action.name}。由平台可信执行器读取同一权限快照的全部分页，"
+                                    "直接生成 Excel、CSV、Word、PPT、PDF 或文本到当前员工选定的工作空间；"
+                                    "模型不会接触或拼接全部数据行。"
+                                ),
+                                "parameters": _enterprise_export_file_parameters(
+                                    action.input_schema,
+                                    supported_formats,
+                                ),
+                            },
+                        }
+                    )
                     registry[export_file_tool_name] = {
                         "kind": "enterprise_export_file",
                         "application": application,
@@ -3120,11 +3946,16 @@ async def _build_tools(
                         "supported_formats": supported_formats,
                     }
                 else:
-                    tools.append({"type": "function", "function": {
-                        "name": tool_name,
-                        "description": action.description or action.name,
-                        "parameters": parameters,
-                    }})
+                    tools.append(
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "description": action.description or action.name,
+                                "parameters": parameters,
+                            },
+                        }
+                    )
                     registry[tool_name] = {
                         "kind": "enterprise_action",
                         "application": application,
@@ -3133,12 +3964,23 @@ async def _build_tools(
                         "expected_version": context.get("data_version"),
                     }
             file_tools = []
+            composite_export_required = bool(
+                "business_export_to_workspace_file" in registry
+                and _requires_file_artifact(request_text)
+                and re.search(
+                    r"(?:当前|实时|业务|数据|导出|报表|报告|current|business|data|export)",
+                    request_text,
+                    re.I,
+                )
+            )
             for item in _builtin_tool_defs(include_workspace=True, include_image_generation=False):
                 function = item.get("function") or {}
                 name = str(function.get("name") or "")
                 if name not in BUSINESS_ASSISTANT_FILE_TOOL_NAMES:
                     continue
-                if active_names is not None and name not in active_names:
+                if not platform_tool_enabled(name, active_names):
+                    continue
+                if composite_export_required and name in FILE_CREATE_TOOL_NAMES:
                     continue
                 parameters = function.get("parameters") or {}
                 properties = parameters.get("properties")
@@ -3158,15 +4000,17 @@ async def _build_tools(
         if user is not None and not skill_scope_service.user_can_use_folder(user, folder):
             continue
         if user is not None and not await enterprise_application_service.target_allowed_for_user(
-            db, user, "skill_folder", folder.id,
+            db,
+            user,
+            "skill_folder",
+            folder.id,
         ):
             continue
         version = await db.get(SkillVersion, folder.active_version_id) if folder.active_version_id else None
         if version is not None and version.install_status != "ready":
             continue
         platform = (
-            version.manifest.get("_platform")
-            if version is not None and isinstance(version.manifest, dict) else None
+            version.manifest.get("_platform") if version is not None and isinstance(version.manifest, dict) else None
         )
         if isinstance(platform, dict) and platform.get("package_format") == "agent_skill":
             organization = await db.get(Organization, folder.organization_id)
@@ -3176,7 +4020,8 @@ async def _build_tools(
                 continue
             try:
                 skill_path = next(
-                    item["path"] for item in platform.get("resources", [])
+                    item["path"]
+                    for item in platform.get("resources", [])
                     if PurePosixPath(str(item.get("path") or "")).name.lower() == "skill.md"
                 )
                 skill_content = (await skill_import_service.read_version_resource(version, skill_path)).decode("utf-8")
@@ -3185,7 +4030,9 @@ async def _build_tools(
                 continue
             folder_id = str(folder.id)
             agent_skills[folder_id] = {
-                "folder": folder, "version": version, "content": skill_content,
+                "folder": folder,
+                "version": version,
+                "content": skill_content,
                 "platform": platform,
             }
             agent_skill_slugs.setdefault(folder.slug, []).append(folder_id)
@@ -3202,31 +4049,50 @@ async def _build_tools(
             params = dict(manifest.parameters or {"type": "object", "properties": {}})
             params.setdefault("type", "object")
             properties = dict(params.get("properties") or {})
-            properties.setdefault("input_file_ids", {
-                "type": "array", "items": {"type": "string"},
-                "description": "工作空间输入文件 UUID；未传时使用本轮聊天附件",
-            })
-            properties.setdefault("target_workspace_id", {
-                "type": "string",
-                "description": "输出目标；省略时写入个人空间，点名且有写权限时可写共享空间",
-            })
+            properties.setdefault(
+                "input_file_ids",
+                {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "工作空间输入文件 UUID；未传时使用本轮聊天附件",
+                },
+            )
+            properties.setdefault(
+                "target_workspace_id",
+                {
+                    "type": "string",
+                    "description": "输出目标；省略时写入个人空间，点名且有写权限时可写共享空间",
+                },
+            )
             params["properties"] = properties
-            tools.append({"type": "function", "function": {
-                "name": tool_name,
-                "description": manifest.description or folder.name,
-                "parameters": params,
-            }})
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": manifest.description or folder.name,
+                        "parameters": params,
+                    },
+                }
+            )
             registry[tool_name] = {"kind": "code", "folder": folder, "version": version}
             continue
         if version is not None and not manifest.bound_endpoint_ids:
             tool_name = f"load_{re.sub(r'[^a-zA-Z0-9_-]', '_', folder.slug)[:55]}"
-            tools.append({"type": "function", "function": {
-                "name": tool_name,
-                "description": manifest.description or f"载入技能 {folder.name} 的详细操作说明",
-                "parameters": {"type": "object", "properties": {}},
-            }})
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": manifest.description or f"载入技能 {folder.name} 的详细操作说明",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            )
             registry[tool_name] = {
-                "kind": "prompt", "folder": folder, "version": version,
+                "kind": "prompt",
+                "folder": folder,
+                "version": version,
                 "content": manifest_file.content or "",
             }
             continue
@@ -3238,7 +4104,10 @@ async def _build_tools(
             if not (ep and ep.is_active):
                 continue
             if user is not None and not await enterprise_application_service.target_allowed_for_user(
-                db, user, "tool_endpoint", ep.id,
+                db,
+                user,
+                "tool_endpoint",
+                ep.id,
             ):
                 continue
             # OpenAI-compatible providers only accept [a-zA-Z0-9_-] tool names.
@@ -3257,14 +4126,16 @@ async def _build_tools(
                 params = mp
             else:
                 params = ep.params_schema or {"type": "object", "properties": {}}
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "description": ep.description or manifest.description or "",
-                    "parameters": params,
-                },
-            })
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": ep.description or manifest.description or "",
+                        "parameters": params,
+                    },
+                }
+            )
             registry[tool_name] = {"folder": folder, "endpoint": ep}
     if agent_skills:
         summaries = "; ".join(
@@ -3273,84 +4144,122 @@ async def _build_tools(
             for skill_id, entry in agent_skills.items()
         )
         id_schema = {"type": "string", "enum": list(agent_skills)}
-        tools.extend([
-            {"type": "function", "function": {
-                "name": "load_skill",
-                "description": "按需载入当前用户可用标准 Skill 的完整 SKILL.md。可用技能：" + summaries,
-                "parameters": {"type": "object", "properties": {
-                    "skill_id": {**id_schema, "description": "技能 UUID（来自 Skill 目录）"},
-                }, "required": ["skill_id"]},
-            }},
-            {"type": "function", "function": {
-                "name": "read_skill_resource",
-                "description": "读取已载入 Skill 中 references/、assets/ 或脚本说明等文本资源。",
-                "parameters": {"type": "object", "properties": {
-                    "skill_id": id_schema,
-                    "path": {"type": "string", "description": "资源索引中显示的相对路径"},
-                }, "required": ["skill_id", "path"]},
-            }},
-        ])
+        tools.extend(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "load_skill",
+                        "description": "按需载入当前用户可用标准 Skill 的完整 SKILL.md。可用技能：" + summaries,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "skill_id": {**id_schema, "description": "技能 UUID（来自 Skill 目录）"},
+                            },
+                            "required": ["skill_id"],
+                        },
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read_skill_resource",
+                        "description": "读取已载入 Skill 中 references/、assets/ 或脚本说明等文本资源。",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "skill_id": id_schema,
+                                "path": {"type": "string", "description": "资源索引中显示的相对路径"},
+                            },
+                            "required": ["skill_id", "path"],
+                        },
+                    },
+                },
+            ]
+        )
         if any(entry["version"].is_executable for entry in agent_skills.values()):
-            tools.append({"type": "function", "function": {
-                "name": "run_skill_script",
-                "description": (
-                    "在隔离 Runner 中执行当前用户可用 Skill 的 scripts/ 内 Python、Node 或 Bash 脚本。"
-                    "先调用 load_skill 并遵循其说明。"
-                ),
-                "parameters": {"type": "object", "properties": {
-                    "skill_id": id_schema,
-                    "script_path": {"type": "string", "description": "load_skill 返回的 scripts/ 相对路径"},
-                    "args": {
-                        "type": "array", "items": {"type": "string"},
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "run_skill_script",
                         "description": (
-                            "直接传给脚本的参数数组，不是 Shell 命令。严禁猜测服务器文件名、UUID 或相对路径；"
-                            "输入文件必须写 {input_file}（多个输入用 {input_dir}），输出路径必须写在 "
-                            "{output_dir} 下，例如 ['{input_file}', '{output_dir}/处理后.xlsx']。"
+                            "在隔离 Runner 中执行当前用户可用 Skill 的 scripts/ 内 Python、Node 或 Bash 脚本。"
+                            "先调用 load_skill 并遵循其说明。"
                         ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "skill_id": id_schema,
+                                "script_path": {"type": "string", "description": "load_skill 返回的 scripts/ 相对路径"},
+                                "args": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": (
+                                        "直接传给脚本的参数数组，不是 Shell 命令。"
+                                        "严禁猜测服务器文件名、UUID 或相对路径；"
+                                        "输入文件必须写 {input_file}（多个输入用 {input_dir}），输出路径必须写在 "
+                                        "{output_dir} 下，例如 ['{input_file}', '{output_dir}/处理后.xlsx']。"
+                                    ),
+                                },
+                                "input_file_ids": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "工作空间输入文件 UUID；省略时使用本轮附件",
+                                },
+                                "target_workspace_id": {
+                                    "type": "string",
+                                    "description": "新建输出目标；省略时写入个人空间，有 create 权限时可写共享空间",
+                                },
+                                "target_file_id": {
+                                    "type": "string",
+                                    "description": "可选：脚本恰好一个产出时原位更新的稳定文件 UUID",
+                                },
+                                "base_version_id": {
+                                    "type": "string",
+                                    "description": "target_file_id 存在时必填：开始编辑时读取到的版本 UUID",
+                                },
+                                "idempotency_key": {
+                                    "type": "string",
+                                    "minLength": 8,
+                                    "description": "兼容客户端重试键；服务端会按本轮工具调用生成最终写入键",
+                                },
+                                "output_path": {
+                                    "type": "string",
+                                    "description": "新建单输出的完整相对路径；多输出时作为目标目录前缀",
+                                },
+                            },
+                            "required": ["skill_id", "script_path"],
+                        },
                     },
-                    "input_file_ids": {
-                        "type": "array", "items": {"type": "string"},
-                        "description": "工作空间输入文件 UUID；省略时使用本轮附件",
-                    },
-                    "target_workspace_id": {
-                        "type": "string",
-                        "description": "新建输出目标；省略时写入个人空间，有 create 权限时可写共享空间",
-                    },
-                    "target_file_id": {
-                        "type": "string",
-                        "description": "可选：脚本恰好一个产出时原位更新的稳定文件 UUID",
-                    },
-                    "base_version_id": {
-                        "type": "string",
-                        "description": "target_file_id 存在时必填：开始编辑时读取到的版本 UUID",
-                    },
-                    "idempotency_key": {
-                        "type": "string", "minLength": 8,
-                        "description": "兼容客户端重试键；服务端会按本轮工具调用生成最终写入键",
-                    },
-                    "output_path": {
-                        "type": "string",
-                        "description": "新建单输出的完整相对路径；多输出时作为目标目录前缀",
-                    },
-                }, "required": ["skill_id", "script_path"]},
-            }})
+                }
+            )
         tool_names = ["load_skill", "read_skill_resource"]
         if any(entry["version"].is_executable for entry in agent_skills.values()):
             tool_names.append("run_skill_script")
         for name in tool_names:
             registry[name] = {
-                "kind": name, "skills": agent_skills, "slug_index": agent_skill_slugs,
+                "kind": name,
+                "skills": agent_skills,
+                "slug_index": agent_skill_slugs,
             }
     include_image_generation = False
     if workspace_id and user is not None:
-        include_image_generation = await multimodal_service.resolve_image_generation(
-            db, user.organization_id, dept_id=user.department_id, team_id=user.team_id,
-        ) is not None
+        include_image_generation = (
+            await multimodal_service.resolve_image_generation(
+                db,
+                user.organization_id,
+                dept_id=user.department_id,
+                team_id=user.team_id,
+            )
+            is not None
+        )
     from app.services.platform_tool_registry import (
         active_external_tool_defs,
         active_platform_tool_names,
         platform_managed_tool_names,
     )
+
     builtin_defs = _builtin_tool_defs(
         include_workspace=bool(workspace_id) or user is not None,
         include_image_generation=include_image_generation,
@@ -3358,24 +4267,26 @@ async def _build_tools(
     active_builtin_names = await active_platform_tool_names(db)
     if active_builtin_names is not None:
         builtin_defs = [
-            item for item in builtin_defs
-            if item.get("function", {}).get("name") in active_builtin_names
+            item
+            for item in builtin_defs
+            if platform_tool_enabled(str(item.get("function", {}).get("name") or ""), active_builtin_names)
         ]
         disabled_managed_names = platform_managed_tool_names() - active_builtin_names
-        tools = [
-            item for item in tools
-            if item.get("function", {}).get("name") not in disabled_managed_names
-        ]
+        tools = [item for item in tools if item.get("function", {}).get("name") not in disabled_managed_names]
         for name in disabled_managed_names:
             registry.pop(name, None)
     # 企业应用内的业务小助手只能使用当前页面获准的契约 Action。
     # 普通聊天可见的全局扩展工具可能仍指向旧系统地址；把它们混入应用会话不仅越过
     # 应用边界，也会让模型先逐个等待失效接口超时，造成抽屉长期停在“正在理解”。
-    external_defs = [] if application_id else await active_external_tool_defs(
-        db,
-        organization_id=str(user.organization_id) if user is not None else "",
-        user_role=str(user.role) if user is not None else None,
-        exec_mode=exec_mode,
+    external_defs = (
+        []
+        if application_id
+        else await active_external_tool_defs(
+            db,
+            organization_id=str(user.organization_id) if user is not None else "",
+            user_role=str(user.role) if user is not None else None,
+            exec_mode=exec_mode,
+        )
     )
     if external_defs:
         # Extension tools execute inside the runtime, so they get no execution registry entry;
@@ -3407,8 +4318,12 @@ async def _external_tool_risk_flags(db) -> dict[str, dict]:
 
 
 async def _execute_code_skill(
-    state: AgentState, entry: dict, params: dict, *,
-    script_path: str | None = None, script_args: list[str] | None = None,
+    state: AgentState,
+    entry: dict,
+    params: dict,
+    *,
+    script_path: str | None = None,
+    script_args: list[str] | None = None,
 ) -> str:
     deps = get_deps()
     db = deps["db"]
@@ -3419,7 +4334,10 @@ async def _execute_code_skill(
     if user is None or not skill_scope_service.user_can_use_folder(user, folder):
         return json.dumps({"status": "error", "error": "Skill is outside the current user scope"})
     if not await enterprise_application_service.target_allowed_for_user(
-        db, user, "skill_folder", folder.id,
+        db,
+        user,
+        "skill_folder",
+        folder.id,
     ):
         return json.dumps({"status": "error", "error": "Enterprise application permission required"})
     # Re-check mutable authorization/lifecycle state immediately before each
@@ -3451,15 +4369,24 @@ async def _execute_code_skill(
     target_file = None
     if target_file_id:
         if not base_version_id:
-            return json.dumps({
-                "status": "error", "error": "base_version_id is required with target_file_id",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "base_version_id is required with target_file_id",
+                }
+            )
         if output_path:
-            return json.dumps({
-                "status": "error", "error": "output_path cannot rename a target_file_id update",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "output_path cannot rename a target_file_id update",
+                }
+            )
         target_file, ws, user = await _authorized_file(
-            state, target_file_id, user, capability="update",
+            state,
+            target_file_id,
+            user,
+            capability="update",
         )
         if target_file is None or ws is None:
             return json.dumps({"status": "error", "error": "target file not found or update denied"})
@@ -3468,20 +4395,28 @@ async def _execute_code_skill(
     else:
         workspace_params = {"target_workspace_id": target_workspace_id}
         ws, user, workspace_error = await _resolve_tool_workspace(
-            state, workspace_params, user, capability="create", parameter="target_workspace_id",
+            state,
+            workspace_params,
+            user,
+            capability="create",
+            parameter="target_workspace_id",
         )
         if workspace_error:
             return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
     if not mutation_key:
         # Direct internal callers predating server-owned tool keys still get a
         # deterministic execution-scoped fallback, never a random write key.
-        mutation_key = "skill-" + hashlib.sha256(
-            f"{state.get('task_id')}:{version.id}:{script_path}:{base_version_id}".encode()
-        ).hexdigest()
+        mutation_key = (
+            "skill-"
+            + hashlib.sha256(
+                f"{state.get('task_id')}:{version.id}:{script_path}:{base_version_id}".encode()
+            ).hexdigest()
+        )
     if script_path is not None:
         platform = version.manifest.get("_platform") if isinstance(version.manifest, dict) else None
         allowed_scripts = {
-            str(item.get("path")) for item in (platform.get("scripts") if isinstance(platform, dict) else [])
+            str(item.get("path"))
+            for item in (platform.get("scripts") if isinstance(platform, dict) else [])
             if isinstance(item, dict) and item.get("path")
         }
         if script_path not in allowed_scripts:
@@ -3497,9 +4432,7 @@ async def _execute_code_skill(
         valid_ids.append(str(file.id))
         input_workspace = await workspace_service.get_workspace(db, file.workspace_id)
         if input_workspace is not None:
-            input_identities.append(
-                await _workspace_file_identity(db, file, input_workspace, user)
-            )
+            input_identities.append(await _workspace_file_identity(db, file, input_workspace, user))
 
     execution = SkillExecution(
         organization_id=UUID(state["org_id"]),
@@ -3516,12 +4449,19 @@ async def _execute_code_skill(
     await db.flush()
     try:
         result, latency = await skill_runner_client.execute_version(
-            version, params=params, inputs=inputs, execution_id=execution.id,
-            script_path=script_path, args=script_args,
+            version,
+            params=params,
+            inputs=inputs,
+            execution_id=execution.id,
+            script_path=script_path,
+            args=script_args,
         )
         for identity in input_identities:
             _remember_tool_file(
-                state, identity, operation="read", tool_name="run_skill_script",
+                state,
+                identity,
+                operation="read",
+                tool_name="run_skill_script",
             )
         output_ids: list[str] = []
         output_items: list[dict] = []
@@ -3529,9 +4469,12 @@ async def _execute_code_skill(
         task_part = state.get("task_id") or "playground"
         outputs = list(result.get("outputs") or [])
         if target_file is not None and len(outputs) != 1:
-            return json.dumps({
-                "status": "error", "error": "target_file_id requires exactly one Runner output",
-            })
+            return json.dumps(
+                {
+                    "status": "error",
+                    "error": "target_file_id requires exactly one Runner output",
+                }
+            )
         for output_index, item in enumerate(outputs):
             output_mutation_key = f"{mutation_key}-{output_index}"
             original = PurePosixPath(str(item.get("name") or "output.bin")).name
@@ -3539,10 +4482,7 @@ async def _execute_code_skill(
             safe_parts = [part for part in relative.parts if part not in {"", ".", ".."}]
             relative_path = "/".join(safe_parts) or original
             if output_path:
-                path = (
-                    output_path if len(outputs) == 1
-                    else f"{output_path.rstrip('/')}/{relative_path}"
-                )
+                path = output_path if len(outputs) == 1 else f"{output_path.rstrip('/')}/{relative_path}"
             else:
                 stable_suffix = hashlib.sha256(output_mutation_key.encode()).hexdigest()[:12]
                 path = f"技能输出/{task_part}/{stable_suffix}-{relative_path}"
@@ -3555,11 +4495,14 @@ async def _execute_code_skill(
             format_verified = False
             if item.get("content_ref"):
                 (
-                    content_ref, actual_size, mime, actual_etag, content_hash,
-                    detected_format, format_verified,
-                ) = (
-                    await _validated_runner_output(item, mime)
-                )
+                    content_ref,
+                    actual_size,
+                    mime,
+                    actual_etag,
+                    content_hash,
+                    detected_format,
+                    format_verified,
+                ) = await _validated_runner_output(item, mime)
             else:
                 raw = base64.b64decode(item.get("content_base64") or "", validate=True)
                 if not raw:
@@ -3575,14 +4518,19 @@ async def _execute_code_skill(
                     "mime": mime,
                     "name": (
                         clean_display_name(target_file.path, target_file.metadata_ or {})
-                        if target_file is not None else original
+                        if target_file is not None
+                        else original
                     ),
                     "storage_backend": "oss_gateway" if content_ref else "postgres_base64",
                     **({"etag": actual_etag} if actual_etag else {}),
-                    **({
-                        "artifact_format_verified": True,
-                        "detected_artifact_format": detected_format,
-                    } if format_verified else {}),
+                    **(
+                        {
+                            "artifact_format_verified": True,
+                            "detected_artifact_format": detected_format,
+                        }
+                        if format_verified
+                        else {}
+                    ),
                 },
                 source_kind="skill",
                 **task_source,
@@ -3599,18 +4547,28 @@ async def _execute_code_skill(
                     parameter="target_workspace_id",
                 )
                 if workspace_error:
-                    return json.dumps({
-                        "status": "error", "error": "target workspace create permission was revoked",
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "error",
+                            "error": "target workspace create permission was revoked",
+                        },
+                        ensure_ascii=False,
+                    )
             if target_file is not None:
                 # Runner time must not bridge a role revocation or a human edit.
                 target_file, ws, user = await _authorized_file(
-                    state, target_file_id, user, capability="update",
+                    state,
+                    target_file_id,
+                    user,
+                    capability="update",
                 )
                 if target_file is None or ws is None:
-                    return json.dumps({
-                        "status": "error", "error": "target file update permission was revoked",
-                    })
+                    return json.dumps(
+                        {
+                            "status": "error",
+                            "error": "target file update permission was revoked",
+                        }
+                    )
                 try:
                     saved = await workspace_service.replace_file_artifact(
                         db,
@@ -3627,26 +4585,37 @@ async def _execute_code_skill(
                         created_by_user_id=user.id,
                     )
                 except workspace_service.WorkspaceFileVersionConflict as exc:
-                    return json.dumps({
-                        "status": "conflict", "error": str(exc),
-                        "current_version_id": exc.current_version_id,
-                        "latest_version_id": exc.current_version_id,
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "conflict",
+                            "error": str(exc),
+                            "current_version_id": exc.current_version_id,
+                            "latest_version_id": exc.current_version_id,
+                        },
+                        ensure_ascii=False,
+                    )
                 except workspace_service.WorkspaceFileIdempotencyConflict as exc:
                     return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
                 except workspace_service.WorkspaceFileActiveEditConflict as exc:
-                    return json.dumps({
-                        "status": "conflict",
-                        "code": "workspace_file_active_edit_conflict",
-                        "error": str(exc),
-                        "room_id": exc.room_id,
-                        "current_version_id": exc.current_version_id,
-                    }, ensure_ascii=False)
+                    return json.dumps(
+                        {
+                            "status": "conflict",
+                            "code": "workspace_file_active_edit_conflict",
+                            "error": str(exc),
+                            "room_id": exc.room_id,
+                            "current_version_id": exc.current_version_id,
+                        },
+                        ensure_ascii=False,
+                    )
                 if inline_content is not None:
                     await workspace_service.reparse_file(db, saved)
                 await workspace_governance_service.audit(
-                    db, ws, "file_updated", user_id=user.id,
-                    file=saved, version_id=saved.current_version_id,
+                    db,
+                    ws,
+                    "file_updated",
+                    user_id=user.id,
+                    file=saved,
+                    version_id=saved.current_version_id,
                     metadata={"skill_id": str(folder.id)},
                 )
             else:
@@ -3669,26 +4638,33 @@ async def _execute_code_skill(
                 )
                 if replayed:
                     saved, replay_workspace, user = await _authorized_create_replay(
-                        state, mutation, user,
+                        state,
+                        mutation,
+                        user,
                     )
                     if saved is None or replay_workspace is None:
-                        return json.dumps({
-                            "status": "conflict", "error": "idempotent Skill output is unavailable",
-                        })
+                        return json.dumps(
+                            {
+                                "status": "conflict",
+                                "error": "idempotent Skill output is unavailable",
+                            }
+                        )
                     ws = replay_workspace
                 else:
                     existing = await workspace_service.get_file_by_path(db, ws.id, path)
                     if existing is not None:
                         await db.delete(mutation)
                         await db.flush()
-                        return json.dumps({
-                            "status": "conflict",
-                            "error": "output path already exists; use target_file_id with its base version",
-                            "file_id": str(existing.id),
-                            "current_version_id": (
-                                str(existing.current_version_id) if existing.current_version_id else None
-                            ),
-                        })
+                        return json.dumps(
+                            {
+                                "status": "conflict",
+                                "error": "output path already exists; use target_file_id with its base version",
+                                "file_id": str(existing.id),
+                                "current_version_id": (
+                                    str(existing.current_version_id) if existing.current_version_id else None
+                                ),
+                            }
+                        )
                     try:
                         if content_ref:
                             saved = await workspace_service.upsert_file(
@@ -3730,35 +4706,49 @@ async def _execute_code_skill(
                         await db.flush()
                         raise
                     await workspace_governance_service.audit(
-                        db, ws, "file_written", user_id=user.id,
-                        file=saved, version_id=saved.current_version_id,
+                        db,
+                        ws,
+                        "file_written",
+                        user_id=user.id,
+                        file=saved,
+                        version_id=saved.current_version_id,
                         metadata={"skill_id": str(folder.id)},
                     )
             output_ids.append(str(saved.id))
             identity = await _workspace_file_identity(db, saved, ws, user)
             display_name = clean_display_name(saved.path, saved.metadata_ or {})
-            output_items.append({
-                **identity,
-                "display_name": display_name,
-                "name": display_name,
-                "parse_status": saved.parse_status,
-            })
+            output_items.append(
+                {
+                    **identity,
+                    "display_name": display_name,
+                    "name": display_name,
+                    "parse_status": saved.parse_status,
+                }
+            )
         execution.status = "success"
         execution.latency_ms = latency
         execution.output_file_ids = output_ids
         await db.flush()
-        return json.dumps({
-            "status": "success", "skill": folder.name,
-            "summary": result.get("stdout") or "执行完成", "outputs": output_items,
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "status": "success",
+                "skill": folder.name,
+                "summary": result.get("stdout") or "执行完成",
+                "outputs": output_items,
+            },
+            ensure_ascii=False,
+        )
     except workspace_service.WorkspaceFileUnsupportedTextUpdate:
         execution.status = "failed"
         execution.error = "skill_output_format_incompatible"
         await db.flush()
-        return json.dumps({
-            "status": "error",
-            "error": "Skill 输出格式与目标文件不兼容；请另建文件或使用匹配格式的工具",
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "status": "error",
+                "error": "Skill 输出格式与目标文件不兼容；请另建文件或使用匹配格式的工具",
+            },
+            ensure_ascii=False,
+        )
     except Exception as exc:  # noqa: BLE001
         # Do not persist or echo raw Runner/storage failures: they may contain a
         # temporary signed URL, object key, or document excerpt.
@@ -3779,7 +4769,9 @@ async def _execute_code_skill(
 
 def _skill_record(folder: SkillFolder, version: SkillVersion | None, action: str) -> dict:
     return {
-        "id": str(folder.id), "name": folder.name, "slug": folder.slug,
+        "id": str(folder.id),
+        "name": folder.name,
+        "slug": folder.slug,
         "scope_type": folder.scope_type,
         "scope_id": str(folder.scope_id) if folder.scope_id else None,
         "version_id": str(version.id) if version is not None else None,
@@ -3789,7 +4781,11 @@ def _skill_record(folder: SkillFolder, version: SkillVersion | None, action: str
 
 
 def _append_skill_record(
-    state: AgentState, key: str, folder: SkillFolder, version: SkillVersion | None, action: str,
+    state: AgentState,
+    key: str,
+    folder: SkillFolder,
+    version: SkillVersion | None,
+    action: str,
 ) -> None:
     records = state.setdefault(key, [])
     record = _skill_record(folder, version, action)
@@ -3818,7 +4814,10 @@ async def _resolve_agent_skill(state: AgentState, entry: dict, params: dict) -> 
     if user is None or not skill_scope_service.user_can_use_folder(user, folder):
         return None, "Skill is outside the current user scope"
     if not await enterprise_application_service.target_allowed_for_user(
-        db, user, "skill_folder", folder.id,
+        db,
+        user,
+        "skill_folder",
+        folder.id,
     ):
         return None, "Enterprise application permission required"
     await db.refresh(folder)
@@ -3844,19 +4843,24 @@ async def _execute_agent_skill_tool(state: AgentState, entry: dict, name: str, p
     version: SkillVersion = selected["version"]
     if name == "load_skill":
         _append_skill_record(state, "loaded_skills", folder, version, "load_skill")
-        return json.dumps({
-            "status": "success",
-            "skill": {"id": str(folder.id), "name": folder.name, "slug": folder.slug},
-            "instructions": selected["content"],
-            "scripts": platform.get("scripts") or [],
-            "resources": platform.get("resources") or [],
-            "compatibility_warnings": platform.get("compatibility_warnings") or [],
-            "execution_contract": {
-                "input_dir": "SKILL_INPUT_DIR", "output_dir": "SKILL_OUTPUT_DIR",
-                "skill_dir": "SKILL_DIR", "params_json": "SKILL_PARAMS_JSON",
-                "argument_placeholders": ["{input_file}", "{input_dir}", "{output_dir}", "{params_json}"],
+        return json.dumps(
+            {
+                "status": "success",
+                "skill": {"id": str(folder.id), "name": folder.name, "slug": folder.slug},
+                "instructions": selected["content"],
+                "scripts": platform.get("scripts") or [],
+                "resources": platform.get("resources") or [],
+                "compatibility_warnings": platform.get("compatibility_warnings") or [],
+                "execution_contract": {
+                    "input_dir": "SKILL_INPUT_DIR",
+                    "output_dir": "SKILL_OUTPUT_DIR",
+                    "skill_dir": "SKILL_DIR",
+                    "params_json": "SKILL_PARAMS_JSON",
+                    "argument_placeholders": ["{input_file}", "{input_dir}", "{output_dir}", "{params_json}"],
+                },
             },
-        }, ensure_ascii=False)
+            ensure_ascii=False,
+        )
     if name == "read_skill_resource":
         _append_skill_record(state, "loaded_skills", folder, version, "read_skill_resource")
         path = str(params.get("path") or "")
@@ -3878,12 +4882,14 @@ async def _execute_agent_skill_tool(state: AgentState, entry: dict, name: str, p
         if not isinstance(raw_args, list) or not all(isinstance(value, str) for value in raw_args):
             return json.dumps({"status": "error", "error": "args must be an array of strings"})
         execution_params = {
-            key: value for key, value in params.items()
-            if key not in {"skill_id", "skill_slug", "script_path", "args"}
+            key: value for key, value in params.items() if key not in {"skill_id", "skill_slug", "script_path", "args"}
         }
         result = await _execute_code_skill(
-            state, selected, execution_params,
-            script_path=str(params.get("script_path") or ""), script_args=raw_args,
+            state,
+            selected,
+            execution_params,
+            script_path=str(params.get("script_path") or ""),
+            script_args=raw_args,
         )
         try:
             if json.loads(result).get("status") == "success":
@@ -3895,7 +4901,9 @@ async def _execute_agent_skill_tool(state: AgentState, entry: dict, name: str, p
 
 
 async def _execute_tool_call(
-    state: AgentState, tool_call: dict, registry: dict[str, dict],
+    state: AgentState,
+    tool_call: dict,
+    registry: dict[str, dict],
 ) -> tuple[dict, str, bool]:
     """执行单个 tool_call，返回 (tool 消息, 结果预览, 是否成功)。
 
@@ -3911,15 +4919,15 @@ async def _execute_tool_call(
         params = {}
 
     tool_call_id = tool_call.get("id", "")
-    mutation_material = "\0".join((
-        str(state.get("task_id") or "playground"),
-        str(state.get("run_id") or "run"),
-        str(tool_call_id),
-        str(name),
-    ))
-    server_mutation_key = "agent-" + hashlib.sha256(
-        mutation_material.encode("utf-8")
-    ).hexdigest()
+    mutation_material = "\0".join(
+        (
+            str(state.get("task_id") or "playground"),
+            str(state.get("run_id") or "run"),
+            str(tool_call_id),
+            str(name),
+        )
+    )
+    server_mutation_key = "agent-" + hashlib.sha256(mutation_material.encode("utf-8")).hexdigest()
 
     # 内置工作空间文件工具
     if name in BUILTIN_TOOL_NAMES | LEGACY_BUILTIN_TOOL_NAMES:
@@ -3928,16 +4936,18 @@ async def _execute_tool_call(
         # invents a new client idempotency key.
         params = dict(params)
         params["_mutation_key"] = server_mutation_key
+        params["_tool_call_id"] = tool_call_id
         result_text = await _execute_builtin_tool(state, name, params)
-        ok = not result_text.startswith(("no ", "workspace ", "file not found",
-                                         "tool error", "unknown builtin"))
+        ok = not result_text.startswith(("no ", "workspace ", "file not found", "tool error", "unknown builtin"))
         if ok:
             try:
                 structured_result = json.loads(result_text)
             except (json.JSONDecodeError, TypeError):
                 structured_result = None
             if isinstance(structured_result, dict) and structured_result.get("status") in {
-                "error", "unavailable", "conflict",
+                "error",
+                "unavailable",
+                "conflict",
             }:
                 ok = False
             if ok and isinstance(structured_result, dict):
@@ -3945,8 +4955,7 @@ async def _execute_tool_call(
         preview = result_text
         if len(preview) > 4000:
             preview = preview[:4000] + "\n[工具结果预览已截断，模型已收到完整分页结果]"
-        return ({"role": "tool", "tool_call_id": tool_call_id, "content": result_text},
-                preview, ok)
+        return ({"role": "tool", "tool_call_id": tool_call_id, "content": result_text}, preview, ok)
 
     entry = registry.get(name)
     if entry is None:
@@ -3976,16 +4985,23 @@ async def _execute_tool_call(
                 if coll is None:
                     continue
                 hits = await rag_retrieve(
-                    db, coll, UUID(state["org_id"]), RagRetrieveRequest(query=query, top_k=top_k),
+                    db,
+                    coll,
+                    UUID(state["org_id"]),
+                    RagRetrieveRequest(query=query, top_k=top_k),
                     department_id=state.get("department_id"),
                     team_id=state.get("team_id"),
                 )
                 for hit in hits:
-                    merged.append({
-                        "content": hit["content"], "score": hit["score"],
-                        "document_id": hit["document_id"], "collection_id": str(cid),
-                        "metadata": hit.get("metadata") or {},
-                    })
+                    merged.append(
+                        {
+                            "content": hit["content"],
+                            "score": hit["score"],
+                            "document_id": hit["document_id"],
+                            "collection_id": str(cid),
+                            "metadata": hit.get("metadata") or {},
+                        }
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("agent_rag_tool_failed", collection=str(cid), error=str(exc))
         merged.sort(key=lambda item: item.get("score", 0.0), reverse=True)
@@ -4004,7 +5020,11 @@ async def _execute_tool_call(
             ok = False
         if ok:
             _append_skill_record(
-                state, "executed_skills", entry["folder"], entry.get("version"), "runner_script",
+                state,
+                "executed_skills",
+                entry["folder"],
+                entry.get("version"),
+                "runner_script",
             )
             try:
                 structured = json.loads(content)
@@ -4037,13 +5057,18 @@ async def _execute_tool_call(
             return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
         try:
             content, ok = await _execute_enterprise_export_file(
-                state, entry, params, user, db, tool_call_id,
+                state,
+                entry,
+                params,
+                user,
+                db,
+                tool_call_id,
             )
             if ok:
                 structured = json.loads(content)
-                trusted_file_tool = str(structured.get("tool") or "spreadsheet_tool")
+                trusted_file_tool = str(structured.get("tool") or "spreadsheet_create")
                 if trusted_file_tool not in PLATFORM_TOOL_NAMES:
-                    trusted_file_tool = "spreadsheet_tool"
+                    trusted_file_tool = "spreadsheet_create"
                 _remember_structured_tool_result(state, trusted_file_tool, structured)
             return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
         except Exception as exc:  # noqa: BLE001
@@ -4070,7 +5095,10 @@ async def _execute_tool_call(
                 action_params,
                 user,
                 request_id=_enterprise_action_request_id(
-                    state, tool_call_id, action_params, expected_version,
+                    state,
+                    tool_call_id,
+                    action_params,
+                    expected_version,
                 ),
                 page_key=entry.get("page_key"),
                 operation=action.operation,
@@ -4080,11 +5108,13 @@ async def _execute_tool_call(
             ok = result.get("status") in {"pending", "completed"}
             if result.get("status") == "completed" and isinstance(result.get("provenance"), dict):
                 result_payload = result.get("result") if isinstance(result.get("result"), dict) else {}
-                state.setdefault("business_action_provenance", []).append({
-                    **dict(result["provenance"]),
-                    "snapshot_id": result_payload.get("snapshotId"),
-                    "snapshot_at": result_payload.get("snapshotAt"),
-                })
+                state.setdefault("business_action_provenance", []).append(
+                    {
+                        **dict(result["provenance"]),
+                        "snapshot_id": result_payload.get("snapshotId"),
+                        "snapshot_at": result_payload.get("snapshotAt"),
+                    }
+                )
             return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
         except Exception as exc:  # noqa: BLE001
             logger.warning("enterprise_action_failed", action=action.action_key, error=str(exc))
@@ -4095,10 +5125,16 @@ async def _execute_tool_call(
     user = deps.get("user")
     if user is not None:
         skill_allowed = await enterprise_application_service.target_allowed_for_user(
-            db, user, "skill_folder", folder.id,
+            db,
+            user,
+            "skill_folder",
+            folder.id,
         )
         endpoint_allowed = await enterprise_application_service.target_allowed_for_user(
-            db, user, "tool_endpoint", ep.id,
+            db,
+            user,
+            "tool_endpoint",
+            ep.id,
         )
         if not skill_allowed or not endpoint_allowed:
             msg = "Enterprise application permission required"
@@ -4110,13 +5146,16 @@ async def _execute_tool_call(
 
     try:
         result = await execute_endpoint(
-            db, org_id=UUID(state["org_id"]), connector=conn, endpoint=ep,
-            params=params, skill_id=folder.id,
+            db,
+            org_id=UUID(state["org_id"]),
+            connector=conn,
+            endpoint=ep,
+            params=params,
+            skill_id=folder.id,
         )
         preview = json.dumps(result.body, ensure_ascii=False) if result.body is not None else (result.error or "")
         ok = 200 <= int(result.status_code or 0) < 400
-        return ({"role": "tool", "tool_call_id": tool_call_id, "content": preview[:4000]},
-                preview[:4000], ok)
+        return ({"role": "tool", "tool_call_id": tool_call_id, "content": preview[:4000]}, preview[:4000], ok)
     except Exception as exc:  # noqa: BLE001
         logger.warning("tool_call_failed", tool=name, error_type=type(exc).__name__)
         msg = "外部工具调用失败，请检查连接器状态后重试"
@@ -4172,8 +5211,8 @@ def _skill_catalog_prompt(state: AgentState, *, load_skill_available: bool) -> s
     invoked_ids = {item.get("id") for item in state.get("invoked_skills") or []}
     lines: list[str] = []
     for item in skill_catalog[:80]:
-        priority = "本轮明确" if item.get("id") in invoked_ids else (
-            "智能体默认" if item.get("id") in default_ids else "可用"
+        priority = (
+            "本轮明确" if item.get("id") in invoked_ids else ("智能体默认" if item.get("id") in default_ids else "可用")
         )
         executable = "可执行" if item.get("is_executable") else "说明/API"
         description = str(item.get("description") or "").replace("\n", " ")[:240]
@@ -4205,12 +5244,14 @@ def _workspace_access_prompt(access: dict, intent: dict) -> str:
     for item in access.get("workspaces") or []:
         caps = item.get("capabilities") or {}
         allowed = [label for key, label in labels.items() if caps.get(key)]
-        source_names = sorted({
-            str(source.get("name"))
-            for values in (item.get("sources") or {}).values()
-            for source in values
-            if source.get("name")
-        })
+        source_names = sorted(
+            {
+                str(source.get("name"))
+                for values in (item.get("sources") or {}).values()
+                for source in values
+                if source.get("name")
+            }
+        )
         rows.append(
             f"- {item.get('name')}（workspace_id={item.get('id')}，{item.get('slug')}，{item.get('scope_type')}）："
             f"{('、'.join(allowed) if allowed else '无权限')}"
@@ -4233,14 +5274,38 @@ def _workspace_access_prompt(access: dict, intent: dict) -> str:
 # ── DSH ToolSpec 装配 ────────────────────────────────────────────────────
 
 _DSH_READ_ONLY_TOOL_NAMES = {
-    "workspace_list", "workspace_search", "workspace_get_file", "workspace_list_files",
-    "workspace_read_file", "workspace_list_versions", "rag_search", "load_skill",
-    "read_skill_resource", "read_memory", "web_tool",
+    "workspace_list",
+    "workspace_search",
+    "workspace_get_file",
+    "workspace_list_files",
+    "workspace_read_file",
+    "workspace_list_versions",
+    "rag_search",
+    "load_skill",
+    "read_skill_resource",
+    "read_memory",
+    "web_tool",
+    "spreadsheet_inspect",
+    "document_inspect",
+    "presentation_inspect",
+    "pdf_inspect",
+    "text_inspect",
 }
 _DSH_READ_ONLY_REGISTRY_KINDS = {"prompt", "load_skill", "read_skill_resource", "rag_search"}
-_DSH_LONG_RUNNING_TOOL_NAMES = {"run_skill_script", "web_tool", "image_generation_tool"}
+_DSH_LONG_RUNNING_TOOL_NAMES = {
+    "run_skill_script",
+    "web_tool",
+    "image_generation_tool",
+    "spreadsheet_convert",
+    "document_convert",
+    "presentation_convert",
+    "pdf_convert",
+}
 _DSH_LONG_RUNNING_REGISTRY_KINDS = {
-    "code", "run_skill_script", "enterprise_action", "enterprise_export_file",
+    "code",
+    "run_skill_script",
+    "enterprise_action",
+    "enterprise_export_file",
 }
 _DSH_SKILL_REGISTRY_KINDS = {"code", "prompt", "load_skill", "read_skill_resource", "run_skill_script"}
 # ``ToolSpec.approval="ask"``: the runtime parks these calls until the terminal user decides
@@ -4326,33 +5391,45 @@ def dsh_tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -
             # Extension tools run inside the runtime and have no execution entry; ``_build_tools``
             # attaches their manifest ``risk_level`` / ``side_effects`` to the definition instead.
             entry = tool.get("risk") if isinstance(tool.get("risk"), dict) else None
-        specs.append({
-            "name": name,
-            "description": str(function.get("description") or ""),
-            "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
-            **_dsh_tool_metadata(name, entry),
-        })
+        specs.append(
+            {
+                "name": name,
+                "description": str(function.get("description") or ""),
+                "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
+                **_dsh_tool_metadata(name, entry),
+            }
+        )
     return specs
 
 
 def _memory_tool_defs() -> list[dict]:
     """read_memory / write_memory for the DSH turn; schemas mirror ``app.mcp.server``."""
     return [
-        {"type": "function", "function": {
-            "name": "read_memory",
-            "description": "读取当前用户 4 级 scope（组织/部门/团队/个人）聚合的长期记忆全文。",
-            "parameters": {"type": "object", "properties": {}},
-        }},
-        {"type": "function", "function": {
-            "name": "write_memory",
-            "description": (
-                "沉淀一条可跨任务复用的结论性事实到当前用户个人级长期记忆（逐条追加、去重）。"
-                "用「实体 → 属性 → 值」短句；不要写入一次性数据、中间推理或本轮临时数值。"
-            ),
-            "parameters": {"type": "object", "properties": {
-                "content": {"type": "string", "description": "要沉淀的事实，一条一句"},
-            }, "required": ["content"]},
-        }},
+        {
+            "type": "function",
+            "function": {
+                "name": "read_memory",
+                "description": "读取当前用户 4 级 scope（组织/部门/团队/个人）聚合的长期记忆全文。",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_memory",
+                "description": (
+                    "沉淀一条可跨任务复用的结论性事实到当前用户个人级长期记忆（逐条追加、去重）。"
+                    "用「实体 → 属性 → 值」短句；不要写入一次性数据、中间推理或本轮临时数值。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "要沉淀的事实，一条一句"},
+                    },
+                    "required": ["content"],
+                },
+            },
+        },
     ]
 
 
@@ -4373,9 +5450,12 @@ async def _execute_memory_tool(state: AgentState, entry: dict, params: dict) -> 
             if not content:
                 return json.dumps({"status": "error", "error": "content is required"}), False
             if len(content) > MEMORY_WRITE_MAX_CHARS:
-                return json.dumps({
-                    "status": "error", "error": f"content exceeds {MEMORY_WRITE_MAX_CHARS} chars",
-                }), False
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "error": f"content exceeds {MEMORY_WRITE_MAX_CHARS} chars",
+                    }
+                ), False
             async with db.begin_nested():
                 result = await capability_tools._write_memory(db, principal, content)
             # extract_memory skips its LLM pass when the run already persisted facts itself.
@@ -4417,14 +5497,14 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
 
     ontology_ids = state.get("ontology_ids") or []
     if ontology_ids:
-        ontologies = [
-            item for item in [await db.get(OntologyFile, UUID(oid)) for oid in ontology_ids] if item
-        ]
+        ontologies = [item for item in [await db.get(OntologyFile, UUID(oid)) for oid in ontology_ids] if item]
         ont_text = _compact_ontologies(ontologies)
         if ont_text:
             system_prompt = f"{system_prompt}\n\n[组织本体]\n{ont_text}"
         trace = {
-            "category": "ontology", "title": "组织本体注入", "files": len(ontologies),
+            "category": "ontology",
+            "title": "组织本体注入",
+            "files": len(ontologies),
             "paths": [item.path for item in ontologies],
         }
         _emit({"type": "trace", **trace})
@@ -4438,14 +5518,21 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
             logger.warning("load_data_interfaces_failed", error=str(exc))
             interfaces = []
         interfaces = [
-            item for item in interfaces
+            item
+            for item in interfaces
             if await enterprise_application_service.target_allowed_for_user(
-                db, user, "data_interface", item.id,
+                db,
+                user,
+                "data_interface",
+                item.id,
             )
         ]
         if application_id:
             application, permissions = await enterprise_application_service.assert_application_permission(
-                db, application_id, user, "view",
+                db,
+                application_id,
+                user,
+                "view",
             )
             page_context = json.dumps(state.get("page_context") or {}, ensure_ascii=False, default=str)
             system_prompt = (
@@ -4459,13 +5546,13 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
                 "凡是查询当前、今天、实时、数量、进度、异常、风险或待处理业务数据，"
                 "必须调用当前页面获准的 query Action；Action 没有成功返回时必须明确说无法确认，"
                 "禁止使用长期记忆、历史回答或页面展示值冒充本轮实时结果。"
-                "用户要求把导出数据交付为 Excel/CSV 时，必须优先调用名称以 _file 结尾的可信导出工具；"
+                "用户要求根据当前业务数据生成 Excel、CSV、Word、PPT、PDF 或文本时，必须调用"
+                " business_export_to_workspace_file 可信复合工具；"
                 "它会在服务端完成同一快照的全部分页和工作空间写入，不得自行逐页拼接或虚构下载地址。"
             )
             if application.assistant_prompt and application.assistant_prompt.strip():
                 system_prompt = (
-                    f"{system_prompt}\n\n[企业管理员配置的业务助手规则]\n"
-                    f"{application.assistant_prompt.strip()}"
+                    f"{system_prompt}\n\n[企业管理员配置的业务助手规则]\n{application.assistant_prompt.strip()}"
                 )
         system_names = sorted({(item.system.name if item.system else "?") for item in interfaces})
         if interfaces:
@@ -4481,12 +5568,13 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
                 )
             system_prompt = (
                 f"{system_prompt}\n\n[数据接口] 以下为当前可用数据接口（仅供参考其参数/返回结构，"
-                "不能直接执行调用；path 中 {占位符} 为路径参数，调用时须提供实际值）：\n"
-                + "\n".join(lines)
+                "不能直接执行调用；path 中 {占位符} 为路径参数，调用时须提供实际值）：\n" + "\n".join(lines)
             )
         trace = {
-            "category": "data_interface", "title": "数据接口注入",
-            "systems": len(system_names), "interfaces": len(interfaces),
+            "category": "data_interface",
+            "title": "数据接口注入",
+            "systems": len(system_names),
+            "interfaces": len(interfaces),
             "names": [f"{(item.system.name if item.system else '?')}/{item.name}" for item in interfaces],
         }
         _emit({"type": "trace", **trace})
@@ -4516,31 +5604,33 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
         if workspace_file is None or not workspace_file.workspace_id:
             continue
         workspace = await workspace_service.get_workspace(db, UUID(str(workspace_file.workspace_id)))
-        if workspace is None or (user is not None and not (
-            await workspace_permission_service.capabilities(db, workspace, user)
-        )["read"]):
+        if workspace is None or (
+            user is not None and not (await workspace_permission_service.capabilities(db, workspace, user))["read"]
+        ):
             continue
         resolved_version_id = _referenced_version_id(state, fid)
         if resolved_version_id is not None:
             try:
                 workspace_file, _ = await workspace_service.file_snapshot_at_version(
-                    db, workspace_file, resolved_version_id,
+                    db,
+                    workspace_file,
+                    resolved_version_id,
                 )
             except workspace_service.WorkspaceFileVersionNotFound:
                 continue
         canonical_path = f"{workspace.name}:/{str(workspace_file.path).lstrip('/')}"
         file_names.append(canonical_path)
-        file_refs.append({
-            "file_id": fid,
-            "path": canonical_path,
-            "version_id": str(workspace_file.current_version_id or "") or None,
-        })
+        file_refs.append(
+            {
+                "file_id": fid,
+                "path": canonical_path,
+                "version_id": str(workspace_file.current_version_id or "") or None,
+            }
+        )
         inject_content = fid in explicit_ref_ids
         content = workspace_service.resolve_file_content(workspace_file) if inject_content else ""
         raw_tool = workspace_service.raw_tool_file_kind(workspace_file)
-        suffix = PurePosixPath(
-            str((workspace_file.metadata_ or {}).get("name") or workspace_file.path)
-        ).suffix.lower()
+        suffix = PurePosixPath(str((workspace_file.metadata_ or {}).get("name") or workspace_file.path)).suffix.lower()
         is_current_image = (
             any(str(item.get("file_id")) == fid for item in state.get("attachment_files") or [])
             and suffix in multimodal_service.ALLOWED_IMAGE_SUFFIXES
@@ -4569,8 +5659,7 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
         if inject_content:
             injected_ref_count += 1
         file_parts.append(
-            f"[引用文件 file_id={fid} version_id={workspace_file.current_version_id} "
-            f"path={canonical_path}]\n{rendered}"
+            f"[引用文件 file_id={fid} version_id={workspace_file.current_version_id} path={canonical_path}]\n{rendered}"
         )
     if file_refs:
         mapping = "\n".join(f"- @{item['file_id']} → {item['path']}" for item in file_refs)
@@ -4588,8 +5677,11 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
             "仍可在当前用户实时可读工作空间内搜索。\n\n" + "\n\n".join(file_parts)
         )
         trace = {
-            "category": "file", "title": "引用工作空间文件", "files": len(file_names),
-            "paths": file_names, "references": file_refs,
+            "category": "file",
+            "title": "引用工作空间文件",
+            "files": len(file_names),
+            "paths": file_names,
+            "references": file_refs,
         }
         _emit({"type": "trace", **trace})
         traces.append(trace)
@@ -4609,6 +5701,7 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
             user,
             application_id=state.get("application_id"),
             page_context=state.get("page_context") or {},
+            request_text=str(state.get("request") or ""),
         )
         rag_ids = list(state.get("rag_collection_ids") or [])
         if state.get("rag_collection_id") and str(state["rag_collection_id"]) not in rag_ids:
@@ -4616,24 +5709,24 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
         from app.services.platform_tool_registry import active_platform_tool_names
 
         active_platform_names = await active_platform_tool_names(db)
-        if not application_id and rag_ids and (
-            active_platform_names is None or "rag_search" in active_platform_names
-        ):
-            tools.append({
-                "type": "function",
-                "function": {
-                    "name": "rag_search",
-                    "description": "按需检索当前智能体已绑定且当前用户有权访问的知识库。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "检索问题或关键词"},
-                            "top_k": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5},
+        if not application_id and rag_ids and (active_platform_names is None or "rag_search" in active_platform_names):
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "rag_search",
+                        "description": "按需检索当前智能体已绑定且当前用户有权访问的知识库。",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string", "description": "检索问题或关键词"},
+                                "top_k": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5},
+                            },
+                            "required": ["query"],
                         },
-                        "required": ["query"],
                     },
-                },
-            })
+                }
+            )
             registry["rag_search"] = {"kind": "rag_search", "collection_ids": rag_ids}
         if user is not None and not application_id:
             # Long-term memory is a per-user capability; the admin playground has no principal.
@@ -4649,8 +5742,7 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
             )
             if "load_skill" in registry:
                 instruction = (
-                    "请先调用 load_skill 加载其完整说明，并在任务需要操作时务必实际调用脚本或接口，"
-                    "不得仅声称完成："
+                    "请先调用 load_skill 加载其完整说明，并在任务需要操作时务必实际调用脚本或接口，不得仅声称完成："
                 )
             else:
                 instruction = (
@@ -4658,26 +5750,32 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
                     "如无其他对应工具，应明确说明当前无法执行："
                 )
             system_prompt = (
-                f"{system_prompt}\n\n[用户本轮明确调用的 Skill] 以下选择仅对当前轮有效。"
-                f"{instruction}\n{lines}"
+                f"{system_prompt}\n\n[用户本轮明确调用的 Skill] 以下选择仅对当前轮有效。{instruction}\n{lines}"
             )
 
-    system_prompt = (
-        f"{system_prompt}"
-        f"{_skill_catalog_prompt(state, load_skill_available='load_skill' in registry)}"
-    )
+    system_prompt = f"{system_prompt}{_skill_catalog_prompt(state, load_skill_available='load_skill' in registry)}"
 
     provider, model, system_prompt = await _configure_visual_turn(
-        state, db, user, messages, system_prompt,
+        state,
+        db,
+        user,
+        messages,
+        system_prompt,
     )
     return {
-        "messages": messages, "system_prompt": system_prompt, "tools": tools,
-        "registry": registry, "traces": traces, "provider_override": provider,
-        "model_override": model, "memory_context": memory_context,
+        "messages": messages,
+        "system_prompt": system_prompt,
+        "tools": tools,
+        "registry": registry,
+        "traces": traces,
+        "provider_override": provider,
+        "model_override": model,
+        "memory_context": memory_context,
     }
 
 
 # ── save_memory ────────────────────────────────────────────────────────
+
 
 async def save_memory(state: AgentState) -> dict:
     """持久化本轮对话消息。
@@ -4690,6 +5788,7 @@ async def save_memory(state: AgentState) -> dict:
 
     if state.get("mode") == "general":
         from app.models.task import TaskMessage
+
         task_id = state.get("task_id")
         if not task_id:
             return {}
@@ -4710,7 +5809,8 @@ async def save_memory(state: AgentState) -> dict:
             tool_file_refs.append(dict(candidate))
         tool_file_refs.reverse()
         file_accesses_v1 = [
-            dict(item) for item in (state.get("file_accesses_v1") or [])
+            dict(item)
+            for item in (state.get("file_accesses_v1") or [])
             if isinstance(item, dict) and item.get("file_id")
         ]
         task = await db.get(Task, UUID(task_id))
@@ -4734,29 +5834,35 @@ async def save_memory(state: AgentState) -> dict:
             task_title=task.title if task is not None else None,
             executed_skills=executed_skills,
         )
+        streamed_final = str(state.get("assistant_final") or "")
         if state.get("application_id") and _requires_file_artifact(state.get("request", "")) and not artifacts:
             state["assistant_final"] = (
                 "文件生成未完成：本轮没有得到平台文件服务确认的有效文件，"
                 "因此不会把文字结果冒充为已交付文件。请检查业务 Action 或文件生成工具后重试。"
             )
             state["error"] = "business assistant artifact delivery failed"
-        for artifact in artifacts:
-            _emit({"type": "artifact", "artifact": artifact})
+        state["artifacts"] = artifacts
         # Maintain a durable task-level context index.  This is only a recall
         # hint: every future resolution still re-checks the user's live RBAC.
         from app.services import task_service
+
         await task_service.upsert_task_file_refs(db, UUID(task_id), tool_file_refs)
-        db.add(TaskMessage(task_id=UUID(task_id), role="assistant",
-                           content=state.get("assistant_final", ""),
-                           metadata_={
-                               "traces": traces,
-                               "loaded_skills": state.get("loaded_skills", []),
-                               "executed_skills": executed_skills,
-                               "artifacts": artifacts,
-                               "file_refs_v1": tool_file_refs,
-                               "file_accesses_v1": file_accesses_v1,
-                           }))
+        assistant_message = TaskMessage(
+            task_id=UUID(task_id),
+            role="assistant",
+            content=state.get("assistant_final", ""),
+            metadata_={
+                "traces": traces,
+                "loaded_skills": state.get("loaded_skills", []),
+                "executed_skills": executed_skills,
+                "artifacts": artifacts,
+                "file_refs_v1": tool_file_refs,
+                "file_accesses_v1": file_accesses_v1,
+            },
+        )
+        db.add(assistant_message)
         await db.flush()
+        state["assistant_message_id"] = str(assistant_message.id)
         # **立即提交**：让 assistant 回复（及本轮工具写入的工作空间文件）当场持久化，
         # 不再依赖 _run_graph_bg 末尾的统一 commit。这样即使后续 extract_memory /
         # judge / write_run_log 抛异常或末尾 commit 失败，回复也不会被回滚「消失」
@@ -4767,6 +5873,28 @@ async def save_memory(state: AgentState) -> dict:
         except Exception:  # noqa: BLE001
             logger.warning("save_memory_commit_failed", task_id=str(task_id), exc_info=True)
             await db.rollback()
+            state["artifacts"] = []
+            state["error"] = "workspace artifact commit failed"
+            raise RuntimeError("工作空间文件或回复保存失败，请稍后重试")
+
+        # SSE only receives trusted artifacts after the workspace transaction is durable.
+        # If the final guard replaced a model success claim, replace the already streamed
+        # text before exposing the terminal message and done event.
+        final_content = str(state.get("assistant_final") or "")
+        if final_content != streamed_final:
+            if streamed_final:
+                _emit({"type": "text_retract", "chars": len(streamed_final)})
+            _emit({"type": "text", "delta": final_content})
+        for artifact in artifacts:
+            _emit({"type": "artifact", "artifact": artifact})
+        _emit(
+            {
+                "type": "assistant_message",
+                "messageId": str(assistant_message.id),
+                "content": final_content,
+                "artifacts": artifacts,
+            }
+        )
         return {}
 
     # ── agent 模式 ──
@@ -4777,12 +5905,14 @@ async def save_memory(state: AgentState) -> dict:
 
     agent_id = UUID(state["agent_id"])
     session_id = state["session_id"]
-    db.add_all([
-        AgentMessage(agent_id=agent_id, session_id=session_id, role="user",
-                     content=state.get("request", "")),
-        AgentMessage(agent_id=agent_id, session_id=session_id, role="assistant",
-                     content=state.get("assistant_final", "")),
-    ])
+    db.add_all(
+        [
+            AgentMessage(agent_id=agent_id, session_id=session_id, role="user", content=state.get("request", "")),
+            AgentMessage(
+                agent_id=agent_id, session_id=session_id, role="assistant", content=state.get("assistant_final", "")
+            ),
+        ]
+    )
     await db.flush()
     return {}
 
@@ -4814,7 +5944,7 @@ def _parse_json_lenient(text: str) -> Any:
     lo, hi = s.find("{"), s.rfind("}")
     if lo != -1 and hi != -1 and hi > lo:
         try:
-            return json.loads(s[lo:hi + 1])
+            return json.loads(s[lo : hi + 1])
         except json.JSONDecodeError:
             pass
     return {}
@@ -4839,8 +5969,11 @@ async def extract_memory(state: AgentState) -> dict:
         # The model already persisted its facts through write_memory this run; a second
         # LLM extraction pass would only duplicate them and cost a model call.
         trace = {
-            "category": "memory", "subtype": "extract", "title": "记忆沉淀",
-            "facts": 0, "skipped": "write_memory",
+            "category": "memory",
+            "subtype": "extract",
+            "title": "记忆沉淀",
+            "facts": 0,
+            "skipped": "write_memory",
         }
         _emit({"type": "trace", **trace})
         return {
@@ -4865,13 +5998,15 @@ async def extract_memory(state: AgentState) -> dict:
         "- 仅本轮有效的临时数值、试算中间值\n"
         "- 与具体任务实例绑死的执行步骤\n"
         "最多 8 条，宁缺毋滥。若无值得沉淀的结论性事实，返回空数组。"
-        "返回 JSON {\"facts\":[\"实体 → 属性 → 值\", ...]}。\n"
+        '返回 JSON {"facts":["实体 → 属性 → 值", ...]}。\n'
         f"用户：{request}\n助手：{assistant}"
     )
     facts: list[str] = []
     try:
         result = await llm_client.chat(
-            db, UUID(org_id), state.get("model_alias", "default"),
+            db,
+            UUID(org_id),
+            state.get("model_alias", "default"),
             [{"role": "user", "content": prompt}],
             system_prompt="你只输出 JSON。",
             dept_id=state.get("department_id"),
@@ -4887,8 +6022,7 @@ async def extract_memory(state: AgentState) -> dict:
         await memory_service.add_user_memory(db, UUID(org_id), user_id, f)
     if facts:
         await db.flush()
-    trace = {"category": "memory", "subtype": "extract", "title": "记忆沉淀",
-             "facts": len(facts)}
+    trace = {"category": "memory", "subtype": "extract", "title": "记忆沉淀", "facts": len(facts)}
     _emit({"type": "trace", **trace})
     return {
         "steps": [*state.get("steps", []), {"step": "extract_memory", "facts": len(facts)}],
@@ -4897,6 +6031,7 @@ async def extract_memory(state: AgentState) -> dict:
 
 
 # ── judge ──────────────────────────────────────────────────────────────
+
 
 async def judge(state: AgentState) -> dict:
     """若启用判官，按 JudgeTemplate criteria 让 LLM 打分。general 模式默认不启用。"""
@@ -4913,6 +6048,7 @@ async def judge(state: AgentState) -> dict:
     rubric: str | None = None
     if jt_id:
         from app.models.judge import JudgeTemplate
+
         jt = await db.get(JudgeTemplate, UUID(jt_id))
         if jt:
             criteria = list(jt.criteria or [])
@@ -4923,16 +6059,18 @@ async def judge(state: AgentState) -> dict:
 
     prompt = (
         f"你是评审判官。请按以下维度对智能体回复打分（0-100），"
-        f"返回 JSON {{\"scores\":{{...}},\"total\":number,\"comment\":\"...\"}}。\n"
+        f'返回 JSON {{"scores":{{...}},"total":number,"comment":"..."}}。\n'
         f"维度：{json.dumps(criteria, ensure_ascii=False)}\n"
         f"评分细则：{rubric or '(无)'}\n"
-        f"用户问题：{state.get('request','')}\n"
-        f"智能体回复：{state.get('assistant_final','')}\n"
+        f"用户问题：{state.get('request', '')}\n"
+        f"智能体回复：{state.get('assistant_final', '')}\n"
     )
     parsed: dict
     try:
         result = await llm_client.chat(
-            db, UUID(state["org_id"]), state.get("model_alias", "default"),
+            db,
+            UUID(state["org_id"]),
+            state.get("model_alias", "default"),
             [{"role": "user", "content": prompt}],
             system_prompt="你是一个严格的评审判官，只输出 JSON。",
             dept_id=state.get("department_id"),
@@ -4949,6 +6087,7 @@ async def judge(state: AgentState) -> dict:
 
 
 # ── write_run_log ──────────────────────────────────────────────────────
+
 
 async def write_run_log(state: AgentState) -> dict:
     """收口：更新 AgentRun（messages/steps/usage/status/judge）+ 写审计日志。agent/general 共用。"""
@@ -4978,7 +6117,9 @@ async def write_run_log(state: AgentState) -> dict:
     # event_type 与 proxy_request 区分，路由器监控的总量/by_provider 即可覆盖智能体通路。
     try:
         provider_id, model_served = await llm_client.resolve_provider_model(
-            db, UUID(state["org_id"]), state.get("model_alias", "default"),
+            db,
+            UUID(state["org_id"]),
+            state.get("model_alias", "default"),
             dept_id=state.get("department_id"),
             team_id=state.get("team_id"),
         )

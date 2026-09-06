@@ -32,11 +32,13 @@ def test_corrected_action_arguments_get_a_new_idempotency_key():
 def test_browser_retry_keeps_action_and_file_idempotency_across_new_run_ids():
     first = nodes._enterprise_action_request_id(
         {"task_id": "task-1", "run_id": 7, "client_request_id": "browser-request-1"},
-        "call-1", {"limit": 50},
+        "call-1",
+        {"limit": 50},
     )
     retried = nodes._enterprise_action_request_id(
         {"task_id": "task-1", "run_id": 8, "client_request_id": "browser-request-1"},
-        "call-1", {"limit": 50},
+        "call-1",
+        {"limit": 50},
     )
     assert first == retried
 
@@ -70,9 +72,7 @@ def test_numeric_string_version_is_normalized_before_action_dispatch():
 
 def test_subsystem_json_error_is_preserved_and_bounded():
     response = httpx.Response(409, json={"error": "记录已更新，请重新查询当前版本\n再试"})
-    assert _subsystem_response_error(response) == (
-        "子系统 Action 返回 HTTP 409：记录已更新，请重新查询当前版本 再试"
-    )
+    assert _subsystem_response_error(response) == ("子系统 Action 返回 HTTP 409：记录已更新，请重新查询当前版本 再试")
 
 
 def _export_action(result_schema: dict) -> SimpleNamespace:
@@ -97,45 +97,72 @@ def _export_schema() -> dict:
 
 def test_export_result_is_schema_validated_before_model_use():
     action = _export_action(_export_schema())
-    _validate_result(action, {
-        "snapshotId": "snap-1", "snapshotAt": "2026-09-06T00:00:00Z",
-        "columns": [{"key": "orderNo", "label": "订单号", "type": "string"}],
-        "rows": [{"orderNo": "PO-1"}], "rowCount": 1, "nextCursor": None,
-    })
+    _validate_result(
+        action,
+        {
+            "snapshotId": "snap-1",
+            "snapshotAt": "2026-09-06T00:00:00Z",
+            "columns": [{"key": "orderNo", "label": "订单号", "type": "string"}],
+            "rows": [{"orderNo": "PO-1"}],
+            "rowCount": 1,
+            "nextCursor": None,
+        },
+    )
 
     with pytest.raises(RuntimeError, match="不符合约定"):
-        _validate_result(action, {
-            "snapshotId": "snap-1", "snapshotAt": "2026-09-06T00:00:00Z",
-            "columns": [], "rows": [], "rowCount": "1", "nextCursor": None,
-        })
+        _validate_result(
+            action,
+            {
+                "snapshotId": "snap-1",
+                "snapshotAt": "2026-09-06T00:00:00Z",
+                "columns": [],
+                "rows": [],
+                "rowCount": "1",
+                "nextCursor": None,
+            },
+        )
 
     with pytest.raises(RuntimeError, match="未声明"):
-        _validate_result(action, {
-            "snapshotId": "snap-1", "snapshotAt": "2026-09-06T00:00:00Z",
-            "columns": [{"key": "orderNo", "label": "订单号", "type": "string"}],
-            "rows": [{"orderNo": "PO-1", "serverOnly": "x"}],
-            "rowCount": 1, "nextCursor": None,
-        })
+        _validate_result(
+            action,
+            {
+                "snapshotId": "snap-1",
+                "snapshotAt": "2026-09-06T00:00:00Z",
+                "columns": [{"key": "orderNo", "label": "订单号", "type": "string"}],
+                "rows": [{"orderNo": "PO-1", "serverOnly": "x"}],
+                "rowCount": 1,
+                "nextCursor": None,
+            },
+        )
 
 
 def test_export_result_rejects_nested_server_paths_even_when_schema_allows_them():
     schema = _export_schema()
     schema["properties"]["rows"] = {"type": "array", "items": {"type": "object"}}
     with pytest.raises(RuntimeError, match="不得返回服务器路径"):
-        _validate_result(_export_action(schema), {
-            "snapshotId": "snap-1", "snapshotAt": "2026-09-06T00:00:00Z",
-            "columns": [], "rows": [{"metadata": {"download": "/var/backups/db.sqlite"}}],
-            "rowCount": 1, "nextCursor": None,
-        })
+        _validate_result(
+            _export_action(schema),
+            {
+                "snapshotId": "snap-1",
+                "snapshotAt": "2026-09-06T00:00:00Z",
+                "columns": [],
+                "rows": [{"metadata": {"download": "/var/backups/db.sqlite"}}],
+                "rowCount": 1,
+                "nextCursor": None,
+            },
+        )
 
 
 def test_query_result_rejects_internal_database_paths_before_model_use():
     action = SimpleNamespace(operation="query", result_schema={"type": "object"})
     with pytest.raises(RuntimeError, match="不得返回服务器路径"):
-        _validate_result(action, {
-            "items": [],
-            "metadata": {"dbMode": "sqlite", "dbPath": "/data/garment.sqlite3"},
-        })
+        _validate_result(
+            action,
+            {
+                "items": [],
+                "metadata": {"dbMode": "sqlite", "dbPath": "/data/garment.sqlite3"},
+            },
+        )
 
 
 def test_browser_relative_business_links_are_not_misclassified_as_server_paths():
@@ -154,10 +181,15 @@ def test_browser_relative_business_links_are_not_misclassified_as_server_paths()
     ],
 )
 def test_file_delivery_verbs_do_not_fake_a_business_mutation(user_text, expected):
-    assert runner._requests_business_mutation({
-        "application_id": "app-1",
-        "request": user_text,
-    }) is expected
+    assert (
+        runner._requests_business_mutation(
+            {
+                "application_id": "app-1",
+                "request": user_text,
+            }
+        )
+        is expected
+    )
 
 
 def test_export_file_tool_name_stays_within_provider_limit():
@@ -173,18 +205,24 @@ async def test_trusted_export_executor_collects_one_snapshot_without_exposing_ro
         {
             "status": "completed",
             "result": {
-                "snapshotId": "snap-1", "snapshotAt": "2026-09-06T00:00:00Z",
+                "snapshotId": "snap-1",
+                "snapshotAt": "2026-09-06T00:00:00Z",
                 "columns": [{"key": "id", "label": "编号", "type": "string"}],
-                "rows": [{"id": "1"}, {"id": "2"}], "rowCount": 3, "nextCursor": "cursor-2",
+                "rows": [{"id": "1"}, {"id": "2"}],
+                "rowCount": 3,
+                "nextCursor": "cursor-2",
             },
             "provenance": {"actionKey": "orders.export", "requestId": "request-1"},
         },
         {
             "status": "completed",
             "result": {
-                "snapshotId": "snap-1", "snapshotAt": "2026-09-06T00:00:00Z",
+                "snapshotId": "snap-1",
+                "snapshotAt": "2026-09-06T00:00:00Z",
                 "columns": [{"key": "id", "label": "编号", "type": "string"}],
-                "rows": [{"id": "3"}], "rowCount": 3, "nextCursor": None,
+                "rows": [{"id": "3"}],
+                "rowCount": 3,
+                "nextCursor": None,
             },
             "provenance": {"actionKey": "orders.export", "requestId": "request-2"},
         },
@@ -215,14 +253,19 @@ async def test_trusted_export_executor_collects_one_snapshot_without_exposing_ro
     }
 
     content, ok = await nodes._execute_enterprise_export_file(
-        state, entry, {"limit": 2, "output_name": "订单.xlsx"}, user, object(), "call-1",
+        state,
+        entry,
+        {"limit": 2, "output_name": "订单.xlsx"},
+        user,
+        object(),
+        "call-1",
     )
 
     assert ok is True
     assert len(invoked) == 2
     assert invoked[1]["params"]["snapshotId"] == "snap-1"
     assert invoked[1]["params"]["nextCursor"] == "cursor-2"
-    assert generated["name"] == "spreadsheet_tool"
+    assert generated["name"] == "spreadsheet_create"
     assert generated["params"]["sheets"][0]["rows"] == [["编号"], ["1"], ["2"], ["3"]]
     assert "snap-1" not in content  # model only receives the committed file result
     assert state["business_action_provenance"][-1]["row_count"] == 3
@@ -233,13 +276,19 @@ async def test_successful_query_does_not_mask_a_failed_mutation(monkeypatch):
     async def stream_run(_request):
         yield {"type": "tool_call", "id": "q1", "name": "record_query", "arguments": "{}"}
         yield {
-            "type": "tool_result", "id": "q1", "name": "record_query",
-            "content": '{"status":"completed","result":{"count":1}}', "ok": True,
+            "type": "tool_result",
+            "id": "q1",
+            "name": "record_query",
+            "content": '{"status":"completed","result":{"count":1}}',
+            "ok": True,
         }
         yield {"type": "tool_call", "id": "u1", "name": "record_update", "arguments": "{}"}
         yield {
-            "type": "tool_result", "id": "u1", "name": "record_update",
-            "content": "子系统 Action 返回 HTTP 409：记录已更新", "ok": False,
+            "type": "tool_result",
+            "id": "u1",
+            "name": "record_update",
+            "content": "子系统 Action 返回 HTTP 409：记录已更新",
+            "ok": False,
         }
         yield {"type": "done", "text": "已经修改成功。"}
 
@@ -252,10 +301,12 @@ async def test_successful_query_does_not_mask_a_failed_mutation(monkeypatch):
         "steps": [],
         "_dsh_tool_registry": {
             "record_query": {
-                "kind": "enterprise_action", "action": SimpleNamespace(operation="query"),
+                "kind": "enterprise_action",
+                "action": SimpleNamespace(operation="query"),
             },
             "record_update": {
-                "kind": "enterprise_action", "action": SimpleNamespace(operation="update"),
+                "kind": "enterprise_action",
+                "action": SimpleNamespace(operation="update"),
             },
         },
     }
@@ -274,8 +325,11 @@ async def test_successful_mutation_is_not_failed_by_the_generic_record_noun(monk
     async def stream_run(_request):
         yield {"type": "tool_call", "id": "c1", "name": "record_create", "arguments": "{}"}
         yield {
-            "type": "tool_result", "id": "c1", "name": "record_create",
-            "content": '{"status":"completed","result":{"id":3,"dataVersion":1}}', "ok": True,
+            "type": "tool_result",
+            "id": "c1",
+            "name": "record_create",
+            "content": '{"status":"completed","result":{"id":3,"dataVersion":1}}',
+            "ok": True,
         }
         yield {"type": "done", "text": "已新增供应商记录，编号 3。"}
 
@@ -288,7 +342,8 @@ async def test_successful_mutation_is_not_failed_by_the_generic_record_noun(monk
         "steps": [],
         "_dsh_tool_registry": {
             "record_create": {
-                "kind": "enterprise_action", "action": SimpleNamespace(operation="create"),
+                "kind": "enterprise_action",
+                "action": SimpleNamespace(operation="create"),
             },
         },
     }
@@ -304,8 +359,11 @@ async def test_query_for_saved_records_is_not_misclassified_as_a_mutation(monkey
     async def stream_run(_request):
         yield {"type": "tool_call", "id": "q1", "name": "record_query", "arguments": "{}"}
         yield {
-            "type": "tool_result", "id": "q1", "name": "record_query",
-            "content": '{"status":"completed","result":{"totalCount":0,"dataVersion":1}}', "ok": True,
+            "type": "tool_result",
+            "id": "q1",
+            "name": "record_query",
+            "content": '{"status":"completed","result":{"totalCount":0,"dataVersion":1}}',
+            "ok": True,
         }
         yield {"type": "done", "text": "当前共有 0 条已保存的核算记录。"}
 
@@ -313,15 +371,15 @@ async def test_query_for_saved_records_is_not_misclassified_as_a_mutation(monkey
     state = {
         "run_id": 24,
         "request": (
-            "请实时查询当前面辅料耗料核算共有多少条已保存的核算记录；"
-            "必须只调用当前模块查询工具，并返回数据版本。"
+            "请实时查询当前面辅料耗料核算共有多少条已保存的核算记录；必须只调用当前模块查询工具，并返回数据版本。"
         ),
         "application_id": "app-1",
         "messages": [],
         "steps": [],
         "_dsh_tool_registry": {
             "record_query": {
-                "kind": "enterprise_action", "action": SimpleNamespace(operation="query"),
+                "kind": "enterprise_action",
+                "action": SimpleNamespace(operation="query"),
             },
         },
     }
@@ -337,8 +395,11 @@ async def test_pending_mutation_is_not_reported_as_completed(monkeypatch):
     async def stream_run(_request):
         yield {"type": "tool_call", "id": "d1", "name": "record_delete", "arguments": "{}"}
         yield {
-            "type": "tool_result", "id": "d1", "name": "record_delete",
-            "content": '{"status":"pending","confirmation_id":"confirm-1"}', "ok": True,
+            "type": "tool_result",
+            "id": "d1",
+            "name": "record_delete",
+            "content": '{"status":"pending","confirmation_id":"confirm-1"}',
+            "ok": True,
         }
         yield {"type": "done", "text": "记录已删除。"}
 
@@ -351,7 +412,8 @@ async def test_pending_mutation_is_not_reported_as_completed(monkeypatch):
         "steps": [],
         "_dsh_tool_registry": {
             "record_delete": {
-                "kind": "enterprise_action", "action": SimpleNamespace(operation="delete"),
+                "kind": "enterprise_action",
+                "action": SimpleNamespace(operation="delete"),
             },
         },
     }

@@ -95,6 +95,33 @@ export type BusinessAssistantTurnResult = {
   error: string | null;
 };
 
+function normalizeBusinessArtifact(value: Record<string, unknown>): BusinessArtifact | null {
+  const fileId = typeof value.file_id === 'string' ? value.file_id : '';
+  const versionId = typeof value.version_id === 'string'
+    ? value.version_id
+    : typeof value.current_version_id === 'string' ? value.current_version_id : null;
+  if (!fileId || !versionId) return null;
+  return {
+    fileId,
+    versionId,
+    workspaceId: typeof value.workspace_id === 'string' ? value.workspace_id : '',
+    canonicalPath: typeof value.canonical_path === 'string' ? value.canonical_path : '',
+    name: typeof value.display_name === 'string'
+      ? value.display_name
+      : typeof value.name === 'string' ? value.name : '生成文件',
+    mimeType: typeof value.mime_type === 'string' ? value.mime_type : 'application/octet-stream',
+    sizeBytes: typeof value.size === 'number'
+      ? value.size
+      : typeof value.sizeBytes === 'number' ? value.sizeBytes : 0,
+    checksumSha256: typeof value.checksum_sha256 === 'string' ? value.checksum_sha256 : null,
+    source: value.source && typeof value.source === 'object'
+      ? value.source as Record<string, unknown>
+      : value.provenance && typeof value.provenance === 'object'
+        ? value.provenance as Record<string, unknown>
+        : undefined,
+  };
+}
+
 export function businessArtifactsFromMessage(message: TerminalTaskMessage | undefined): BusinessArtifact[] {
   const raw = message?.metadata?.artifacts;
   if (!Array.isArray(raw)) return [];
@@ -102,24 +129,22 @@ export function businessArtifactsFromMessage(message: TerminalTaskMessage | unde
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue;
     const value = item as Record<string, unknown>;
-    const fileId = typeof value.file_id === 'string' ? value.file_id : '';
-    const versionId = typeof value.version_id === 'string'
-      ? value.version_id
-      : typeof value.current_version_id === 'string' ? value.current_version_id : null;
-    if (!fileId || !versionId) continue;
-    deduped.set(`${fileId}:${versionId}`, {
-      fileId,
-      versionId,
-      workspaceId: typeof value.workspace_id === 'string' ? value.workspace_id : '',
-      canonicalPath: typeof value.canonical_path === 'string' ? value.canonical_path : '',
-      name: typeof value.display_name === 'string' ? value.display_name : '生成文件',
-      mimeType: typeof value.mime_type === 'string' ? value.mime_type : 'application/octet-stream',
-      sizeBytes: typeof value.size === 'number' ? value.size : 0,
-      checksumSha256: typeof value.checksum_sha256 === 'string' ? value.checksum_sha256 : null,
-      source: value.source && typeof value.source === 'object' ? value.source as Record<string, unknown> : undefined,
-    });
+    const artifact = normalizeBusinessArtifact(value);
+    if (artifact) deduped.set(`${artifact.fileId}:${artifact.versionId}`, artifact);
   }
   return [...deduped.values()];
+}
+
+function businessArtifactFromEvent(event: Record<string, unknown>): BusinessArtifact | null {
+  if (event.type !== 'artifact' || !event.artifact || typeof event.artifact !== 'object') return null;
+  return normalizeBusinessArtifact(event.artifact as Record<string, unknown>);
+}
+
+function formatArtifactBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '大小未知';
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
 type BusinessAssistantApproval = ApprovalCardData & { taskId: string };
@@ -170,13 +195,23 @@ function progressForAssistantEvent(event: Record<string, unknown>): AssistantPro
   if (type === 'tool_call') {
     const name = String(event.name ?? '').toLowerCase();
     let label = '正在调用当前页面已授权的业务能力';
-    if (/(delete|remove|_de_)/.test(name)) label = '正在准备删除业务记录';
+    if (name === 'business_export_to_workspace_file') label = '正在读取权限范围内的业务数据';
+    else if (/(spreadsheet|document|presentation|pdf|text)_(create|edit|convert|merge|split|extract)/.test(name)) {
+      label = '正在生成文件';
+    } else if (/(delete|remove|_de_)/.test(name)) label = '正在准备删除业务记录';
     else if (/(update|edit|_up_)/.test(name)) label = '正在准备更新业务记录';
     else if (/(create|add|_ad_)/.test(name)) label = '正在准备新增业务记录';
     else if (/(query|search|list|_qu_)/.test(name)) label = '正在查询当前页面的业务数据';
     return { key: `tool:${String(event.id ?? name)}`, label };
   }
   if (type === 'tool_result') {
+    const name = String(event.name ?? '').toLowerCase();
+    if (event.ok !== false && (
+      name === 'business_export_to_workspace_file'
+      || /(spreadsheet|document|presentation|pdf|text)_(create|edit|convert|merge|split|extract)/.test(name)
+    )) {
+      return { key: `tool:${String(event.id ?? 'result')}`, label: '文件已生成，正在验证格式并保存' };
+    }
     return event.ok === false
       ? { key: `tool:${String(event.id ?? 'result')}`, label: '本次业务调用未成功，正在调整处理方式', tone: 'warning' }
       : { key: `tool:${String(event.id ?? 'result')}`, label: '业务系统已返回数据，正在核对结果' };
@@ -184,6 +219,8 @@ function progressForAssistantEvent(event: Record<string, unknown>): AssistantPro
   if (type === 'approval_request') {
     return { key: 'approval', label: '操作已暂停，正在等待你的确认', tone: 'warning' };
   }
+  if (type === 'artifact') return { key: 'artifact', label: '文件已验证并保存到工作空间' };
+  if (type === 'assistant_message') return { key: 'answer', label: '正在整理最终结果和文件卡片' };
   if (type === 'text') return { key: 'answer', label: '数据已经核对，正在组织回答' };
   if (type === 'done') return { key: 'done', label: '回答已经生成' };
   if (type === 'error') return { key: 'error', label: '执行遇到问题，正在整理原因', tone: 'error' };
@@ -266,6 +303,26 @@ export default function EnterpriseApplicationView({
     queryFn: () => terminal.listAllWsFiles(),
     enabled: assistantOpen,
   });
+  const { data: fileCapabilityRegistry } = useQuery({
+    queryKey: ['workspace-file-capabilities'],
+    queryFn: () => terminal.fileCapabilities(),
+    enabled: assistantOpen,
+    staleTime: 5 * 60_000,
+  });
+  const formatCapabilityByExtension = new Map(
+    (fileCapabilityRegistry?.formats ?? []).map((item) => [item.format.toLowerCase(), item]),
+  );
+
+  const inputCapabilityLabel = (file: WorkspaceFileSummary): string => {
+    const name = file.presentation?.display_name || file.original_filename || file.path;
+    const extension = name.split('.').pop()?.toLowerCase() || '';
+    const capability = formatCapabilityByExtension.get(extension);
+    if (!capability) return '暂不支持';
+    if (capability.nativeOrCompatibility === 'native' && capability.capabilities.edit) return '可直接编辑';
+    if (capability.nativeOrCompatibility === 'compatibility' && capability.capabilities.convert) return '转换后编辑';
+    if (capability.capabilities.inspect) return '仅可读取';
+    return '暂不支持';
+  };
 
   useEffect(() => {
     if (!restoredBusinessTask || assistantRunning) return;
@@ -468,6 +525,16 @@ export default function EnterpriseApplicationView({
         page_key: fallbackPageKey,
         ...bridgeContext,
       }, (event) => {
+        const liveArtifact = businessArtifactFromEvent(event);
+        if (liveArtifact) {
+          updateRunningAssistant((item) => {
+            const byVersion = new Map(
+              (item.artifacts ?? []).map((artifact) => [`${artifact.fileId}:${artifact.versionId}`, artifact]),
+            );
+            byVersion.set(`${liveArtifact.fileId}:${liveArtifact.versionId}`, liveArtifact);
+            return { ...item, artifacts: [...byVersion.values()] };
+          });
+        }
         if (event.type === 'approval_request') {
           const approvalId = String(event.approval_id ?? '');
           const taskId = String(event.task_id ?? '');
@@ -505,11 +572,14 @@ export default function EnterpriseApplicationView({
       }, selectedFileRefs);
       updateRunningAssistant((item) => ({
         ...item,
-        content: result.content || '操作已完成。',
+        content: result.content || (result.status === 'completed' ? '操作已完成。' : '执行未完成，请稍后重试。'),
         artifacts: result.artifacts,
         running: false,
+        failed: result.status === 'failed',
         elapsedSeconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
-        progress: appendProgress(item.progress, { key: 'done', label: '回答已经生成' }),
+        progress: appendProgress(item.progress, result.status === 'completed'
+          ? { key: 'done', label: result.artifacts.length ? '文件已交付' : '回答已经生成' }
+          : { key: 'error', label: '执行未完成，请查看下方原因', tone: 'error' }),
       }));
       await refreshFrame();
     } catch (assistantError) {
@@ -702,7 +772,7 @@ export default function EnterpriseApplicationView({
             value={selectedInputFileIds}
             options={availableInputFiles.map((file) => ({
               value: file.id,
-              label: `${file.presentation?.display_name || file.original_filename || file.path} · ${file.workspace_name}`,
+              label: `${file.presentation?.display_name || file.original_filename || file.path} · ${file.workspace_name} · ${inputCapabilityLabel(file)}`,
             }))}
             onChange={setSelectedInputFileIds}
             disabled={assistantRunning || uploadingInput}
@@ -809,7 +879,12 @@ export default function EnterpriseApplicationView({
                       <Button size="small" icon={<DownloadOutlined />} onClick={() => void downloadArtifact(artifact)}>下载</Button>
                     </Space>}
                   >
-                    <Typography.Text type="secondary">{artifact.canonicalPath || '已保存到工作空间'} · {artifact.sizeBytes} 字节</Typography.Text>
+                    <Space direction="vertical" size={2}>
+                      <Typography.Text type="secondary">
+                        {(artifact.name.split('.').pop() || '文件').toUpperCase()} · {formatArtifactBytes(artifact.sizeBytes)} · 版本 {artifact.versionId?.slice(0, 8)}
+                      </Typography.Text>
+                      <Typography.Text type="secondary">{artifact.canonicalPath || '已保存到工作空间'}</Typography.Text>
+                    </Space>
                   </Card>)}
                 </section>}
               </div>

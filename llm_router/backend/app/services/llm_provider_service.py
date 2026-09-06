@@ -66,8 +66,12 @@ def normalize_bailian_workspace_id(value: str | None, region: str | None) -> str
 
 
 def provider_base_url(
-    vendor: str, *, region: str | None, workspace_id: str | None,
-    provider_type: str, explicit: str | None,
+    vendor: str,
+    *,
+    region: str | None,
+    workspace_id: str | None,
+    provider_type: str,
+    explicit: str | None,
 ) -> str:
     """Return a production API endpoint without exposing billing credentials."""
     if explicit:
@@ -93,12 +97,14 @@ def provider_base_url(
         if selected == "cn-beijing":
             return (
                 "https://dashscope.aliyuncs.com/apps/anthropic"
-                if provider_type == "anthropic" else "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                if provider_type == "anthropic"
+                else "https://dashscope.aliyuncs.com/compatible-mode/v1"
             )
         if selected == "ap-southeast-1":
             return (
                 "https://dashscope-intl.aliyuncs.com/apps/anthropic"
-                if provider_type == "anthropic" else "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+                if provider_type == "anthropic"
+                else "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
             )
         raise ValueError("Bailian workspace_id is required for this region")
     raise ValueError("Base URL is required for custom and Azure providers")
@@ -112,19 +118,25 @@ def _legacy_deployments(data: LlmProviderCreate) -> list[ModelDeploymentCreate]:
     deployments: list[ModelDeploymentCreate] = []
     for model in data.supported_models:
         if image.get("enabled") and image.get("model") == model:
-            deployments.append(ModelDeploymentCreate(
-                model_id=model, adapter="openai_images", capabilities=["image_generation"],
-                endpoint_path=image.get("endpoint_path") or "/images/generations",
-            ))
+            deployments.append(
+                ModelDeploymentCreate(
+                    model_id=model,
+                    adapter="openai_images",
+                    capabilities=["image_generation"],
+                    endpoint_path=image.get("endpoint_path") or "/images/generations",
+                )
+            )
             continue
         capabilities = ["chat"]
         if (caps.get(model) or {}).get("vision"):
             capabilities.append("vision")
-        deployments.append(ModelDeploymentCreate(
-            model_id=model,
-            adapter="anthropic_messages" if data.provider_type == "anthropic" else "openai_chat_completions",
-            capabilities=capabilities,
-        ))
+        deployments.append(
+            ModelDeploymentCreate(
+                model_id=model,
+                adapter="anthropic_messages" if data.provider_type == "anthropic" else "openai_chat_completions",
+                capabilities=capabilities,
+            )
+        )
     return deployments
 
 
@@ -168,17 +180,22 @@ async def create_provider(
 ) -> LlmProvider:
     workspace_id = (
         normalize_bailian_workspace_id(data.workspace_id, data.region)
-        if data.vendor == "aliyun_bailian" else data.workspace_id
+        if data.vendor == "aliyun_bailian"
+        else data.workspace_id
     )
     deployments = _legacy_deployments(data)
     declared_models = list(dict.fromkeys([*data.supported_models, *(d.model_id for d in deployments)]))
     normalized_config = validate_provider_config(
-        _sync_legacy_config(data.config, deployments), declared_models,
+        _sync_legacy_config(data.config, deployments),
+        declared_models,
     )
     encrypted_key = encrypt_provider_api_key(data.api_key)
     base_url = provider_base_url(
-        data.vendor, region=data.region, workspace_id=workspace_id,
-        provider_type=data.provider_type, explicit=data.base_url,
+        data.vendor,
+        region=data.region,
+        workspace_id=workspace_id,
+        provider_type=data.provider_type,
+        explicit=data.base_url,
     )
     provider = LlmProvider(
         organization_id=org_id,
@@ -202,11 +219,13 @@ async def create_provider(
     db.add(provider)
     await db.flush()
     for deployment in deployments:
-        db.add(ModelDeployment(
-            provider_id=provider.id,
-            **deployment.model_dump(),
-            verification_status="legacy" if not data.model_deployments else "unverified",
-        ))
+        db.add(
+            ModelDeployment(
+                provider_id=provider.id,
+                **deployment.model_dump(),
+                verification_status="legacy" if not data.model_deployments else "unverified",
+            )
+        )
     await db.flush()
     await db.refresh(provider)
     return provider
@@ -267,6 +286,7 @@ async def update_provider(db: AsyncSession, provider: LlmProvider, data: LlmProv
 
 async def soft_delete_provider(db: AsyncSession, provider: LlmProvider) -> None:
     from datetime import datetime
+
     provider.deleted_at = datetime.now(UTC)
     await db.flush()
 
@@ -277,28 +297,39 @@ async def get_decrypted_api_key(provider: LlmProvider) -> str:
 
 
 async def list_model_deployments(db: AsyncSession, provider_id: UUID) -> list[ModelDeployment]:
-    result = await db.execute(select(ModelDeployment).where(
-        ModelDeployment.provider_id == provider_id, ModelDeployment.deleted_at.is_(None),
-    ).order_by(ModelDeployment.routing_priority.desc(), ModelDeployment.model_id))
+    result = await db.execute(
+        select(ModelDeployment)
+        .where(
+            ModelDeployment.provider_id == provider_id,
+            ModelDeployment.deleted_at.is_(None),
+        )
+        .order_by(ModelDeployment.routing_priority.desc(), ModelDeployment.model_id)
+    )
     return list(result.scalars().all())
 
 
 async def get_model_deployment(db: AsyncSession, deployment_id: UUID) -> ModelDeployment | None:
-    result = await db.execute(select(ModelDeployment).where(
-        ModelDeployment.id == deployment_id, ModelDeployment.deleted_at.is_(None),
-    ))
+    result = await db.execute(
+        select(ModelDeployment).where(
+            ModelDeployment.id == deployment_id,
+            ModelDeployment.deleted_at.is_(None),
+        )
+    )
     return result.scalar_one_or_none()
 
 
 async def create_model_deployment(
-    db: AsyncSession, provider: LlmProvider, data: ModelDeploymentCreate,
+    db: AsyncSession,
+    provider: LlmProvider,
+    data: ModelDeploymentCreate,
 ) -> ModelDeployment:
     deployment = ModelDeployment(provider_id=provider.id, **data.model_dump(), verification_status="unverified")
     db.add(deployment)
     if data.model_id not in provider.supported_models:
         provider.supported_models = [*provider.supported_models, data.model_id]
     provider.config = validate_provider_config(
-        _sync_legacy_config(provider.config, [data]), provider.supported_models,
+        _sync_legacy_config(provider.config, [data]),
+        provider.supported_models,
     )
     await db.flush()
     return deployment
@@ -343,13 +374,16 @@ async def _rebuild_provider_legacy_view(db: AsyncSession, provider_id: UUID) -> 
         for item in active
     ]
     provider.config = validate_provider_config(
-        _sync_legacy_config(config, declarations), provider.supported_models,
+        _sync_legacy_config(config, declarations),
+        provider.supported_models,
     )
     await db.flush()
 
 
 async def update_model_deployment(
-    db: AsyncSession, deployment: ModelDeployment, data: ModelDeploymentUpdate,
+    db: AsyncSession,
+    deployment: ModelDeployment,
+    data: ModelDeploymentUpdate,
 ) -> ModelDeployment:
     payload = data.model_dump(exclude_unset=True)
     if "adapter" in payload or "capabilities" in payload or "endpoint_path" in payload:
@@ -378,6 +412,7 @@ async def update_model_deployment(
 
 async def delete_model_deployment(db: AsyncSession, deployment: ModelDeployment) -> None:
     from datetime import datetime
+
     deployment.deleted_at = datetime.now(UTC)
     await db.flush()
     await _rebuild_provider_legacy_view(db, deployment.provider_id)
@@ -391,10 +426,7 @@ def effective_provider(provider: LlmProvider, deployment: ModelDeployment) -> Ll
     # ``parent object ... has been garbage collected``.  This path is commonly
     # hit twice by agent tools (capability resolution, then gateway dispatch),
     # so build a transient mapped instance with independent instrumentation.
-    values = {
-        column.key: deepcopy(getattr(provider, column.key))
-        for column in LlmProvider.__table__.columns
-    }
+    values = {column.key: deepcopy(getattr(provider, column.key)) for column in LlmProvider.__table__.columns}
     resolved = LlmProvider(**values)
     resolved.provider_type = "anthropic" if deployment.adapter == "anthropic_messages" else "openai"
     if deployment.base_url_override:
@@ -407,6 +439,7 @@ def effective_provider(provider: LlmProvider, deployment: ModelDeployment) -> Ll
     }
     resolved.config = {
         **config,
+        **{key: value for key, value in (deployment.config or {}).items() if key in {"supports_strict_tools"}},
         "model_capabilities": capabilities,
         "_gateway_deployment_id": str(deployment.id),
         "_gateway_adapter": deployment.adapter,

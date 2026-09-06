@@ -99,10 +99,10 @@ def test_workspace_file_tool_schema_exposes_ids_and_paths():
     assert "workspace_id" in tools["workspace_list_files"]["parameters"]["properties"]
     assert "workspace_id" in tools["workspace_read_file"]["parameters"]["properties"]
     assert "target_workspace_id" in tools["workspace_write_file"]["parameters"]["properties"]
-    assert "target_workspace_id" in tools["spreadsheet_tool"]["parameters"]["properties"]
-    assert "target_file_id" in tools["spreadsheet_tool"]["parameters"]["properties"]
-    assert "base_version_id" in tools["document_tool"]["parameters"]["properties"]
-    assert "idempotency_key" in tools["presentation_tool"]["parameters"]["properties"]
+    assert "target_workspace_id" in tools["spreadsheet_create"]["parameters"]["properties"]
+    assert "target_file_id" in tools["spreadsheet_edit"]["parameters"]["properties"]
+    assert "base_version_id" in tools["document_edit"]["parameters"]["properties"]
+    assert "idempotency_key" in tools["presentation_edit"]["parameters"]["properties"]
     assert "offset" in tools["workspace_search"]["parameters"]["properties"]
     assert "普通问答、解释或文件分析不得擅自生成附件" in nodes.OUTPUT_PROTOCOL_PROMPT
 
@@ -131,33 +131,44 @@ async def test_workspace_tools_list_mapping_and_read_by_file_id(
     assert [(item["file_id"], item["path"]) for item in listed["items"]] == [
         (str(selected.id), selected.path),
     ]
-    read_result = json.loads(await nodes._execute_builtin_tool(
-        state,
-        "workspace_read_file",
-        {"file_id": str(selected.id)},
-    ))
+    read_result = json.loads(
+        await nodes._execute_builtin_tool(
+            state,
+            "workspace_read_file",
+            {"file_id": str(selected.id)},
+        )
+    )
     assert read_result["content"] == "选中文件的解析内容"
     assert read_result["has_more"] is False
-    assert await nodes._execute_builtin_tool(
-        state,
-        "workspace_read_file",
-        {"file_id": str(other_file.id)},
-    ) == "file not found"
-    assert await nodes._execute_builtin_tool(
-        state,
-        "workspace_read_file",
-        {},
-    ) == "file_id or path is required"
+    assert (
+        await nodes._execute_builtin_tool(
+            state,
+            "workspace_read_file",
+            {"file_id": str(other_file.id)},
+        )
+        == "file not found"
+    )
+    assert (
+        await nodes._execute_builtin_tool(
+            state,
+            "workspace_read_file",
+            {},
+        )
+        == "file_id or path is required"
+    )
 
 
 @pytest.mark.asyncio
 async def test_builtin_tool_keeps_full_model_result_and_only_truncates_trace_preview(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    full_result = json.dumps({
-        "status": "ready",
-        "content": "长" * 5000,
-    }, ensure_ascii=False)
+    full_result = json.dumps(
+        {
+            "status": "ready",
+            "content": "长" * 5000,
+        },
+        ensure_ascii=False,
+    )
 
     async def fake_execute(*_args, **_kwargs):
         return full_result
@@ -215,7 +226,10 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
         ),
     )
     user = await _make_personal_principal(
-        db_session, org, ws, prefix="prompt-ref",
+        db_session,
+        org,
+        ws,
+        prefix="prompt-ref",
     )
     principal = CurrentUser(
         user=user,
@@ -225,15 +239,16 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
         organization_id=org.id,
     )
     await db_session.flush()
+
     async def fake_build_tools(
         _db,
         _skill_ids,
         _workspace_id,
         _user=None,
         *,
-            exec_mode="craft",
-            application_id=None,
-            page_context=None,
+        exec_mode="craft",
+        application_id=None,
+        page_context=None,
     ):
         return nodes._builtin_tool_defs(), {}
 
@@ -245,22 +260,24 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
     monkeypatch.setattr(nodes, "_configure_visual_turn", fake_visual)
 
     file_id = str(selected.id)
-    result = await nodes.prepare_dsh_turn({
-        "mode": "general",
-        "org_id": str(org.id),
-        "workspace_id": str(ws.id),
-        "system_prompt": "你是测试助手。",
-        "messages": [{"role": "user", "content": f"@{file_id} 这个能分析一下么？"}],
-        "referenced_file_ids": [file_id],
-        "file_refs_v1": [{"file_id": file_id, "inject_content": True}],
-        "skill_ids": [],
-        "exec_mode": "craft",
-        "memory_context": [],
-        "rag_context": [],
-        "steps": [],
-        "traces": [],
-        "usage": {},
-    })
+    result = await nodes.prepare_dsh_turn(
+        {
+            "mode": "general",
+            "org_id": str(org.id),
+            "workspace_id": str(ws.id),
+            "system_prompt": "你是测试助手。",
+            "messages": [{"role": "user", "content": f"@{file_id} 这个能分析一下么？"}],
+            "referenced_file_ids": [file_id],
+            "file_refs_v1": [{"file_id": file_id, "inject_content": True}],
+            "skill_ids": [],
+            "exec_mode": "craft",
+            "memory_context": [],
+            "rag_context": [],
+            "steps": [],
+            "traces": [],
+            "usage": {},
+        }
+    )
 
     prompt = result["system_prompt"]
     canonical = f"{ws.name}:/WAIC展商联系方式.txt"
@@ -297,7 +314,10 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
         WorkspaceFileCreate(path="根目录/其他文件.txt", content="绝对不得注入"),
     )
     user = await _make_personal_principal(
-        db_session, org, ws, prefix="structured-ref",
+        db_session,
+        org,
+        ws,
+        prefix="structured-ref",
     )
     principal = CurrentUser(
         user=user,
@@ -307,15 +327,16 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
         organization_id=org.id,
     )
     await db_session.flush()
+
     async def fake_build_tools(
         _db,
         _skill_ids,
         _workspace_id,
         _user=None,
         *,
-            exec_mode="craft",
-            application_id=None,
-            page_context=None,
+        exec_mode="craft",
+        application_id=None,
+        page_context=None,
     ):
         return nodes._builtin_tool_defs(), {}
 
@@ -327,22 +348,24 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
     monkeypatch.setattr(nodes, "_configure_visual_turn", fake_visual)
 
     file_id = str(selected.id)
-    result = await nodes.prepare_dsh_turn({
-        "mode": "general",
-        "org_id": str(org.id),
-        "workspace_id": str(ws.id),
-        "system_prompt": "你是测试助手。",
-        "messages": [{"role": "user", "content": "请分析我刚刚拖入的文件"}],
-        "referenced_file_ids": [file_id],
-        "file_refs_v1": [{"file_id": file_id, "inject_content": True}],
-        "skill_ids": [],
-        "exec_mode": "craft",
-        "memory_context": [],
-        "rag_context": [],
-        "steps": [],
-        "traces": [],
-        "usage": {},
-    })
+    result = await nodes.prepare_dsh_turn(
+        {
+            "mode": "general",
+            "org_id": str(org.id),
+            "workspace_id": str(ws.id),
+            "system_prompt": "你是测试助手。",
+            "messages": [{"role": "user", "content": "请分析我刚刚拖入的文件"}],
+            "referenced_file_ids": [file_id],
+            "file_refs_v1": [{"file_id": file_id, "inject_content": True}],
+            "skill_ids": [],
+            "exec_mode": "craft",
+            "memory_context": [],
+            "rag_context": [],
+            "steps": [],
+            "traces": [],
+            "usage": {},
+        }
+    )
 
     prompt = result["system_prompt"]
     assert "只能注入这份附件的内容" in prompt
@@ -389,8 +412,11 @@ def test_general_state_and_message_metadata_preserve_attachment_snapshot():
         "name": "report.xlsx",
     }
     invoked_skill = {
-        "id": str(uuid4()), "name": "Workbook Cleaner", "slug": "workbook-cleaner",
-        "scope_type": "user", "is_executable": True,
+        "id": str(uuid4()),
+        "name": "Workbook Cleaner",
+        "slug": "workbook-cleaner",
+        "scope_type": "user",
+        "is_executable": True,
     }
     user = SimpleNamespace(id=str(uuid4()), department_id=None, team_id=None)
 
@@ -408,7 +434,8 @@ def test_general_state_and_message_metadata_preserve_attachment_snapshot():
     assert state["referenced_file_ids"] == [file_id]
     assert state["invoked_skill_ids"] == [invoked_skill["id"]]
     assert runtime_support.user_message_metadata(state) == {
-        "attachments": [snapshot], "invoked_skills": [invoked_skill],
+        "attachments": [snapshot],
+        "invoked_skills": [invoked_skill],
     }
 
 
@@ -441,7 +468,10 @@ async def test_attachment_validation_accepts_authorized_cross_workspace_and_unre
 
     monkeypatch.setattr(terminal_api.workspace_service, "get_file", cross_workspace_file)
     snapshots = await terminal_api._resolve_task_attachments(
-        db_session, cu, str(workspace_id), [file_id],
+        db_session,
+        cu,
+        str(workspace_id),
+        [file_id],
     )
     assert snapshots[0]["workspace_id"] == str(other_workspace_id)
 
@@ -457,7 +487,10 @@ async def test_attachment_validation_accepts_authorized_cross_workspace_and_unre
 
     monkeypatch.setattr(terminal_api.workspace_service, "get_file", unready_file)
     snapshots = await terminal_api._resolve_task_attachments(
-        db_session, cu, str(workspace_id), [file_id],
+        db_session,
+        cu,
+        str(workspace_id),
+        [file_id],
     )
     assert snapshots[0]["file_id"] == str(file_id)
 
@@ -473,7 +506,10 @@ async def test_attachment_validation_accepts_authorized_cross_workspace_and_unre
 
     monkeypatch.setattr(terminal_api.workspace_service, "get_file", raw_png_file)
     snapshots = await terminal_api._resolve_task_attachments(
-        db_session, cu, str(workspace_id), [file_id],
+        db_session,
+        cu,
+        str(workspace_id),
+        [file_id],
     )
     assert snapshots[0]["name"] == "截图.png"
 
@@ -484,34 +520,49 @@ def test_workspace_intent_is_capability_derived_not_keyword_gated() -> None:
     access = {
         "roles": [{"name": "财务经理"}],
         "workspaces": [
-            {"id": personal_id, "name": "我的空间", "slug": "me", "scope_type": "user",
-             "capabilities": {"read": True, "create": True, "update": True, "delete": True}},
-            {"id": finance_id, "name": "财务部", "slug": "finance-dept", "scope_type": "department",
-             "capabilities": {"read": True, "create": True, "update": True, "delete": False}},
+            {
+                "id": personal_id,
+                "name": "我的空间",
+                "slug": "me",
+                "scope_type": "user",
+                "capabilities": {"read": True, "create": True, "update": True, "delete": True},
+            },
+            {
+                "id": finance_id,
+                "name": "财务部",
+                "slug": "finance-dept",
+                "scope_type": "department",
+                "capabilities": {"read": True, "create": True, "update": True, "delete": False},
+            },
         ],
     }
 
     question = workspace_permission_service.resolve_workspace_intent(
-        access, "我能不能修改财务部文件？",
+        access,
+        "我能不能修改财务部文件？",
     )
     assert question["permission_question"] is False
     assert set(question["read_workspace_ids"]) == {personal_id, finance_id}
     assert set(question["write_workspace_ids"]) == {personal_id, finance_id}
 
     operation = workspace_permission_service.resolve_workspace_intent(
-        access, "请修改财务部文件里的预算表",
+        access,
+        "请修改财务部文件里的预算表",
     )
     assert operation["permission_question"] is False
     assert finance_id in operation["read_workspace_ids"]
     assert finance_id in operation["write_workspace_ids"]
 
     exact_reference = workspace_permission_service.resolve_workspace_intent(
-        access, "请分析附件", referenced_workspace_ids=[finance_id],
+        access,
+        "请分析附件",
+        referenced_workspace_ids=[finance_id],
     )
     assert finance_id in exact_reference["read_workspace_ids"]
 
     all_authorized_files = workspace_permission_service.resolve_workspace_intent(
-        access, "请列出所有我有权限的部门文件",
+        access,
+        "请列出所有我有权限的部门文件",
     )
     assert all_authorized_files["permission_question"] is False
     assert finance_id in all_authorized_files["read_workspace_ids"]
@@ -542,7 +593,9 @@ async def test_delete_inferred_workspace_folder_path_recursively(db_session: Asy
     await db_session.flush()
 
     deleted = await workspace_service.soft_delete_folder_path(
-        db_session, ws.id, "平台工具输出",
+        db_session,
+        ws.id,
+        "平台工具输出",
     )
 
     assert deleted == {"folders": 0, "files": 2}
@@ -554,16 +607,24 @@ async def test_delete_inferred_workspace_folder_path_recursively(db_session: Asy
 @pytest.mark.asyncio
 async def test_bulk_delete_deduplicates_nested_folders_and_selected_files(db_session: AsyncSession):
     _, ws, first = await _make_workspace_with_file(
-        db_session, path="平台工具输出/task-a/result.txt", content="a",
+        db_session,
+        path="平台工具输出/task-a/result.txt",
+        content="a",
     )
     second = await workspace_service.upsert_file(
-        db_session, ws, WorkspaceFileCreate(path="平台工具输出/task-b/report.md", content="b"),
+        db_session,
+        ws,
+        WorkspaceFileCreate(path="平台工具输出/task-b/report.md", content="b"),
     )
     keep = await workspace_service.upsert_file(
-        db_session, ws, WorkspaceFileCreate(path="会话附件/task-c/input.txt", content="c"),
+        db_session,
+        ws,
+        WorkspaceFileCreate(path="会话附件/task-c/input.txt", content="c"),
     )
     await workspace_service.create_folder(
-        db_session, ws, WorkspaceFolderCreate(path="平台工具输出/task-a"),
+        db_session,
+        ws,
+        WorkspaceFolderCreate(path="平台工具输出/task-a"),
     )
 
     deleted = await workspace_service.bulk_soft_delete_items(
@@ -586,11 +647,17 @@ async def test_bulk_delete_rejects_cross_workspace_and_traversal(db_session: Asy
 
     with pytest.raises(ValueError, match="不属于当前工作空间"):
         await workspace_service.bulk_soft_delete_items(
-            db_session, ws.id, file_ids=[other.id], folder_paths=[],
+            db_session,
+            ws.id,
+            file_ids=[other.id],
+            folder_paths=[],
         )
     with pytest.raises(ValueError, match="不能包含"):
         await workspace_service.bulk_soft_delete_items(
-            db_session, other_ws.id, file_ids=[], folder_paths=["../根目录"],
+            db_session,
+            other_ws.id,
+            file_ids=[],
+            folder_paths=["../根目录"],
         )
 
 
@@ -621,14 +688,19 @@ async def test_attachment_validation_returns_deduplicated_display_snapshot(
     monkeypatch.setattr(terminal_api.scope_service, "is_workspace_visible", lambda _ws, _cu: True)
 
     snapshots = await terminal_api._resolve_task_attachments(
-        db_session, cu, str(workspace_id), [file_id, file_id],
+        db_session,
+        cu,
+        str(workspace_id),
+        [file_id, file_id],
     )
-    assert snapshots == [{
-        "file_id": str(file_id),
-        "workspace_id": str(workspace_id),
-        "path": "会话附件/task/internal-report.xlsx",
-        "name": "原始报告.xlsx",
-    }]
+    assert snapshots == [
+        {
+            "file_id": str(file_id),
+            "workspace_id": str(workspace_id),
+            "path": "会话附件/task/internal-report.xlsx",
+            "name": "原始报告.xlsx",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -637,10 +709,15 @@ async def test_history_restores_available_and_unavailable_attachment_refs(
     monkeypatch: pytest.MonkeyPatch,
 ):
     org, ws, available = await _make_workspace_with_file(
-        db_session, path="会话附件/task/报告.txt", content="历史文件正文",
+        db_session,
+        path="会话附件/task/报告.txt",
+        content="历史文件正文",
     )
     user = await _make_personal_principal(
-        db_session, org, ws, prefix="history",
+        db_session,
+        org,
+        ws,
+        prefix="history",
     )
     task = Task(
         organization_id=org.id,
@@ -653,17 +730,29 @@ async def test_history_restores_available_and_unavailable_attachment_refs(
     db_session.add(task)
     await db_session.flush()
     missing_id = str(uuid4())
-    db_session.add(TaskMessage(
-        task_id=task.id,
-        role="user",
-        content="请分析这两份文件",
-        metadata_={"attachments": [
-            {"file_id": str(available.id), "workspace_id": str(ws.id),
-             "path": available.path, "name": "报告.txt"},
-            {"file_id": missing_id, "workspace_id": str(ws.id),
-             "path": "会话附件/task/已删除.xlsx", "name": "已删除.xlsx"},
-        ]},
-    ))
+    db_session.add(
+        TaskMessage(
+            task_id=task.id,
+            role="user",
+            content="请分析这两份文件",
+            metadata_={
+                "attachments": [
+                    {
+                        "file_id": str(available.id),
+                        "workspace_id": str(ws.id),
+                        "path": available.path,
+                        "name": "报告.txt",
+                    },
+                    {
+                        "file_id": missing_id,
+                        "workspace_id": str(ws.id),
+                        "path": "会话附件/task/已删除.xlsx",
+                        "name": "已删除.xlsx",
+                    },
+                ]
+            },
+        )
+    )
     await db_session.flush()
 
     async def no_memory(*_args, **_kwargs):
@@ -671,7 +760,10 @@ async def test_history_restores_available_and_unavailable_attachment_refs(
 
     monkeypatch.setattr(nodes.memory_service, "load_memory_for_scopes", no_memory)
     cu = SimpleNamespace(
-        id=str(user.id), organization_id=org.id, department_id=None, team_id=None,
+        id=str(user.id),
+        organization_id=org.id,
+        department_id=None,
+        team_id=None,
     )
     result = await nodes._load_memory_general(
         {
@@ -703,10 +795,15 @@ async def test_business_assistant_does_not_read_long_term_memory(
     monkeypatch: pytest.MonkeyPatch,
 ):
     org, ws, _ = await _make_workspace_with_file(
-        db_session, path="business-assistant/current.txt", content="current",
+        db_session,
+        path="business-assistant/current.txt",
+        content="current",
     )
     user = await _make_personal_principal(
-        db_session, org, ws, prefix="business-assistant-memory",
+        db_session,
+        org,
+        ws,
+        prefix="business-assistant-memory",
     )
     task = Task(
         organization_id=org.id,
@@ -718,12 +815,14 @@ async def test_business_assistant_does_not_read_long_term_memory(
     )
     db_session.add(task)
     await db_session.flush()
-    db_session.add(TaskMessage(
-        task_id=task.id,
-        role="user",
-        content="查询当前页面记录",
-        metadata_={},
-    ))
+    db_session.add(
+        TaskMessage(
+            task_id=task.id,
+            role="user",
+            content="查询当前页面记录",
+            metadata_={},
+        )
+    )
     await db_session.flush()
 
     async def fail_if_memory_is_read(*_args, **_kwargs):
@@ -731,7 +830,10 @@ async def test_business_assistant_does_not_read_long_term_memory(
 
     monkeypatch.setattr(nodes.memory_service, "load_memory_for_scopes", fail_if_memory_is_read)
     cu = SimpleNamespace(
-        id=str(user.id), organization_id=org.id, department_id=None, team_id=None,
+        id=str(user.id),
+        organization_id=org.id,
+        department_id=None,
+        team_id=None,
     )
     result = await nodes._load_memory_general(
         {
@@ -759,10 +861,14 @@ async def test_agent_searches_and_reads_authorized_shared_space_without_referenc
     monkeypatch: pytest.MonkeyPatch,
 ):
     _, default_ws, _ = await _make_workspace_with_file(
-        db_session, path="personal.txt", content="personal",
+        db_session,
+        path="personal.txt",
+        content="personal",
     )
     _, shared_ws, shared_file = await _make_workspace_with_file(
-        db_session, path="2026冬尺寸表/AD2604M601.txt", content="shared-data",
+        db_session,
+        path="2026冬尺寸表/AD2604M601.txt",
+        content="shared-data",
     )
     principal = SimpleNamespace(id=str(uuid4()))
     allowed = {"value": True}
@@ -779,24 +885,32 @@ async def test_agent_searches_and_reads_authorized_shared_space_without_referenc
     monkeypatch.setattr(nodes.scope_service, "list_workspaces_for_user", readable_workspaces)
     state = {"workspace_id": str(default_ws.id), "referenced_file_ids": []}
 
-    searched = json.loads(await nodes._execute_builtin_tool(
-        state, "workspace_search", {"query": "AD2604", "limit": 10, "offset": 0},
-    ))
-    assert [item["file_id"] for item in searched["items"]] == [str(shared_file.id)]
-    assert searched["items"][0]["canonical_path"] == (
-        f"{shared_ws.name}:/2026冬尺寸表/AD2604M601.txt"
+    searched = json.loads(
+        await nodes._execute_builtin_tool(
+            state,
+            "workspace_search",
+            {"query": "AD2604", "limit": 10, "offset": 0},
+        )
     )
+    assert [item["file_id"] for item in searched["items"]] == [str(shared_file.id)]
+    assert searched["items"][0]["canonical_path"] == (f"{shared_ws.name}:/2026冬尺寸表/AD2604M601.txt")
 
-    read = json.loads(await nodes._execute_builtin_tool(
-        state, "workspace_read_file", {"file_id": str(shared_file.id)},
-    ))
+    read = json.loads(
+        await nodes._execute_builtin_tool(
+            state,
+            "workspace_read_file",
+            {"file_id": str(shared_file.id)},
+        )
+    )
     assert read["content"] == "shared-data"
 
     # The next operation uses fresh capabilities rather than the earlier result
     # or an attachment/file-ref snapshot.
     allowed["value"] = False
     denied = await nodes._execute_builtin_tool(
-        state, "workspace_read_file", {"file_id": str(shared_file.id)},
+        state,
+        "workspace_read_file",
+        {"file_id": str(shared_file.id)},
     )
     assert denied == "file not found"
 
@@ -831,30 +945,37 @@ async def test_platform_runner_target_file_updates_in_place(
         return {"read": True, "create": True, "update": True, "delete": False}
 
     async def execute_builtin(**_kwargs):
-        return ({
-            "summary": "updated",
-            "outputs": [{
-                "name": "runner-output.xlsx",
-                "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "content_base64": base64.b64encode(output_bytes).decode("ascii"),
-            }],
-        }, 12)
+        return (
+            {
+                "summary": "updated",
+                "outputs": [
+                    {
+                        "name": "runner-output.xlsx",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "content_base64": base64.b64encode(output_bytes).decode("ascii"),
+                    }
+                ],
+            },
+            12,
+        )
 
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": principal})
     monkeypatch.setattr(nodes.workspace_permission_service, "capabilities", caps)
     monkeypatch.setattr(nodes.skill_runner_client, "execute_builtin", execute_builtin)
 
-    result = json.loads(await nodes._execute_builtin_tool(
-        {"workspace_id": str(ws.id), "exec_mode": "craft", "referenced_file_ids": []},
-        "spreadsheet_tool",
-        {
-            "action": "edit",
-            "target_file_id": str(file.id),
-            "base_version_id": str(base_version_id),
-            "idempotency_key": "runner-update-0001",
-            "operations": [],
-        },
-    ))
+    result = json.loads(
+        await nodes._execute_builtin_tool(
+            {"workspace_id": str(ws.id), "exec_mode": "craft", "referenced_file_ids": []},
+            "spreadsheet_tool",
+            {
+                "action": "edit",
+                "target_file_id": str(file.id),
+                "base_version_id": str(base_version_id),
+                "idempotency_key": "runner-update-0001",
+                "operations": [],
+            },
+        )
+    )
 
     await db_session.refresh(file)
     assert result["status"] == "success"

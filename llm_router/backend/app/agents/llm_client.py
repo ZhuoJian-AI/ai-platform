@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import ipaddress
 import json
 import os
@@ -29,11 +30,44 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.llm_provider import LlmProvider
 from app.routing.router import find_provider
+from app.services.file_capability_registry import provider_strict_schema
 from app.services.llm_provider_service import get_decrypted_api_key
 
 logger = structlog.get_logger()
 
 ANTHROPIC_VERSION = "2023-06-01"
+
+
+def prepare_tools_for_provider(
+    provider: LlmProvider,
+    tools: list[dict] | None,
+) -> list[dict] | None:
+    """Enable strict function schemas only for explicitly capable providers.
+
+    All calls still receive server-side validation.  Official OpenAI providers
+    default to strict support; OpenAI-compatible vendors opt in through
+    ``config.supports_strict_tools`` so a custom gateway cannot reject the whole
+    request merely because it does not understand the ``strict`` field.
+    """
+
+    if not tools:
+        return None
+    config = provider.config or {}
+    supports_strict = provider.provider_type == "openai" and bool(
+        config.get("supports_strict_tools", provider.vendor == "openai")
+    )
+    prepared = copy.deepcopy(tools)
+    for tool in prepared:
+        function = tool.get("function") or {}
+        if not function.get("strict"):
+            continue
+        if supports_strict:
+            function["parameters"] = provider_strict_schema(
+                function.get("parameters") or {"type": "object", "properties": {}}
+            )
+        else:
+            function.pop("strict", None)
+    return prepared
 
 
 @dataclass
@@ -55,8 +89,13 @@ class ImageGenerationResult:
 
 
 async def _resolve(
-    db: AsyncSession, org_id: UUID, model_alias: str, *, for_embeddings: bool = False,
-    dept_id: str | UUID | None = None, team_id: str | UUID | None = None,
+    db: AsyncSession,
+    org_id: UUID,
+    model_alias: str,
+    *,
+    for_embeddings: bool = False,
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
 ) -> tuple[LlmProvider, str]:
     """选 provider。model_alias 为真实模型 id（或 "default" 走组织默认路由）。返回 (provider, model)。
 
@@ -71,8 +110,13 @@ async def _resolve(
 
 
 async def resolve_provider_model(
-    db: AsyncSession, org_id: UUID, model_alias: str, *, for_embeddings: bool = False,
-    dept_id: str | UUID | None = None, team_id: str | UUID | None = None,
+    db: AsyncSession,
+    org_id: UUID,
+    model_alias: str,
+    *,
+    for_embeddings: bool = False,
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
 ) -> tuple[str, str]:
     """公开封装：model_alias→(provider_id, model)。
 
@@ -80,14 +124,23 @@ async def resolve_provider_model(
     端点，故需在落审计日志时显式解析 provider，否则 by_provider 维度会落空）。
     """
     provider, actual_model = await _resolve(
-        db, org_id, model_alias, for_embeddings=for_embeddings, dept_id=dept_id, team_id=team_id,
+        db,
+        org_id,
+        model_alias,
+        for_embeddings=for_embeddings,
+        dept_id=dept_id,
+        team_id=team_id,
     )
     return str(provider.id), actual_model
 
 
 async def resolve_provider(
-    db: AsyncSession, org_id: UUID, model_alias: str, *,
-    dept_id: str | UUID | None = None, team_id: str | UUID | None = None,
+    db: AsyncSession,
+    org_id: UUID,
+    model_alias: str,
+    *,
+    dept_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,
 ) -> tuple[LlmProvider, str]:
     """Resolve a concrete provider once so a multimodal turn cannot switch protocols mid-loop."""
     return await _resolve(db, org_id, model_alias, dept_id=dept_id, team_id=team_id)
@@ -158,6 +211,7 @@ def _build_chat_body(
     stream: bool,
 ) -> dict:
     """按 provider 协议构造 chat 请求体。messages 为 OpenAI 风格 [{role, content, tool_calls?}]。"""
+    tools = prepare_tools_for_provider(provider, tools)
     if provider.provider_type == "anthropic":
         # Anthropic: system 单独，messages 仅 user/assistant
         body: dict[str, Any] = {
@@ -171,8 +225,11 @@ def _build_chat_body(
             body["temperature"] = temperature
         if tools:
             body["tools"] = [
-                {"name": t["function"]["name"], "description": t["function"].get("description", ""),
-                 "input_schema": t["function"].get("parameters", {"type": "object", "properties": {}})}
+                {
+                    "name": t["function"]["name"],
+                    "description": t["function"].get("description", ""),
+                    "input_schema": t["function"].get("parameters", {"type": "object", "properties": {}}),
+                }
                 for t in tools
             ]
         if stream:
@@ -208,16 +265,31 @@ def _to_anthropic_messages(messages: list[dict]) -> list[dict]:
         role = m["role"]
         if role == "tool":
             # OpenAI tool 结果 → Anthropic user/tool_result
-            out.append({"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": m.get("tool_call_id", ""), "content": m.get("content", "")}
-            ]})
+            out.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": m.get("tool_call_id", ""),
+                            "content": m.get("content", ""),
+                        }
+                    ],
+                }
+            )
         elif role == "assistant" and m.get("tool_calls"):
             content: list[dict] = []
             if m.get("content"):
                 content.append({"type": "text", "text": m["content"]})
             for tc in m["tool_calls"]:
-                content.append({"type": "tool_use", "id": tc["id"], "name": tc["function"]["name"],
-                                "input": _safe_json(tc["function"].get("arguments", "{}"))})
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc["id"],
+                        "name": tc["function"]["name"],
+                        "input": _safe_json(tc["function"].get("arguments", "{}")),
+                    }
+                )
             out.append({"role": "assistant", "content": content})
         else:
             out.append({"role": role, "content": _to_anthropic_content(m.get("content", ""))})
@@ -253,10 +325,12 @@ def _to_anthropic_content(content: Any) -> Any:
                 base64.b64decode(encoded, validate=True)
             except (ValueError, TypeError) as exc:
                 raise RuntimeError("Anthropic image data is not valid base64") from exc
-            converted.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": media_type, "data": encoded},
-            })
+            converted.append(
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": media_type, "data": encoded},
+                }
+            )
             continue
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -306,7 +380,8 @@ async def chat(
         text = "".join(p.get("text", "") for p in content_parts if p.get("type") == "text")
         tool_calls = [
             {"id": p["id"], "name": p["name"], "arguments": json.dumps(p.get("input", {}))}
-            for p in content_parts if p.get("type") == "tool_use"
+            for p in content_parts
+            if p.get("type") == "tool_use"
         ]
         u = data.get("usage", {})
         usage = {"input_tokens": u.get("input_tokens"), "output_tokens": u.get("output_tokens")}
@@ -317,17 +392,23 @@ async def chat(
         tool_calls = []
         for tc in choice.get("tool_calls") or []:
             fn = tc.get("function", {})
-            tool_calls.append({
-                "id": tc.get("id", ""),
-                "name": fn.get("name", ""),
-                "arguments": fn.get("arguments", ""),
-            })
+            tool_calls.append(
+                {
+                    "id": tc.get("id", ""),
+                    "name": fn.get("name", ""),
+                    "arguments": fn.get("arguments", ""),
+                }
+            )
         u = data.get("usage", {})
         usage = {"input_tokens": u.get("prompt_tokens"), "output_tokens": u.get("completion_tokens")}
 
     return LlmResult(
-        content=text, tool_calls=tool_calls, usage=usage, provider_id=str(provider.id),
-        model_served=model, reasoning_content=reasoning_content if provider.provider_type != "anthropic" else None,
+        content=text,
+        tool_calls=tool_calls,
+        usage=usage,
+        provider_id=str(provider.id),
+        model_served=model,
+        reasoning_content=reasoning_content if provider.provider_type != "anthropic" else None,
     )
 
 
@@ -369,8 +450,10 @@ async def stream_chat(
 
     async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
         async with client.stream(
-            "POST", _chat_url(provider),
-            headers=_auth_headers(provider, api_key), json=body,
+            "POST",
+            _chat_url(provider),
+            headers=_auth_headers(provider, api_key),
+            json=body,
         ) as resp:
             if resp.status_code >= 400:
                 err = await resp.aread()
@@ -380,7 +463,7 @@ async def stream_chat(
                 line = line.strip()
                 if not line.startswith("data:"):
                     continue
-                payload = line[len("data:"):].strip()
+                payload = line[len("data:") :].strip()
                 if not payload or payload == "[DONE]":
                     continue
                 try:
@@ -395,12 +478,17 @@ async def stream_chat(
                         if d.get("type") == "text_delta":
                             yield ("text", d.get("text", ""), None)
                         elif d.get("type") == "input_json_delta":
-                            idx = (data.get("index") if data.get("index") is not None
-                                   else max(ant_blocks) if ant_blocks else 0)
+                            idx = (
+                                data.get("index")
+                                if data.get("index") is not None
+                                else max(ant_blocks)
+                                if ant_blocks
+                                else 0
+                            )
                             blk = ant_blocks.setdefault(idx, {"id": "", "name": "", "json_acc": ""})
                             blk["json_acc"] += d.get("partial_json", "")
                     elif etype == "content_block_start":
-                        blk = (data.get("content_block") or {})
+                        blk = data.get("content_block") or {}
                         if blk.get("type") == "tool_use":
                             ant_blocks[data.get("index", 0)] = {
                                 "id": blk.get("id", ""),
@@ -441,10 +529,14 @@ async def stream_chat(
                                 slot["arguments"] += fn["arguments"]
                     if data.get("usage"):
                         u = data["usage"]
-                        yield ("usage", None, {
-                            "input_tokens": u.get("prompt_tokens"),
-                            "output_tokens": u.get("completion_tokens"),
-                        })
+                        yield (
+                            "usage",
+                            None,
+                            {
+                                "input_tokens": u.get("prompt_tokens"),
+                                "output_tokens": u.get("completion_tokens"),
+                            },
+                        )
 
     # 流末下发本轮累积的完整 tool_calls（OpenAI 风格 [{"id","name","arguments":json-str}]）
     if is_anthropic:
@@ -454,8 +546,7 @@ async def stream_chat(
         ]
     else:
         tool_calls = [
-            {"id": s["id"], "name": s["name"], "arguments": s["arguments"]}
-            for _, s in sorted(oai_tc.items())
+            {"id": s["id"], "name": s["name"], "arguments": s["arguments"]} for _, s in sorted(oai_tc.items())
         ]
     if tool_calls:
         yield ("tool_calls", tool_calls, None)
@@ -468,8 +559,13 @@ async def stream_chat(
 
 
 async def generate_image(
-    provider: LlmProvider, model: str, *, prompt: str, size: str,
-    quality: str | None = None, endpoint_path: str = "/images/generations",
+    provider: LlmProvider,
+    model: str,
+    *,
+    prompt: str,
+    size: str,
+    quality: str | None = None,
+    endpoint_path: str = "/images/generations",
     max_bytes: int = 5 * 1024 * 1024,
 ) -> ImageGenerationResult:
     """Call an OpenAI-compatible Images API and accept either b64_json or a temporary URL."""
@@ -484,7 +580,9 @@ async def generate_image(
     # otherwise bounce the request into a private network.
     async with httpx.AsyncClient(timeout=provider.timeout_seconds, follow_redirects=False) as client:
         response = await client.post(
-            _images_url(provider, endpoint_path), headers=_auth_headers(provider, api_key), json=body,
+            _images_url(provider, endpoint_path),
+            headers=_auth_headers(provider, api_key),
+            json=body,
         )
         try:
             data = response.json()
@@ -519,7 +617,9 @@ async def generate_image(
     if not raw or len(raw) > max_bytes:
         raise RuntimeError("generated image is empty or exceeds the 5MB limit")
     return ImageGenerationResult(
-        raw=raw, provider_id=str(provider.id), model_served=model,
+        raw=raw,
+        provider_id=str(provider.id),
+        model_served=model,
         revised_prompt=item.get("revised_prompt"),
     )
 
@@ -540,15 +640,19 @@ async def embed_with_usage(
         provider, actual = provider_override, (model_override or model)
     else:
         provider, actual = await _resolve(
-            db, org_id, model, for_embeddings=True, dept_id=dept_id, team_id=team_id,
+            db,
+            org_id,
+            model,
+            for_embeddings=True,
+            dept_id=dept_id,
+            team_id=team_id,
         )
     if provider.provider_type == "anthropic":
         raise RuntimeError("Anthropic provider does not expose embeddings; configure an OpenAI-compatible provider")
     api_key = await get_decrypted_api_key(provider)
     headers = _auth_headers(provider, api_key)
     async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
-        resp = await client.post(_embed_url(provider), headers=headers,
-                                 json={"model": actual, "input": texts})
+        resp = await client.post(_embed_url(provider), headers=headers, json={"model": actual, "input": texts})
     data = resp.json()
     if resp.status_code >= 400:
         raise RuntimeError(f"upstream embed error {resp.status_code}: {data}")

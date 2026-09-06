@@ -30,6 +30,8 @@ RUN sed -i 's|deb.debian.org/debian|mirrors.aliyun.com/debian|g; s|security.debi
         libreoffice-writer-nogui \
         libreoffice-calc-nogui \
         libreoffice-impress-nogui \
+        tesseract-ocr \
+        tesseract-ocr-chi-sim \
         fonts-wqy-microhei \
     && rm -rf /var/lib/apt/lists/*
 
