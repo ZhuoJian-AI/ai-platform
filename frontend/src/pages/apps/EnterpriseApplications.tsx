@@ -488,7 +488,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
 
       <Modal width={820} title={grantIndex === null ? '新增子模块授权' : '编辑子模块授权'} open={grantModalOpen} onCancel={() => setGrantModalOpen(false)} onOk={() => grantForm.submit()} confirmLoading={saveGrant.isPending} forceRender>
         <Form form={grantForm} layout="vertical" onFinish={(values) => saveGrant.mutate(values)}>
-          <Form.Item name="scope" label="授权对象" rules={[{ required: true }]}><TreeSelect treeData={orgTree} treeDefaultExpandAll showSearch treeNodeFilterProp="title" loading={treeLoading || rolesLoading} placeholder="选择角色、部门、团队或用户" /></Form.Item>
+          <Form.Item name="scope" label="授权对象" rules={[{ required: true }]}><TreeSelect treeData={orgTree} treeDefaultExpandAll showSearch treeNodeFilterProp="title" loading={treeLoading || rolesLoading} placeholder="选择角色、部门或用户" /></Form.Item>
           {selectedIntegration?.modules.length ? <>
             <Form.Item name="module_keys" label="授权哪些子模块" rules={[{ required: true, message: '至少选择一个子模块' }]} extra="每个子模块独立配置权限；以后新同步的子模块不会自动获得授权。">
               <Checkbox.Group options={selectedIntegration.modules.map((item) => ({

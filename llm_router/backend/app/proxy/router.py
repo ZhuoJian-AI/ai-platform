@@ -31,7 +31,6 @@ from app.graph import get_proxy_graph, run_proxy, stream_proxy
 from app.models.department import Department
 from app.models.llm_provider import LlmProvider
 from app.models.organization import Organization
-from app.models.team import Team
 from app.proxy.anthropic_adapter import make_anthropic_error
 from app.proxy.openai_adapter import make_openai_error
 
@@ -86,9 +85,7 @@ async def list_models(
     """列出当前 API Key 可访问的模型列表（OpenAI 格式）。"""
     org = await db.get(Organization, auth.organization_id)
     dept = await db.get(Department, auth.department_id) if auth.department_id else None
-    team = await db.get(Team, auth.team_id) if auth.team_id else None
-
-    perms = resolve_effective_permissions(auth.api_key, org, dept, team)
+    perms = resolve_effective_permissions(auth.api_key, org, dept)
 
     result = await db.execute(
         select(LlmProvider).where(

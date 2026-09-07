@@ -47,7 +47,7 @@ async def create_agent_endpoint(
 @router.get("/organizations/{org_id}/agents", response_model=list[AgentRead])
 async def list_agents_endpoint(
     org_id: UUID,
-    scope_type: str | None = Query(default=None, description="organization/department/team/user"),
+    scope_type: str | None = Query(default=None, description="organization/department/user/role"),
     scope_id: str | None = Query(default=None),
     _: CurrentAdmin = Depends(require_org_access), db: AsyncSession = Depends(get_db),
 ):

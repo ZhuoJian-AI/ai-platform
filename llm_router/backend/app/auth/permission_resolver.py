@@ -1,4 +1,4 @@
-"""Permission resolver — cascade permissions from org → dept → team → key."""
+"""Permission resolver — cascade permissions from enterprise → department → key."""
 
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -6,7 +6,6 @@ from decimal import Decimal
 from app.models.api_key import ApiKey
 from app.models.department import Department
 from app.models.organization import Organization
-from app.models.team import Team
 
 
 @dataclass
@@ -29,7 +28,6 @@ def resolve_effective_permissions(
     api_key: ApiKey,
     org: Organization,
     dept: Department | None = None,
-    team: Team | None = None,
 ) -> EffectivePermissions:
     """级联计算最终权限。
 
@@ -45,8 +43,6 @@ def resolve_effective_permissions(
     _append_models(model_sets, org.settings.get("default_models"))
     if dept:
         _append_models(model_sets, dept.settings.get("default_models"))
-    if team:
-        _append_models(model_sets, team.settings.get("default_models"))
     _append_models(model_sets, api_key.allowed_models)
 
     if model_sets:
@@ -66,7 +62,6 @@ def resolve_effective_permissions(
     # ── 速率限制 (最小有效值) ──
     rpm_candidates = [v for v in [
         api_key.rate_limit_rpm,
-        team.rate_limit_rpm if team else None,
         dept.rate_limit_rpm if dept else None,
         org.rate_limit_rpm,
     ] if v is not None]
@@ -74,7 +69,6 @@ def resolve_effective_permissions(
 
     tpm_candidates = [v for v in [
         api_key.rate_limit_tpm,
-        team.rate_limit_tpm if team else None,
         dept.rate_limit_tpm if dept else None,
         org.rate_limit_tpm,
     ] if v is not None]
@@ -83,7 +77,6 @@ def resolve_effective_permissions(
     # ── 预算上限 (最小有效值) ──
     budget_candidates = [v for v in [
         api_key.budget_cap_usd,
-        team.budget_cap_usd if team else None,
         dept.budget_cap_usd if dept else None,
         org.budget_cap_usd,
     ] if v is not None]
@@ -92,7 +85,6 @@ def resolve_effective_permissions(
     # ── 预算上限（以 token 计，最小有效值）──
     token_candidates = [v for v in [
         api_key.budget_cap_tokens,
-        team.budget_cap_tokens if team else None,
         dept.budget_cap_tokens if dept else None,
         org.budget_cap_tokens,
     ] if v is not None]
@@ -100,7 +92,6 @@ def resolve_effective_permissions(
 
     credit_candidates = [v for v in [
         getattr(api_key, "budget_cap_credits", None),
-        getattr(team, "budget_cap_credits", None) if team else None,
         getattr(dept, "budget_cap_credits", None) if dept else None,
         getattr(org, "budget_cap_credits", None),
     ] if v is not None]

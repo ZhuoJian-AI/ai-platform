@@ -115,24 +115,6 @@ export interface Department {
   updated_at: string;
 }
 
-export interface Team {
-  id: string;
-  department_id: string;
-  organization_id: string;
-  name: string;
-  slug: string;
-  description: string | null;
-  settings: Record<string, unknown>;
-  rate_limit_rpm: number | null;
-  rate_limit_tpm: number | null;
-  /** 历史只读字段；后端不再执行或接受写入。 */
-  readonly budget_cap_usd: string | null;
-  budget_cap_tokens: number | null;
-  budget_cap_credits: number | null;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface LlmProvider {
   id: string;
   organization_id: string;
@@ -141,9 +123,8 @@ export interface LlmProvider {
   provider_type: string;
   region: string | null;
   workspace_id: string | null;
-  scope_type: 'organization' | 'department' | 'team';
+  scope_type: 'organization' | 'department';
   department_id: string | null;
-  team_id: string | null;
   base_url: string;
   api_key_masked: string;
   api_key_version: number;
@@ -207,10 +188,9 @@ export interface ApiKey {
   id: string;
   key_prefix: string;
   key_name: string;
-  scope_type: 'organization' | 'department' | 'team';
+  scope_type: 'organization' | 'department';
   organization_id: string;
   department_id: string | null;
-  team_id: string | null;
   allowed_models: string[];
   rate_limit_rpm: number | null;
   rate_limit_tpm: number | null;
@@ -240,7 +220,7 @@ export interface DlpRule {
   action: 'block' | 'redact' | 'warn' | 'log';
   direction: 'request' | 'response' | 'both';
   pattern: string;
-  scope_type: 'organization' | 'department' | 'team';
+  scope_type: 'organization' | 'department';
   scope_id: string | null;
   is_active: boolean;
   priority: number;
@@ -394,19 +374,6 @@ export const departments = {
     request<void>(`/api/v1/departments/${id}`, { method: 'DELETE' }),
 };
 
-// ── Teams ──────────────────────────────────────────────────────────────
-
-export const teams = {
-  list: (deptId: string) => request<Team[]>(`/api/v1/departments/${deptId}/teams`),
-  get: (id: string) => request<Team>(`/api/v1/teams/${id}`),
-  create: (deptId: string, data: Partial<Team>) =>
-    request<Team>(`/api/v1/departments/${deptId}/teams`, { method: 'POST', body: JSON.stringify(data) }),
-  update: (id: string, data: Partial<Team>) =>
-    request<Team>(`/api/v1/teams/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  delete: (id: string) =>
-    request<void>(`/api/v1/teams/${id}`, { method: 'DELETE' }),
-};
-
 // ── Users ──────────────────────────────────────────────────────────────
 
 export interface User {
@@ -426,7 +393,6 @@ export interface User {
   } | null;
   department_ids: string[];
   department_id: string | null;
-  team_id: string | null;
   is_active: boolean;
   must_change_password: boolean;
   manager_scopes: ManagerScopeGrant[];
@@ -451,7 +417,7 @@ async function requestBlob(path: string, tokenKey: string, signal?: AbortSignal)
 }
 
 export interface ManagerScopeGrant {
-  scope_type: 'department' | 'team';
+  scope_type: 'department';
   scope_id: string;
 }
 
@@ -462,7 +428,6 @@ export interface UserCreateInput {
   role_ids?: string[];
   department_ids?: string[];
   department_id?: string | null;
-  team_id?: string | null;
   is_active?: boolean;
   password: string;
   manager_scopes?: ManagerScopeGrant[];
@@ -517,7 +482,7 @@ export interface EffectiveWorkspaceAccess {
   id: string;
   name: string;
   slug: string;
-  scope_type: 'organization' | 'department' | 'team' | 'user';
+  scope_type: 'organization' | 'department' | 'user';
   scope_id: string | null;
   capabilities: WorkspaceCapabilities;
   sources: Partial<Record<'read' | 'create' | 'update' | 'delete', EffectiveAccessSource[]>>;
@@ -671,9 +636,6 @@ export const providers = {
   /** 创建部门级提供商 */
   createForDept: (deptId: string, data: Partial<LlmProvider> & { organization_id: string }) =>
     request<LlmProvider>(`/api/v1/departments/${deptId}/providers`, { method: 'POST', body: JSON.stringify(data) }),
-  /** 创建团队级提供商 */
-  createForTeam: (teamId: string, data: Partial<LlmProvider> & { organization_id: string }) =>
-    request<LlmProvider>(`/api/v1/teams/${teamId}/providers`, { method: 'POST', body: JSON.stringify(data) }),
   update: (id: string, data: Partial<LlmProvider>) =>
     request<LlmProvider>(`/api/v1/providers/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) =>
@@ -705,9 +667,6 @@ export const apiKeys = {
   /** 创建部门级 Key */
   createForDept: (deptId: string, data: Partial<ApiKey> & { organization_id: string }) =>
     request<ApiKeyWithSecret>(`/api/v1/departments/${deptId}/api-keys`, { method: 'POST', body: JSON.stringify(data) }),
-  /** 创建团队级 Key */
-  createForTeam: (teamId: string, data: Partial<ApiKey> & { organization_id: string }) =>
-    request<ApiKeyWithSecret>(`/api/v1/teams/${teamId}/api-keys`, { method: 'POST', body: JSON.stringify(data) }),
   update: (id: string, data: Partial<ApiKey>) =>
     request<ApiKey>(`/api/v1/api-keys/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   revoke: (id: string) =>
@@ -764,7 +723,7 @@ export const auditLogs = {
 
 // ── AI quota usage (credits + token consumption) ─────────────────────
 
-export type BudgetScopeType = 'organization' | 'department' | 'team' | 'api_key';
+export type BudgetScopeType = 'organization' | 'department' | 'api_key';
 
 export interface BudgetScopeCaps {
   rpm: number | null;
@@ -1079,7 +1038,7 @@ export interface WorkspaceFileVersion {
 
 /** 工作空间树节点：随组织架构逐级嵌套，每节点携带同名绑定工作空间。 */
 export interface WorkspaceTreeNode {
-  node_type: 'organization' | 'department' | 'team' | 'user';
+  node_type: 'organization' | 'department' | 'user';
   node_id: string;
   name: string;
   workspace: {
@@ -1242,9 +1201,9 @@ export interface RagFolder {
   created_at: string; updated_at: string;
 }
 
-/** 终端知识库左栏树节点：用户可见的作用域单链（组织→部门→团队→个人）。 */
+/** 终端知识库左栏树节点：用户可见的作用域单链（企业→部门→个人）。 */
 export interface KbNode {
-  scope_type: 'organization' | 'department' | 'team' | 'user';
+  scope_type: 'organization' | 'department' | 'user';
   scope_id: string | null;
   name: string;
 }
@@ -1260,7 +1219,7 @@ export interface RagIngestConfig {
 }
 
 export interface RagScope {
-  scope_type: 'organization' | 'department' | 'team' | 'user';
+  scope_type: 'organization' | 'department' | 'user';
   scope_id?: string | null;
 }
 
@@ -1775,7 +1734,6 @@ export interface TerminalUser {
   user: User;
   department_ids: string[];
   department_id: string | null;
-  team_id: string | null;
   scopes: [string, string | null][];
 }
 
@@ -2314,7 +2272,7 @@ export interface TaskConfig {
 
 export type EnterpriseApplicationPermission =
   | 'view' | 'ai_query' | 'ai_create' | 'ai_update' | 'ai_delete' | 'ai_approve' | 'export';
-export type EnterpriseApplicationScope = 'organization' | 'role' | 'department' | 'team' | 'user';
+export type EnterpriseApplicationScope = 'organization' | 'role' | 'department' | 'user';
 export type EnterpriseApplicationTarget = 'tool_endpoint' | 'data_interface' | 'skill_folder';
 export type EnterpriseApplicationOperation = 'query' | 'create' | 'update' | 'delete' | 'export' | 'approve';
 
@@ -2497,13 +2455,6 @@ export interface EnterpriseApplicationEventRoute {
   is_active: boolean; created_at: string; updated_at: string;
 }
 
-export interface CrossDepartmentWorkItem {
-  id: string; source_application_id: string; source_event_id: string;
-  title: string; status: 'open' | 'done'; target_scope_type: string;
-  target_scope_id: string | null; target_module_key: string | null;
-  source_context: Record<string, unknown>; created_at: string; updated_at: string;
-}
-
 export interface EnterpriseApplicationCapability {
   binding_id: string;
   target_type: EnterpriseApplicationTarget;
@@ -2585,7 +2536,7 @@ export const enterpriseApplications = {
     }),
   syncIntegration: (id: string) => request<{
     status: 'healthy' | 'pending_review' | 'error'; manifest_updated: boolean; received_events: number;
-    created_work_items: number; delivered_events: number; cursor_sequence: number; detail: string | null;
+    queued_deliveries: number; delivered_events: number; cursor_sequence: number; detail: string | null;
   }>(`/api/v1/applications/${id}/integration/sync`, { method: 'POST' }),
   actions: (id: string) => request<EnterpriseApplicationAction[]>(`/api/v1/applications/${id}/actions`),
   eventRoutes: (id: string) => request<EnterpriseApplicationEventRoute[]>(`/api/v1/applications/${id}/event-routes`),
@@ -2608,7 +2559,6 @@ export interface TerminalTask {
   organization_id: string;
   user_id: string;
   department_id: string | null;
-  team_id: string | null;
   session_id: string;
   title: string;
   message: string;
@@ -2711,13 +2661,6 @@ export const terminal = {
       `/api/v1/terminal/application-action-confirmations/${id}/${decision}`,
       { method: 'POST' },
     ),
-  crossDepartmentWorkItems: () => userRequest<CrossDepartmentWorkItem[]>(
-    '/api/v1/terminal/cross-department-work-items',
-  ),
-  updateCrossDepartmentWorkItem: (id: string, status: 'open' | 'done') =>
-    userRequest<CrossDepartmentWorkItem>(`/api/v1/terminal/cross-department-work-items/${id}`, {
-      method: 'PATCH', body: JSON.stringify({ status }),
-    }),
   // ── 终端智能体管理（用户级）：列表展示权限范围内可见、改删仅限自己创建的 ──
   listAgents: (scope?: { scope_type: string; scope_id?: string | null }) => {
     const url = scope
@@ -2855,7 +2798,7 @@ export const terminal = {
     userRequest<WorkspaceFilePage>(`/api/v1/terminal/workspaces/${wsId}/files?page=${page}&page_size=${pageSize}`),
   listWsFiles: (wsId: string) => loadAllWorkspaceFilePages((page, pageSize) =>
     userRequest<WorkspaceFilePage>(`/api/v1/terminal/workspaces/${wsId}/files?page=${page}&page_size=${pageSize}`)),
-  /** 用户可访问的全部工作空间文件（组织/部门/团队/个人并集），供任务输入框 @ 引用下拉。 */
+  /** 用户可访问的全部工作空间文件（企业/部门/个人并集），供任务输入框 @ 引用下拉。 */
   listAllWsFiles: () => userRequest<WorkspaceFileSummary[]>('/api/v1/terminal/workspace-files'),
   upsertWsFile: (wsId: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>
     userRequest<WorkspaceFile>(`/api/v1/terminal/workspaces/${wsId}/files`, { method: 'POST', body: JSON.stringify(data) }),
@@ -3114,7 +3057,7 @@ export interface MemoryItem {
 }
 
 export interface MemoryTreeNode {
-  node_type: 'organization' | 'department' | 'team' | 'user';
+  node_type: 'organization' | 'department' | 'user';
   node_id: string;
   name: string;
   memory: {

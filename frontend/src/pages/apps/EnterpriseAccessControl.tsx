@@ -269,7 +269,7 @@ export default function EnterpriseAccessControl() {
         }) : null;
         if (currentSnapshot === nextSnapshot) return [];
         // 本页只替换当前角色的授权：其他角色（仍启用的）授权原样保留；
-        // 部门/团队/用户授权后端对非 2.4 契约的子系统仍然生效，同样原样保留，不能被悄悄清掉。
+        // 部门/用户授权后端对非 2.4 契约的子系统仍然生效，同样原样保留，不能被悄悄清掉。
         const retained = application.grants
           .filter(grant => !(grant.scope_type === 'role' && grant.scope_id === role.id))
           .filter(grant => grant.scope_type !== 'role' || (grant.scope_id && activeRoleIds.has(grant.scope_id)))

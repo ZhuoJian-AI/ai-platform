@@ -187,7 +187,7 @@ class SkillImportRead(BaseModel):
 
 
 class SkillScopeNode(BaseModel):
-    scope_type: Literal["organization", "department", "team", "user"]
+    scope_type: Literal["organization", "department", "user"]
     scope_id: str | None
     name: str
     can_import: bool = False

@@ -11,7 +11,6 @@ export interface TerminalUserState {
   organization_name: string | null;
   department_ids: string[];
   department_id: string | null;
-  team_id: string | null;
 }
 
 interface UserAuthContextType {

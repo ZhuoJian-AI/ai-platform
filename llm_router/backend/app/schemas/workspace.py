@@ -16,7 +16,7 @@ class WorkspaceCreate(BaseModel):
     storage_backend: str = Field("local", max_length=20)
     root_path: str = Field("", max_length=512)
     config: dict = Field(default_factory=dict)
-    scope_type: str = Field("organization", max_length=20)
+    scope_type: Literal["organization", "department", "user"] = "organization"
     scope_id: str | None = None
     is_active: bool = True
 
@@ -25,7 +25,7 @@ class WorkspaceUpdate(BaseModel):
     name: str | None = Field(None, max_length=255)
     description: str | None = None
     config: dict | None = None
-    scope_type: str | None = Field(None, max_length=20)
+    scope_type: Literal["organization", "department", "user"] | None = None
     scope_id: str | None = None
     is_active: bool | None = None
 

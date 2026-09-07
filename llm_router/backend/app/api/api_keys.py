@@ -22,7 +22,7 @@ from app.services.api_key_service import (
     revoke_api_key,
     update_api_key,
 )
-from app.services.organization_service import get_department, get_team
+from app.services.organization_service import get_department
 
 router = APIRouter()
 
@@ -69,14 +69,7 @@ async def create_team_key(
     auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    if data.scope_type != "team":
-        raise HTTPException(status_code=400, detail="scope_type must be 'team' for this endpoint")
-    team = await get_team(db, team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    assert_org_write_access(auth, team.organization_id)
-    api_key, full_key = await create_api_key(db, team_id=team_id, org_id=team.organization_id, data=data)
-    return ApiKeyCreateResponse(**_build_read(api_key), key=full_key)
+    raise HTTPException(status_code=410, detail="Team 已停用，请在企业或部门范围配置 API Key")
 
 
 @router.get("/organizations/{org_id}/api-keys", response_model=list[ApiKeyRead])

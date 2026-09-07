@@ -151,7 +151,7 @@ class ScopeManagerAssignment(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixi
 
     __tablename__ = "scope_manager_assignments"
     __table_args__ = (
-        CheckConstraint("scope_type IN ('department','team')", name="ck_scope_manager_type"),
+        CheckConstraint("scope_type = 'department'", name="ck_scope_manager_type"),
         UniqueConstraint("user_id", "scope_type", "scope_id", name="uq_scope_manager_assignment"),
     )
 

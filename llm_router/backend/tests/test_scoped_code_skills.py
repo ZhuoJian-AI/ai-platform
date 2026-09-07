@@ -21,7 +21,6 @@ from app.models.department import Department
 from app.models.organization import Organization
 from app.models.rag import RagCollection
 from app.models.skill import SkillFolder, SkillVersion
-from app.models.team import Team
 from app.models.user import User
 from app.models.workspace import Workspace
 from app.schemas.user import ManagerScopeGrant
@@ -51,7 +50,9 @@ _AUTHENTICATED_BUILTIN_TOOLS = {
     "workspace_list_versions",
     "workspace_restore_version",
     "web_tool",
-    *nodes.PLATFORM_TOOL_NAMES,
+    *nodes.STRICT_FILE_TOOL_NAMES,
+    "image_tool",
+    "archive_tool",
 }
 
 
@@ -72,12 +73,6 @@ async def _hierarchy(db_session):
     )
     db_session.add_all([department, other_department])
     await db_session.flush()
-    team = Team(
-        organization_id=org.id,
-        department_id=department.id,
-        name="Accounting",
-        slug=f"accounting-{uuid4().hex[:6]}",
-    )
     user = User(
         organization_id=org.id,
         username=f"member-{uuid4().hex[:8]}",
@@ -86,7 +81,7 @@ async def _hierarchy(db_session):
         team_id=None,
         is_active=True,
     )
-    db_session.add_all([team, user])
+    db_session.add(user)
     await db_session.flush()
     cu = CurrentUser(
         user=user,
@@ -97,12 +92,12 @@ async def _hierarchy(db_session):
         department_id=str(department.id),
         team_id=None,
     )
-    return org, other_org, department, other_department, team, user, cu
+    return org, other_org, department, other_department, None, user, cu
 
 
 @pytest.mark.asyncio
-async def test_department_manager_inherits_team_management_and_cross_tenant_is_rejected(db_session):
-    org, other_org, department, other_department, team, user, cu = await _hierarchy(db_session)
+async def test_department_manager_has_department_scope_and_team_scope_is_rejected(db_session):
+    org, other_org, department, other_department, _, user, cu = await _hierarchy(db_session)
     await replace_manager_grants(
         db_session,
         user,
@@ -113,8 +108,10 @@ async def test_department_manager_inherits_team_management_and_cross_tenant_is_r
 
     scopes = await managed_scopes(db_session, cu)
     assert ("department", str(department.id)) in scopes
-    assert ("team", str(team.id)) in scopes
-    assert await assert_user_can_manage_scope(db_session, cu, "team", team.id) == str(team.id)
+    assert all(scope_type != "team" for scope_type, _ in scopes)
+    with pytest.raises(HTTPException) as exc:
+        await assert_user_can_manage_scope(db_session, cu, "team", uuid4())
+    assert exc.value.status_code == 410
 
     with pytest.raises(HTTPException) as exc:
         await validate_scope_target(db_session, org.id, "department", other_department.id)
@@ -538,7 +535,7 @@ async def test_executable_skill_output_is_ingested_into_workspace(db_session, mo
         )
     )
 
-    assert result["status"] == "success"
+    assert result["status"] == "success", result
     assert result["summary"] == "created result"
     assert len(result["outputs"]) == 1
     output = result["outputs"][0]
@@ -633,11 +630,11 @@ async def test_platform_file_tools_are_available_without_skills_and_persist_outp
     result = json.loads(
         await nodes._execute_builtin_tool(
             state,
-            "text_tool",
-            {"action": "create", "output_name": "result.md", "content": "# 完成"},
+            "text_create",
+            {"output_name": "result.md", "content": "# 完成", "format": "md"},
         )
     )
-    assert result["status"] == "success"
+    assert result["status"] == "success", result
     assert result["outputs"][0]["name"] == "result.md"
     assert result["outputs"][0]["path"].startswith("平台工具输出/playground/")
     runner.assert_awaited_once()

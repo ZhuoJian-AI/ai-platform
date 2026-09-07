@@ -38,7 +38,7 @@ async def dlp_request(state: ProxyState) -> dict:
         request_text,
         state.get("org_id", ""),
         state.get("dept_id"),
-        state.get("team_id"),
+        None,
     )
 
     dlp_dict = _serialize_dlp_result(result)
@@ -96,7 +96,7 @@ async def dlp_response(state: ProxyState) -> dict:
         text,
         state.get("org_id", ""),
         state.get("dept_id"),
-        state.get("team_id"),
+        None,
     )
     dlp_dict = _serialize_dlp_result(result)
 

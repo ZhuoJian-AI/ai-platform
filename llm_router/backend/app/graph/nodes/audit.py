@@ -65,7 +65,7 @@ async def write_audit(state: ProxyState) -> dict:
         api_key_id=str(auth.api_key.id),
         organization_id=str(auth.organization_id),
         department_id=str(auth.department_id) if auth.department_id else None,
-        team_id=str(auth.team_id) if auth.team_id else None,
+        team_id=None,
         provider_id=state.get("provider_id"),
         event_type="proxy_request",
         direction="inbound",

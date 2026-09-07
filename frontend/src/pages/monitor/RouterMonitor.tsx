@@ -46,14 +46,12 @@ function fmtAsOf(value?: string, timezone?: string): string {
 const SCOPE_LABELS: Record<BudgetScopeType, string> = {
   organization: '企业',
   department: '部门',
-  team: '团队',
   api_key: 'API Key',
 };
 
 const SCOPE_COLORS: Record<BudgetScopeType, string> = {
   organization: 'purple',
   department: 'blue',
-  team: 'cyan',
   api_key: 'gold',
 };
 
@@ -319,7 +317,7 @@ export default function RouterMonitor() {
                           <Card title="快速入门" size="small">
                             <Typography.Paragraph><Typography.Text strong>1.</Typography.Text> 创建组织并注册 LLM 提供商</Typography.Paragraph>
                             <Typography.Paragraph><Typography.Text strong>2.</Typography.Text> 配置 DLP 安全围栏规则</Typography.Paragraph>
-                            <Typography.Paragraph><Typography.Text strong>3.</Typography.Text> 为团队生成 API Key</Typography.Paragraph>
+                            <Typography.Paragraph><Typography.Text strong>3.</Typography.Text> 为企业或部门生成 API Key</Typography.Paragraph>
                             <Typography.Paragraph><Typography.Text strong>4.</Typography.Text> 客户端设置 <code>base_url</code> 指向本平台</Typography.Paragraph>
                           </Card>
                         </Col>
@@ -389,7 +387,7 @@ export default function RouterMonitor() {
                         showIcon
                         type="info"
                         message="一次平台 AI 操作准入扣 1 次调用额度；失败不退；供应商重试或故障转移不重复扣"
-                        description="下表的有效余额由服务端沿企业、部门、团队和 API Key 额度链计算后直接返回；页面不自行推算。企业未设置直接额度显示为“无限”，其他层显示为“继承”；有效余额为“无限”表示整条链均未设置上限。历史 USD 预算只读且不再执行。"
+                        description="下表的有效余额由服务端沿企业、部门和 API Key 额度链计算后直接返回；页面不自行推算。企业未设置直接额度显示为“无限”，其他层显示为“继承”；有效余额为“无限”表示整条链均未设置上限。历史 USD 预算只读且不再执行。"
                         style={{ marginBottom: 16 }}
                       />
                       <Row gutter={[16, 16]}>
@@ -418,7 +416,7 @@ export default function RouterMonitor() {
                           </Card>
                         </Col>
                       </Row>
-                      <Card title="企业 / 部门 / 团队 / API Key 四级额度" style={{ marginTop: 16 }}>
+                      <Card title="企业 / 部门 / API Key 三级额度" style={{ marginTop: 16 }}>
                         <Table<BudgetScopeTreeNode>
                           dataSource={budgetScopes}
                           rowKey={(row) => `${row.scope_type}:${row.scope_id}`}

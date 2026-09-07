@@ -35,7 +35,6 @@ class MultimodalJobRead(BaseModel):
     organization_id: UUID
     user_id: UUID
     department_id: UUID | None
-    team_id: UUID | None
     capability: str
     status: str
     request_id: str

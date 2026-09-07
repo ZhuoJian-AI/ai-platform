@@ -5,7 +5,7 @@ import {
 } from 'antd';
 import {
   DeleteOutlined, BankOutlined, ApartmentOutlined,
-  TeamOutlined, UserOutlined, FolderOutlined, FileTextOutlined,
+  UserOutlined, FolderOutlined, FileTextOutlined,
   FolderAddOutlined, ArrowUpOutlined, HomeOutlined, UploadOutlined,
   DownloadOutlined, EyeOutlined,
   AppstoreOutlined, UnorderedListOutlined, SearchOutlined, CheckSquareOutlined,
@@ -39,14 +39,12 @@ import BrowserDrawer, { classifyFile, classifyUrl, type Source } from '../termin
 const SCOPE_LABEL: Record<string, string> = {
   organization: '组织级',
   department: '部门级',
-  team: '团队级',
   user: '个人级',
 };
 
 const NODE_ICON: Record<string, ReactNode> = {
   organization: <BankOutlined />,
   department: <ApartmentOutlined />,
-  team: <TeamOutlined />,
   user: <UserOutlined />,
 };
 
@@ -77,7 +75,7 @@ const PARSE_LABEL: Record<string, string> = {
   unsupported: '不支持解析', unparsed: '未解析',
 };
 
-/** 工作空间管理：随组织架构逐级嵌套的文件夹树（组织→部门→团队→用户），
+/** 工作空间管理：随组织架构逐级嵌套的文件夹树（企业→部门→用户），
  * 每个节点对应一个同名绑定工作空间，选中节点即以 Finder 网格浏览器管理其中的文件夹 / 文件。
  * 视觉对齐终端 WorkspaceManagerView（Mac Finder 风、紧凑字号梯、靛蓝配色、居中 ConfirmModal）。
  */

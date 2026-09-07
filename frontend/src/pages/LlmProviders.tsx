@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, CloudServerOutlined,
-  BankOutlined, ApartmentOutlined, TeamOutlined, ApiOutlined, ThunderboltOutlined,
+  BankOutlined, ApartmentOutlined, ApiOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { providers } from '../api/client';
@@ -58,19 +58,16 @@ const ADAPTER_OPTIONS = [
 const SCOPE_LABELS: Record<string, string> = {
   organization: '组织级',
   department: '部门级',
-  team: '团队级',
 };
 
 const SCOPE_COLORS: Record<string, string> = {
   organization: 'blue',
   department: 'green',
-  team: 'orange',
 };
 
 const NODE_ICON: Record<string, ReactNode> = {
   organization: <BankOutlined />,
   department: <ApartmentOutlined />,
-  team: <TeamOutlined />,
 };
 
 interface RawTreeNode { value: string; title: string; key: string; children?: RawTreeNode[] }
@@ -134,7 +131,6 @@ export default function LlmProviders() {
     if (!selectedNode) return [];
     if (selectedNode.type === 'organization') return all.filter((p) => p.scope_type === 'organization');
     if (selectedNode.type === 'department') return all.filter((p) => p.department_id === selectedNode.id);
-    if (selectedNode.type === 'team') return all.filter((p) => p.team_id === selectedNode.id);
     return [];
   }, [providerList, selectedNode]);
 
@@ -213,8 +209,6 @@ export default function LlmProviders() {
           return providers.create(selectedNode.id, payload);
         case 'department':
           return providers.createForDept(selectedNode.id, { ...payload, organization_id: selectedNode.orgId });
-        case 'team':
-          return providers.createForTeam(selectedNode.id, { ...payload, organization_id: selectedNode.orgId });
         default:
           return Promise.reject(new Error(`Unknown scope type: ${selectedNode.type}`));
       }
@@ -306,7 +300,7 @@ export default function LlmProviders() {
   });
 
   const createBtn = (
-    <Tooltip title={!selectedNode ? '请先在左侧选择组织/部门/团队节点' : ''}>
+    <Tooltip title={!selectedNode ? '请先在左侧选择企业或部门节点' : ''}>
       <Button type="primary" icon={<PlusOutlined />} disabled={!selectedNode} onClick={openCreate}>注册提供商</Button>
     </Tooltip>
   );
@@ -324,7 +318,7 @@ export default function LlmProviders() {
         <Sidebar header="组织架构">
           {finderTree.length === 0 ? (
             <div style={{ padding: '8px 12px', color: WB.textAux, fontSize: FS.aux }}>
-              {orgId ? (treeLoading ? '加载中…' : '该组织下暂无部门/团队节点') : '请先选择组织'}
+              {orgId ? (treeLoading ? '加载中…' : '该企业下暂无部门') : '请先选择企业'}
             </div>
           ) : (
             <MacTree nodes={finderTree} selectedKey={selectedNodeKey} onSelect={setSelectedNodeKey} />
@@ -333,7 +327,7 @@ export default function LlmProviders() {
 
         <section style={{ flex: 8, minWidth: 0, display: 'flex', flexDirection: 'column', background: '#fff' }}>
           {!selectedNode ? (
-            <FinderEmpty description="请从左侧选择组织 / 部门 / 团队节点" />
+            <FinderEmpty description="请从左侧选择企业或部门节点" />
           ) : (
             <>
               <Toolbar
@@ -460,7 +454,7 @@ export default function LlmProviders() {
                   {selectedNode.name}
                 </span>
               }
-              description="新提供商绑定到左栏选中节点；调用解析遵循 团队级 > 部门级 > 组织级 优先级且继承。"
+              description="新提供商绑定到左栏选中节点；调用解析遵循部门级优先、企业级兜底。"
             />
           )}
           <Form.Item name="name" label="提供商名称" rules={[{ required: true }]}>

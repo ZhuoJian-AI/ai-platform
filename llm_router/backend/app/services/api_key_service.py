@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +17,8 @@ async def create_api_key(
     db: AsyncSession, org_id: UUID, data: ApiKeyCreate, dept_id: UUID | None = None, team_id: UUID | None = None
 ) -> tuple[ApiKey, str]:
     """创建分层 API Key，返回 (key_record, full_key_plaintext)。"""
+    if team_id is not None or data.scope_type == "team":
+        raise HTTPException(status_code=410, detail="Team 已停用，请使用部门和角色")
     scope = data.scope_type
     full_key, key_prefix, key_hash = generate_api_key(scope)
 

@@ -24,7 +24,6 @@ export default function UsersPage() {
   const [searchText, setSearchText] = useState('');
   const [form] = Form.useForm();
   const watchedDepartmentId = Form.useWatch('department_id', form) as string | undefined;
-  const watchedTeamId = Form.useWatch('team_id', form) as string | undefined;
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [resetTarget, setResetTarget] = useState<User | null>(null);
   const [newPassword, setNewPassword] = useState('');
@@ -47,19 +46,11 @@ export default function UsersPage() {
 
   const { nodeMap } = useOrgTree();
   const deptName = (id: string | null) => (id ? nodeMap.get(`dept:${id}`)?.name : undefined);
-  const teamName = (id: string | null) => (id ? nodeMap.get(`team:${id}`)?.name : undefined);
 
   const departmentOptions = useMemo(() => Array.from(nodeMap.values())
     .filter(node => node.type === 'department' && node.orgId === orgId)
     .sort((a, b) => (a.sortOrder ?? Number.MAX_SAFE_INTEGER) - (b.sortOrder ?? Number.MAX_SAFE_INTEGER))
     .map(node => ({ value: node.id, label: node.name })), [nodeMap, orgId]);
-
-  const teamOptions = useMemo(() => {
-    return Array.from(nodeMap.values())
-      .filter(node => node.type === 'team' && node.orgId === orgId && node.deptId === watchedDepartmentId)
-      .map(node => ({ value: node.id, label: `${deptName(node.deptId ?? null) ?? ''} / ${node.name}` }))
-      .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'));
-  }, [nodeMap, orgId, watchedDepartmentId]);
 
   const isEdit = !!editing;
   const activeRoleIds = useMemo(
@@ -82,12 +73,8 @@ export default function UsersPage() {
       value: `department:${watchedDepartmentId}`,
       label: `部门负责人：${deptName(watchedDepartmentId) ?? watchedDepartmentId}`,
     });
-    if (watchedTeamId) options.push({
-      value: `team:${watchedTeamId}`,
-      label: `团队负责人：${teamName(watchedTeamId) ?? watchedTeamId}`,
-    });
     return options;
-  }, [watchedDepartmentId, watchedTeamId, nodeMap]);
+  }, [watchedDepartmentId, nodeMap]);
 
   const openCreate = () => {
     setEditing(null);
@@ -117,7 +104,6 @@ export default function UsersPage() {
         // 带回提交，否则一次正常的员工修改也会被服务端整体拒绝。
         role_ids: (editing.role_ids ?? []).filter(roleId => activeRoleIds.has(roleId)),
         department_id: editing.department_id ?? editing.department_ids?.[0] ?? undefined,
-        team_id: editing.team_id ?? undefined,
         manager_scope_keys: (editing.manager_scopes ?? []).map((grant) => `${grant.scope_type}:${grant.scope_id}`),
       });
     }
@@ -135,7 +121,7 @@ export default function UsersPage() {
     mutationFn: (data: {
       username: string; display_name?: string | null; role: string; is_active: boolean; password: string;
       role_ids?: string[];
-      department_ids?: string[]; department_id?: string | null; team_id?: string | null;
+      department_ids?: string[]; department_id?: string | null;
       manager_scopes?: ManagerScopeGrant[];
     }) => {
       if (!orgId) { message.error('请先创建组织'); return Promise.reject(new Error('No org')); }
@@ -182,7 +168,6 @@ export default function UsersPage() {
     if (createUser.isPending || updateUser.isPending) return;
     setSubmitError(null);
     const department_id = (v.department_id as string | undefined) ?? null;
-    const team_id = (v.team_id as string | undefined) ?? null;
     const manager_scopes = ((v.manager_scope_keys as string[] | undefined) ?? []).map((key) => {
       const [scope_type, scope_id] = key.split(':');
       return { scope_type, scope_id } as ManagerScopeGrant;
@@ -197,7 +182,6 @@ export default function UsersPage() {
       // department_ids 仅保留为旧客户端兼容字段，服务端强制最多一个部门。
       department_ids: department_id ? [department_id] : [],
       department_id,
-      team_id,
       manager_scopes,
     };
     if (isEdit) {
@@ -259,14 +243,6 @@ export default function UsersPage() {
               },
             },
             {
-              title: '团队', dataIndex: 'team_id', width: 140,
-              render: (id: string | null) => (id
-                ? (teamName(id)
-                  ? <Tag color="geekblue">{teamName(id)}</Tag>
-                  : <Tag color="red">原团队已删除，请重新选择</Tag>)
-                : <Typography.Text type="secondary">—</Typography.Text>),
-            },
-            {
               title: '状态', dataIndex: 'is_active', width: 80,
               render: (v: boolean) => <Tag color={v ? 'green' : 'red'}>{v ? '启用' : '停用'}</Tag>,
             },
@@ -274,7 +250,7 @@ export default function UsersPage() {
               title: '负责人授权', dataIndex: 'manager_scopes', width: 180,
               render: (grants: ManagerScopeGrant[] | undefined) => (grants?.length
                 ? grants.map((grant) => <Tag key={`${grant.scope_type}:${grant.scope_id}`} color="purple">
-                    {grant.scope_type === 'department' ? '部门负责人' : '团队负责人'}
+                    部门负责人
                   </Tag>)
                 : <Typography.Text type="secondary">—</Typography.Text>),
             },
@@ -354,11 +330,7 @@ export default function UsersPage() {
               options={departmentOptions}
               placeholder="选择一个所属部门"
               onChange={(departmentId?: string) => {
-                const currentTeamId = form.getFieldValue('team_id') as string | undefined;
-                const currentTeam = currentTeamId ? nodeMap.get(`team:${currentTeamId}`) : undefined;
-                if (currentTeam?.deptId && currentTeam.deptId !== departmentId) {
-                  form.setFieldValue('team_id', undefined);
-                }
+                void departmentId;
                 form.setFieldValue('manager_scope_keys', []);
               }}
             />
@@ -381,30 +353,15 @@ export default function UsersPage() {
             />
           </Form.Item>
           <Form.Item
-            name="team_id"
-            label="所属团队（可选）"
-            extra="团队只能从当前所属部门中选择，不会改变用户的部门归属。"
-          >
-            <Select
-              allowClear
-              showSearch
-              optionFilterProp="label"
-              options={teamOptions}
-              placeholder={watchedDepartmentId ? '选择一个所属团队' : '请先选择所属部门'}
-              disabled={!watchedDepartmentId}
-              onChange={() => form.setFieldValue('manager_scope_keys', [])}
-            />
-          </Form.Item>
-          <Form.Item
             name="manager_scope_keys"
             label="技能负责人授权"
-            extra="负责人可上传、升级、停用其范围内的 Skill；部门负责人同时可管理下属团队 Skill。普通成员留空。"
+            extra="负责人可上传、升级、停用其部门范围内的 Skill。普通成员留空。"
           >
             <Select
               mode="multiple"
               allowClear
               options={managerOptions}
-              placeholder={managerOptions.length ? '可选：任命为当前部门/团队负责人' : '请先选择部门或团队'}
+              placeholder={managerOptions.length ? '可选：任命为当前部门负责人' : '请先选择部门'}
               disabled={!managerOptions.length}
             />
           </Form.Item>

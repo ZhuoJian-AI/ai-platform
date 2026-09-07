@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from
 import { Form, Input, InputNumber, Select, Switch, Tag, Typography, message, Empty, Spin } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, RobotOutlined,
-  BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined, FolderOutlined,
+  BankOutlined, ApartmentOutlined, UserOutlined, FolderOutlined,
   RightOutlined, SearchOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -22,10 +22,10 @@ const WB_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "
 const { TextArea } = Input;
 
 const SCOPE_LABEL: Record<string, string> = {
-  organization: '组织级', department: '部门级', team: '团队级', user: '个人级',
+  organization: '企业级', department: '部门级', user: '个人级',
 };
 const SCOPE_ICON: Record<string, ReactNode> = {
-  organization: <BankOutlined />, department: <ApartmentOutlined />, team: <TeamOutlined />, user: <UserOutlined />,
+  organization: <BankOutlined />, department: <ApartmentOutlined />, user: <UserOutlined />,
 };
 
 interface TreeNode {
@@ -36,7 +36,7 @@ interface TreeNode {
   children?: TreeNode[];
 }
 
-/** 把后端单链 KbNode[] 组装成 组织→部门→团队→个人 嵌套树（每级至多一个）。 */
+/** 把后端单链 KbNode[] 组装成 企业→部门→个人 嵌套树（每级至多一个）。 */
 function buildTree(nodes: KbNode[]): TreeNode[] {
   let child: TreeNode | null = null;
   for (let i = nodes.length - 1; i >= 0; i--) {
@@ -52,10 +52,10 @@ function buildTree(nodes: KbNode[]): TreeNode[] {
 }
 
 /** 终端「智能体」视图：用户级智能体管理（参照 SkillManagerView 自包含范式）。
- *  左栏：用户可见作用域单链（组织/部门/团队/个人）。
+ *  左栏：用户可见作用域单链（企业/部门/个人）。
  *  中栏：选中 scope 下的智能体列表。
  *  右栏：选中智能体的编辑表单。
- *  权限：列表展示用户权限范围内可见的全部智能体；创建可在 个人/团队/部门 scope（不允许组织级）；
+ *  权限：列表展示用户权限范围内可见的全部智能体；创建可在个人/部门范围（不允许企业级）；
  *       修改/删除仅限「自己创建」（created_by === 当前用户），非自己创建的只读。 */
 export default function AgentManagerView() {
   const qc = useQueryClient();
@@ -93,7 +93,7 @@ export default function AgentManagerView() {
   });
 
   // 智能体可绑定用户继承到的全部资源，而非只看当前树节点的直接资源。
-  // 后端只返回已安装成功的 Skill，组织/部门/团队来源在选项中显式标注。
+  // 后端只返回已安装成功的 Skill，企业/部门来源在选项中显式标注。
   const { data: resources } = useQuery({
     queryKey: ['terminal-resources'], queryFn: () => terminal.resources(),
   });
@@ -212,7 +212,7 @@ export default function AgentManagerView() {
             <button
               style={{ ...toolBtnStyle, background: canCreate ? WB.primary : '#eef0f3', color: canCreate ? '#fff' : WB.textAux, border: 'none' }}
               disabled={!canCreate}
-              title={canCreate ? '新建智能体' : '组织级不允许新建，请选择个人/团队/部门节点'}
+              title={canCreate ? '新建智能体' : '企业级不允许新建，请选择个人或部门节点'}
               onClick={() => { createForm.resetFields(); setCreateModal(true); }}
             >
               <PlusOutlined style={{ fontSize: 13 }} /> 新建

@@ -1,7 +1,7 @@
 """Organization-scoped hybrid RBAC models.
 
 Users keep one organizational department while roles grant product capabilities and
-data scopes.  Direct department/team/user grants remain additive for compatibility.
+data scopes. Direct department and user grants remain additive for compatibility.
 """
 
 from sqlalchemy import Boolean, CheckConstraint, ForeignKey, String, UniqueConstraint

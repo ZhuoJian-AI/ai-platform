@@ -110,7 +110,7 @@ async def search_rag(query: str, top_k: int = 5, ctx: Context = None) -> str:  #
 
 @mcp.tool()
 async def read_memory(ctx: Context = None) -> str:  # type: ignore[assignment]
-    """读取归口用户 4 级 scope（组织/部门/团队/个人）聚合的长期记忆。"""
+    """读取归口用户按角色获权的企业、部门、角色与个人长期记忆。"""
     async with async_session_factory() as db:
         principal = await resolve_principal(ctx, db)
         return await _read_memory(db, principal)  # type: ignore[arg-type]

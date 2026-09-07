@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import { Typography, Empty, Spin, Tooltip, Drawer, Tag } from 'antd';
 import {
-  ApiOutlined, BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined,
+  ApiOutlined, BankOutlined, ApartmentOutlined, UserOutlined,
   EyeOutlined, RightOutlined,
 } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
@@ -17,10 +17,10 @@ const WB = {
 const WB_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
 
 const SCOPE_LABEL: Record<string, string> = {
-  organization: '组织', department: '部门', team: '团队', user: '个人',
+  organization: '企业', department: '部门', user: '个人',
 };
 const SCOPE_ICON: Record<string, ReactNode> = {
-  organization: <BankOutlined />, department: <ApartmentOutlined />, team: <TeamOutlined />, user: <UserOutlined />,
+  organization: <BankOutlined />, department: <ApartmentOutlined />, user: <UserOutlined />,
 };
 
 interface TreeNode {
@@ -31,7 +31,7 @@ interface TreeNode {
   children?: TreeNode[];
 }
 
-/** 把后端单链 KbNode[] 组装成 组织→部门→团队→个人 嵌套树（每级至多一个）。 */
+/** 把后端单链 KbNode[] 组装成 企业→部门→个人 嵌套树（每级至多一个）。 */
 function buildTree(nodes: KbNode[]): TreeNode[] {
   let child: TreeNode | null = null;
   for (let i = nodes.length - 1; i >= 0; i--) {
@@ -47,7 +47,7 @@ function buildTree(nodes: KbNode[]): TreeNode[] {
 }
 
 /** 终端「数据接口」视图：左中右三栏（参照知识库样式）。
- *  左栏：用户可见作用域单链（组织/部门/团队/个人）；中栏：选中 scope 下的数据系统（无操作）；
+ *  左栏：用户可见作用域单链（企业/部门/个人）；中栏：选中 scope 下的数据系统（无操作）；
  *  右栏：选中系统下的数据接口，点击「查看」图标弹出右侧抽屉显示输入输出样例。终端只读。 */
 export default function DataInterfaceView() {
   const [scope, setScope] = useState<{ type: string; id: string | null; name: string } | null>(null);

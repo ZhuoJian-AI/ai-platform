@@ -1,9 +1,9 @@
 """Memory service — CRUD for hierarchical long-term memory + runtime load.
 
-组织/部门/团队级记忆由管理端维护（manual）；个人级（scope_type='user'）每个非管理员用户
+企业/部门级记忆由管理端维护（manual）；个人级（scope_type='user'）每个非管理员用户
 **只有一份**：系统端建/改用户时同步的「个人档案」与终端智能体经 ``extract_memory`` 沉淀的
 「沉淀记忆」均合并进同一条记录（markdown 分节：``## 个人档案`` 可覆写、``## 沉淀记忆`` 逐条
-追加去重）。运行时 ``load_memory`` 按用户的 4 级 scope 聚合 recent top-N 注入 system_prompt。
+追加去重）。运行时 ``load_memory`` 按用户有效角色的企业、部门和个人 scope 聚合 recent top-N。
 """
 
 from __future__ import annotations
@@ -14,10 +14,9 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.department import Department
 from app.models.memory import Memory
 from app.models.organization import Organization
-from app.models.department import Department
-from app.models.team import Team
 from app.models.user import User
 from app.schemas.memory import MemoryCreate, MemoryUpdate
 
@@ -29,7 +28,7 @@ FACTS_SECTION = "沉淀记忆"
 # ── markdown 分节合并工具 ──────────────────────────────────────────────
 
 def _build_profile_section(
-    name: str | None, org_name: str | None, dept_name: str | None, team_name: str | None,
+    name: str | None, org_name: str | None, dept_name: str | None,
 ) -> str:
     """构建「## 个人档案」分节（无任何归属信息时返回空串）。"""
     lines: list[str] = []
@@ -39,8 +38,6 @@ def _build_profile_section(
         lines.append(f"- 所属组织：{org_name}")
     if dept_name:
         lines.append(f"- 所属部门：{dept_name}")
-    if team_name:
-        lines.append(f"- 所属团队：{team_name}")
     if not lines:
         return ""
     return f"## {PROFILE_SECTION}\n" + "\n".join(lines)
@@ -71,7 +68,7 @@ def _replace_section(content: str, header: str, new_section: str) -> str:
     if bounds is None:
         # 不存在该分节：前置（与已有内容空一行分隔）
         body = new_section.split("\n")
-        merged = body + ([""] + lines if lines and any(l.strip() for l in lines) else lines)
+        merged = body + ([""] + lines if lines and any(line.strip() for line in lines) else lines)
         return "\n".join(merged).strip("\n")
     start, end = bounds
     merged = lines[:start] + new_section.split("\n") + lines[end:]
@@ -127,11 +124,11 @@ async def list_memory_for_user(
     db: AsyncSession, org_id: UUID,
     scopes: list[tuple[str, str | None]],
 ) -> list[Memory]:
-    """终端用户可见记忆：4 级 scope 并集（org + dept + team + user）。"""
+    """终端用户可见记忆：有效角色授权的企业、部门、角色和个人 scope 并集。"""
     conds = []
     for st, sid in scopes:
         if st == "organization":
-            conds.append((Memory.scope_type == "organization"))
+            conds.append(Memory.scope_type == "organization")
         else:
             if sid:
                 conds.append((Memory.scope_type == st) & (Memory.scope_id == sid))
@@ -222,19 +219,17 @@ async def upsert_user_profile_memory(
     name: str | None,
     org_name: str | None,
     dept_name: str | None,
-    team_name: str | None,
 ) -> Memory:
     """新建/编辑用户时同步个人档案记忆。
 
-    合并进该用户唯一一条个人记忆的 ``## 个人档案`` 分节（覆写姓名/组织/部门/团队，
+    合并进该用户唯一一条个人记忆的 ``## 个人档案`` 分节（覆写姓名/企业/部门，
     保留 ``## 沉淀记忆`` 等其它分节）；记录不存在则新建。category 统一为 'personal'。
     """
-    profile_section = _build_profile_section(name, org_name, dept_name, team_name)
+    profile_section = _build_profile_section(name, org_name, dept_name)
     metadata = {
         "name": name,
         "organization": org_name,
         "department": dept_name,
-        "team": team_name,
     }
 
     mem = await _get_personal_memory(db, org_id, user_id)
@@ -267,7 +262,6 @@ async def consolidate_user_memory(
     name: str | None,
     org_name: str | None,
     dept_name: str | None,
-    team_name: str | None,
 ) -> dict:
     """一次性合并某用户存量多条个人记忆为一条 markdown 分节记录，软删多余行。
 
@@ -295,7 +289,7 @@ async def consolidate_user_memory(
                 facts.append(ln)
 
     parts: list[str] = []
-    profile_section = _build_profile_section(name, org_name, dept_name, team_name)
+    profile_section = _build_profile_section(name, org_name, dept_name)
     if profile_section:
         parts.append(profile_section)
     elif rows:
@@ -304,7 +298,7 @@ async def consolidate_user_memory(
         parts.append(f"## {FACTS_SECTION}\n" + "\n".join(f"- {f}" for f in facts))
     new_content = "\n\n".join(parts)
     metadata = {
-        "name": name, "organization": org_name, "department": dept_name, "team": team_name,
+        "name": name, "organization": org_name, "department": dept_name,
     }
 
     survivor = next((m for m in rows if m.category == "profile"), None) or (rows[0] if rows else None)
@@ -377,11 +371,11 @@ def _mnode(node_type: str, node_id, name: str, mem: Memory | None, children: lis
 
 
 async def build_memory_tree(db: AsyncSession, org_ids: list[UUID]) -> list[dict]:
-    """构建长期记忆树：组织 → 部门 → 团队 → 用户，每节点携带其绑定记忆。
+    """构建长期记忆树：企业 → 部门 → 用户，每节点携带其绑定记忆。
 
-    缺失记忆惰性补建/刷新（org/dept/team 走 ``ensure_node_memory``，user 走
+    缺失记忆惰性补建/刷新（org/dept 走 ``ensure_node_memory``，user 走
     ``upsert_user_profile_memory``）；组织管理员（role='admin'）非终端用户，不持有个人记忆，
-    节点照常展示但 memory=None。用户挂载到所属团队 / 部门 / 组织。
+    节点照常展示但 memory=None。用户挂载到所属部门 / 企业。
     """
     # 延迟导入以规避与 memory_lifecycle 的循环依赖。
     from app.services.memory_lifecycle import ensure_node_memory
@@ -407,21 +401,13 @@ async def build_memory_tree(db: AsyncSession, org_ids: list[UUID]) -> list[dict]
         )).scalars().all())
         dept_map: dict[UUID, Department] = {d.id: d for d in depts}
 
-        all_teams = list((await db.execute(
-            select(Team).where(
-                Team.organization_id == org.id, Team.deleted_at.is_(None)
-            )
-        )).scalars().all())
-        team_map: dict[UUID, Team] = {t.id: t for t in all_teams}
-
         users = list((await db.execute(
             select(User).where(
                 User.organization_id == org.id, User.deleted_at.is_(None)
             )
         )).scalars().all())
 
-        # 先按 team / dept / org 分桶用户节点
-        users_by_team: dict[UUID, list[dict]] = {}
+        # 按部门 / 企业分桶用户节点。
         users_by_dept: dict[UUID, list[dict]] = {}
         org_direct_users: list[dict] = []
         for u in users:
@@ -431,14 +417,11 @@ async def build_memory_tree(db: AsyncSession, org_ids: list[UUID]) -> list[dict]
                 umem = None
             else:
                 dept_name = dept_map[u.department_id].name if u.department_id and u.department_id in dept_map else None
-                team_name = team_map[u.team_id].name if u.team_id and u.team_id in team_map else None
                 umem = await upsert_user_profile_memory(
-                    db, org.id, str(u.id), uname, org.name, dept_name, team_name,
+                    db, org.id, str(u.id), uname, org.name, dept_name,
                 )
             unode = _mnode("user", u.id, uname, umem, [])
-            if u.team_id and u.team_id in team_map:
-                users_by_team.setdefault(u.team_id, []).append(unode)
-            elif u.department_id and u.department_id in dept_map:
+            if u.department_id and u.department_id in dept_map:
                 users_by_dept.setdefault(u.department_id, []).append(unode)
             else:
                 org_direct_users.append(unode)
@@ -450,16 +433,7 @@ async def build_memory_tree(db: AsyncSession, org_ids: list[UUID]) -> list[dict]
                 db, org.id, "department", str(dept.id),
                 org_name=org.name, dept_name=dept.name,
             )
-            dept_teams = [t for t in team_map.values() if t.department_id == dept.id]
-            dept_teams = sorted(dept_teams, key=lambda t: t.name)
-            team_nodes: list[dict] = []
-            for team in dept_teams:
-                team_mem = await ensure_node_memory(
-                    db, org.id, "team", str(team.id),
-                    org_name=org.name, dept_name=dept.name, team_name=team.name,
-                )
-                team_nodes.append(_mnode("team", team.id, team.name, team_mem, users_by_team.get(team.id, [])))
-            dept_children = team_nodes + users_by_dept.get(dept.id, [])
+            dept_children = users_by_dept.get(dept.id, [])
             dept_nodes.append(_mnode("department", dept.id, dept.name, dept_mem, dept_children))
 
         tree.append(_mnode("organization", org.id, org.name, org_mem, dept_nodes + org_direct_users))

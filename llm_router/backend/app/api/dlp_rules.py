@@ -54,7 +54,12 @@ def _assert_dlp_access(auth: CurrentAdmin, rule_org_id: UUID | None) -> None:
 
 
 @router.post("/organizations/{org_id}/dlp-rules", response_model=DlpRuleRead, status_code=201)
-async def create_rule(org_id: UUID, data: DlpRuleCreate, auth: CurrentAdmin = Depends(require_org_access_write), db: AsyncSession = Depends(get_db)):
+async def create_rule(
+    org_id: UUID,
+    data: DlpRuleCreate,
+    auth: CurrentAdmin = Depends(require_org_access_write),
+    db: AsyncSession = Depends(get_db),
+):
     return await create_dlp_rule(db, org_id, data)
 
 
@@ -73,13 +78,18 @@ async def get_rule(rule_id: UUID, auth: CurrentAdmin = Depends(require_admin), d
 
 
 @router.patch("/dlp-rules/{rule_id}", response_model=DlpRuleRead)
-async def update_rule(rule_id: UUID, data: DlpRuleUpdate, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def update_rule(
+    rule_id: UUID,
+    data: DlpRuleUpdate,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
     rule = await get_dlp_rule(db, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="DLP rule not found")
     _assert_dlp_access(auth, rule.organization_id)
     # 组织级账号的作用域护栏（平台级账号不受限）：不得把规则挪到别的组织。
-    # 不允许提升为全局——scope_type 正则已限制为 organization/department/team。
+    # 不允许提升为全局——scope_type 正则已限制为 organization/department。
     if auth.organization_id is not None:
         changes = data.model_dump(exclude_unset=True)
         effective_org = changes.get("organization_id", rule.organization_id)
@@ -101,7 +111,12 @@ async def delete_rule(rule_id: UUID, auth: CurrentAdmin = Depends(require_admin)
 
 
 @router.post("/dlp-rules/{rule_id}/test", response_model=DlpRuleTestResponse)
-async def test_rule(rule_id: UUID, data: DlpRuleTestRequest, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def test_rule(
+    rule_id: UUID,
+    data: DlpRuleTestRequest,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
     rule = await get_dlp_rule(db, rule_id)
     if not rule:
         raise HTTPException(status_code=404, detail="DLP rule not found")

@@ -318,7 +318,6 @@ def _identity_claims(
             action.action_key,
             OPERATION_PERMISSION[action.operation],
         ),
-        "teamId": user.team_id,
         "moduleKey": action.module_key,
         "pageKey": page_key,
         "actionKey": action.action_key,
@@ -716,7 +715,6 @@ def _launch_claims(
         "effectiveDataScope": enterprise_application_service.effective_data_scope(
             application, user, module_key
         ),
-        "teamId": user.team_id,
         "moduleKey": module_key,
         "permissions": sorted(permissions),
         "jti": uuid4().hex,
@@ -769,7 +767,6 @@ def issue_legacy_launch_ticket(
         "effectiveDataScope": enterprise_application_service.effective_data_scope(
             application, user, module_key
         ),
-        "teamId": user.team_id,
         "moduleKey": module_key,
         "permissions": sorted(permissions),
         "actionKeys": action_keys,

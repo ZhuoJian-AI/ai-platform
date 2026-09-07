@@ -11,8 +11,9 @@ from app.database import get_db
 from app.models.api_key import ApiKey
 from app.services.api_key_service import validate_api_key
 
-# 合法的 lr_sk_{scope}_{32chars}，scope 为 organization/department/team
-API_KEY_PATTERN = re.compile(r"^lr_sk_(organization|department|team)_[a-zA-Z0-9]{32}$")
+# 新请求只接受企业或部门范围的 Key。旧 Team Key 在迁移中会被撤销，
+# 这里再做一次入口兜底，避免未迁移实例继续按 Team 放行。
+API_KEY_PATTERN = re.compile(r"^lr_sk_(organization|department)_[a-zA-Z0-9]{32}$")
 
 
 @dataclass
@@ -21,7 +22,6 @@ class AuthenticatedKey:
     api_key: ApiKey
     organization_id: UUID
     department_id: UUID | None
-    team_id: UUID | None
     scope_type: str
 
 
@@ -65,6 +65,5 @@ async def authenticate_request(
         api_key=api_key,
         organization_id=api_key.organization_id,
         department_id=api_key.department_id,
-        team_id=api_key.team_id,
         scope_type=api_key.scope_type,
     )

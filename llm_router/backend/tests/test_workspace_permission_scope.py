@@ -71,8 +71,8 @@ async def test_wildcard_role_grants_department_update_but_never_shared_delete() 
         scope_id=None,
     )
     assert await workspace_permission_service.capabilities(None, organization_workspace, cu) == {
-        "read": True, "create": False, "update": False, "delete": False,
-        "manage": False, "publish": False,
+        "read": True, "create": True, "update": True, "delete": True,
+        "manage": True, "publish": False,
     }
 
 

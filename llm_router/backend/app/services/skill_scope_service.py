@@ -13,14 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.department import Department
 from app.models.role import Role
 from app.models.skill import ScopeManagerAssignment, SkillFile, SkillFolder, SkillVersion
-from app.models.team import Team
 from app.models.user import User
 from app.schemas.user import ManagerScopeGrant
 
 if TYPE_CHECKING:
     from app.auth.user_auth import CurrentUser
 
-VALID_SCOPE_TYPES = {"organization", "department", "team", "user", "role"}
+VALID_SCOPE_TYPES = {"organization", "department", "user", "role"}
 
 
 def _user_department_ids(user: User | CurrentUser) -> set[str]:
@@ -35,6 +34,8 @@ async def validate_scope_target(
     db: AsyncSession, org_id: UUID | str, scope_type: str, scope_id: str | UUID | None,
 ) -> str | None:
     """Validate target existence and tenant membership; return normalized string id."""
+    if scope_type == "team":
+        raise HTTPException(status_code=410, detail="Team 已停用，请使用部门归属和角色授权")
     if scope_type not in VALID_SCOPE_TYPES:
         raise HTTPException(status_code=422, detail="Invalid scope_type")
     org = str(org_id)
@@ -45,7 +46,7 @@ async def validate_scope_target(
         return None
     if not sid:
         raise HTTPException(status_code=422, detail=f"{scope_type} scope_id is required")
-    model = {"department": Department, "team": Team, "user": User, "role": Role}[scope_type]
+    model = {"department": Department, "user": User, "role": Role}[scope_type]
     row = (await db.execute(select(model).where(
         model.id == UUID(sid), model.organization_id == UUID(org), model.deleted_at.is_(None),
     ))).scalar_one_or_none()
@@ -57,6 +58,8 @@ async def validate_scope_target(
 async def validate_user_membership(
     db: AsyncSession, org_id: UUID | str, department_id: UUID | None, team_id: UUID | None,
 ) -> None:
+    if team_id is not None:
+        raise HTTPException(status_code=410, detail="Team 已停用，请使用部门归属和角色授权")
     dept = None
     if department_id:
         dept = (await db.execute(select(Department).where(
@@ -66,16 +69,6 @@ async def validate_user_membership(
         ))).scalar_one_or_none()
         if dept is None:
             raise HTTPException(status_code=422, detail="Department does not belong to this organization")
-    if team_id:
-        team = (await db.execute(select(Team).where(
-            Team.id == team_id,
-            Team.organization_id == UUID(str(org_id)),
-            Team.deleted_at.is_(None),
-        ))).scalar_one_or_none()
-        if team is None:
-            raise HTTPException(status_code=422, detail="Team does not belong to this organization")
-        if department_id is None or str(team.department_id) != str(department_id):
-            raise HTTPException(status_code=422, detail="Team must belong to the selected department")
 
 
 async def validate_user_departments(
@@ -91,16 +84,8 @@ async def validate_user_departments(
         ))).scalars().all())
         if set(rows) != unique_ids:
             raise HTTPException(status_code=422, detail="A department does not belong to this organization")
-    if team_id:
-        team = (await db.execute(select(Team).where(
-            Team.id == team_id,
-            Team.organization_id == UUID(str(org_id)),
-            Team.deleted_at.is_(None),
-        ))).scalar_one_or_none()
-        if team is None:
-            raise HTTPException(status_code=422, detail="Team does not belong to this organization")
-        if team.department_id not in unique_ids:
-            raise HTTPException(status_code=422, detail="Team must belong to one of the selected departments")
+    if team_id is not None:
+        raise HTTPException(status_code=410, detail="Team 已停用，请使用部门归属和角色授权")
 
 
 async def replace_manager_grants(
@@ -114,8 +99,6 @@ async def replace_manager_grants(
         sid = await validate_scope_target(db, user.organization_id, grant.scope_type, grant.scope_id)
         if grant.scope_type == "department" and sid not in _user_department_ids(user):
             raise HTTPException(status_code=422, detail="Department manager must belong to that department")
-        if grant.scope_type == "team" and str(user.team_id or "") != sid:
-            raise HTTPException(status_code=422, detail="Team manager must belong to that team")
         normalized.add((grant.scope_type, sid or ""))
 
     rows = list((await db.execute(select(ScopeManagerAssignment).where(
@@ -146,11 +129,6 @@ async def managed_scopes(db: AsyncSession, cu: CurrentUser) -> set[tuple[str, st
     scopes: set[tuple[str, str | None]] = {("user", str(cu.id))}
     for row in rows:
         scopes.add((row.scope_type, row.scope_id))
-        if row.scope_type == "department":
-            teams = list((await db.execute(select(Team).where(
-                Team.department_id == UUID(row.scope_id), Team.deleted_at.is_(None),
-            ))).scalars().all())
-            scopes.update(("team", str(team.id)) for team in teams)
     return scopes
 
 
@@ -176,8 +154,8 @@ def user_can_use_folder(cu: CurrentUser, folder: SkillFolder) -> bool:
         return True
     if folder.scope_type == "department":
         return folder.scope_id in _user_department_ids(cu)
-    if folder.scope_type == "team":
-        return bool(cu.team_id and folder.scope_id == cu.team_id)
+    if folder.scope_type == "role":
+        return folder.scope_id in set(getattr(cu, "role_ids", ()) or ())
     return folder.scope_type == "user" and folder.scope_id == cu.id
 
 

@@ -17,7 +17,6 @@ from app.auth.user_auth import CurrentUser
 from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.department import Department
 from app.models.enterprise_application import (
-    CrossDepartmentWorkItem,
     EnterpriseApplicationAction,
     EnterpriseApplicationActionRequest,
     EnterpriseApplicationEvent,
@@ -27,7 +26,6 @@ from app.models.enterprise_application import (
 from app.models.organization import Organization
 from app.models.role import Role
 from app.models.skill import SkillFile, SkillFolder
-from app.models.team import Team
 from app.models.tool_call_log import ToolCallLog
 from app.models.user import User
 from app.schemas.enterprise_application import (
@@ -419,21 +417,17 @@ async def _organization_tree(db_session):
     )
     db_session.add(department)
     await db_session.flush()
-    team = Team(
-        organization_id=org.id, department_id=department.id,
-        name="Planning", slug=f"planning-{uuid4().hex[:6]}",
-    )
     user = User(
-        organization_id=org.id, department_id=department.id, team_id=team.id,
+        organization_id=org.id, department_id=department.id, team_id=None,
         username=f"member-{uuid4().hex[:8]}", role="member", is_active=True,
     )
-    db_session.add_all([team, user])
+    db_session.add(user)
     await db_session.flush()
     current = CurrentUser(
         user=user, id=str(user.id), email=user.username, role=user.role,
-        organization_id=org.id, department_id=str(department.id), team_id=str(team.id),
+        organization_id=org.id, department_id=str(department.id), team_id=None,
     )
-    return org, other, department, team, current
+    return org, other, department, None, current
 
 
 @pytest.mark.asyncio
@@ -489,7 +483,7 @@ async def test_v25_credentials_cannot_be_partially_cleared_or_downgraded(db_sess
 
 @pytest.mark.asyncio
 async def test_application_is_hidden_by_default_and_grants_union_across_existing_scopes(db_session):
-    org, _, department, team, current = await _organization_tree(db_session)
+    org, _, department, _, current = await _organization_tree(db_session)
     application = await service.create_application(db_session, org.id, EnterpriseApplicationCreate(
         name="Production Collaboration",
         slug="production-collaboration",
@@ -504,7 +498,7 @@ async def test_application_is_hidden_by_default_and_grants_union_across_existing
             module_keys=["factory_progress"],
         ),
         EnterpriseApplicationGrantInput(
-            scope_type="team", scope_id=team.id, permissions=["ai_update", "export"],
+            scope_type="user", scope_id=current.user.id, permissions=["ai_update", "export"],
             module_keys=["factory_progress"],
         ),
     ])
@@ -775,7 +769,7 @@ async def test_application_overview_resolves_tools_without_double_counting_skill
 
 
 @pytest.mark.asyncio
-async def test_subsystem_sync_is_replay_safe_and_routes_work_items(db_session, monkeypatch):
+async def test_subsystem_sync_is_replay_safe_and_audit_only_without_target(db_session, monkeypatch):
     org, _, department, _, _ = await _organization_tree(db_session)
     application = await service.create_application(
         db_session,
@@ -852,7 +846,7 @@ async def test_subsystem_sync_is_replay_safe_and_routes_work_items(db_session, m
         "status": "healthy",
         "manifest_updated": True,
         "received_events": 1,
-        "created_work_items": 1,
+        "queued_deliveries": 0,
         "delivered_events": 0,
         "cursor_sequence": 1,
         "detail": None,
@@ -860,9 +854,6 @@ async def test_subsystem_sync_is_replay_safe_and_routes_work_items(db_session, m
     assert second["status"] == "healthy"
     assert second["received_events"] == 0
     assert len((await db_session.execute(select(EnterpriseApplicationEvent))).scalars().all()) == 1
-    work_items = list((await db_session.execute(select(CrossDepartmentWorkItem))).scalars().all())
-    assert len(work_items) == 1
-    assert work_items[0].title == "生产款号更新通知设计部：203A023"
 
 
 @pytest.mark.asyncio
@@ -927,7 +918,6 @@ async def test_subsystem_sync_rejects_late_bad_page_without_partial_activation(
     assert integration.manifest == baseline
     assert integration.cursor_sequence == 0
     assert not (await db_session.execute(select(EnterpriseApplicationEvent))).scalars().all()
-    assert not (await db_session.execute(select(CrossDepartmentWorkItem))).scalars().all()
 
 
 @pytest.mark.asyncio
@@ -1267,7 +1257,7 @@ async def test_cross_application_event_delivery_is_signed_and_idempotent(db_sess
             target_module_key="production_handoff",
         )],
     )
-    stored, work_items = await integration_service._store_event(db_session, source_integration, {
+    stored, queued_deliveries = await integration_service._store_event(db_session, source_integration, {
         "sequence": 1,
         "eventId": "sample-review-approved-1",
         "eventType": "design.sample_review.approved.v1",
@@ -1278,7 +1268,7 @@ async def test_cross_application_event_delivery_is_signed_and_idempotent(db_sess
         "occurredAt": "2026-08-30T12:00:00+08:00",
         "payload": {"sampleNumber": "S-001"},
     })
-    assert stored is True and work_items == 1
+    assert stored is True and queued_deliveries == 1
 
     calls = 0
 

@@ -370,7 +370,7 @@ async def ingest_document(
         org_id,
         chunks,
         department_id=department_id,
-        team_id=team_id,
+        team_id=None,
     )
     return doc
 
@@ -405,7 +405,7 @@ async def _chunk_and_embed(
                 coll.embedding_model,
                 batch,
                 dept_id=department_id,
-                team_id=team_id,
+                team_id=None,
             )
         except Exception as exc:  # noqa: BLE001 — 嵌入是入库契约的一部分，失败即 fail loud
             # 清理本批之前已 flush 的半成品 chunk，置 failed 供调用方 commit 落库排查
@@ -494,7 +494,7 @@ async def ingest_uploaded_file(
             coll_id,
             org_id_str,
             str(department_id) if department_id is not None else None,
-            str(team_id) if team_id is not None else None,
+            None,
         )
     )
     return doc
@@ -573,7 +573,7 @@ async def _run_ingest_bg(
                 UUID(org_id),
                 chunks,
                 department_id=department_id,
-                team_id=team_id,
+                team_id=None,
                 on_progress=_p,
             )
             await db.commit()
@@ -701,7 +701,7 @@ async def reingest_document(
             coll.embedding_model,
             chunks,
             dept_id=department_id,
-            team_id=team_id,
+            team_id=None,
         )
     except Exception as exc:  # noqa: BLE001
         raise EmbeddingError(str(exc)) from exc
@@ -986,7 +986,7 @@ async def retrieve(
             coll.embedding_model,
             [req.query],
             dept_id=department_id,
-            team_id=team_id,
+            team_id=None,
         )
         if qvecs:
             qvec = qvecs[0]

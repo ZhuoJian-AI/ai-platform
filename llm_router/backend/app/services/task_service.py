@@ -44,13 +44,13 @@ def make_task_title(message: str, *, max_length: int = 36) -> str:
 
 async def create_task(
     db: AsyncSession, *, org_id: UUID, user_id: str, department_id: str | None,
-    team_id: str | None, data: TaskCreate,
+    data: TaskCreate,
 ) -> Task:
     task = Task(
         organization_id=org_id,
         user_id=user_id,
         department_id=department_id,
-        team_id=team_id,
+        team_id=None,
         session_id=f"task-{uuid.uuid4()}",
         title=data.title.strip() if data.title.strip() else make_task_title(data.message),
         message=data.message,

@@ -217,7 +217,7 @@ async def workspace_tree_endpoint(
     auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """工作空间文件夹树：组织 → 部门 → 团队 → 用户，每节点携带同名绑定工作空间。
+    """工作空间文件夹树：企业 → 部门 → 用户，每节点携带同名绑定工作空间。
 
     - 指定 ``organization_id`` 时仅返回该组织子树（须有访问权）；
     - 组织级管理员未指定时返回其组织子树；

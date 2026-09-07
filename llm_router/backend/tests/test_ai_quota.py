@@ -175,11 +175,10 @@ async def test_zero_quota_is_an_explicit_denial():
 
 @pytest.mark.asyncio
 async def test_every_hierarchy_counter_is_checked_and_api_key_is_most_restrictive():
-    org_id, dept_id, team_id, key_id = (str(uuid4()) for _ in range(4))
+    org_id, dept_id, key_id = (str(uuid4()) for _ in range(3))
     scopes = [
         quota.QuotaScope("organization", org_id, rate_limit_rpm=100),
         quota.QuotaScope("department", dept_id, rate_limit_rpm=50),
-        quota.QuotaScope("team", team_id, rate_limit_rpm=30),
         quota.QuotaScope("api_key", key_id, rate_limit_rpm=1),
     ]
     enforcer = _enforcer()
@@ -463,7 +462,6 @@ async def test_credit_hierarchy_uses_most_restrictive_scope():
     scopes = [
         quota.QuotaScope("organization", str(uuid4()), budget_cap_credits=10),
         quota.QuotaScope("department", str(uuid4()), budget_cap_credits=5),
-        quota.QuotaScope("team", str(uuid4()), budget_cap_credits=2),
         quota.QuotaScope("api_key", str(uuid4()), budget_cap_credits=1),
     ]
     enforcer = _enforcer()
@@ -634,7 +632,7 @@ async def test_budget_report_keeps_revoked_key_history_from_ledger(
 
 
 def test_resource_scopes_preserve_parent_and_child_limits():
-    org_id, dept_id, team_id, key_id = (uuid4() for _ in range(4))
+    org_id, dept_id, key_id = (uuid4() for _ in range(3))
     organization = SimpleNamespace(
         id=org_id,
         rate_limit_rpm=100,
@@ -649,13 +647,6 @@ def test_resource_scopes_preserve_parent_and_child_limits():
         budget_cap_tokens=None,
         budget_cap_usd=None,
     )
-    team = SimpleNamespace(
-        id=team_id,
-        rate_limit_rpm=10,
-        rate_limit_tpm=None,
-        budget_cap_tokens=None,
-        budget_cap_usd=None,
-    )
     api_key = SimpleNamespace(
         id=key_id,
         rate_limit_rpm=3,
@@ -663,11 +654,10 @@ def test_resource_scopes_preserve_parent_and_child_limits():
         budget_cap_tokens=500,
         budget_cap_usd=None,
     )
-    scopes = quota.quota_scopes_for_resources(organization, department, team, api_key)
+    scopes = quota.quota_scopes_for_resources(organization, department, api_key)
     assert [scope.scope_type for scope in scopes] == [
         "organization",
         "department",
-        "team",
         "api_key",
     ]
     assert min(scope.rate_limit_rpm for scope in scopes if scope.rate_limit_rpm is not None) == 3

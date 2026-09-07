@@ -1,6 +1,6 @@
-"""resolve_permissions 节点 —— 加载组织架构、级联解析权限、校验模型访问。
+"""resolve_permissions 节点 —— 加载企业和部门、级联解析权限、校验模型访问。
 
-等价于原 ``proxy/router.py`` 中「加载 org/dept/team → resolve_effective_permissions
+等价于原 ``proxy/router.py`` 中「加载 org/dept → resolve_effective_permissions
 → 模型访问校验」这一段。模型越权时设置 ``state.error``，由条件边导向 build_error。
 """
 
@@ -13,7 +13,6 @@ from app.graph.context import get_deps
 from app.graph.state import ProxyState
 from app.models.department import Department
 from app.models.organization import Organization
-from app.models.team import Team
 
 logger = structlog.get_logger()
 
@@ -26,9 +25,7 @@ async def resolve_permissions(state: ProxyState) -> dict:
 
     org = await db.get(Organization, auth.organization_id)
     dept = await db.get(Department, auth.department_id) if auth.department_id else None
-    team = await db.get(Team, auth.team_id) if auth.team_id else None
-
-    perms = resolve_effective_permissions(auth.api_key, org, dept, team)
+    perms = resolve_effective_permissions(auth.api_key, org, dept)
     allowed_models = sorted(perms.allowed_models)
 
     requested_model = state.get("requested_model", "")
@@ -38,7 +35,6 @@ async def resolve_permissions(state: ProxyState) -> dict:
             "allowed_models": allowed_models,
             "org_id": str(auth.organization_id),
             "dept_id": str(auth.department_id) if auth.department_id else None,
-            "team_id": str(auth.team_id) if auth.team_id else None,
             "error": {
                 "status_code": 403,
                 "error_type": "forbidden",
@@ -51,7 +47,6 @@ async def resolve_permissions(state: ProxyState) -> dict:
         "allowed_models": allowed_models,
         "org_id": str(auth.organization_id),
         "dept_id": str(auth.department_id) if auth.department_id else None,
-        "team_id": str(auth.team_id) if auth.team_id else None,
     }
 
 

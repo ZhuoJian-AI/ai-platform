@@ -20,7 +20,6 @@ from sqlalchemy.orm import load_only
 from app.config import settings
 from app.models.department import Department
 from app.models.organization import Organization
-from app.models.team import Team
 from app.models.user import User
 from app.models.workspace import (
     OfficeEditRoom,
@@ -2326,9 +2325,9 @@ def _node(node_type: str, node_id, name: str, ws: Workspace | None, children: li
 
 
 async def build_workspace_tree(db: AsyncSession, org_ids: list[UUID]) -> list[dict]:
-    """构建工作空间文件夹树：组织 → 部门 → 团队 → 用户，每节点携带其绑定工作空间。
+    """构建工作空间文件夹树：企业 → 部门 → 用户，每节点携带其绑定工作空间。
 
-    缺失工作空间惰性补建（``ensure_node_workspace``）；用户挂载到所属团队 / 部门 / 组织。
+    缺失工作空间惰性补建（``ensure_node_workspace``）；用户挂载到所属部门 / 企业。
     """
     # 延迟导入以规避与 workspace_lifecycle 的循环依赖。
     from app.services.workspace_lifecycle import ensure_node_workspace
@@ -2354,21 +2353,13 @@ async def build_workspace_tree(db: AsyncSession, org_ids: list[UUID]) -> list[di
         )).scalars().all())
         dept_map: dict[UUID, Department] = {d.id: d for d in depts}
 
-        all_teams = list((await db.execute(
-            select(Team).where(
-                Team.organization_id == org.id, Team.deleted_at.is_(None)
-            )
-        )).scalars().all())
-        team_map: dict[UUID, Team] = {t.id: t for t in all_teams}
-
         users = list((await db.execute(
             select(User).where(
                 User.organization_id == org.id, User.deleted_at.is_(None)
             )
         )).scalars().all())
 
-        # 先按 team / dept / org 分桶用户节点
-        users_by_team: dict[UUID, list[dict]] = {}
+        # 按部门 / 企业分桶用户节点。
         users_by_dept: dict[UUID, list[dict]] = {}
         org_direct_users: list[dict] = []
         for u in users:
@@ -2380,25 +2371,17 @@ async def build_workspace_tree(db: AsyncSession, org_ids: list[UUID]) -> list[di
             else:
                 uws = await ensure_node_workspace(db, org.id, "user", str(u.id), uname, str(u.id))
             unode = _node("user", u.id, uname, uws, [])
-            if u.team_id and u.team_id in team_map:
-                users_by_team.setdefault(u.team_id, []).append(unode)
-            elif u.department_id and u.department_id in dept_map:
+            if u.department_id and u.department_id in dept_map:
                 users_by_dept.setdefault(u.department_id, []).append(unode)
             else:
                 org_direct_users.append(unode)
 
-        # 按部门组装（团队归其部门）
+        # 按部门组装。
         depts_sorted = sorted(depts, key=lambda d: (d.sort_order, d.created_at, str(d.id)))
         dept_nodes: list[dict] = []
         for dept in depts_sorted:
             dept_ws = await ensure_node_workspace(db, org.id, "department", str(dept.id), dept.name, dept.slug)
-            dept_teams = [t for t in team_map.values() if t.department_id == dept.id]
-            dept_teams = sorted(dept_teams, key=lambda t: t.name)
-            team_nodes: list[dict] = []
-            for team in dept_teams:
-                team_ws = await ensure_node_workspace(db, org.id, "team", str(team.id), team.name, str(team.id))
-                team_nodes.append(_node("team", team.id, team.name, team_ws, users_by_team.get(team.id, [])))
-            dept_children = team_nodes + users_by_dept.get(dept.id, [])
+            dept_children = users_by_dept.get(dept.id, [])
             dept_nodes.append(_node("department", dept.id, dept.name, dept_ws, dept_children))
 
         tree.append(_node("organization", org.id, org.name, org_ws, dept_nodes + org_direct_users))

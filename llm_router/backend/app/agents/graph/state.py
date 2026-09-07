@@ -23,7 +23,6 @@ class AgentState(TypedDict, total=False):
     task_id: str | None
     user_id: str | None
     department_id: str | None
-    team_id: str | None
     exec_mode: str  # "craft"（自主执行）/ "ask"（只读问答）/ "plan"（出方案不执行）
     # general 模式：可选引用一个 Agent 行作「场景模板」，其 system_prompt 作为
     # persona/policy 前缀拼到 GENERAL_SYSTEM_PROMPT 之前（load_config 解析填充 base_prompt）。

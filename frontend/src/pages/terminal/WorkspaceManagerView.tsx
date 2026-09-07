@@ -3,7 +3,7 @@ import {
   Input, Typography, message, Empty, Spin, Select, Checkbox, Modal, List, Dropdown,
 } from 'antd';
 import {
-  DeleteOutlined, BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined,
+  DeleteOutlined, BankOutlined, ApartmentOutlined, UserOutlined,
   FolderOutlined, FileTextOutlined, FolderAddOutlined, ArrowUpOutlined,
   HomeOutlined, UploadOutlined, EyeOutlined, RightOutlined,
   AppstoreOutlined, UnorderedListOutlined, SearchOutlined, CheckSquareOutlined,
@@ -36,12 +36,12 @@ const WB = {
 /** 统一字体栈：与终端 Terminal.tsx 完全一致，根容器设置后所有子文本继承。 */
 const WB_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
 
-const SCOPE_ORDER = ['organization', 'department', 'team', 'user'] as const;
+const SCOPE_ORDER = ['organization', 'department', 'user'] as const;
 const SCOPE_LABEL: Record<string, string> = {
-  organization: '组织', department: '部门', team: '团队', user: '个人',
+  organization: '企业', department: '部门', user: '个人',
 };
 const SCOPE_ICON: Record<string, ReactNode> = {
-  organization: <BankOutlined />, department: <ApartmentOutlined />, team: <TeamOutlined />, user: <UserOutlined />,
+  organization: <BankOutlined />, department: <ApartmentOutlined />, user: <UserOutlined />,
 };
 
 interface TreeNode {
@@ -55,12 +55,11 @@ interface TreeNode {
 /** 把用户可见的扁平工作空间列表组织成树。
  *
  * 一个角色可能同时获授多个部门工作空间，不能按 scope_type 只保留第一项。
- * 当前用户的个人空间挂在其主部门下；无法确认父级的团队/个人空间仍保留在组织根节点下。
+ * 当前用户的个人空间挂在其主部门下；无主部门时保留在企业根节点下。
  */
 function buildTree(
   workspaces: Workspace[],
   homeDepartmentId?: string | null,
-  homeTeamId?: string | null,
 ): { treeData: TreeNode[]; wsById: Map<string, Workspace> } {
   const wsById = new Map<string, Workspace>();
   for (const w of workspaces) wsById.set(w.id, w);
@@ -75,19 +74,12 @@ function buildTree(
     .filter((w) => w.scope_type === 'department')
     .map(toNode);
   const homeDepartment = departments.find((node) => wsById.get(node.wsId)?.scope_id === homeDepartmentId);
-  const teams = workspaces.filter((w) => w.scope_type === 'team').map(toNode);
-  const homeTeam = teams.find((node) => wsById.get(node.wsId)?.scope_id === homeTeamId);
   const people = workspaces.filter((w) => w.scope_type === 'user').map(toNode);
-  if (homeTeam && people.length) homeTeam.children = people;
-  else if (homeDepartment && people.length) homeDepartment.children = people;
-  if (homeDepartment && homeTeam) {
-    homeDepartment.children = [homeTeam, ...(homeDepartment.children ?? [])];
-  }
+  if (homeDepartment && people.length) homeDepartment.children = people;
 
   const rootChildren = [
     ...departments,
-    ...teams.filter((node) => node !== homeTeam),
-    ...(homeDepartment || homeTeam ? [] : people),
+    ...(homeDepartment ? [] : people),
   ];
   const organizations = workspaces.filter((w) => w.scope_type === 'organization').map(toNode);
   if (organizations.length) {
@@ -122,18 +114,16 @@ const PARSE_LABEL: Record<string, string> = {
 };
 
 /** 工作空间管理视图：MacOS Finder 风格。
- *  左栏（2:8）为用户权限可见的工作空间树（组织→部门→团队→个人，逐级嵌套）；
+ *  左栏（2:8）为用户权限可见的工作空间树（企业→部门→个人）；
  *  右栏为选中工作空间的文件夹 / 文件图标浏览器。
  *  全部字体沿用终端 WB_FONT，字号与终端一致（标题 14 / 主文本 13 / 辅助 12 / 微 11）。 */
 export default function WorkspaceManagerView({
   resources,
   homeDepartmentId,
-  homeTeamId,
   fileEventsById,
 }: {
   resources: TerminalResources | undefined;
   homeDepartmentId?: string | null;
-  homeTeamId?: string | null;
   fileEventsById?: Record<string, WorkspaceFileEvent>;
 }) {
   const qc = useQueryClient();
@@ -143,8 +133,8 @@ export default function WorkspaceManagerView({
   const linkedVersionId = urlParams.get('version');
   const workspaces = resources?.workspaces ?? [];
   const { treeData, wsById } = useMemo(
-    () => buildTree(workspaces, homeDepartmentId, homeTeamId),
-    [homeDepartmentId, homeTeamId, workspaces],
+    () => buildTree(workspaces, homeDepartmentId),
+    [homeDepartmentId, workspaces],
   );
 
   // 默认选中用户个人工作空间（或 defaults.workspace_id，或首个可见工作空间）
@@ -971,7 +961,7 @@ export default function WorkspaceManagerView({
                                       { key: 'versions', label: '版本历史', icon: <HistoryOutlined /> },
                                       { key: 'share', label: '创建限时分享', icon: <ShareAltOutlined /> },
                                     ] : []),
-                                    ...(selectedWs.capabilities?.publish ? [{ key: 'publish', label: '发布到部门或团队', icon: <SendOutlined /> }] : []),
+                                    ...(selectedWs.capabilities?.publish ? [{ key: 'publish', label: '发布到部门', icon: <SendOutlined /> }] : []),
                                     ...(canDelete ? [{ key: 'delete', label: '移至回收站', icon: <DeleteOutlined />, danger: true }] : []),
                                   ],
                                   onClick: ({ key: action, domEvent }) => {
@@ -1111,7 +1101,7 @@ export default function WorkspaceManagerView({
 
       <Modal title="发布文件" open={!!publishFile} confirmLoading={publishMutation.isPending} okButtonProps={{ disabled: !publishTarget }} onCancel={() => { setPublishFile(null); setPublishTarget(undefined); }} onOk={() => publishMutation.mutate()}>
         <Typography.Paragraph>发布会在目标工作空间建立一份受版本管理的文件，个人原件不会删除。</Typography.Paragraph>
-        <Select style={{ width: '100%' }} placeholder="选择本人所属部门或团队" value={publishTarget} onChange={setPublishTarget} options={workspaces.filter((workspace) => workspace.id !== selectedWsId && workspace.capabilities?.create && (workspace.scope_type === 'department' || workspace.scope_type === 'team')).map((workspace) => ({ value: workspace.id, label: `${SCOPE_LABEL[workspace.scope_type]} · ${workspace.name}` }))} />
+        <Select style={{ width: '100%' }} placeholder="选择已获授权的部门" value={publishTarget} onChange={setPublishTarget} options={workspaces.filter((workspace) => workspace.id !== selectedWsId && workspace.capabilities?.create && workspace.scope_type === 'department').map((workspace) => ({ value: workspace.id, label: `${SCOPE_LABEL[workspace.scope_type]} · ${workspace.name}` }))} />
       </Modal>
 
       <Modal title="工作空间审计" open={auditOpen} footer={null} onCancel={() => setAuditOpen(false)} width={760}>

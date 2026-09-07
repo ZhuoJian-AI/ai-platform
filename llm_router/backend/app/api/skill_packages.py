@@ -14,7 +14,6 @@ from app.database import get_db
 from app.models.department import Department
 from app.models.organization import Organization
 from app.models.skill import SkillExecution, SkillFolder, SkillVersion
-from app.models.team import Team
 from app.schemas.skill import (
     SkillExecutionRead,
     SkillImportRead,
@@ -133,20 +132,6 @@ async def terminal_skill_scopes(
         key = ("department", str(row.id))
         nodes.append(SkillScopeNode(
             scope_type="department", scope_id=str(row.id), name=row.name,
-            can_import=key in grants, can_manage=key in grants,
-        ))
-    team_ids = {sid for st, sid in grants if st == "team" and sid}
-    if cu.team_id:
-        team_ids.add(cu.team_id)
-    teams = list((await db.execute(select(Team).where(
-        Team.organization_id == cu.organization_id,
-        Team.id.in_([UUID(value) for value in team_ids]) if team_ids else False,
-        Team.deleted_at.is_(None),
-    ))).scalars().all()) if team_ids else []
-    for row in teams:
-        key = ("team", str(row.id))
-        nodes.append(SkillScopeNode(
-            scope_type="team", scope_id=str(row.id), name=row.name,
             can_import=key in grants, can_manage=key in grants,
         ))
     nodes.append(SkillScopeNode(

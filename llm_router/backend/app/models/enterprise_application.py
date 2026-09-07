@@ -76,7 +76,7 @@ class EnterpriseApplicationGrant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDelete
             name="uq_enterprise_application_grant_scope",
         ),
         CheckConstraint(
-            "scope_type IN ('organization','department','team','user','role')",
+            "scope_type IN ('organization','department','user','role')",
             name="ck_enterprise_application_grant_scope_type",
         ),
         Index(
@@ -340,12 +340,12 @@ class EnterpriseApplicationEvent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class EnterpriseApplicationEventRoute(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
-    """Administrator-owned rule that turns a subsystem event into a scoped work item."""
+    """Administrator-owned rule for audited subsystem event delivery."""
 
     __tablename__ = "enterprise_application_event_routes"
     __table_args__ = (
         CheckConstraint(
-            "target_scope_type IN ('organization','department','team','user')",
+            "target_scope_type IN ('organization','department','user')",
             name="ck_enterprise_application_event_route_scope_type",
         ),
     )
@@ -403,30 +403,3 @@ class EnterpriseApplicationEventDelivery(UUIDPrimaryKeyMixin, TimestampMixin, Ba
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     response: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-
-class CrossDepartmentWorkItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Central, department-scoped notification produced from a subsystem event."""
-
-    __tablename__ = "cross_department_work_items"
-    __table_args__ = (
-        UniqueConstraint("route_id", "source_event_id", name="uq_cross_department_work_item_route_event"),
-        CheckConstraint("status IN ('open','done')", name="ck_cross_department_work_item_status"),
-    )
-
-    organization_id: Mapped[str] = mapped_column(
-        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    source_application_id: Mapped[str] = mapped_column(
-        ForeignKey("enterprise_applications.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    route_id: Mapped[str] = mapped_column(
-        ForeignKey("enterprise_application_event_routes.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    source_event_id: Mapped[str] = mapped_column(String(200), nullable=False)
-    title: Mapped[str] = mapped_column(String(300), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
-    target_scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
-    target_scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    target_module_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    source_context: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

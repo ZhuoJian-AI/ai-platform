@@ -10,7 +10,7 @@ from app.schemas.role import EffectiveDataScopeRead, RoleSummary
 
 
 class ManagerScopeGrant(BaseModel):
-    scope_type: Literal["department", "team"]
+    scope_type: Literal["department"]
     scope_id: UUID
 
 
@@ -29,6 +29,8 @@ class UserCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_single_department(self) -> "UserCreate":
+        if self.team_id is not None:
+            raise ValueError("Team 已停用，请使用部门归属和角色授权")
         legacy_department_id = self.department_ids[0] if self.department_ids else None
         if self.department_id and legacy_department_id and self.department_id != legacy_department_id:
             raise ValueError("department_id and department_ids must identify the same department")
@@ -52,6 +54,8 @@ class UserUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validate_single_department(self) -> "UserUpdate":
+        if "team_id" in self.model_fields_set and self.team_id is not None:
+            raise ValueError("Team 已停用，请使用部门归属和角色授权")
         if "department_ids" not in self.model_fields_set or "department_id" not in self.model_fields_set:
             return self
         legacy_department_id = self.department_ids[0] if self.department_ids else None
@@ -103,6 +107,13 @@ class UserRead(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def hide_retired_team(self) -> "UserRead":
+        # Compatibility field for stale clients. Runtime authorization never
+        # exposes a historical Team membership.
+        self.team_id = None
+        return self
 
 
 class UserLoginResponse(BaseModel):

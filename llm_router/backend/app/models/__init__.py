@@ -13,7 +13,6 @@ from app.models.department import Department
 from app.models.dlp_rule import DlpRule
 from app.models.ecs_runtime import EcsModuleRelease, EcsRuntime
 from app.models.enterprise_application import (
-    CrossDepartmentWorkItem,
     EnterpriseApplication,
     EnterpriseApplicationAction,
     EnterpriseApplicationActionRequest,
@@ -84,7 +83,6 @@ __all__ = [
     "EnterpriseApplicationEvent",
     "EnterpriseApplicationEventDelivery",
     "EnterpriseApplicationEventRoute",
-    "CrossDepartmentWorkItem",
     "EnterpriseApplicationGrant",
     "EnterpriseApplicationToolBinding",
     "RoutingPolicy",

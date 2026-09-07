@@ -19,7 +19,6 @@ async def collect_applicable_rules(
     规则来源（取并集，安全规则只增不减）:
     1. 组织规则 (scope_type='organization', organization_id=org_id)
     2. 部门规则 (scope_type='department', scope_id=dept_id)
-    3. 团队规则 (scope_type='team', scope_id=team_id)
     """
     result = await db.execute(
         select(DlpRule).where(
@@ -29,7 +28,6 @@ async def collect_applicable_rules(
             (
                 ((DlpRule.scope_type == "organization") & (DlpRule.organization_id == org_id))
                 | ((DlpRule.scope_type == "department") & (DlpRule.scope_id == dept_id) if dept_id else False)
-                | ((DlpRule.scope_type == "team") & (DlpRule.scope_id == team_id) if team_id else False)
             ),
         ).order_by(DlpRule.priority.desc())
     )
@@ -44,7 +42,7 @@ async def scan_request(
     team_id: str | None = None,
 ) -> DLPResult:
     """扫描请求内容。"""
-    rules = await collect_applicable_rules(db, org_id, dept_id, team_id, direction="request")
+    rules = await collect_applicable_rules(db, org_id, dept_id, None, direction="request")
     if not rules:
         return DLPResult()
     engine = DLPEngine(rules=rules)
@@ -59,7 +57,7 @@ async def scan_response(
     team_id: str | None = None,
 ) -> DLPResult:
     """扫描响应内容。"""
-    rules = await collect_applicable_rules(db, org_id, dept_id, team_id, direction="response")
+    rules = await collect_applicable_rules(db, org_id, dept_id, None, direction="response")
     if not rules:
         return DLPResult()
     engine = DLPEngine(rules=rules)

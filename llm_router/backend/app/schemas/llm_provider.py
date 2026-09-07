@@ -133,7 +133,7 @@ class LlmProviderCreate(BaseModel):
     supported_models: list[str] = Field(default_factory=list)
     model_deployments: list[ModelDeploymentCreate] = Field(default_factory=list)
     config: dict = Field(default_factory=dict)
-    scope_type: str = Field(default="organization", pattern=r"^(organization|department|team)$")
+    scope_type: str = Field(default="organization", pattern=r"^(organization|department)$")
 
     @model_validator(mode="after")
     def validate_provider(self):
@@ -184,7 +184,6 @@ class LlmProviderRead(BaseModel):
     workspace_id: str | None
     scope_type: str
     department_id: UUID | None = None
-    team_id: UUID | None = None
     base_url: str
     api_key_masked: str = "••••••••"
     api_key_version: int

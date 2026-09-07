@@ -5,7 +5,7 @@ import {
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, RobotOutlined,
-  BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined, FolderOutlined,
+  BankOutlined, ApartmentOutlined, UserOutlined, FolderOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { agents, rag, skillStore } from '../../api/client';
@@ -23,23 +23,23 @@ import { WB, FS } from '../../components/finder/theme';
 const { TextArea } = Input;
 
 interface ScopeState {
-  scope_type: 'organization' | 'department' | 'team' | 'user';
+  scope_type: 'organization' | 'department' | 'user';
   scope_id?: string | null;
   orgId: string;
   nodeName: string;
 }
 
 const SCOPE_PREFIX: Record<ScopeState['scope_type'], string> = {
-  organization: 'org', department: 'dept', team: 'team', user: 'user',
+  organization: 'org', department: 'dept', user: 'user',
 };
 
 const NODE_ICON: Record<string, ReactNode> = {
-  org: <BankOutlined />, dept: <ApartmentOutlined />, team: <TeamOutlined />, user: <UserOutlined />,
+  org: <BankOutlined />, dept: <ApartmentOutlined />, user: <UserOutlined />,
 };
 const iconForKey = (key: string): ReactNode => NODE_ICON[key.split(':')[0]] ?? <FolderOutlined />;
 
 const SCOPE_LABEL: Record<string, string> = {
-  organization: '组织级', department: '部门级', team: '团队级', user: '个人级',
+  organization: '企业级', department: '部门级', user: '个人级',
 };
 
 export default function Agents() {
@@ -100,7 +100,7 @@ export default function Agents() {
 
   // 右栏绑定选项：只载入「所选节点 scope + 组织级」可见的 RAG / 技能
   // （组织级对全员可见；所选节点 scope 覆盖该节点下 agent 常绑的本级资源，使已选项能解析出名称）。
-  type ScRef = { scope_type: 'organization' | 'department' | 'team' | 'user'; scope_id: string | null };
+  type ScRef = { scope_type: 'organization' | 'department' | 'user'; scope_id: string | null };
   const ORG_SCOPE: ScRef = { scope_type: 'organization', scope_id: null };
   const nodeScope: ScRef | null = scope
     ? { scope_type: scope.scope_type, scope_id: scope.scope_id ?? null }

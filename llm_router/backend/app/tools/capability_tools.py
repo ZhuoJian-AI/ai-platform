@@ -194,7 +194,7 @@ async def _search_rag(db: AsyncSession, cu: CurrentUser, query: str, top_k: int)
                 UUID(str(cu.organization_id)),
                 req,
                 department_id=cu.department_id,
-                team_id=cu.team_id,
+                team_id=None,
             )
         except Exception as exc:  # noqa: BLE001 — 检索失败不阻断其余集合
             out.append(f"[{coll.name}] 检索失败：{exc}")
@@ -209,7 +209,7 @@ async def _search_rag(db: AsyncSession, cu: CurrentUser, query: str, top_k: int)
 
 
 async def _read_memory(db: AsyncSession, cu: CurrentUser) -> str:
-    """4 级（org/dept/team/user）scope 聚合的长期记忆（复用 memory_service.list_memory_for_user）。"""
+    """聚合企业、部门、角色与个人范围的长期记忆。"""
     scopes = scope_service.effective_scope_set(cu)
     mems = await memory_service.list_memory_for_user(db, UUID(str(cu.organization_id)), scopes)
     if not mems:
@@ -458,7 +458,7 @@ def build_capability_tools(db: AsyncSession, cu: CurrentUser) -> list[Structured
         StructuredTool.from_function(
             func=_t_read_memory,
             name="read_memory",
-            description="读取当前归口用户 4 级 scope（组织/部门/团队/个人）聚合的长期记忆。",
+            description="读取当前归口用户按角色获权的企业、部门、角色与个人长期记忆。",
         ),
         StructuredTool.from_function(
             func=_t_write_memory,

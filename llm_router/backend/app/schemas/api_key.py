@@ -9,8 +9,8 @@ from pydantic import BaseModel, Field
 
 class ApiKeyCreate(BaseModel):
     key_name: str = Field(..., max_length=255)
-    scope_type: str = Field(..., pattern=r"^(organization|department|team)$")
-    organization_id: UUID | None = None  # 用于 dept/team 级别的 key 创建
+    scope_type: str = Field(..., pattern=r"^(organization|department)$")
+    organization_id: UUID | None = None  # 用于部门级 Key 创建
     allowed_models: list[str] = Field(default_factory=list)  # 空=全部
     rate_limit_rpm: int | None = Field(None, ge=0)
     rate_limit_tpm: int | None = Field(None, ge=0)
@@ -42,7 +42,6 @@ class _ApiKeyReadInner(BaseModel):
     scope_type: str
     organization_id: UUID
     department_id: UUID | None
-    team_id: UUID | None
     allowed_models: list[str]
     rate_limit_rpm: int | None
     rate_limit_tpm: int | None
@@ -66,7 +65,6 @@ class ApiKeyRead(BaseModel):
     scope_type: str
     organization_id: UUID
     department_id: UUID | None
-    team_id: UUID | None
     allowed_models: list[str]
     rate_limit_rpm: int | None
     rate_limit_tpm: int | None

@@ -53,7 +53,7 @@ def general_initial_state(
     return {
         "mode": "general", "org_id": org_id, "task_id": task_id, "user_id": user.id,
         "run_started_monotonic": time.monotonic(),
-        "department_id": user.department_id, "team_id": user.team_id,
+        "department_id": user.department_id,
         "session_id": session_id or f"sess-{uuid.uuid4()}", "request": message,
         "messages": [], "steps": [], "usage": {"input_tokens": 0, "output_tokens": 0},
         "workspace_id": config.get("workspace_id"),

@@ -8,7 +8,7 @@ import {
   PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined,
   FolderOutlined, FolderAddOutlined, FileOutlined, UploadOutlined,
   SettingOutlined, HomeOutlined, TagOutlined, MinusCircleOutlined,
-  BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined,
+  BankOutlined, ApartmentOutlined, UserOutlined,
   ArrowUpOutlined, DatabaseOutlined, InboxOutlined, CheckCircleOutlined,
   CloseCircleOutlined, LoadingOutlined, FolderOpenOutlined,
 } from '@ant-design/icons';
@@ -36,18 +36,18 @@ const DEFAULT_INGEST: RagIngestConfig = {
 };
 
 interface ScopeState {
-  scope_type: 'organization' | 'department' | 'team' | 'user';
+  scope_type: 'organization' | 'department' | 'user';
   scope_id?: string | null;
   orgId: string;
   nodeName: string;
 }
 
 const SCOPE_PREFIX: Record<ScopeState['scope_type'], string> = {
-  organization: 'org', department: 'dept', team: 'team', user: 'user',
+  organization: 'org', department: 'dept', user: 'user',
 };
 
 const NODE_ICON: Record<string, ReactNode> = {
-  org: <BankOutlined />, dept: <ApartmentOutlined />, team: <TeamOutlined />, user: <UserOutlined />,
+  org: <BankOutlined />, dept: <ApartmentOutlined />, user: <UserOutlined />,
 };
 const iconForKey = (key: string): ReactNode => NODE_ICON[key.split(':')[0]] ?? <FolderOutlined />;
 
@@ -407,7 +407,7 @@ export default function Rag() {
   }, [collModal, collForm, effectiveIngest]);
 
   const openCollCreate = () => {
-    if (!scope) { message.warning('请先在左侧选择组织 / 部门 / 团队 / 个人节点'); return; }
+    if (!scope) { message.warning('请先在左侧选择企业 / 部门 / 个人节点'); return; }
     setCollModal({ open: true, editing: null });
   };
   const openCollEdit = (r: RagCollection) => setCollModal({ open: true, editing: r });

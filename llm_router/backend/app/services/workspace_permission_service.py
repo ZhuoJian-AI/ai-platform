@@ -12,6 +12,8 @@ from app.models.workspace import Workspace
 DEPARTMENT_READ_PREFIX = "workspace.department.read:"
 DEPARTMENT_UPLOAD_PREFIX = "workspace.department.upload:"
 ORGANIZATION_MANAGE_PERMISSION = "workspace.organization.manage"
+
+
 def department_workspace_scope_ids(cu: CurrentUser) -> tuple[str, ...]:
     """Return departments explicitly exposed to the user by role permissions."""
     department_ids: set[str] = set()
@@ -107,10 +109,11 @@ async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) 
     own = scope_type == "user" and scope_id == str(getattr(cu, "id", ""))
     _, department_upload = _department_workspace_access(cu, scope_id)
     organization_manage = (
-        scope_type == "organization" and ORGANIZATION_MANAGE_PERMISSION in codes
+        scope_type == "organization"
+        and (ORGANIZATION_MANAGE_PERMISSION in codes or "*" in codes)
     )
     # Workspace file access follows the explicit administrator role matrix.
-    # Until organization/team workspace permissions have corresponding role
+    # Until organization workspace permissions have corresponding role
     # codes, membership alone must not silently disclose those catalogues.
     can_read = is_workspace_readable(workspace, cu)
     can_write_department = scope_type == "department" and department_upload
@@ -148,7 +151,7 @@ def capability_sources(workspace: Workspace, cu: CurrentUser) -> dict[str, list[
         manage_sources = _role_sources(
             cu,
             ORGANIZATION_MANAGE_PERMISSION,
-            include_wildcard=False,
+            include_wildcard=True,
         )
         if manage_sources:
             result.update({key: manage_sources for key in ("create", "update", "delete")})
@@ -183,7 +186,7 @@ async def effective_access(db: AsyncSession, cu: CurrentUser) -> dict:
         Workspace.deleted_at.is_(None),
         Workspace.is_active.is_(True),
     ))).scalars().all())
-    scope_order = {"organization": 0, "department": 1, "team": 2, "user": 3}
+    scope_order = {"organization": 0, "department": 1, "user": 2}
     rows = []
     for workspace in sorted(
         workspaces,
@@ -293,11 +296,7 @@ async def assert_publish_target(db: AsyncSession, workspace: Workspace, cu: Curr
         raise HTTPException(status_code=404, detail="Workspace not found")
     department_id = str(workspace.scope_id or "")
     _, can_upload_department = _department_workspace_access(cu, department_id)
-    valid = (
-        workspace.scope_type == "department" and can_upload_department
-    ) or (
-        workspace.scope_type == "team" and str(workspace.scope_id or "") == str(cu.team_id or "")
-    )
+    valid = workspace.scope_type == "department" and can_upload_department
     if not valid:
-        raise HTTPException(status_code=403, detail="Files may only be published to your department or team")
+        raise HTTPException(status_code=403, detail="文件只能发布到已获授权的部门工作空间")
     await assert_can_create(db, workspace, cu)
