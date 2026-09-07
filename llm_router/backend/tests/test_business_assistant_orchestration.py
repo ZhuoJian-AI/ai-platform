@@ -217,6 +217,35 @@ async def test_protocol_fields_are_derived_from_structured_intent(monkeypatch):
     assert attempts == [{"attempt": 1, "status": "valid"}]
 
 
+@pytest.mark.asyncio
+async def test_single_group_by_from_compatible_provider_is_canonicalized(monkeypatch):
+    async def fake_chat(*args, **kwargs):
+        return _tool_result({
+            "intent": "query",
+            "target": {"entityType": "production_order", "entityIds": []},
+            "query": {
+                "filters": [{"field": "risk", "operator": "eq", "value": "严重"}],
+                "aggregation": [{
+                    "function": "count",
+                    "field": "orderId",
+                    "groupBy": "risk",
+                }],
+            },
+        })
+
+    monkeypatch.setattr(orchestration.model_gateway, "chat", fake_chat)
+    intent, _usage, attempts = await orchestration.classify_business_turn(
+        object(),
+        envelope=_envelope(),
+        request_text="当前有多少风险订单？",
+        model_alias="default",
+        department_id=None,
+    )
+    assert intent.intent == "query"
+    assert intent.query.aggregation[0].group_by == ["risk"]
+    assert attempts == [{"attempt": 1, "status": "valid"}]
+
+
 def test_cross_page_mutation_is_downgraded_to_navigation():
     envelope = _envelope()
     intent = orchestration.BusinessTurnIntent.model_validate({

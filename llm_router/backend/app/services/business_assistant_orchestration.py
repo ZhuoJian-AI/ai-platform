@@ -404,6 +404,20 @@ def _normalize_intent_payload(payload: Any) -> dict[str, Any]:
     for field in ("filters", "sort", "aggregation"):
         if query.get(field) is None:
             query[field] = []
+    # Some OpenAI-compatible providers serialize a single JSON-Schema array
+    # item as a scalar even when strict tool mode was requested.  ``groupBy``
+    # is descriptive query shape only (never identity, authorization, or a
+    # tool target), so canonicalize the one unambiguous scalar form before
+    # Pydantic performs the closed-schema validation.  All other invalid
+    # nested values still fail and receive the normal single correction retry.
+    for aggregation in query.get("aggregation") or []:
+        if not isinstance(aggregation, dict):
+            continue
+        group_by = aggregation.get("groupBy")
+        if group_by is None:
+            aggregation["groupBy"] = []
+        elif isinstance(group_by, str):
+            aggregation["groupBy"] = [group_by] if group_by.strip() else []
     normalized["query"] = query
 
     live_data_defaults = {
