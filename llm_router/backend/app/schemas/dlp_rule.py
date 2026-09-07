@@ -15,7 +15,7 @@ class DlpRuleCreate(BaseModel):
     severity: str = Field(..., pattern=r"^(low|medium|high|critical)$")
     action: str = Field(..., pattern=r"^(block|redact|warn|log)$")
     direction: str = Field(..., pattern=r"^(request|response|both)$")
-    scope_type: str = Field(..., pattern=r"^(organization|department|team)$")
+    scope_type: str = Field(..., pattern=r"^(organization|department)$")
     scope_id: UUID | None = None
     is_active: bool = True
     priority: int = 0
@@ -26,14 +26,14 @@ class DlpRuleUpdate(BaseModel):
 
     name/rule_type/pattern/description 不可改（来自规则库）。
     范围编辑：scope_type 与 scope_id 配合；organization_id 用于维持规则归属到
-    当前组织——切换为组织/部门/团队范围时归属到当前组织，不允许提升为全局。
+    当前组织——切换为组织/部门范围时归属到当前组织，不允许提升为全局。
     """
     severity: str | None = Field(None, pattern=r"^(low|medium|high|critical)$")
     action: str | None = Field(None, pattern=r"^(block|redact|warn|log)$")
     direction: str | None = Field(None, pattern=r"^(request|response|both)$")
     is_active: bool | None = None
     priority: int | None = None
-    scope_type: str | None = Field(None, pattern=r"^(organization|department|team)$")
+    scope_type: str | None = Field(None, pattern=r"^(organization|department)$")
     scope_id: UUID | None = None
     organization_id: UUID | None = None
 

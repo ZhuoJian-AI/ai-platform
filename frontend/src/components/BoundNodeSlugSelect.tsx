@@ -5,7 +5,7 @@ import { useOrgTree } from '../hooks/useOrgTree';
  * 绑定节点 Slug 选择器 —— 参照「API Key 管理 → 创建 API Key → 绑定节点」。
  *
  * 受控控件：表单字段值是普通 slug 字符串（与后端契约一致，无需提交期转换），
- * 内部负责 slug ↔ 组织架构树复合节点值（org:<id> / dept:<id> / team:<id>）互转。
+ * 内部负责 slug ↔ 组织架构树复合节点值（org:<id> / dept:<id>）互转。
  *
  * 选中某节点后，把该节点的 slug 写回表单字段；只展示当前组织（orgId）子树。
  */
@@ -20,7 +20,7 @@ export default function BoundNodeSlugSelect({
 }) {
   const { treeData, nodeMap, isLoading } = useOrgTree();
 
-  // 只展示当前组织子树（org 根 + 其部门 / 团队）
+  // 只展示当前企业子树（企业根 + 部门）
   const orgNode = treeData.find((n) => n.key === `org:${orgId}`);
   const treeDataScoped = orgNode ? [orgNode] : [];
 
@@ -38,7 +38,7 @@ export default function BoundNodeSlugSelect({
         const info = nodeMap.get(v);
         if (info) onChange?.(info.slug);
       }}
-      placeholder="选择组织 / 部门 / 团队节点"
+      placeholder="选择企业或部门节点"
       treeDefaultExpandAll
       showSearch
       treeNodeFilterProp="title"

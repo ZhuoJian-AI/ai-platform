@@ -205,7 +205,7 @@ export default function EnterpriseApplicationDetail() {
       qc.invalidateQueries({ queryKey: ['enterprise-application-integration', appId] });
       qc.invalidateQueries({ queryKey: ['enterprise-application-actions', appId] });
       if (result.status === 'healthy') {
-        message.success(`同步完成：新增 ${result.received_events} 个事件，生成 ${result.created_work_items} 个跨部门待办，投递 ${result.delivered_events} 个目标系统事件`);
+        message.success(`同步完成：审计 ${result.received_events} 个事件，投递 ${result.delivered_events} 个目标系统事件`);
       } else if (result.status === 'pending_review') {
         message.info('同步完成；新清单需要管理员审核后才会生效');
       } else message.error(result.detail || '子系统同步失败');
@@ -248,7 +248,7 @@ export default function EnterpriseApplicationDetail() {
   const saveRoute = useMutation({
     mutationFn: (values: { name: string; event_type: string; module_key?: string; target_scope: string; target_application_id?: string; target_module_key?: string }) => {
       const [prefix, id] = values.target_scope.split(':', 2);
-      const scopeType = prefix === 'org' ? 'organization' : prefix === 'dept' ? 'department' : prefix as 'team' | 'user';
+      const scopeType = prefix === 'org' ? 'organization' : prefix === 'dept' ? 'department' : 'user';
       return enterpriseApplications.replaceEventRoutes(appId, [
         ...(routesQuery.data ?? []).map(routePayload),
         {
@@ -490,7 +490,7 @@ export default function EnterpriseApplicationDetail() {
         <div className="app-detail-section-stack">
           <Alert
             showIcon type="info" message="页面更新与业务数据同步是两条链路"
-            description="iframe 负责实时显示子系统页面；这里的 HTTPS 连接负责发现模块、增量接收业务事件，并按管理员规则生成跨部门待办。中央平台不会复制子系统业务表。"
+            description="iframe 负责实时显示子系统页面；这里的 HTTPS 连接负责发现模块、审计业务事件，并按管理员规则投递到明确的目标系统。中央平台不复制业务表，也不生成业务待办。"
           />
           {pendingManifestReview && (
             <Card title={<Space><SafetyCertificateOutlined />待审核的 Manifest 变更</Space>}>
@@ -667,14 +667,14 @@ export default function EnterpriseApplicationDetail() {
               ]}
             />
           </Card>
-          <Card title="跨部门分发规则" extra={<Button icon={<PlusOutlined />} onClick={() => setRouteOpen(true)} disabled={!integrationQuery.data?.modules.length}>新增规则</Button>}>
-            <Alert showIcon type="success" message="规则只传递业务变化，不复制对方数据库" description="例如：生产部“款号资料中心”变化后，为设计部生成待办；设计部进入自己的系统继续处理。" style={{ marginBottom: 14 }} />
-            <Table rowKey="id" pagination={false} dataSource={routesQuery.data ?? []} locale={{ emptyText: '尚未配置跨部门分发规则' }} columns={[
+          <Card title="系统间事件投递规则" extra={<Button icon={<PlusOutlined />} onClick={() => setRouteOpen(true)} disabled={!integrationQuery.data?.modules.length}>新增规则</Button>}>
+            <Alert showIcon type="success" message="规则只投递业务事件，不承载业务流程" description="目标业务系统收到事件后自行创建待办或推进审批；未选择目标系统时，SaaS 仅保留事件审计。" style={{ marginBottom: 14 }} />
+            <Table rowKey="id" pagination={false} dataSource={routesQuery.data ?? []} locale={{ emptyText: '尚未配置系统间事件投递规则' }} columns={[
               { title: '规则', dataIndex: 'name' },
               { title: '来源子模块', dataIndex: 'module_key', render: (value: string | null) => value || '全部模块' },
               { title: '接收范围', render: (_: unknown, row) => scopeLabel(row.target_scope_type, row.target_scope_id) },
-              { title: '目标系统', dataIndex: 'target_application_id', render: (value: string | null) => organizationAppsQuery.data?.find((item) => item.id === value)?.name || (value ? '已登记系统' : '仅平台待办') },
-              { title: '进入目标模块', dataIndex: 'target_module_key', render: (value: string | null) => value || '跨部门待办' },
+              { title: '目标系统', dataIndex: 'target_application_id', render: (value: string | null) => organizationAppsQuery.data?.find((item) => item.id === value)?.name || (value ? '已登记系统' : '仅审计，不投递') },
+              { title: '进入目标模块', dataIndex: 'target_module_key', render: (value: string | null) => value || '由目标系统决定' },
               { title: '操作', width: 90, render: (_: unknown, row) => <Button size="small" danger loading={removeRoute.isPending} onClick={() => removeRoute.mutate(row.id)}>移除</Button> },
             ]} />
           </Card>
@@ -721,16 +721,16 @@ export default function EnterpriseApplicationDetail() {
           <Space size={32}><Form.Item name="is_active" label="审核并启用应用" valuePropName="checked"><Switch /></Form.Item><Form.Item name="assistant_enabled" label="启用业务助手" valuePropName="checked"><Switch /></Form.Item></Space>
         </Form>
       </Modal>
-      <Modal title="新增跨部门分发规则" open={routeOpen} onCancel={() => setRouteOpen(false)} onOk={() => routeForm.submit()} confirmLoading={saveRoute.isPending} forceRender>
+      <Modal title="新增系统间事件投递规则" open={routeOpen} onCancel={() => setRouteOpen(false)} onOk={() => routeForm.submit()} confirmLoading={saveRoute.isPending} forceRender>
         <Form form={routeForm} layout="vertical" onFinish={(values) => saveRoute.mutate(values)}>
           <Form.Item name="name" label="规则名称" rules={[{ required: true }]}><Input placeholder="例如：款号资料更新后通知设计部" /></Form.Item>
           <Form.Item name="module_key" label="来源子模块" extra="选择“全部模块”时，这个系统的任何业务更新都会通知接收方。">
             <Select allowClear placeholder="全部模块" options={(integrationQuery.data?.modules ?? []).map((item) => ({ value: item.moduleKey, label: item.name || item.moduleKey }))} />
           </Form.Item>
           <Form.Item name="event_type" label="来源事件类型" rules={[{ required: true }]} extra="使用 Manifest 中带版本的稳定事件类型，例如 design.sample_review.approved.v1。"><Input placeholder="design.sample_review.approved.v1" /></Form.Item>
-          <Form.Item name="target_scope" label="接收部门、团队或人员" rules={[{ required: true }]}><TreeSelect treeData={treeData} treeDefaultExpandAll showSearch treeNodeFilterProp="title" placeholder="例如：设计部" /></Form.Item>
-          <Form.Item name="target_application_id" label="目标模块系统（可选）" extra="选择后，平台会把事件签名投递到目标系统；留空则只生成平台待办。"><Select allowClear showSearch optionFilterProp="label" options={(organizationAppsQuery.data ?? []).filter((item) => item.id !== appId).map((item) => ({ value: item.id, label: item.name }))} /></Form.Item>
-          <Form.Item name="target_module_key" label="目标模块标识（可选）" extra="目标部门有独立系统时填写其模块 key；暂未接入时留空，先进入平台跨部门待办。"><Input placeholder="例如：style_design" /></Form.Item>
+          <Form.Item name="target_scope" label="接收企业、部门或人员" rules={[{ required: true }]}><TreeSelect treeData={treeData} treeDefaultExpandAll showSearch treeNodeFilterProp="title" placeholder="例如：设计部" /></Form.Item>
+          <Form.Item name="target_application_id" label="目标业务系统（可选）" extra="选择后，平台会把事件签名投递到目标系统；留空只保留同步审计，不创建平台待办。"><Select allowClear showSearch optionFilterProp="label" options={(organizationAppsQuery.data ?? []).filter((item) => item.id !== appId).map((item) => ({ value: item.id, label: item.name }))} /></Form.Item>
+          <Form.Item name="target_module_key" label="目标模块标识（可选）" extra="填写目标系统中的模块 key；业务待办与审批由目标系统处理。"><Input placeholder="例如：style_design" /></Form.Item>
         </Form>
       </Modal>
     </FinderShell>

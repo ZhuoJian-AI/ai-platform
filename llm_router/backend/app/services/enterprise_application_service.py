@@ -61,7 +61,7 @@ def _application_options():
 def _uses_role_authorization(row: EnterpriseApplication) -> bool:
     """Contract 2.4+ makes roles the only native authorization subject.
 
-    Older integrations retain their historical department/team/user grants until an
+    Older integrations retain their historical department/user grants until an
     administrator upgrades the subsystem manifest and converts those grants.
     """
     integration = row.integration
@@ -329,7 +329,7 @@ async def replace_grants(
             )
         except HTTPException as exc:
             # Older clients submit the complete grant list. If a referenced
-            # department/team/user/role was deleted after the page loaded, let the
+            # department/user/role was deleted after the page loaded, let the
             # same request repair that pre-existing orphan instead of blocking all
             # unrelated role changes. Unknown invalid targets are still rejected.
             if exc.status_code == 422 and requested_key in current:

@@ -9,7 +9,7 @@ import StatCard from '../../components/StatCard';
 import { FinderShell, TitleBar } from '../../components/finder/primitives';
 
 const SCOPE_LABEL: Record<string, string> = {
-  organization: '组织', department: '部门', team: '团队', user: '用户',
+  organization: '企业', department: '部门', role: '角色', user: '用户',
 };
 
 const HEALTH_COLOR: Record<string, string> = {

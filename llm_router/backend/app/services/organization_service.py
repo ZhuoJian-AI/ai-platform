@@ -474,93 +474,20 @@ async def soft_delete_department(db: AsyncSession, dept: Department) -> None:
 # ── Team ────────────────────────────────────────────────────────────────
 
 async def create_team(db: AsyncSession, dept_id: UUID, org_id: UUID, data: TeamCreate) -> Team:
-    team = Team(department_id=dept_id, organization_id=org_id, **data.model_dump())
-    db.add(team)
-    await db.flush()
-    await ensure_node_workspace(db, org_id, "team", str(team.id), team.name, str(team.id))
-    org_name, _ = await get_org_name_slug_by_id(db, org_id)
-    dept_name = await get_dept_name_by_id(db, team.department_id)
-    await ensure_node_memory(
-        db, org_id, "team", str(team.id),
-        org_name=org_name, dept_name=dept_name, team_name=team.name,
-    )
-    return team
+    raise HTTPException(status_code=410, detail="Team 已停用，请使用部门和角色")
 
 
 async def list_teams(db: AsyncSession, dept_id: UUID) -> list[Team]:
-    result = await db.execute(
-        select(Team).where(Team.department_id == dept_id, Team.deleted_at.is_(None))
-    )
-    return list(result.scalars().all())
+    raise HTTPException(status_code=410, detail="Team 已停用，请使用部门和角色")
 
 
 async def get_team(db: AsyncSession, team_id: UUID) -> Team | None:
-    result = await db.execute(
-        select(Team).where(Team.id == team_id, Team.deleted_at.is_(None))
-    )
-    return result.scalar_one_or_none()
+    raise HTTPException(status_code=410, detail="Team 已停用，请使用部门和角色")
 
 
 async def update_team(db: AsyncSession, team: Team, data: TeamUpdate) -> Team:
-    for field, value in data.model_dump(exclude_unset=True).items():
-        setattr(team, field, value)
-    await db.flush()
-    await db.refresh(team)
-    if data.name is not None:
-        await sync_node_workspace(db, team.organization_id, "team", str(team.id), team.name)
-        org_name, _ = await get_org_name_slug_by_id(db, team.organization_id)
-        dept_name = await get_dept_name_by_id(db, team.department_id)
-        await ensure_node_memory(
-            db, team.organization_id, "team", str(team.id),
-            org_name=org_name, dept_name=dept_name, team_name=team.name,
-        )
-    return team
+    raise HTTPException(status_code=410, detail="Team 已停用，请使用部门和角色")
 
 
 async def soft_delete_team(db: AsyncSession, team: Team) -> None:
-    from datetime import datetime
-
-    from sqlalchemy import update
-
-    from app.models.enterprise_application import EnterpriseApplicationGrant
-    from app.models.skill import ScopeManagerAssignment
-    from app.models.user import User
-
-    active_user_count = int((await db.execute(
-        select(func.count()).select_from(User).where(
-            User.organization_id == team.organization_id,
-            User.team_id == team.id,
-            User.deleted_at.is_(None),
-        )
-    )).scalar_one())
-    if active_user_count:
-        raise HTTPException(
-            status_code=409,
-            detail=f"该团队仍包含 {active_user_count} 名员工，请先转移员工后再删除团队",
-        )
-
-    deleted_at = datetime.now(UTC)
-    await db.execute(
-        update(EnterpriseApplicationGrant)
-        .where(
-            EnterpriseApplicationGrant.organization_id == team.organization_id,
-            EnterpriseApplicationGrant.scope_type == "team",
-            EnterpriseApplicationGrant.scope_id == str(team.id),
-            EnterpriseApplicationGrant.deleted_at.is_(None),
-        )
-        .values(deleted_at=deleted_at)
-    )
-    await db.execute(
-        update(ScopeManagerAssignment)
-        .where(
-            ScopeManagerAssignment.organization_id == team.organization_id,
-            ScopeManagerAssignment.scope_type == "team",
-            ScopeManagerAssignment.scope_id == str(team.id),
-            ScopeManagerAssignment.deleted_at.is_(None),
-        )
-        .values(deleted_at=deleted_at)
-    )
-    team.deleted_at = deleted_at
-    await soft_delete_node_workspace(db, team.organization_id, "team", str(team.id))
-    await soft_delete_node_memory(db, team.organization_id, "team", str(team.id))
-    await db.flush()
+    raise HTTPException(status_code=410, detail="Team 已停用，请使用部门和角色")

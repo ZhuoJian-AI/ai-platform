@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Input, Typography, Upload, message, Empty, Spin, Tooltip, Tag } from 'antd';
 import {
-  DeleteOutlined, BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined,
+  DeleteOutlined, BankOutlined, ApartmentOutlined, UserOutlined,
   FolderOutlined, FileTextOutlined, EditOutlined, RightOutlined,
   DownOutlined, EyeOutlined, UploadOutlined, SearchOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
@@ -22,10 +22,10 @@ const WB = {
 const WB_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
 
 const SCOPE_LABEL: Record<string, string> = {
-  organization: '组织', department: '部门', team: '团队', user: '个人',
+  organization: '企业', department: '部门', user: '个人',
 };
 const SCOPE_ICON: Record<string, ReactNode> = {
-  organization: <BankOutlined />, department: <ApartmentOutlined />, team: <TeamOutlined />, user: <UserOutlined />,
+  organization: <BankOutlined />, department: <ApartmentOutlined />, user: <UserOutlined />,
 };
 
 interface TreeNode {
@@ -60,7 +60,7 @@ type ConfirmTarget =
   | { kind: 'file'; id: string; title: string };
 
 /** 终端「技能」视图：左右两栏（参照工作空间样式）。
- *  左栏：用户可见作用域单链（组织/部门/团队/个人）；右栏：选中 scope 下的技能操作区。
+ *  左栏：用户可见作用域单链（企业/部门/个人）；右栏：选中 scope 下的技能操作区。
  *  导入：在可管理 scope 选择标准 Skill 文件夹或上传 ZIP/MD；智能体绑定与安装相互独立。 */
 export default function SkillManagerView() {
   const qc = useQueryClient();

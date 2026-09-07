@@ -28,7 +28,7 @@ ALLOWED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".ti
 ALLOWED_IMAGE_SIZES = {
     "256x256", "512x512", "1024x1024", "1024x1536", "1536x1024", "auto",
 }
-_SCOPE_RANK = {"team": 3, "department": 2, "organization": 1}
+_SCOPE_RANK = {"department": 2, "organization": 1}
 
 
 @dataclass(frozen=True)
@@ -118,12 +118,10 @@ def provider_image_generation_model(provider: LlmProvider) -> str | None:
     return model or None
 
 
-def _scope_clause(dept_id: str | UUID | None, team_id: str | UUID | None):
+def _scope_clause(dept_id: str | UUID | None, team_id: str | UUID | None):  # noqa: ARG001
     branches = [LlmProvider.scope_type == "organization"]
     if dept_id:
         branches.append((LlmProvider.scope_type == "department") & (LlmProvider.department_id == str(dept_id)))
-    if team_id:
-        branches.append((LlmProvider.scope_type == "team") & (LlmProvider.team_id == str(team_id)))
     return or_(*branches)
 
 

@@ -246,10 +246,11 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
         _workspace_id,
         _user=None,
         *,
-        exec_mode="craft",
-        application_id=None,
-        page_context=None,
-    ):
+            exec_mode="craft",
+            application_id=None,
+            page_context=None,
+            request_text="",
+        ):
         return nodes._builtin_tool_defs(), {}
 
     async def fake_visual(_state, _db, _user, _messages, prompt):
@@ -334,10 +335,11 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
         _workspace_id,
         _user=None,
         *,
-        exec_mode="craft",
-        application_id=None,
-        page_context=None,
-    ):
+            exec_mode="craft",
+            application_id=None,
+            page_context=None,
+            request_text="",
+        ):
         return nodes._builtin_tool_defs(), {}
 
     async def fake_visual(_state, _db, _user, _messages, prompt):
@@ -966,13 +968,12 @@ async def test_platform_runner_target_file_updates_in_place(
     result = json.loads(
         await nodes._execute_builtin_tool(
             {"workspace_id": str(ws.id), "exec_mode": "craft", "referenced_file_ids": []},
-            "spreadsheet_tool",
+            "spreadsheet_edit",
             {
-                "action": "edit",
                 "target_file_id": str(file.id),
                 "base_version_id": str(base_version_id),
                 "idempotency_key": "runner-update-0001",
-                "operations": [],
+                "operations": [{"type": "set_cell", "cell": "A1", "value": "new"}],
             },
         )
     )

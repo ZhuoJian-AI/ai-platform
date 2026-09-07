@@ -1,4 +1,4 @@
-"""Memory admin API — 维护组织/部门/团队级长期记忆（超管端 + 组织管理端）。
+"""Memory admin API — 维护组织/部门/角色级长期记忆（超管端 + 组织管理端）。
 
 个人级（scope_type='user'）每用户仅一条，由系统端 + 终端智能体自动合并沉淀；管理端不允许
 新建个人记忆（避免破坏「每用户一份」），但可编辑其内容/分类/元数据（人工修订）。所有级别
@@ -27,7 +27,7 @@ router = APIRouter()
 
 
 def _assert_admin_scope_writable(scope_type: str) -> None:
-    """管理端仅可新建 organization/department/team 级；user 级由系统+智能体自动合并。"""
+    """管理端仅可新建 organization/department/role 级；user 级由系统+智能体自动合并。"""
     if scope_type == "user":
         raise HTTPException(status_code=403, detail="Personal memory is auto-managed; edit instead of create")
 
@@ -47,7 +47,7 @@ async def memory_tree_endpoint(
     organization_id: UUID | None = None,
     auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
-    """长期记忆树：组织 → 部门 → 团队 → 用户，每节点携带其绑定记忆。
+    """长期记忆树：企业 → 部门 → 用户，每节点携带其绑定记忆。
 
     - 指定 ``organization_id`` 时仅返回该组织子树（须有访问权）；
     - 组织级管理员未指定时返回其组织子树；

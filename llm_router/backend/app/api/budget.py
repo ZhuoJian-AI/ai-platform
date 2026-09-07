@@ -257,24 +257,17 @@ async def get_budget_usage(
             credit_cap=department.budget_cap_credits,
             is_inactive=department.deleted_at is not None,
         )
-    for team in team_rows:
-        team_id = str(team.id)
-        scopes[("team", team_id)] = _scope_bucket(
-            scope_type="team",
-            scope_id=team_id,
-            scope_name=team.name,
-            parent_scope_type="department",
-            parent_scope_id=str(team.department_id),
-            rate_limit_rpm=team.rate_limit_rpm,
-            rate_limit_tpm=team.rate_limit_tpm,
-            token_cap=team.budget_cap_tokens,
-            credit_cap=team.budget_cap_credits,
-            is_inactive=team.deleted_at is not None,
-        )
+    retired_team_departments = {
+        str(team.id): str(team.department_id)
+        for team in team_rows
+    }
     for key in key_rows:
         key_id = str(key.id)
         if key.scope_type == "team" and key.team_id:
-            parent_scope_type, parent_scope_id = "team", str(key.team_id)
+            parent_scope_type = "department"
+            parent_scope_id = retired_team_departments.get(str(key.team_id), org_id_str)
+            if parent_scope_id == org_id_str:
+                parent_scope_type = "organization"
         elif key.scope_type == "department" and key.department_id:
             parent_scope_type, parent_scope_id = "department", str(key.department_id)
         else:
@@ -332,7 +325,14 @@ async def get_budget_usage(
     ).all()
 
     for row in rows:
-        scope_key = (str(row.scope_type), str(row.scope_id))
+        scope_type = str(row.scope_type)
+        scope_id = str(row.scope_id)
+        if scope_type == "team":
+            scope_type = "department"
+            scope_id = retired_team_departments.get(scope_id, org_id_str)
+            if scope_id == org_id_str:
+                scope_type = "organization"
+        scope_key = (scope_type, scope_id)
         bucket = scopes.get(scope_key)
         if bucket is None:
             bucket = _scope_bucket(
@@ -454,7 +454,7 @@ async def get_budget_usage(
             scope["effective_remaining"] if scope is not None else None
         )
 
-    scope_order = {"organization": 0, "department": 1, "team": 2, "api_key": 3}
+    scope_order = {"organization": 0, "department": 1, "api_key": 2}
     scopes_list = sorted(
         scopes.values(),
         key=lambda item: (

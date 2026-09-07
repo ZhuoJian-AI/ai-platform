@@ -37,7 +37,7 @@ from app.services.llm_provider_service import (
     update_provider,
 )
 from app.services.model_gateway import classify_gateway_error, test_deployment, test_provider_connection
-from app.services.organization_service import get_department, get_team
+from app.services.organization_service import get_department
 
 router = APIRouter()
 
@@ -61,7 +61,7 @@ async def create_dept_provider_endpoint(
     auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """创建部门级提供商：调用解析遵循 团队>部门>组织 优先级且继承。"""
+    """创建部门级提供商：调用解析遵循部门优先、企业兜底。"""
     if data.scope_type != "department":
         raise HTTPException(status_code=400, detail="scope_type must be 'department' for this endpoint")
     dept = await get_department(db, dept_id)
@@ -78,14 +78,7 @@ async def create_team_provider_endpoint(
     auth: CurrentAdmin = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """创建团队级提供商：调用解析遵循 团队>部门>组织 优先级且继承。"""
-    if data.scope_type != "team":
-        raise HTTPException(status_code=400, detail="scope_type must be 'team' for this endpoint")
-    team = await get_team(db, team_id)
-    if not team:
-        raise HTTPException(status_code=404, detail="Team not found")
-    assert_org_write_access(auth, team.organization_id)
-    return await create_provider(db, team.organization_id, data, team_id=team_id)
+    raise HTTPException(status_code=410, detail="Team 已停用，请在企业或部门范围配置模型供应商")
 
 
 @router.get("/organizations/{org_id}/providers", response_model=list[LlmProviderRead])

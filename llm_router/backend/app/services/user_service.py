@@ -19,7 +19,6 @@ from app.services.memory_service import consolidate_user_memory, upsert_user_pro
 from app.services.organization_service import (
     get_dept_name_by_id,
     get_org_name_slug_by_id,
-    get_team_name_by_id,
 )
 from app.services.role_service import (
     BUILTIN_ADMIN,
@@ -123,15 +122,13 @@ def _create_user_access_token(user: User) -> str:
 
 
 async def _sync_user_profile_memory(db: AsyncSession, user: User) -> None:
-    """同步用户个人档案记忆：姓名 / 组织 / 部门 / 团队。
+    """同步用户个人档案记忆：姓名 / 组织 / 部门。
 
-    新建用户时创建，编辑用户（姓名/部门/团队变更）时更新。组织名取自
-    ``get_org_name_slug_by_id``，部门/团队名取自 ``get_dept_name_by_id`` /
-    ``get_team_name_by_id``，均为标量查询，避免触发 selectin 关系。
+    新建用户时创建，编辑用户（姓名/部门变更）时更新。组织名取自
+    ``get_org_name_slug_by_id``，部门名取自 ``get_dept_name_by_id``。
     """
     org_name, _ = await get_org_name_slug_by_id(db, user.organization_id)
     dept_name = await get_dept_name_by_id(db, user.department_id)
-    team_name = await get_team_name_by_id(db, user.team_id)
     await upsert_user_profile_memory(
         db,
         user.organization_id,
@@ -139,7 +136,6 @@ async def _sync_user_profile_memory(db: AsyncSession, user: User) -> None:
         user.display_name or user.username,
         org_name,
         dept_name,
-        team_name,
     )
 
 
@@ -151,7 +147,6 @@ async def consolidate_user_profile_memory(db: AsyncSession, user: User) -> dict:
     """
     org_name, _ = await get_org_name_slug_by_id(db, user.organization_id)
     dept_name = await get_dept_name_by_id(db, user.department_id)
-    team_name = await get_team_name_by_id(db, user.team_id)
     return await consolidate_user_memory(
         db,
         user.organization_id,
@@ -159,7 +154,6 @@ async def consolidate_user_profile_memory(db: AsyncSession, user: User) -> dict:
         user.display_name or user.username,
         org_name,
         dept_name,
-        team_name,
     )
 
 
@@ -180,7 +174,7 @@ async def create_user(
         role=data.role,
         is_active=data.is_active,
         department_id=primary_department_id,
-        team_id=data.team_id,
+        team_id=None,
         password_hash=hash_password(data.password),
         must_change_password=True,
     )
@@ -248,7 +242,10 @@ async def update_user(
     else:
         next_department_id = user.department_id
         next_department_ids = [UUID(value) for value in user.department_ids]
-    next_team_id = values.get("team_id", user.team_id)
+    # Historical clients may still send null. Team membership is never
+    # persisted or considered by the active authorization model.
+    values.pop("team_id", None)
+    next_team_id = None
     await validate_user_departments(db, user.organization_id, next_department_ids, next_team_id)
     await validate_user_membership(db, user.organization_id, next_department_id, next_team_id)
     role_changed = "role" in values
@@ -271,7 +268,7 @@ async def update_user(
 
     if requested_manager_scopes is not None:
         await replace_manager_grants(db, user, requested_manager_scopes, created_by_admin_id)
-    elif role_changed or department_ids_were_set or {"department_id", "team_id", "is_active"} & values.keys():
+    elif role_changed or department_ids_were_set or {"department_id", "is_active"} & values.keys():
         # 调岗/停用/角色变化时只保留仍与新成员关系一致的授权。
         surviving = []
         for grant in user.manager_assignments or []:
@@ -279,8 +276,6 @@ async def update_user(
                 continue
             if grant.scope_type == "department" and grant.scope_id in set(user.department_ids):
                 surviving.append({"scope_type": "department", "scope_id": grant.scope_id})
-            if grant.scope_type == "team" and str(user.team_id or "") == grant.scope_id:
-                surviving.append({"scope_type": "team", "scope_id": grant.scope_id})
         from app.schemas.user import ManagerScopeGrant
         await replace_manager_grants(
             db, user, [ManagerScopeGrant(**item) for item in surviving], created_by_admin_id,
@@ -300,9 +295,9 @@ async def update_user(
     elif not is_admin and (data.username is not None or data.display_name is not None):
         await sync_node_workspace(db, user.organization_id, "user", str(user.id), _user_ws_name(user))
 
-    # 个人档案记忆：仅终端用户（非管理员）。姓名/部门/团队变更，或由管理员降为普通用户时同步。
+    # 个人档案记忆：仅终端用户（非管理员）。姓名/部门变更，或由管理员降为普通用户时同步。
     if not is_admin and (
-        {"display_name", "department_id", "team_id"} & values.keys()
+        {"display_name", "department_id"} & values.keys()
         or department_ids_were_set
         or (role_changed and prev_role == "admin")
     ):
@@ -313,7 +308,7 @@ async def update_user(
         or requested_manager_scopes is not None
         or role_changed
         or department_ids_were_set
-        or {"department_id", "team_id", "is_active"} & values.keys()
+        or {"department_id", "is_active"} & values.keys()
     )
     if auth_affecting:
         user.auth_epoch += 1

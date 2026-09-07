@@ -86,7 +86,6 @@ export default function UserLoginPage() {
         organization_name: org?.name ?? canonicalSlug,
         department_ids: data.user.department_ids ?? (data.user.department_id ? [data.user.department_id] : []),
         department_id: data.user.department_id,
-        team_id: data.user.team_id,
       };
       if (data.must_change_password) {
         setPasswordChangeError('');

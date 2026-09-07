@@ -38,7 +38,7 @@ from app.services.llm_provider_service import effective_provider, get_decrypted_
 LlmResult = legacy_client.LlmResult
 ImageGenerationResult = legacy_client.ImageGenerationResult
 
-_SCOPE_RANK = {"team": 3, "department": 2, "organization": 1}
+_SCOPE_RANK = {"department": 2, "organization": 1}
 _ROUTABLE_STATES = {"verified", "legacy"}
 _RETRYABLE_MARKERS = (" 429", " 500", " 502", " 503", " 504", "timeout", "timed out", "connect")
 _TEST_IMAGE_DATA_URL = (
@@ -79,7 +79,7 @@ async def _reserve_gateway_quota(
             max_output_tokens=max_output_tokens,
             input_token_upper_bound=input_token_upper_bound,
             department_id=dept_id,
-            team_id=team_id,
+            team_id=None,
             request_id=request_id or monotonic_request_id(operation),
             supports_token_metering=supports_token_metering,
             provider_id=provider_id,
@@ -702,12 +702,10 @@ def _normalize_bailian_image_size(value: str) -> str:
     return f"{width}*{height}"
 
 
-def _scope_clause(dept_id: str | UUID | None, team_id: str | UUID | None):
+def _scope_clause(dept_id: str | UUID | None, team_id: str | UUID | None):  # noqa: ARG001
     branches = [LlmProvider.scope_type == "organization"]
     if dept_id:
         branches.append((LlmProvider.scope_type == "department") & (LlmProvider.department_id == UUID(str(dept_id))))
-    if team_id:
-        branches.append((LlmProvider.scope_type == "team") & (LlmProvider.team_id == UUID(str(team_id))))
     return or_(*branches)
 
 
@@ -1879,7 +1877,7 @@ async def test_deployment(
             else settings.ai_quota_default_max_output_tokens
         ),
         dept_id=getattr(provider, "department_id", None),
-        team_id=getattr(provider, "team_id", None),
+        team_id=None,
         supports_token_metering=capability
         not in {
             "image_generation",

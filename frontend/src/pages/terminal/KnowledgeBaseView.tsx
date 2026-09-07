@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Input, Typography, message, Empty, Spin, Tooltip, Upload, Progress } from 'antd';
 import {
-  DeleteOutlined, BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined,
+  DeleteOutlined, BankOutlined, ApartmentOutlined, UserOutlined,
   FolderOutlined, FileTextOutlined, FolderAddOutlined, ArrowUpOutlined,
   HomeOutlined, PlusOutlined, EditOutlined, RightOutlined, TagsOutlined,
   InboxOutlined, FolderOpenOutlined, CheckCircleOutlined, CloseCircleOutlined,
@@ -24,10 +24,10 @@ const WB = {
 const WB_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
 
 const SCOPE_LABEL: Record<string, string> = {
-  organization: '组织', department: '部门', team: '团队', user: '个人',
+  organization: '企业', department: '部门', user: '个人',
 };
 const SCOPE_ICON: Record<string, ReactNode> = {
-  organization: <BankOutlined />, department: <ApartmentOutlined />, team: <TeamOutlined />, user: <UserOutlined />,
+  organization: <BankOutlined />, department: <ApartmentOutlined />, user: <UserOutlined />,
 };
 
 interface TreeNode {
@@ -38,7 +38,7 @@ interface TreeNode {
   children?: TreeNode[];
 }
 
-/** 把后端单链 KbNode[] 组装成 组织→部门→团队→个人 嵌套树（每级至多一个）。 */
+/** 把后端单链 KbNode[] 组装成 企业→部门→个人 嵌套树（每级至多一个）。 */
 function buildTree(nodes: KbNode[]): TreeNode[] {
   let child: TreeNode | null = null;
   for (let i = nodes.length - 1; i >= 0; i--) {
@@ -93,7 +93,7 @@ type ConfirmTarget =
   | { kind: 'doc'; id: string; title: string };
 
 /** 终端「知识库」视图：左中右三栏。
- *  左栏：用户可见作用域单链（组织/部门/团队/个人）；中栏：选中 scope 下的知识库；
+ *  左栏：用户可见作用域单链（企业/部门/个人）；中栏：选中 scope 下的知识库；
  *  右栏：选中知识库的文件夹与文档。
  *  新建：任意可见 scope 均可；删除/重命名/编辑：仅限「自己创建」的资源（created_by === 当前用户）。 */
 export default function KnowledgeBaseView() {

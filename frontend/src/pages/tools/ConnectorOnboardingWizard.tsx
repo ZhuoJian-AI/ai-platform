@@ -456,7 +456,7 @@ export default function ConnectorOnboardingWizard({ open, orgId, onClose, onComp
   const renderReleaseStep = () => (
     <div className="connector-onboarding-release-grid">
       <Card title={<Space><SafetyCertificateOutlined />谁可以使用</Space>}>
-        <Form.Item name="visible_scopes" label="部门、团队或用户" rules={[{ required: true, message: '请至少选择一个授权范围' }]}>
+        <Form.Item name="visible_scopes" label="部门、角色或用户" rules={[{ required: true, message: '请至少选择一个授权范围' }]}>
           <TreeSelect multiple allowClear treeData={orgTree} treeDefaultExpandAll showSearch treeNodeFilterProp="title" loading={treeLoading} placeholder="选择采购部、财务部或指定人员" />
         </Form.Item>
         <Form.Item name="permissions" label="授予的应用与 AI 权限" rules={[{ required: true }]}>

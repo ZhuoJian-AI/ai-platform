@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Form, Input, Typography, message } from 'antd';
 import {
-  BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined, ReadOutlined,
+  BankOutlined, ApartmentOutlined, UserOutlined, ReadOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { memory } from '../../api/client';
@@ -20,14 +20,12 @@ const { TextArea } = Input;
 const SCOPE_LABEL: Record<string, string> = {
   organization: '组织级',
   department: '部门级',
-  team: '团队级',
   user: '个人级',
 };
 
 const NODE_ICON: Record<string, ReactNode> = {
   organization: <BankOutlined />,
   department: <ApartmentOutlined />,
-  team: <TeamOutlined />,
   user: <UserOutlined />,
 };
 
@@ -38,7 +36,7 @@ interface EditingMem {
   content: string;
 }
 
-/** 长期记忆：Finder 风。随组织架构逐级嵌套的树（组织→部门→团队→用户），每个节点对应一条
+/** 长期记忆：Finder 风。随组织架构逐级嵌套的树（企业→部门→用户），每个节点对应一条
  *  自动生成的长期记忆（markdown）。点击节点在右侧编辑区修订其内容。记忆随节点增删改
  *  自动生成/同步，此处不手动新建/删除。 */
 export default function MemoryPage() {

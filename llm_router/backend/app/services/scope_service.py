@@ -1,8 +1,8 @@
 """Scope service — resolve a terminal user's effective resource scope.
 
 资源（Skill / 本体 / RagCollection / Workspace）按 ``scope_type`` + ``scope_id`` 分级：
-organization（全组织，scope_id 为 None）/ department / team / user。一个资源对用户可见当且仅当
-其落在用户的有效 scope 集合内：组织级 + 用户所属部门 + 用户所属团队 + 用户本人。
+organization（全组织，scope_id 为 None）/ department / user / role。一个资源对用户可见当且仅当
+其落在用户的有效 scope 集合内：企业级 + 用户所属部门 + 用户所绑定角色 + 用户本人。
 
 「自动匹配全部」= 用户有效 scope 集合内的资源并集（终端在 skills/ontology/rag 未指定时由
 运行时调用本服务解析为全集）。
@@ -55,33 +55,32 @@ def has_unrestricted_data_scope(cu: CurrentUser) -> bool:
 def effective_scope_set(cu: CurrentUser) -> list[tuple[str, str | None]]:
     """返回用户有效 scope 集合 [(scope_type, scope_id), ...]。
 
-    organization 级 scope_id 为 None；department/team/user 级为对应 id（未绑定则省略）。
+    organization 级 scope_id 为 None；department/user/role 级为对应 id。
     """
     scopes: list[tuple[str, str | None]] = [("organization", None)]
     scopes.extend(("department", department_id) for department_id in department_scope_ids(cu))
-    if cu.team_id:
-        scopes.append(("team", cu.team_id))
     scopes.append(("user", cu.id))
     scopes.extend(("role", role_id) for role_id in (getattr(cu, "role_ids", ()) or ()))
     return scopes
 
 
 def scope_filter(model, cu: CurrentUser):
-    """构造 ``model`` 的可见性 WHERE 条件（组织级 + 用户 dept/team/user 命中）。"""
+    """构造 ``model`` 的可见性 WHERE 条件（组织、部门、角色、个人）。"""
     conds = [model.scope_type == "organization"]
     department_ids = department_scope_ids(cu)
     if has_unrestricted_data_scope(cu):
         conds.append(model.scope_type == "department")
     elif department_ids:
         conds.append((model.scope_type == "department") & (model.scope_id.in_(department_ids)))
-    if cu.team_id:
-        conds.append((model.scope_type == "team") & (model.scope_id == cu.team_id))
+    role_ids = tuple(getattr(cu, "role_ids", ()) or ())
+    if role_ids:
+        conds.append((model.scope_type == "role") & (model.scope_id.in_(role_ids)))
     conds.append((model.scope_type == "user") & (model.scope_id == cu.id))
     return or_(*conds)
 
 
 async def list_skills_for_user(db: AsyncSession, cu: CurrentUser) -> list[SkillFolder]:
-    """用户可见的技能文件夹（组织级 + 用户 dept/team/user 命中）。
+    """用户可见的技能文件夹（组织级 + 用户部门/角色/个人命中）。
 
     新版包必须已有活动版本；存量技能只要存在 skill.md 仍兼容显示。
     """
@@ -103,7 +102,7 @@ async def list_skills_for_user(db: AsyncSession, cu: CurrentUser) -> list[SkillF
 
 
 async def list_ontologies_for_user(db: AsyncSession, cu: CurrentUser) -> list[OntologyFile]:
-    """用户可见的本体 Markdown 文件（组织级 + 用户 dept/team/user 命中）。
+    """用户可见的本体 Markdown 文件（组织级 + 用户部门/角色/个人命中）。
 
     本体已文件化：返回 OntologyFile（无 is_active 维度，文件即启用）。
     """
@@ -131,8 +130,8 @@ def is_rag_visible(collection: RagCollection, cu: CurrentUser) -> bool:
         return True
     if collection.scope_type == "department":
         return has_unrestricted_data_scope(cu) or collection.scope_id in department_scope_ids(cu)
-    if collection.scope_type == "team":
-        return bool(cu.team_id and collection.scope_id == cu.team_id)
+    if collection.scope_type == "role":
+        return collection.scope_id in set(getattr(cu, "role_ids", ()) or ())
     return collection.scope_type == "user" and collection.scope_id == cu.id
 
 
@@ -182,7 +181,7 @@ async def assert_admin_bound_rags(
 
 
 async def list_data_interfaces_for_user(db: AsyncSession, cu: CurrentUser) -> list[DataInterface]:
-    """用户可见的活跃数据接口（按 DataSystem 节点作用域：组织级 + 用户 dept/team/user 命中）。
+    """用户可见的活跃数据接口（企业、部门、角色和个人范围取并集）。
 
     数据接口为管理端目录（params/response schema），运行时仅注入上下文 + 留痕，不真正执行。
     预加载 ``system`` 关系以取系统名，避免逐条懒加载产生 N+1。
@@ -224,7 +223,7 @@ async def list_workspaces_for_user(db: AsyncSession, cu: CurrentUser) -> list[Wo
         Department.deleted_at.is_(None),
     ))).scalars().all())
     department_order = {str(department.id): department.sort_order for department in department_rows}
-    scope_order = {"organization": 0, "department": 1, "team": 2, "user": 3}
+    scope_order = {"organization": 0, "department": 1, "role": 2, "user": 3}
     return sorted(workspaces, key=lambda workspace: (
         scope_order.get(workspace.scope_type, 4),
         department_order.get(str(workspace.scope_id), 0)
@@ -235,7 +234,7 @@ async def list_workspaces_for_user(db: AsyncSession, cu: CurrentUser) -> list[Wo
 
 
 async def list_agents_for_user(db: AsyncSession, cu: CurrentUser) -> list[Agent]:
-    """用户可见的活跃智能体（组织级 + 用户 dept/team/user 命中）。
+    """用户可见的活跃智能体（企业、部门、角色和个人范围取并集）。
 
     供终端「选智能体」下拉：返回 Agent 行（已加 scope_type/scope_id 列），
     仅 is_active 且未删除者。终端选中后以 template_agent_id 逐次覆盖运行（不落库）。
@@ -267,10 +266,9 @@ def is_workspace_visible(ws: Workspace, cu: CurrentUser) -> bool:
 
 
 async def list_api_keys_for_user(db: AsyncSession, cu: CurrentUser) -> list[ApiKey]:
-    """用户可访问的活跃 API Key（组织级 + 所属部门 + 所属团队；未过期、未吊销）。
+    """用户可访问的活跃 API Key（组织级 + 获权部门；未过期、未吊销）。
 
-    ApiKey 仅按 organization/department/team 三级分发（无 user 级），故用户可见集 =
-    组织级 Key ∪ 其部门级 Key ∪ 其团队级 Key。
+    Team 级 Key 已停用，不再进入员工模型路由。
     """
     now = datetime.now(UTC)
     conds: list = [ApiKey.scope_type == "organization"]
@@ -279,8 +277,6 @@ async def list_api_keys_for_user(db: AsyncSession, cu: CurrentUser) -> list[ApiK
         conds.append(ApiKey.scope_type == "department")
     elif department_ids:
         conds.append((ApiKey.scope_type == "department") & (ApiKey.department_id.in_(department_ids)))
-    if cu.team_id:
-        conds.append((ApiKey.scope_type == "team") & (ApiKey.team_id == cu.team_id))
     stmt = select(ApiKey).where(
         ApiKey.organization_id == cu.organization_id,
         ApiKey.is_active.is_(True),
@@ -305,7 +301,7 @@ async def list_available_models_for_user(
     keys = await list_api_keys_for_user(db, cu)
 
     providers = await multimodal_service.visible_providers(
-        db, cu.organization_id, dept_id=cu.department_id, team_id=cu.team_id,
+        db, cu.organization_id, dept_id=cu.department_id, team_id=None,
     )
     organization = await db.get(Organization, cu.organization_id)
     allow_new_gateway = bool(
@@ -363,13 +359,13 @@ async def list_available_models_for_user(
 async def terminal_model_capabilities(db: AsyncSession, cu: CurrentUser, models: list[str]) -> dict:
     """Return additive multimodal metadata without changing the legacy models array."""
     capabilities = await multimodal_service.model_capabilities_for_scope(
-        db, cu.organization_id, models, dept_id=cu.department_id, team_id=cu.team_id,
+        db, cu.organization_id, models, dept_id=cu.department_id, team_id=None,
     )
     fallback = await multimodal_service.resolve_vision_fallback(
-        db, cu.organization_id, dept_id=cu.department_id, team_id=cu.team_id,
+        db, cu.organization_id, dept_id=cu.department_id, team_id=None,
     )
     image_generation = await multimodal_service.resolve_image_generation(
-        db, cu.organization_id, dept_id=cu.department_id, team_id=cu.team_id,
+        db, cu.organization_id, dept_id=cu.department_id, team_id=None,
     )
     return {
         "capabilities": capabilities,

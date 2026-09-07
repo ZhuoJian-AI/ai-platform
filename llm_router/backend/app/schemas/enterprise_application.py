@@ -11,7 +11,8 @@ from app.schemas._base import OrmModel
 ApplicationPermission = Literal[
     "view", "ai_query", "ai_create", "ai_update", "ai_delete", "ai_approve", "export"
 ]
-ApplicationScope = Literal["organization", "department", "team", "user", "role"]
+ApplicationScope = Literal["organization", "department", "user", "role"]
+EventRouteScope = Literal["organization", "department", "user"]
 ApplicationTarget = Literal["tool_endpoint", "data_interface", "skill_folder"]
 ApplicationOperation = Literal["query", "create", "update", "delete", "export", "approve"]
 
@@ -377,7 +378,7 @@ class EnterpriseApplicationSyncRead(BaseModel):
     status: Literal["healthy", "pending_review", "error"]
     manifest_updated: bool = False
     received_events: int = 0
-    created_work_items: int = 0
+    queued_deliveries: int = 0
     delivered_events: int = 0
     cursor_sequence: int = 0
     detail: str | None = None
@@ -422,7 +423,7 @@ class EnterpriseApplicationEventRouteInput(BaseModel):
     name: str = Field(..., min_length=1, max_length=160)
     event_type: str = Field(..., min_length=1, max_length=160)
     module_key: str | None = Field(None, max_length=120)
-    target_scope_type: ApplicationScope
+    target_scope_type: EventRouteScope
     target_scope_id: UUID | None = None
     target_application_id: UUID | None = None
     target_module_key: str | None = Field(None, max_length=120)
@@ -446,24 +447,6 @@ class EnterpriseApplicationEventRouteRead(OrmModel):
     is_active: bool
     created_at: datetime
     updated_at: datetime
-
-
-class CrossDepartmentWorkItemRead(OrmModel):
-    id: UUID
-    source_application_id: UUID
-    source_event_id: str
-    title: str
-    status: str
-    target_scope_type: str
-    target_scope_id: str | None
-    target_module_key: str | None
-    source_context: dict
-    created_at: datetime
-    updated_at: datetime
-
-
-class CrossDepartmentWorkItemUpdate(BaseModel):
-    status: Literal["open", "done"]
 
 
 class EnterpriseApplicationHealthRead(BaseModel):

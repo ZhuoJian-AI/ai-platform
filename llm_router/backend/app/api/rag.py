@@ -34,8 +34,8 @@ from app.schemas.rag import (
 )
 from app.services import doc_parser
 from app.services.rag_service import (
-    create_collection,
     EmbeddingError,
+    create_collection,
     create_folder,
     get_collection,
     get_document,
@@ -79,7 +79,7 @@ async def create_coll_endpoint(
 @router.get("/organizations/{org_id}/rag", response_model=list[RagCollectionRead])
 async def list_coll_endpoint(
     org_id: UUID,
-    scope_type: str | None = Query(default=None, description="organization/department/team/user"),
+    scope_type: str | None = Query(default=None, description="organization/department/user/role"),
     scope_id: str | None = Query(default=None),
     _: CurrentAdmin = Depends(require_org_access), db: AsyncSession = Depends(get_db),
 ):

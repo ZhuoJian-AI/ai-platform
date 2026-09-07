@@ -85,8 +85,8 @@ def _quota_resource(identifier: UUID, **overrides):
 
 
 @pytest.mark.asyncio
-async def test_rag_embedding_paths_forward_department_and_team(monkeypatch) -> None:
-    department_id, team_id, org_id = uuid4(), uuid4(), uuid4()
+async def test_rag_embedding_paths_forward_department_without_team(monkeypatch) -> None:
+    department_id, org_id = uuid4(), uuid4()
     observed: list[dict] = []
 
     async def fake_embed(_db, _org, _model, texts, **kwargs):
@@ -118,7 +118,7 @@ async def test_rag_embedding_paths_forward_department_and_team(monkeypatch) -> N
         org_id,
         ["first"],
         department_id=department_id,
-        team_id=team_id,
+        team_id=uuid4(),
     )
     await rag_service.reingest_document(
         db,
@@ -126,7 +126,7 @@ async def test_rag_embedding_paths_forward_department_and_team(monkeypatch) -> N
         org_id,
         RagReingestRequest(chunks=["second"]),
         department_id=department_id,
-        team_id=team_id,
+        team_id=uuid4(),
     )
     await rag_service.retrieve(
         db,
@@ -134,17 +134,17 @@ async def test_rag_embedding_paths_forward_department_and_team(monkeypatch) -> N
         org_id,
         RagRetrieveRequest(query="needle", top_k=3),
         department_id=department_id,
-        team_id=team_id,
+        team_id=uuid4(),
     )
 
     assert len(observed) == 3
     assert all(item["dept_id"] == department_id for item in observed)
-    assert all(item["team_id"] == team_id for item in observed)
+    assert all(item["team_id"] is None for item in observed)
 
 
 @pytest.mark.asyncio
-async def test_uploaded_rag_job_keeps_scope_for_background_embedding(monkeypatch) -> None:
-    department_id, team_id, org_id, coll_id = uuid4(), uuid4(), uuid4(), uuid4()
+async def test_uploaded_rag_job_keeps_department_scope_for_background_embedding(monkeypatch) -> None:
+    department_id, org_id, coll_id = uuid4(), uuid4(), uuid4()
     captured: tuple[str, str, str, str | None, str | None] | None = None
 
     async def fake_folder_chain(*_args, **_kwargs):
@@ -176,15 +176,15 @@ async def test_uploaded_rag_job_keeps_scope_for_background_embedding(monkeypatch
         content_type="text/plain",
         raw=b"body",
         department_id=department_id,
-        team_id=team_id,
+        team_id=uuid4(),
     )
 
     assert captured is not None
-    assert captured[2:] == (str(org_id), str(department_id), str(team_id))
+    assert captured[2:] == (str(org_id), str(department_id), None)
 
 
 @pytest.mark.asyncio
-async def test_audio_job_persists_team_and_worker_forwards_full_scope(monkeypatch, tmp_path: Path) -> None:
+async def test_audio_job_ignores_retired_team_and_forwards_department(monkeypatch, tmp_path: Path) -> None:
     org_id, user_id, department_id, team_id = (uuid4() for _ in range(4))
     cu = SimpleNamespace(
         organization_id=org_id,
@@ -202,7 +202,7 @@ async def test_audio_job_persists_team_and_worker_forwards_full_scope(monkeypatc
         idempotency_key="scope-job",
     )
     assert job.department_id == department_id
-    assert job.team_id == team_id
+    assert job.team_id is None
 
     source = tmp_path / "segment.mp3"
     source.write_bytes(b"audio")
@@ -246,7 +246,7 @@ async def test_audio_job_persists_team_and_worker_forwards_full_scope(monkeypatc
 
     await multimodal_worker._transcribe(None, job, tmp_path)
     assert observed["dept_id"] == department_id
-    assert observed["team_id"] == team_id
+    assert observed["team_id"] is None
     assert observed["request_id"] == job.request_id
     assert observed["segment_count"] == 2
 
@@ -427,8 +427,8 @@ async def test_audio_provider_verification_is_credit_only(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_vision_fallback_chat_forwards_department_and_team(monkeypatch) -> None:
-    org_id, department_id, team_id = (uuid4() for _ in range(3))
+async def test_vision_fallback_chat_forwards_department_without_team(monkeypatch) -> None:
+    org_id, department_id = (uuid4() for _ in range(2))
     primary = SimpleNamespace(id=uuid4(), provider_type="openai")
     fallback_provider = SimpleNamespace(id=uuid4())
     image = SimpleNamespace(
@@ -472,7 +472,6 @@ async def test_vision_fallback_chat_forwards_department_and_team(monkeypatch) ->
     state = {
         "org_id": str(org_id),
         "department_id": str(department_id),
-        "team_id": str(team_id),
         "model_alias": "default",
     }
     await graph_nodes._configure_visual_turn(
@@ -484,7 +483,7 @@ async def test_vision_fallback_chat_forwards_department_and_team(monkeypatch) ->
     )
 
     assert captured["dept_id"] == str(department_id)
-    assert captured["team_id"] == str(team_id)
+    assert captured["team_id"] is None
 
 
 @pytest.mark.asyncio
@@ -541,9 +540,7 @@ async def test_quota_admission_uses_one_utc_instant_everywhere(monkeypatch) -> N
 async def test_department_ancestor_caps_are_included_root_to_leaf(monkeypatch) -> None:
     from app.models.department import Department
     from app.models.organization import Organization
-    from app.models.team import Team
-
-    org_id, root_id, child_id, team_id = (uuid4() for _ in range(4))
+    org_id, root_id, child_id = (uuid4() for _ in range(3))
     organization = _quota_resource(org_id, budget_cap_credits=100)
     root = _quota_resource(
         root_id,
@@ -557,17 +554,10 @@ async def test_department_ancestor_caps_are_included_root_to_leaf(monkeypatch) -
         parent_id=root_id,
         budget_cap_credits=20,
     )
-    team = _quota_resource(
-        team_id,
-        organization_id=org_id,
-        department_id=child_id,
-        budget_cap_credits=30,
-    )
     db = _FakeDb({
         (Organization, org_id): organization,
         (Department, root_id): root,
         (Department, child_id): child,
-        (Team, team_id): team,
     })
 
     async def no_baseline(_db, scope, _instant):
@@ -578,7 +568,6 @@ async def test_department_ancestor_caps_are_included_root_to_leaf(monkeypatch) -
         db,
         org_id,
         department_id=child_id,
-        team_id=team_id,
         now=datetime(2026, 9, 4, tzinfo=UTC),
     )
 
@@ -586,7 +575,6 @@ async def test_department_ancestor_caps_are_included_root_to_leaf(monkeypatch) -
         ("organization", str(org_id)),
         ("department", str(root_id)),
         ("department", str(child_id)),
-        ("team", str(team_id)),
     ]
     assert min(
         scope.budget_cap_credits
@@ -597,18 +585,18 @@ async def test_department_ancestor_caps_are_included_root_to_leaf(monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_only_redis_missing_scopes_recompute_postgres_baselines(monkeypatch) -> None:
-    org_id, department_id, team_id = (uuid4() for _ in range(3))
+    org_id, department_id, key_id = (uuid4() for _ in range(3))
     scopes = [
         quota.QuotaScope("organization", str(org_id), budget_cap_credits=100),
         quota.QuotaScope("department", str(department_id), budget_cap_credits=50),
-        quota.QuotaScope("team", str(team_id), budget_cap_credits=10),
+        quota.QuotaScope("api_key", str(key_id), budget_cap_credits=10),
     ]
     hydrated: list[tuple[str, str]] = []
 
     class Probe:
         async def missing_counter_scopes(self, _scopes, *, now):
             assert now == datetime(2026, 9, 4, tzinfo=UTC)
-            return {("team", str(team_id))}
+            return {("api_key", str(key_id))}
 
     async def fake_baseline(_db, scope, _instant):
         hydrated.append((scope.scope_type, scope.scope_id))
@@ -622,7 +610,7 @@ async def test_only_redis_missing_scopes_recompute_postgres_baselines(monkeypatc
         datetime(2026, 9, 4, tzinfo=UTC),
     )
 
-    assert hydrated == [("team", str(team_id))]
+    assert hydrated == [("api_key", str(key_id))]
     assert [scope.baseline_budget_credits for scope in result] == [0, 0, 7]
 
 

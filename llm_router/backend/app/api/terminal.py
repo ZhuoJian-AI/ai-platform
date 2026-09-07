@@ -48,7 +48,6 @@ from app.models.organization import Organization
 from app.models.rag import RagCollection, RagDocument, RagFolder
 from app.models.skill import SkillFolder, SkillVersion
 from app.models.task import Task, TaskMessage
-from app.models.team import Team
 from app.models.workspace import WorkspaceFileVersion, WorkspaceUploadSession
 from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
 from app.schemas.data_interface import DataInterfaceRead, DataSystemRead
@@ -540,7 +539,6 @@ async def me_endpoint(cu: CurrentUser = Depends(require_user)):
         "user": user_payload,
         "department_ids": list(cu.department_ids),
         "department_id": cu.department_id,
-        "team_id": cu.team_id,
         "scopes": scope_service.effective_scope_set(cu),
         "roles": list(cu.role_ids),
         "permission_codes": list(cu.permission_codes),
@@ -609,7 +607,7 @@ async def export_skills_pack_endpoint(
 async def list_all_ws_files_endpoint(
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
-    """用户可访问的全部工作空间（组织/部门/团队/个人）内的文件轻量摘要。
+    """用户可访问的全部工作空间（企业/部门/个人）内的文件轻量摘要。
 
     供任务输入框 @ 引用下拉：遍历用户有效 scope 内的工作空间，逐个列出文件，拼装
     {id, workspace_id, workspace_name, path, scope_type, is_binary}（不含 content）。
@@ -666,7 +664,7 @@ async def agents_endpoint(
     scope_id: str | None = Query(default=None),
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
-    """用户可见的活跃智能体（组织级 + 用户 dept/team/user 命中），供终端「选智能体」下拉与智能体管理页。
+    """用户可见的活跃智能体（企业级 + 用户部门/角色/个人命中），供终端「选智能体」下拉与智能体管理页。
 
     选中后以 ``template_agent_id`` 逐次覆盖运行（不落库）；选「不绑定」走通用智能体。
     不传 scope → 返回用户有效集合内全部可见智能体；传 scope → 必须在用户有效集合内（404）后精确过滤。
@@ -686,7 +684,7 @@ async def create_agent_endpoint(
     data: AgentCreate,
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
-    """新建智能体（个人/团队/部门 scope）。后续仅创建者可改删。
+    """新建智能体（个人/角色/部门 scope）。后续仅创建者可改删。
 
     - 不允许 organization scope（终端用户不得建组织级智能体）；
     - scope 必须落在用户有效集合内，否则 403；
@@ -695,7 +693,7 @@ async def create_agent_endpoint(
     """
     assert_user_write(cu)
     if data.scope_type == "organization":
-        raise HTTPException(status_code=400, detail="终端不支持在组织级创建智能体，请选择个人/团队/部门")
+        raise HTTPException(status_code=400, detail="终端不支持在企业级创建智能体，请选择个人、角色或部门")
     if not _scope_in_effective(cu, data.scope_type, str(data.scope_id) if data.scope_id else None):
         raise HTTPException(status_code=403, detail="无权在该作用域下创建智能体")
     if data.model_alias != "default":
@@ -786,14 +784,14 @@ async def create_task_endpoint(
             db, data.config.application_id, cu, "view",
         )
     # 终端任务始终绑定用户个人工作空间。调用方不能通过手工构造请求把
-    # AI 的写入范围提升到部门、团队或企业工作空间。
+    # AI 的写入范围只由角色授予，不因组织归属自动提升到部门或企业工作空间。
     defaults = await _user_defaults(db, cu)
     data.config.workspace_id = defaults["workspace_id"]
     if data.config.model_alias is None:
         data.config.model_alias = defaults["model_alias"]
     task = await task_service.create_task(
         db, org_id=cu.organization_id, user_id=cu.id,
-        department_id=cu.department_id, team_id=cu.team_id, data=data,
+        department_id=cu.department_id, data=data,
     )
     await db.commit()
     return task
@@ -2532,7 +2530,7 @@ async def bulk_delete_ws_items_endpoint(
 # ── 知识库（RAG）：用户 scope 内可见；删除/重命名/编辑仅限自己创建 ──
 
 def _scope_in_effective(cu: CurrentUser, scope_type: str, scope_id: str | None) -> bool:
-    """选中 scope 是否落在用户有效 scope 集合内（组织/部门/团队/个人）。"""
+    """选中 scope 是否落在用户有效 scope 集合内（企业/部门/角色/个人）。"""
     for t, sid in scope_service.effective_scope_set(cu):
         if t == scope_type and (sid or None) == (scope_id or None):
             return True
@@ -2600,9 +2598,9 @@ async def _get_visible_skill_folder(db: AsyncSession, folder_id: UUID, cu: Curre
 async def kb_nodes_endpoint(
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
-    """用户可见的组织架构单链（组织→部门→团队→个人），供左栏树渲染。
+    """用户可见的组织架构单链（企业→部门→个人），供左栏树渲染。
 
-    每级返回 ``{scope_type, scope_id, name}``；部门/团队缺失则跳过该级。
+    每级返回 ``{scope_type, scope_id, name}``；部门缺失则跳过该级。
     """
     nodes: list[dict] = []
     org = (await db.execute(
@@ -2620,12 +2618,6 @@ async def kb_nodes_endpoint(
         )).scalar_one_or_none()
         if dept:
             nodes.append({"scope_type": "department", "scope_id": dept.id, "name": dept.name})
-    if cu.team_id:
-        team = (await db.execute(
-            select(Team).where(Team.id == cu.team_id, Team.deleted_at.is_(None))
-        )).scalar_one_or_none()
-        if team:
-            nodes.append({"scope_type": "team", "scope_id": team.id, "name": team.name})
     # 个人级：display_name 优先，回退 username
     user_name = cu.user.display_name or cu.user.username
     nodes.append({"scope_type": "user", "scope_id": cu.id, "name": user_name})
@@ -2634,7 +2626,7 @@ async def kb_nodes_endpoint(
 
 @router.get("/terminal/data-systems", response_model=list[DataSystemRead])
 async def list_data_systems_endpoint(
-    scope_type: str = Query(..., description="organization/department/team/user"),
+    scope_type: str = Query(..., description="organization/department/user"),
     scope_id: str | None = Query(default=None),
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
@@ -2659,7 +2651,7 @@ async def list_data_interfaces_endpoint(
 
 @router.get("/terminal/rag", response_model=list[RagCollectionRead])
 async def list_kb_collections_endpoint(
-    scope_type: str = Query(..., description="organization/department/team/user"),
+    scope_type: str = Query(..., description="organization/department/user"),
     scope_id: str | None = Query(default=None),
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
@@ -2812,7 +2804,7 @@ async def ingest_kb_document_endpoint(
             data,
             created_by=cu.id,
             department_id=cu.department_id,
-            team_id=cu.team_id,
+            team_id=None,
         )
     except rag_service.EmbeddingError as exc:
         # service 已置 doc=failed + flush；commit 落库 failed 供排查，转 502
@@ -2848,7 +2840,7 @@ async def upload_kb_document_endpoint(
             folder_path=folder_path,
             created_by=cu.id,
             department_id=cu.department_id,
-            team_id=cu.team_id,
+            team_id=None,
         )
     except doc_parser.UnsupportedFileTypeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -2942,7 +2934,7 @@ async def reingest_kb_document_endpoint(
             coll.organization_id,
             data,
             department_id=cu.department_id,
-            team_id=cu.team_id,
+            team_id=None,
         )
     except rag_service.EmbeddingError as exc:
         # 回滚：恢复旧分块与原 doc，不留下 0 chunk 的 failed 行
@@ -2957,7 +2949,7 @@ async def reingest_kb_document_endpoint(
 
 @router.get("/terminal/skills", response_model=list[SkillFolderRead])
 async def list_skills_endpoint(
-    scope_type: str = Query(..., description="organization/department/team/user"),
+    scope_type: str = Query(..., description="organization/department/user"),
     scope_id: str | None = Query(default=None),
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
@@ -3121,7 +3113,7 @@ async def _get_visible_ontology_file(db: AsyncSession, file_id: UUID, cu: Curren
 
 @router.get("/terminal/ontology-folders", response_model=list[OntologyFolderRead])
 async def list_ontology_folders_endpoint(
-    scope_type: str = Query(..., description="organization/department/team/user"),
+    scope_type: str = Query(..., description="organization/department/user"),
     scope_id: str | None = Query(default=None),
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
@@ -3177,7 +3169,7 @@ async def delete_ontology_folder_endpoint(
 
 @router.get("/terminal/ontology-files", response_model=list[OntologyFileRead])
 async def list_ontology_files_endpoint(
-    scope_type: str = Query(..., description="organization/department/team/user"),
+    scope_type: str = Query(..., description="organization/department/user"),
     scope_id: str | None = Query(default=None),
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):

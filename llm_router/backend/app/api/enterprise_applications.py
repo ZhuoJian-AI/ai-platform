@@ -22,8 +22,6 @@ from app.auth.user_auth import CurrentUser, require_user
 from app.database import get_db
 from app.models.enterprise_application import EnterpriseApplicationIntegration
 from app.schemas.enterprise_application import (
-    CrossDepartmentWorkItemRead,
-    CrossDepartmentWorkItemUpdate,
     EnterpriseApplicationActionInvoke,
     EnterpriseApplicationActionRead,
     EnterpriseApplicationActionRequestRead,
@@ -565,22 +563,19 @@ async def reject_terminal_application_action_endpoint(
     return await action_service.resolve_confirmation(db, confirmation_id, cu, approve=False)
 
 
-@router.get("/terminal/cross-department-work-items", response_model=list[CrossDepartmentWorkItemRead])
+@router.get("/terminal/cross-department-work-items", status_code=410)
 async def terminal_cross_department_work_items_endpoint(
     cu: CurrentUser = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
 ):
-    return await integration_service.list_work_items_for_user(db, cu)
+    raise HTTPException(status_code=410, detail="平台跨部门待办已停用，请在对应业务系统中处理")
 
 
 @router.patch(
     "/terminal/cross-department-work-items/{item_id}",
-    response_model=CrossDepartmentWorkItemRead,
+    status_code=410,
 )
 async def update_terminal_cross_department_work_item_endpoint(
     item_id: UUID,
-    data: CrossDepartmentWorkItemUpdate,
     cu: CurrentUser = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
 ):
-    return await integration_service.update_work_item_status(db, cu, item_id, data.status)
+    raise HTTPException(status_code=410, detail="平台跨部门待办已停用，请在对应业务系统中处理")

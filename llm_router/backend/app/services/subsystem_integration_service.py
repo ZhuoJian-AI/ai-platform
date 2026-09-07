@@ -20,13 +20,11 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.user_auth import CurrentUser
 from app.config import settings
 from app.database import async_session_factory
 from app.models.department import Department
 from app.models.ecs_runtime import EcsModuleRelease
 from app.models.enterprise_application import (
-    CrossDepartmentWorkItem,
     EnterpriseApplication,
     EnterpriseApplicationAction,
     EnterpriseApplicationEvent,
@@ -39,7 +37,7 @@ from app.schemas.enterprise_application import (
     EnterpriseApplicationEventRouteInput,
     EnterpriseApplicationIntegrationInput,
 )
-from app.services import scope_service, skill_scope_service
+from app.services import skill_scope_service
 from app.services.subsystem_access_service import assert_application_available
 from app.utils.crypto import decrypt_provider_api_key, encrypt_provider_api_key, hash_api_key
 from app.utils.public_url import assert_public_http_url, request_public_http, same_origin
@@ -998,8 +996,7 @@ async def _store_event(
         .scalars()
         .all()
     )
-    created = 0
-    entity_label = values["entity_id"] or values["entity_type"] or "业务记录"
+    queued_deliveries = 0
     for route in routes:
         if route.target_application_id:
             delivery_id = str(uuid5(NAMESPACE_URL, f"{route.id}:{event_row_id}"))
@@ -1017,31 +1014,10 @@ async def _store_event(
                 )
                 .on_conflict_do_nothing(index_elements=["route_id", "source_event_id"])
             )
-        work_result = await db.execute(
-            insert(CrossDepartmentWorkItem)
-            .values(
-                organization_id=integration.organization_id,
-                source_application_id=integration.application_id,
-                route_id=route.id,
-                source_event_id=event_id,
-                title=f"{route.name}：{entity_label}"[:300],
-                target_scope_type=route.target_scope_type,
-                target_scope_id=route.target_scope_id,
-                target_module_key=route.target_module_key,
-                source_context={
-                    "event_type": event_type,
-                    "module_key": values["module_key"],
-                    "entity_type": values["entity_type"],
-                    "entity_id": values["entity_id"],
-                    "action": values["action"],
-                    "payload": payload,
-                },
-            )
-            .on_conflict_do_nothing(index_elements=["route_id", "source_event_id"])
-            .returning(CrossDepartmentWorkItem.id)
-        )
-        created += int(work_result.scalar_one_or_none() is not None)
-    return True, created
+            queued_deliveries += 1
+        # Routes without a target application are audit-only. SaaS does not
+        # turn business events into central work items.
+    return True, queued_deliveries
 
 
 async def deliver_pending_events(
@@ -1196,7 +1172,7 @@ async def sync_integration(
     row.last_error = None
     await db.flush()
     received = 0
-    work_items = 0
+    queued_deliveries = 0
     try:
         timeout = httpx.Timeout(20.0, connect=8.0)
         async with httpx.AsyncClient(
@@ -1242,7 +1218,7 @@ async def sync_integration(
                     "status": "pending_review",
                     "manifest_updated": False,
                     "received_events": 0,
-                    "created_work_items": 0,
+                    "queued_deliveries": 0,
                     "delivered_events": 0,
                     "cursor_sequence": row.cursor_sequence,
                     "detail": "Subsystem manifest requires administrator review",
@@ -1291,7 +1267,7 @@ async def sync_integration(
                     break
 
             # Apply the validated candidate atomically. No active manifest,
-            # action catalog, event, work item or cursor can be left half-updated.
+            # action catalog, event, delivery or cursor can be left half-updated.
             async with db.begin_nested():
                 await _activate_manifest(db, application, row, manifest, events_url, version)
                 row.manifest_diff = manifest_diff
@@ -1299,7 +1275,7 @@ async def sync_integration(
                 for event in candidate_events:
                     stored, created = await _store_event(db, row, event)
                     received += int(stored)
-                    work_items += created
+                    queued_deliveries += created
                     row.cursor_sequence = int(event["sequence"])
                 if application.is_active:
                     row.last_event_sync_at = datetime.now(UTC)
@@ -1310,7 +1286,7 @@ async def sync_integration(
             "status": "healthy",
             "manifest_updated": bool(manifest_diff),
             "received_events": received,
-            "created_work_items": work_items,
+            "queued_deliveries": queued_deliveries,
             # Delivery is a separate committed outbox phase in the scheduler.
             "delivered_events": 0,
             "cursor_sequence": row.cursor_sequence,
@@ -1325,47 +1301,11 @@ async def sync_integration(
             "status": "error",
             "manifest_updated": False,
             "received_events": received,
-            "created_work_items": work_items,
+            "queued_deliveries": queued_deliveries,
             "delivered_events": 0,
             "cursor_sequence": row.cursor_sequence,
             "detail": row.last_error,
         }
-
-
-async def list_work_items_for_user(db: AsyncSession, user: CurrentUser) -> list[CrossDepartmentWorkItem]:
-    scopes = set(scope_service.effective_scope_set(user))
-    clauses = [
-        (CrossDepartmentWorkItem.target_scope_type == scope_type)
-        & (CrossDepartmentWorkItem.target_scope_id == scope_id)
-        for scope_type, scope_id in scopes
-    ]
-    return list(
-        (
-            await db.execute(
-                select(CrossDepartmentWorkItem)
-                .where(
-                    CrossDepartmentWorkItem.organization_id == user.organization_id,
-                    or_(*clauses),
-                )
-                .order_by(CrossDepartmentWorkItem.status, CrossDepartmentWorkItem.created_at.desc())
-                .limit(500)
-            )
-        )
-        .scalars()
-        .all()
-    )
-
-
-async def update_work_item_status(
-    db: AsyncSession, user: CurrentUser, item_id: UUID, status: str
-) -> CrossDepartmentWorkItem:
-    rows = await list_work_items_for_user(db, user)
-    item = next((row for row in rows if row.id == item_id), None)
-    if item is None:
-        raise HTTPException(status_code=404, detail="Work item not found")
-    item.status = status
-    await db.flush()
-    return item
 
 
 async def run_subsystem_sync_scheduler() -> None:

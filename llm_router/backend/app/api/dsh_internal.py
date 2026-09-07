@@ -291,7 +291,7 @@ async def model_stream(
             max_tokens=body.max_tokens,
             tools=tools or None,
             dept_id=context.state.get("department_id"),
-            team_id=context.state.get("team_id"),
+            team_id=None,
             provider_override=context.provider_override,
             model_override=context.model_override,
         )
@@ -328,7 +328,7 @@ async def model_stream(
                     max_tokens=body.max_tokens,
                     tools=tools or None,
                     dept_id=context.state.get("department_id"),
-                    team_id=context.state.get("team_id"),
+                    team_id=None,
                     provider_override=context.provider_override,
                     model_override=context.model_override,
                 )

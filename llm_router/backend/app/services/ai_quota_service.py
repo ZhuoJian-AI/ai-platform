@@ -3,7 +3,7 @@
 Redis is the synchronous source of truth for admission because a PostgreSQL
 ``SELECT`` followed by ``UPDATE`` cannot safely protect multiple Backend
 replicas from concurrent overspend.  One Lua invocation checks and reserves
-all applicable organization/department/team/API-key counters atomically.
+all applicable organization/department/API-key counters atomically.
 
 Token reservations use a deliberately conservative upper bound.  Successful
 responses are settled to provider-reported usage.  A failed, interrupted, or
@@ -37,7 +37,6 @@ from app.models.api_key import ApiKey
 from app.models.budget import AiQuotaEvent
 from app.models.department import Department
 from app.models.organization import Organization
-from app.models.team import Team
 
 logger = structlog.get_logger()
 
@@ -531,7 +530,6 @@ def _organization_tag_from_counter_keys(keys: tuple[str, ...]) -> str | None:
 def quota_scopes_for_resources(
     organization: Organization,
     department: Department | None = None,
-    team: Team | None = None,
     api_key: ApiKey | None = None,
     *,
     department_ancestors: list[Department] | tuple[Department, ...] = (),
@@ -542,8 +540,6 @@ def quota_scopes_for_resources(
     resources.extend(("department", ancestor) for ancestor in department_ancestors)
     if department is not None:
         resources.append(("department", department))
-    if team is not None:
-        resources.append(("team", team))
     if api_key is not None:
         resources.append(("api_key", api_key))
     scopes = [
@@ -632,7 +628,7 @@ async def _usage_baseline(
     scope: QuotaScope,
     now: datetime,
 ) -> QuotaScope:
-    if scope.scope_type not in {"organization", "department", "team", "api_key"}:
+    if scope.scope_type not in {"organization", "department", "api_key"}:
         raise QuotaConfigurationError(f"unknown quota scope: {scope.scope_type}")
 
     minute_start = now.replace(second=0, microsecond=0)
@@ -712,7 +708,7 @@ async def load_quota_scopes(
     organization_id: str | UUID,
     *,
     department_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
+    team_id: str | UUID | None = None,  # noqa: ARG001 - one-release caller compatibility
     api_key: ApiKey | None = None,
     now: datetime | None = None,
     hydrate_baselines: bool = True,
@@ -722,17 +718,6 @@ async def load_quota_scopes(
         raise QuotaConfigurationError("organization quota scope is unavailable")
     department = None
     department_ancestors: list[Department] = []
-    team = None
-    if team_id is not None:
-        team = await db.get(Team, UUID(str(team_id)))
-        if (
-            team is None
-            or team.deleted_at is not None
-            or str(team.organization_id) != str(organization.id)
-        ):
-            raise QuotaConfigurationError("team quota scope does not belong to organization")
-        if department_id is None:
-            department_id = team.department_id
     if department_id is not None:
         current_id: str | UUID | None = department_id
         seen: set[str] = set()
@@ -755,15 +740,12 @@ async def load_quota_scopes(
             current_id = current.parent_id
         department = chain[0]
         department_ancestors = list(reversed(chain[1:]))
-    if team is not None and department is not None and str(team.department_id) != str(department.id):
-        raise QuotaConfigurationError("team quota scope does not belong to department")
     if api_key is not None and str(api_key.organization_id) != str(organization.id):
         raise QuotaConfigurationError("API key quota scope does not belong to organization")
 
     scopes = quota_scopes_for_resources(
         organization,
         department,
-        team,
         api_key,
         department_ancestors=department_ancestors,
     )
@@ -998,7 +980,7 @@ async def reserve_ai_quota(
         reservation,
         organization_id=str(organization_id),
         department_id=_optional_string(department_id),
-        team_id=_optional_string(team_id),
+        team_id=None,
         api_key_id=_optional_string(api_key.id) if api_key is not None else None,
         provider_id=_optional_string(provider_id),
         operation=operation,
@@ -1085,7 +1067,6 @@ async def quota_startup_preflight(db: AsyncSession) -> None:
     for scope_type, model in (
         ("organization", Organization),
         ("department", Department),
-        ("team", Team),
         ("api_key", ApiKey),
     ):
         legacy_counts[scope_type] = int(

@@ -1,6 +1,7 @@
 """RAG Pydantic schemas."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -18,7 +19,7 @@ class RagCollectionCreate(BaseModel):
     chunk_size: int = 800
     chunk_overlap: int = 100
     metadata: dict = Field(default_factory=dict)
-    scope_type: str = Field("organization", max_length=20)
+    scope_type: Literal["organization", "department", "user", "role"] = "organization"
     scope_id: str | None = None
 
 
@@ -28,7 +29,7 @@ class RagCollectionUpdate(BaseModel):
     chunk_size: int | None = None
     chunk_overlap: int | None = None
     metadata: dict | None = None
-    scope_type: str | None = Field(None, max_length=20)
+    scope_type: Literal["organization", "department", "user", "role"] | None = None
     scope_id: str | None = None
 
 

@@ -31,13 +31,13 @@ async def resolve_route(state: ProxyState) -> dict:
     preferred_type = "anthropic" if protocol == "anthropic" else "openai"
     provider = await find_provider(
         db, org_id, resolved_model, preferred_type=preferred_type,
-        dept_id=state.get("dept_id"), team_id=state.get("team_id"),
+        dept_id=state.get("dept_id"), team_id=None,
     )
     if provider is None and protocol == "openai":
         # OpenAI 端点回退：不限定 provider 类型
         provider = await find_provider(
             db, org_id, resolved_model,
-            dept_id=state.get("dept_id"), team_id=state.get("team_id"),
+            dept_id=state.get("dept_id"), team_id=None,
         )
 
     if provider is None:

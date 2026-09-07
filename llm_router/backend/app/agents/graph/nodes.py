@@ -1853,7 +1853,7 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     db,
                     UUID(state["org_id"]),
                     dept_id=state.get("department_id"),
-                    team_id=state.get("team_id"),
+                    team_id=None,
                 )
                 if scoped is None:
                     return json.dumps({"status": "unavailable", "error": "当前组织未配置生图模型"}, ensure_ascii=False)
@@ -1867,7 +1867,7 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     prompt,
                     str(state["org_id"]),
                     state.get("department_id"),
-                    state.get("team_id"),
+                    None,
                 )
                 if dlp.blocked:
                     return json.dumps({"status": "error", "error": "生图提示词被安全策略拦截"}, ensure_ascii=False)
@@ -1887,7 +1887,7 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     db=db,
                     org_id=UUID(state["org_id"]),
                     dept_id=state.get("department_id"),
-                    team_id=state.get("team_id"),
+                    team_id=None,
                 )
                 raw, width, height = multimodal_service.normalize_generated_png(result.raw)
                 requested = PurePosixPath(str(params.get("output_name") or "generated-image.png")).name
@@ -1928,7 +1928,7 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                         request_id=f"image-generation-{uuid4().hex}",
                         organization_id=str(state["org_id"]),
                         department_id=state.get("department_id"),
-                        team_id=state.get("team_id"),
+                        team_id=None,
                         provider_id=result.provider_id,
                         event_type="image_generation",
                         direction="outbound",
@@ -3100,7 +3100,7 @@ async def retrieve_rag(state: AgentState) -> dict:
                 UUID(state["org_id"]),
                 req,
                 department_id=state.get("department_id"),
-                team_id=state.get("team_id"),
+                team_id=None,
             )
             for h in hits:
                 merged.append(
@@ -3269,7 +3269,7 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
                     content += "\n\n[历史文件引用]\n" + json.dumps(refs, ensure_ascii=False)
             past.append({"role": message.role, "content": content})
 
-    # 4 级长期记忆：按用户权限自动载入全集（组织 + 部门 + 团队 + 个人），无需任务配置。
+    # 长期记忆按角色授权自动载入企业、部门、角色与个人范围，无需任务配置。
     # 业务小助手只允许使用当前应用/页面授权的实时 Action；即使后续提示词逻辑不注入
     # memory_context，也不要提前读取与当前业务页面无关的长期记忆。
     user = deps.get("user")
@@ -3363,7 +3363,7 @@ async def _prepare_current_turn_images(state: AgentState, db, user) -> list[mult
                     ocr_text,
                     str(state["org_id"]),
                     state.get("department_id"),
-                    state.get("team_id"),
+                    None,
                 )
                 # Redacting extracted text cannot redact pixels, so raw image transmission must stop.
                 if dlp.blocked or dlp.redacted_text is not None:
@@ -3409,7 +3409,7 @@ async def _configure_visual_turn(
         UUID(state["org_id"]),
         state.get("model_alias", "default"),
         dept_id=state.get("department_id"),
-        team_id=state.get("team_id"),
+        team_id=None,
     )
     vision_enabled, _ = await multimodal_service.organization_feature_flags(db, UUID(state["org_id"]))
     direct = bool(
@@ -3432,7 +3432,7 @@ async def _configure_visual_turn(
                 request_id=f"vision-{uuid4().hex}",
                 organization_id=str(state["org_id"]),
                 department_id=state.get("department_id"),
-                team_id=state.get("team_id"),
+                team_id=None,
                 provider_id=str(provider.id),
                 event_type="vision_input",
                 direction="outbound",
@@ -3461,7 +3461,7 @@ async def _configure_visual_turn(
         db,
         UUID(state["org_id"]),
         dept_id=state.get("department_id"),
-        team_id=state.get("team_id"),
+        team_id=None,
     )
     if fallback is None:
         raise RuntimeError("当前组织未配置视觉模型；仍可使用 OCR 或 image_tool 处理图片")
@@ -3489,7 +3489,7 @@ async def _configure_visual_turn(
         provider_override=fallback.provider,
         model_override=fallback.model,
         dept_id=state.get("department_id"),
-        team_id=state.get("team_id"),
+        team_id=None,
     )
     description = (visual.content or "").strip()
     if not description:
@@ -3499,7 +3499,7 @@ async def _configure_visual_turn(
             request_id=f"vision-fallback-{uuid4().hex}",
             organization_id=str(state["org_id"]),
             department_id=state.get("department_id"),
-            team_id=state.get("team_id"),
+            team_id=None,
             provider_id=str(fallback.provider.id),
             event_type="vision_fallback",
             direction="outbound",
@@ -4276,7 +4276,7 @@ async def _build_tools(
                 db,
                 user.organization_id,
                 dept_id=user.department_id,
-                team_id=user.team_id,
+                team_id=None,
             )
             is not None
         )
@@ -5016,7 +5016,7 @@ async def _execute_tool_call(
                     UUID(state["org_id"]),
                     RagRetrieveRequest(query=query, top_k=top_k),
                     department_id=state.get("department_id"),
-                    team_id=state.get("team_id"),
+                    team_id=None,
                 )
                 for hit in hits:
                     merged.append(
@@ -5435,7 +5435,7 @@ def _memory_tool_defs() -> list[dict]:
             "type": "function",
             "function": {
                 "name": "read_memory",
-                "description": "读取当前用户 4 级 scope（组织/部门/团队/个人）聚合的长期记忆全文。",
+                "description": "读取当前用户按角色获权的企业、部门、角色与个人长期记忆全文。",
                 "parameters": {"type": "object", "properties": {}},
             },
         },
@@ -6036,7 +6036,7 @@ async def extract_memory(state: AgentState) -> dict:
             [{"role": "user", "content": prompt}],
             system_prompt="你只输出 JSON。",
             dept_id=state.get("department_id"),
-            team_id=state.get("team_id"),
+            team_id=None,
         )
         parsed = _parse_json_lenient(result.content)
         raw = parsed.get("facts", []) if isinstance(parsed, dict) else []
@@ -6100,7 +6100,7 @@ async def judge(state: AgentState) -> dict:
             [{"role": "user", "content": prompt}],
             system_prompt="你是一个严格的评审判官，只输出 JSON。",
             dept_id=state.get("department_id"),
-            team_id=state.get("team_id"),
+            team_id=None,
         )
         try:
             parsed = json.loads(result.content)
@@ -6147,7 +6147,7 @@ async def write_run_log(state: AgentState) -> dict:
             UUID(state["org_id"]),
             state.get("model_alias", "default"),
             dept_id=state.get("department_id"),
-            team_id=state.get("team_id"),
+            team_id=None,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("audit_resolve_provider_failed", error=str(exc))
@@ -6158,7 +6158,7 @@ async def write_run_log(state: AgentState) -> dict:
         api_key_id=None,
         organization_id=str(state["org_id"]),
         department_id=str(state["department_id"]) if state.get("department_id") else None,
-        team_id=str(state["team_id"]) if state.get("team_id") else None,
+        team_id=None,
         provider_id=provider_id,
         event_type="agent_request",
         direction="outbound",

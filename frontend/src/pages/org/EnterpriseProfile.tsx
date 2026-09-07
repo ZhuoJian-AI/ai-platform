@@ -60,8 +60,8 @@ export default function EnterpriseProfile() {
           type="info"
           showIcon
           message={enterpriseScoped
-            ? '企业顶层额度由平台超级管理员设置；你可以为部门、团队和 API Key 分配更严格的子额度。'
-            : '这里维护企业资料与顶层额度；部门和团队请到“组织架构”管理。'}
+            ? '企业顶层额度由平台超级管理员设置；你可以为部门和 API Key 分配更严格的子额度。'
+            : '这里维护企业资料与顶层额度；部门、用户和角色请到对应管理页面维护。'}
           style={{ marginBottom: 20 }}
         />
         <Form form={form} layout="vertical" onFinish={values => save.mutate(values)}>

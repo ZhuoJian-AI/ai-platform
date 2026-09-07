@@ -1,6 +1,7 @@
 """Agent Pydantic schemas."""
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -11,8 +12,8 @@ class AgentCreate(BaseModel):
     # slug 可不填：未提供时由 service 按编码规则自动生成（名称派生 + 同 scope 内唯一）。
     slug: str | None = Field(None, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str | None = None
-    # 作用域：organization / department / team / user；scope_id 为对应 id（org 级为 None）
-    scope_type: str = "organization"
+    # 作用域：organization / department / user / role；scope_id 为对应 id（org 级为 None）
+    scope_type: Literal["organization", "department", "user", "role"] = "organization"
     scope_id: UUID | None = None
     system_prompt: str = Field(..., min_length=1)
     model_alias: str = "default"
@@ -46,7 +47,7 @@ class AgentUpdate(BaseModel):
     max_tokens: int | None = None
     is_active: bool | None = None
     # 终端/管理端允许迁移 agent 所属 scope；None=不改动，空串=置 org 级。
-    scope_type: str | None = None
+    scope_type: Literal["organization", "department", "user", "role"] | None = None
     scope_id: UUID | None = None
 
 

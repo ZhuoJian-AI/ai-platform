@@ -6,7 +6,7 @@ import {
 import {
   DeleteOutlined, EditOutlined, SearchOutlined, UploadOutlined,
   FolderOutlined, FileTextOutlined, EyeOutlined, DownOutlined, RightOutlined,
-  BankOutlined, ApartmentOutlined, TeamOutlined, UserOutlined, ToolOutlined,
+  BankOutlined, ApartmentOutlined, UserOutlined, ToolOutlined,
 } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
@@ -24,17 +24,17 @@ import ConfirmModal from '../../components/finder/ConfirmModal';
 import { WB, FS } from '../../components/finder/theme';
 
 interface ScopeState {
-  scope_type: 'organization' | 'department' | 'team' | 'user';
+  scope_type: 'organization' | 'department' | 'user';
   scope_id: string | null;
   orgId: string;
   nodeName: string;
 }
 
 const SCOPE_PREFIX: Record<ScopeState['scope_type'], string> = {
-  organization: 'org', department: 'dept', team: 'team', user: 'user',
+  organization: 'org', department: 'dept', user: 'user',
 };
 const NODE_ICON: Record<string, ReactNode> = {
-  org: <BankOutlined />, dept: <ApartmentOutlined />, team: <TeamOutlined />, user: <UserOutlined />,
+  org: <BankOutlined />, dept: <ApartmentOutlined />, user: <UserOutlined />,
 };
 const iconForKey = (key: string): ReactNode => NODE_ICON[key.split(':')[0]] ?? <FolderOutlined />;
 

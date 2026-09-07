@@ -125,49 +125,52 @@ async def test_user_belongs_to_one_department(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_department_and_team_cannot_be_deleted_while_they_have_active_members(
+async def test_team_endpoints_are_gone_and_department_members_still_block_deletion(
     client: AsyncClient,
 ):
     org_id = await _make_org(client, slug="delete-membership-guard-org")
     source_id = await _make_department(client, org_id, "设计部", "design")
     target_id = await _make_department(client, org_id, "生产部", "production")
-    team = await client.post(
+    retired_team = await client.post(
         f"/api/v1/departments/{source_id}/teams",
         json={"name": "产品设计组", "slug": "product-design"},
     )
-    assert team.status_code == 201
-    team_id = team.json()["id"]
+    assert retired_team.status_code == 410
+    assert "Team 已停用" in retired_team.json()["detail"]
     user = await client.post(
         f"/api/v1/organizations/{org_id}/users",
         json={
             "username": "department-member",
             "password": "test-pass-123",
             "department_id": source_id,
-            "team_id": team_id,
         },
     )
     assert user.status_code == 201
 
-    rejected_team = await client.delete(f"/api/v1/teams/{team_id}")
-    assert rejected_team.status_code == 409
-    assert "1 名员工" in rejected_team.json()["detail"]
-
     rejected_department = await client.delete(f"/api/v1/departments/{source_id}")
     assert rejected_department.status_code == 409
     assert "1 名员工" in rejected_department.json()["detail"]
-    assert "1 个团队" in rejected_department.json()["detail"]
 
     moved = await client.patch(
         f"/api/v1/users/{user.json()['id']}",
         json={
             "department_ids": [target_id],
             "department_id": target_id,
-            "team_id": None,
         },
     )
     assert moved.status_code == 200
-    assert (await client.delete(f"/api/v1/teams/{team_id}")).status_code == 204
     assert (await client.delete(f"/api/v1/departments/{source_id}")).status_code == 204
+
+    non_null_team = await client.post(
+        f"/api/v1/organizations/{org_id}/users",
+        json={
+            "username": "legacy-team-member",
+            "password": "test-pass-123",
+            "department_id": target_id,
+            "team_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        },
+    )
+    assert non_null_team.status_code == 422
 
 
 @pytest.mark.asyncio

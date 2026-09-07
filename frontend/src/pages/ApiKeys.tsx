@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import {
   PlusOutlined, CopyOutlined, StopOutlined, BookOutlined, KeyOutlined,
-  BankOutlined, ApartmentOutlined, TeamOutlined,
+  BankOutlined, ApartmentOutlined,
   EditOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -26,19 +26,16 @@ import { WB, FS } from '../components/finder/theme';
 const SCOPE_LABELS: Record<string, string> = {
   organization: '组织级',
   department: '部门级',
-  team: '团队级',
 };
 
 const SCOPE_COLORS: Record<string, string> = {
   organization: 'blue',
   department: 'green',
-  team: 'orange',
 };
 
 const NODE_ICON: Record<string, ReactNode> = {
   organization: <BankOutlined />,
   department: <ApartmentOutlined />,
-  team: <TeamOutlined />,
 };
 
 /** 接入指引常量 */
@@ -112,7 +109,7 @@ export default function ApiKeys() {
   const { treeData, nodeMap, isLoading: treeLoading } = useOrgTree();
   const orgId = selectedOrgId;
 
-  // 左栏 Finder 树：仅选中组织的 org→dept→team 子树
+  // 左栏 Finder 树：仅选中企业的企业→部门子树
   const finderTree = useMemo(
     () => buildFinderTree(treeData as unknown as RawTreeNode[], orgId, nodeMap as unknown as Map<string, { type: string; id: string; name: string }>),
     [treeData, nodeMap, orgId],
@@ -128,13 +125,12 @@ export default function ApiKeys() {
     enabled: !!orgId,
   });
 
-  // 选中节点绑定的 Key（精确 scope：组织节点=组织级、部门节点=该部门、团队节点=该团队）
+  // 选中节点绑定的 Key（精确 scope：企业节点=企业级、部门节点=该部门）
   const scopedKeys: ApiKey[] = useMemo(() => {
     const all = keyList ?? [];
     if (!selectedNode) return [];
     if (selectedNode.type === 'organization') return all.filter((k) => k.scope_type === 'organization');
     if (selectedNode.type === 'department') return all.filter((k) => k.department_id === selectedNode.id);
-    if (selectedNode.type === 'team') return all.filter((k) => k.team_id === selectedNode.id);
     return [];
   }, [keyList, selectedNode]);
 
@@ -160,8 +156,6 @@ export default function ApiKeys() {
           return apiKeys.create(selectedNode.id, payload);
         case 'department':
           return apiKeys.createForDept(selectedNode.id, { ...payload, organization_id: selectedNode.orgId });
-        case 'team':
-          return apiKeys.createForTeam(selectedNode.id, { ...payload, organization_id: selectedNode.orgId });
         default:
           return Promise.reject(new Error(`Unknown scope type: ${selectedNode.type}`));
       }
@@ -242,7 +236,7 @@ export default function ApiKeys() {
 
   // 创建按钮：未选节点时禁用并提示
   const createBtn = (
-    <Tooltip title={!selectedNode ? '请先在左侧选择组织/部门/团队节点' : ''}>
+    <Tooltip title={!selectedNode ? '请先在左侧选择企业或部门节点' : ''}>
       <Button
         type="primary"
         icon={<PlusOutlined />}
@@ -278,7 +272,7 @@ export default function ApiKeys() {
         <Sidebar header="组织架构">
           {finderTree.length === 0 ? (
             <div style={{ padding: '8px 12px', color: WB.textAux, fontSize: FS.aux }}>
-              {orgId ? (treeLoading ? '加载中…' : '该组织下暂无部门/团队节点') : '请先选择组织'}
+              {orgId ? (treeLoading ? '加载中…' : '该企业下暂无部门') : '请先选择企业'}
             </div>
           ) : (
             <MacTree
@@ -291,7 +285,7 @@ export default function ApiKeys() {
 
         <section style={{ flex: 8, minWidth: 0, display: 'flex', flexDirection: 'column', background: '#fff' }}>
           {!selectedNode ? (
-            <FinderEmpty description="请从左侧选择组织 / 部门 / 团队节点" />
+            <FinderEmpty description="请从左侧选择企业或部门节点" />
           ) : (
             <>
               <Toolbar
@@ -460,7 +454,7 @@ export default function ApiKeys() {
         />
       </Modal>
 
-      {/* 编辑 Modal：绑定节点不可改（scope_type/department_id/team_id 只读） */}
+      {/* 编辑 Modal：绑定节点不可改（企业或部门作用域只读） */}
       <Modal
         title="编辑 API Key"
         open={!!editTarget}

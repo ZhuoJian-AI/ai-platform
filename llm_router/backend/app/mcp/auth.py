@@ -1,11 +1,11 @@
 """MCP 鉴权 —— 从 MCP 请求头解析 scoped API key → 归口用户 principal。
 
 复用 ``api_key_service.validate_api_key``：与平台内部 ``require_user`` 走同一套 scope
-模型（org/dept/team + created_by 作为 user id），故 MCP 侧调 ``scope_service`` 时
+模型（企业/部门 + created_by 作为 user id），故 MCP 侧调 ``scope_service`` 时
 权限边界与终端 runtime 完全一致——第三方智能体终端的调用被限定在归口用户 scope 内。
 
 principal 是 duck-typed：``scope_service`` 的 ``effective_scope_set`` / ``scope_filter``
-只读 ``organization_id`` / ``department_id`` / ``team_id`` / ``id`` 四字段，故用
+只读企业、部门、角色与用户字段，故用
 ``McpPrincipal`` dataclass 即可（无需构造完整 ``User``）。
 """
 
@@ -66,7 +66,6 @@ class McpPrincipal:
     id: str  # = api_key.created_by（导出 skills 包的归口用户）
     organization_id: UUID
     department_id: str | None
-    team_id: str | None
     department_ids: tuple[str, ...] = ()
     role_ids: tuple[str, ...] = ()
     permission_codes: tuple[str, ...] = ()
@@ -155,7 +154,7 @@ class OrganizationOAuthMiddleware:
                     or int(claims.get("auth_epoch", -1)) != user.auth_epoch
                 ):
                     raise OAuthProtocolError("invalid_token", "user authorization is inactive", 401)
-                # Resolve departments, team and business roles from current DB
+                # Resolve departments and business roles from current DB
                 # state on every request; a revoked grant is never trusted from
                 # old token claims.
                 from app.auth.user_auth import current_user_for_user
@@ -165,7 +164,6 @@ class OrganizationOAuthMiddleware:
                     id=current.id,
                     organization_id=current.organization_id,
                     department_id=current.department_id,
-                    team_id=current.team_id,
                     department_ids=current.department_ids,
                     role_ids=current.role_ids,
                     permission_codes=current.permission_codes,
@@ -204,12 +202,13 @@ async def resolve_principal_from_key(db: AsyncSession, raw_key: str) -> McpPrinc
     api_key = await validate_api_key(db, raw_key)
     if api_key is None:
         raise HTTPException(status_code=401, detail="Invalid or revoked API key")
+    if api_key.scope_type == "team" or api_key.team_id is not None:
+        raise HTTPException(status_code=410, detail="Team API Key 已停用，请使用企业或部门 API Key")
     user_id = api_key.created_by or str(api_key.id)  # skills-pack key 必有 created_by
     return McpPrincipal(
         id=user_id,
         organization_id=api_key.organization_id,
         department_id=str(api_key.department_id) if api_key.department_id else None,
-        team_id=str(api_key.team_id) if api_key.team_id else None,
     )
 
 

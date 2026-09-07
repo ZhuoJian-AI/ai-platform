@@ -29,7 +29,6 @@ class ProxyState(TypedDict, total=False):
     # ── 组织架构作用域（UUID 字符串）──
     org_id: str
     dept_id: str | None
-    team_id: str | None
     allowed_models: list[str]
 
     # ── DLP 扫描结果（序列化后的 dict）──

@@ -6,10 +6,10 @@ import {
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, ExperimentOutlined, EditOutlined, SafetyOutlined,
-  BankOutlined, ApartmentOutlined, TeamOutlined,
+  BankOutlined, ApartmentOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { dlpRules, departments, teams } from '../api/client';
+import { dlpRules, departments } from '../api/client';
 import type { DlpRule, DlpRuleLibraryEntry } from '../api/client';
 import { ApiError } from '../api/client';
 import { useOrgTree } from '../hooks/useOrgTree';
@@ -44,19 +44,16 @@ const DIRECTION_LABELS: Record<string, string> = {
 const SCOPE_LABELS: Record<string, string> = {
   organization: '组织级',
   department: '部门级',
-  team: '团队级',
 };
 
 const SCOPE_COLORS: Record<string, string> = {
   organization: 'blue',
   department: 'green',
-  team: 'orange',
 };
 
 const NODE_ICON: Record<string, ReactNode> = {
   organization: <BankOutlined />,
   department: <ApartmentOutlined />,
-  team: <TeamOutlined />,
 };
 
 interface RawTreeNode { value: string; title: string; key: string; children?: RawTreeNode[] }
@@ -67,7 +64,6 @@ interface DlpEditForm {
   direction: DlpRule['direction'];
   scope_type: DlpRule['scope_type'];
   scope_dept?: string | null;
-  scope_team?: string | null;
   is_active: boolean;
   priority: number;
 }
@@ -135,7 +131,7 @@ export default function DlpRules() {
     enabled: !!orgId,
   });
 
-  // 按选中节点过滤：组织节点 = 组织级；部门节点 = 该部门；团队节点 = 该团队
+  // 按选中节点过滤：企业节点 = 企业级；部门节点 = 该部门
   const scopedRules: DlpRule[] = useMemo(() => {
     const all = ruleList ?? [];
     if (!selectedNode) return [];
@@ -145,27 +141,18 @@ export default function DlpRules() {
     if (selectedNode.type === 'department') {
       return all.filter((r) => r.scope_type === 'department' && r.scope_id === selectedNode.id);
     }
-    if (selectedNode.type === 'team') {
-      return all.filter((r) => r.scope_type === 'team' && r.scope_id === selectedNode.id);
-    }
     return [];
   }, [ruleList, selectedNode]);
 
   // 当前选中 scope 已添加的规则名（用于添加 Modal 下拉去重）
   const addedNamesInScope = useMemo(() => new Set(scopedRules.map((r) => r.name)), [scopedRules]);
 
-  // ── 配置范围所需的部门/团队下拉数据 ──
+  // ── 配置范围所需的部门下拉数据 ──
   const editScopeType = Form.useWatch('scope_type', editForm);
-  const editDeptId = Form.useWatch('scope_dept', editForm);
   const { data: editDepts } = useQuery({
     queryKey: ['depts', orgId],
     queryFn: () => orgId ? departments.list(orgId) : Promise.resolve([]),
     enabled: !!orgId && editModalOpen,
-  });
-  const { data: editTeams } = useQuery({
-    queryKey: ['teams', editDeptId],
-    queryFn: () => editDeptId ? teams.list(editDeptId) : Promise.resolve([]),
-    enabled: !!editDeptId && editScopeType === 'team',
   });
 
   const createRule = useMutation({
@@ -235,19 +222,9 @@ export default function DlpRules() {
       direction: r.direction,
       scope_type: r.scope_type,
       scope_dept: r.scope_type === 'department' ? r.scope_id : undefined,
-      scope_team: undefined,
       is_active: r.is_active,
       priority: r.priority,
     });
-    if (r.scope_type === 'team' && r.scope_id) {
-      try {
-        const team = await teams.get(r.scope_id);
-        editForm.setFieldValue('scope_dept', team.department_id);
-        editForm.setFieldValue('scope_team', r.scope_id);
-      } catch {
-        // 取不到父部门时仅清空，用户可重新选择
-      }
-    }
   };
 
   const submitCreate = (v: {
@@ -275,7 +252,6 @@ export default function DlpRules() {
     const scopeType = v.scope_type;
     let scopeId: string | null = null;
     if (scopeType === 'department') scopeId = v.scope_dept ?? null;
-    else if (scopeType === 'team') scopeId = v.scope_team ?? null;
     const orgIdForScope = orgId ?? null;
     updateRule.mutate({
       id: editingRule.id,
@@ -299,7 +275,7 @@ export default function DlpRules() {
   });
 
   const createBtn = (
-    <Tooltip title={!selectedNode ? '请先在左侧选择组织/部门/团队节点' : ''}>
+    <Tooltip title={!selectedNode ? '请先在左侧选择企业或部门' : ''}>
       <Button type="primary" icon={<PlusOutlined />} disabled={!selectedNode} onClick={openCreate}>添加规则</Button>
     </Tooltip>
   );
@@ -317,7 +293,7 @@ export default function DlpRules() {
         <Sidebar header="组织架构">
           {finderTree.length === 0 ? (
             <div style={{ padding: '8px 12px', color: WB.textAux, fontSize: FS.aux }}>
-              {orgId ? (treeLoading ? '加载中…' : '该组织下暂无部门/团队节点') : '请先选择组织'}
+              {orgId ? (treeLoading ? '加载中…' : '该企业下暂无部门') : '请先选择企业'}
             </div>
           ) : (
             <MacTree nodes={finderTree} selectedKey={selectedNodeKey} onSelect={setSelectedNodeKey} />
@@ -326,7 +302,7 @@ export default function DlpRules() {
 
         <section style={{ flex: 8, minWidth: 0, display: 'flex', flexDirection: 'column', background: '#fff' }}>
           {!selectedNode ? (
-            <FinderEmpty description="请从左侧选择组织 / 部门 / 团队节点" />
+            <FinderEmpty description="请从左侧选择企业或部门节点" />
           ) : (
             <>
               <Toolbar
@@ -546,9 +522,8 @@ export default function DlpRules() {
           <Form.Item name="scope_type" label="范围" rules={[{ required: true }]}>
             <Select
               options={[
-                { value: 'organization', label: '组织 — 当前组织' },
+                { value: 'organization', label: '企业 — 当前企业' },
                 { value: 'department', label: '部门 — 指定部门' },
-                { value: 'team', label: '团队 — 指定团队' },
               ]}
             />
           </Form.Item>
@@ -560,29 +535,6 @@ export default function DlpRules() {
                 notFoundContent="该组织下暂无部门"
               />
             </Form.Item>
-          )}
-          {editScopeType === 'team' && (
-            <Row gutter={16}>
-              <Col span={12}>
-                <Form.Item name="scope_dept" label="所属部门" rules={[{ required: true, message: '请选择部门' }]}>
-                  <Select
-                    placeholder="选择部门"
-                    options={editDepts?.map(d => ({ value: d.id, label: d.name })) ?? []}
-                    notFoundContent="该组织下暂无部门"
-                    onChange={() => editForm.setFieldValue('scope_team', undefined)}
-                  />
-                </Form.Item>
-              </Col>
-              <Col span={12}>
-                <Form.Item name="scope_team" label="目标团队" rules={[{ required: true, message: '请选择团队' }]}>
-                  <Select
-                    placeholder="选择团队"
-                    options={editTeams?.map(t => ({ value: t.id, label: t.name })) ?? []}
-                    notFoundContent={editDeptId ? '该部门下暂无团队' : '请先选择部门'}
-                  />
-                </Form.Item>
-              </Col>
-            </Row>
           )}
           <Row gutter={16}>
             <Col span={12}>

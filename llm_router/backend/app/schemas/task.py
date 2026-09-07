@@ -13,7 +13,7 @@ from app.services.message_verification import classify_execution_verification
 class TaskConfig(BaseModel):
     """任务装配配置。空数组维度 = 运行时按用户权限自动匹配全集。
 
-    长期记忆不在此配置：运行时按用户权限自动载入 组织+部门+团队+个人 四级记忆全集。
+    长期记忆不在此配置：运行时按用户权限自动载入组织、部门、角色与个人记忆全集。
     """
 
     workspace_id: str | None = None
@@ -184,7 +184,6 @@ class TaskRead(BaseModel):
     organization_id: UUID
     user_id: UUID
     department_id: UUID | None = None
-    team_id: UUID | None = None
     session_id: str
     title: str
     message: str

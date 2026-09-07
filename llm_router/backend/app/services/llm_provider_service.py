@@ -6,6 +6,7 @@ from datetime import UTC
 from urllib.parse import urlparse
 from uuid import UUID
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -178,6 +179,8 @@ async def create_provider(
     dept_id: UUID | None = None,
     team_id: UUID | None = None,
 ) -> LlmProvider:
+    if team_id is not None or data.scope_type == "team":
+        raise HTTPException(status_code=410, detail="Team 已停用，请使用部门和角色")
     workspace_id = (
         normalize_bailian_workspace_id(data.workspace_id, data.region)
         if data.vendor == "aliyun_bailian"
