@@ -217,3 +217,73 @@ def test_business_page_context_survives_follow_up_and_rejects_application_switch
                 page_context={},
             )
         assert exc_info.value.status_code == 409
+
+
+def test_business_page_context_uses_manifest_verified_page_name() -> None:
+    from app.api.terminal import _canonical_business_page_context
+    from app.services.business_assistant_orchestration import BusinessTurnEnvelope
+
+    application_id = uuid4()
+    envelope = BusinessTurnEnvelope(
+        requestId="turn-1",
+        organizationId=str(uuid4()),
+        userId=str(uuid4()),
+        authEpoch=2,
+        applicationId=str(application_id),
+        applicationSlug="garment-production-collaboration",
+        applicationName="爱法贝生产协同",
+        moduleKey="progress_dashboard",
+        pageKey="progress_dashboard.main",
+        pageName="进度看板",
+        pageContext={},
+        pageSemantics={},
+        semanticReady=True,
+        candidatePages=[],
+        authorizedActions=[],
+        targetWorkspaceId=str(uuid4()),
+    )
+
+    context = _canonical_business_page_context(
+        {
+            "module_key": "untrusted-module",
+            "page_key": "untrusted-page",
+            "page_name": "不可信页面名",
+            "filters": {"season": "26秋"},
+        },
+        envelope,
+    )
+
+    assert context["application_id"] == str(application_id)
+    assert context["module_key"] == "progress_dashboard"
+    assert context["page_key"] == "progress_dashboard.main"
+    assert context["page_name"] == "进度看板"
+    assert context["filters"] == {"season": "26秋"}
+
+
+def test_legacy_business_task_recovers_page_name_from_message_envelope() -> None:
+    from types import SimpleNamespace
+
+    from app.api.terminal import _task_last_page_context
+
+    application_id = str(uuid4())
+    task = SimpleNamespace(
+        config={
+            "application_id": application_id,
+            "page_context": {
+                "module_key": "progress_dashboard",
+                "page_key": "progress_dashboard.main",
+            },
+        },
+        messages=[
+            SimpleNamespace(metadata_={
+                "business_turn_envelope": {
+                    "applicationId": application_id,
+                    "moduleKey": "progress_dashboard",
+                    "pageKey": "progress_dashboard.main",
+                    "pageName": "进度看板",
+                },
+            }),
+        ],
+    )
+
+    assert _task_last_page_context(task)["page_name"] == "进度看板"

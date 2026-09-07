@@ -811,7 +811,7 @@ async def _task_read_summary(db: AsyncSession, task: Task, *, excerpt: str | Non
     }
     return TaskRead.model_validate(task).model_copy(update={
         "match_excerpt": excerpt,
-        "last_page_context": dict((task.config or {}).get("page_context") or {}),
+        "last_page_context": _task_last_page_context(task),
         "artifact_count": len(artifact_ids),
         "run_status": run_status,
     })
@@ -860,7 +860,7 @@ async def get_task_endpoint(
         .order_by(AgentRun.id.desc()).limit(1)
     )).scalar_one_or_none()
     data.run_status = run_status
-    data.last_page_context = dict((task.config or {}).get("page_context") or {})
+    data.last_page_context = _task_last_page_context(task)
     data.artifact_count = len({
         str(item.get("file_id") or item.get("fileId") or "")
         for message in task.messages
@@ -962,6 +962,51 @@ def _merge_application_run_context(
     return cfg
 
 
+def _canonical_business_page_context(
+    page_context: dict,
+    envelope: business_assistant_orchestration.BusinessTurnEnvelope,
+) -> dict:
+    """Persist Manifest-verified page identity instead of Bridge display text."""
+
+    context = dict(page_context or {})
+    context.update({
+        "application_id": envelope.application_id,
+        "application_slug": envelope.application_slug,
+        "module_key": envelope.module_key,
+        "page_key": envelope.page_key,
+        "page_name": envelope.page_name,
+    })
+    return context
+
+
+def _task_last_page_context(task: Task) -> dict:
+    """Return the newest trusted page label, including pre-fix conversations."""
+
+    context = dict((task.config or {}).get("page_context") or {})
+    if context.get("page_name"):
+        return context
+    application_id = str((task.config or {}).get("application_id") or "")
+    for message in reversed(task.messages or []):
+        metadata = message.metadata_ if isinstance(message.metadata_, dict) else {}
+        envelope = (
+            metadata.get("business_turn_envelope")
+            if isinstance(metadata.get("business_turn_envelope"), dict)
+            else {}
+        )
+        if not envelope.get("pageName"):
+            continue
+        envelope_application_id = str(envelope.get("applicationId") or "")
+        if application_id and envelope_application_id != application_id:
+            continue
+        context.update({
+            "module_key": envelope.get("moduleKey") or context.get("module_key"),
+            "page_key": envelope.get("pageKey") or context.get("page_key"),
+            "page_name": envelope["pageName"],
+        })
+        break
+    return context
+
+
 @router.post("/terminal/tasks/{task_id}/run")
 async def run_task_endpoint(
     task_id: UUID,
@@ -1037,6 +1082,7 @@ async def run_task_endpoint(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         cfg["business_turn_envelope"] = envelope.model_dump(mode="json", by_alias=True)
+        cfg["page_context"] = _canonical_business_page_context(cfg["page_context"], envelope)
     persisted_cfg = dict(task.config or {})
     persisted_cfg["application_id"] = cfg.get("application_id")
     persisted_cfg["page_context"] = dict(cfg.get("page_context") or {})
