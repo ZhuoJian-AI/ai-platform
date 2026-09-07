@@ -199,6 +199,7 @@ async def test_missing_tool_result_retries_through_validated_json_channel(monkey
     async def fake_chat(*args, **kwargs):
         nonlocal calls
         calls += 1
+        assert kwargs["disable_thinking"] is True
         if calls == 1:
             assert kwargs["tool_choice"] == "classify_business_turn"
             assert kwargs["tools"]

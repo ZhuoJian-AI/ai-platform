@@ -72,6 +72,22 @@ def test_chat_body_forces_one_named_tool_for_openai_and_anthropic():
         )
 
 
+def test_chat_body_can_disable_thinking_for_a_single_controller_call():
+    provider = SimpleNamespace(provider_type="openai", vendor="deepseek", config={})
+    body = llm_client._build_chat_body(
+        provider,
+        "deepseek-v4-flash",
+        [{"role": "user", "content": "classify"}],
+        "",
+        0,
+        100,
+        None,
+        False,
+        disable_thinking=True,
+    )
+    assert body["thinking"] == {"type": "disabled"}
+
+
 @pytest.mark.asyncio
 async def test_chat_retries_without_forced_tool_choice_when_reasoning_mode_rejects_it(monkeypatch):
     tool = {
