@@ -157,10 +157,13 @@ def upgrade() -> None:
         WHERE route.target_scope_type = 'team'
           AND route.target_scope_id = team.id::text;
     """))
+    # A PostgreSQL CHECK constraint also validates soft-deleted rows. These
+    # retired manager grants cannot survive the department-only constraint,
+    # so remove them after the deployment backup has preserved their audit
+    # history. Team membership access itself is retained by compatibility
+    # roles above.
     op.execute(sa.text("""
-        UPDATE scope_manager_assignments
-        SET deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP),
-            updated_at = CURRENT_TIMESTAMP
+        DELETE FROM scope_manager_assignments
         WHERE scope_type = 'team';
     """))
     op.execute(sa.text("""
