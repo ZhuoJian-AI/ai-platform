@@ -247,7 +247,7 @@ export function compatibleNode(engine: unknown): boolean {
 export function compatibleDsh(requirement: unknown): boolean {
   if (typeof requirement !== 'string' || !requirement.trim()) return true
   try {
-    return satisfies('0.1.0-rc.5', requirement, { includePrerelease: true })
+    return satisfies('0.1.0-rc.8', requirement, { includePrerelease: true })
   } catch {
     return false
   }
@@ -318,7 +318,7 @@ export async function buildExtension(request: BuildRequest): Promise<Record<stri
     }
     if (!compatibleNode(nodeEngine)) warnings.push(`Node 版本要求 ${String(nodeEngine)} 与平台 Node 22.19 不兼容`)
     if (!compatibleDsh(dshRequirement)) {
-      warnings.push(`DSH 版本要求 ${String(dshRequirement)} 与平台 DSH 0.1.0-rc.5 不兼容`)
+      warnings.push(`DSH 版本要求 ${String(dshRequirement)} 与平台 DSH 0.1.0-rc.8 不兼容`)
     }
     const provides = Array.isArray(explicit?.provides) ? explicit.provides : []
     const slot = resolveExtensionSlot(kind, explicit)
@@ -376,7 +376,7 @@ export async function buildExtension(request: BuildRequest): Promise<Record<stri
       commit_sha: acquired.commitSha,
       sha256,
       artifact_ref: artifactRef,
-      compatibility: { node: '22.19.0', dsh: '0.1.0-rc.5', warnings },
+      compatibility: { node: '22.19.0', dsh: '0.1.0-rc.8', warnings },
       report: { entries: stats.entries, unpacked_bytes: stats.bytes, dependencies, scripts: Object.keys(scripts) },
       error: publishable ? null : warnings.join('；'),
     }

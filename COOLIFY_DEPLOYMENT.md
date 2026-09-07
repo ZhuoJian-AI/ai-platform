@@ -84,3 +84,46 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 3. 管理员入口 `/login` 可以打开并登录；
 4. Coolify 运行版本对应 GitHub `main` 的 SHA；
 5. 手动部署记录显示成功，并且运行镜像的 `SOURCE_COMMIT` 对应本次源代码 SHA。
+
+## 升级 DSH 版本后的发版步骤
+
+`dsh_runtime/vendor` 里的 `@deepseek-ai/*` 升版（如 rc.5 → rc.8）后，只重建 app 镜像不够，
+有两处会把旧版本带上线：dsh-runtime 的 app 镜像 `FROM` 一个预装 `node_modules` 的 deps 基础镜像；
+数据库里已有的 `platform_extension_releases` 行 manifest 仍写着旧 `dsh_version`，新运行时的
+`verifyRelease` 会拒绝激活它。按顺序做：
+
+1. **合并**：功能分支合入 `main`。三处版本常量必须一致——`dsh_runtime/src/extensions.ts::DSH_VERSION`、
+   `extension_builder/src/builder.ts::compatibleDsh`、
+   `llm_router/backend/app/services/platform_extension_catalog.py::DSH_VERSION`（Python 侧唯一来源，
+   基线 manifest、目录、自愈都读它）。核对：
+   `grep -rn "0\.1\.0-rc\." --exclude-dir=node_modules --exclude-dir=vendor --exclude-dir=dist .`
+2. **重建 deps 基础镜像**：在发版服务器、该 commit 的 checkout 里运行 `scripts/build-dsh-runtime-deps.sh`。
+   脚本以仓库根为 build context 构建 `infra/base-images/dsh-runtime-deps.Dockerfile`（COPY
+   `dsh_runtime/package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`vendor/`），先校验
+   `vendor/SHA256SUMS`，构建后核对镜像内 `@deepseek-ai/dsh-agent-loop` 版本等于 `DSH_VERSION`，
+   打 `127.0.0.1:5000/zhuojian/ai-platform-dsh-runtime-deps:<short sha>` 并 push，最后打印下一步要用的
+   `AI_PLATFORM_DSH_RUNTIME_DEPS_BASE=<digest>` 和完整的 app 镜像构建命令。
+   extension-builder 的 deps 镜像不含 `@deepseek-ai/*`（只有 `semver`），DSH 升级本身不需要重建它；
+   只有 `extension_builder/pnpm-lock.yaml` 变了才按同样方式重建：
+   `DOCKER_BUILDKIT=1 docker build --build-arg AI_PLATFORM_NODE22_BASE=127.0.0.1:5000/zhuojian/ai-platform-node22-pnpm:20260824-v1 -f infra/base-images/extension-builder-deps.Dockerfile -t 127.0.0.1:5000/zhuojian/ai-platform-extension-builder-deps:<short sha> .`
+3. **构建 app 镜像**：dsh-runtime 用脚本打印的命令（`--build-arg AI_PLATFORM_DSH_RUNTIME_DEPS_BASE=<新 digest>`）。
+   extension-builder 的 `builder.ts` 里有版本字面量，app 镜像也要重建：
+   `DOCKER_BUILDKIT=1 docker build --build-arg AI_PLATFORM_EXTENSION_BUILDER_DEPS_BASE=<deps 镜像> --build-arg AI_PLATFORM_NODE22_BASE=127.0.0.1:5000/zhuojian/ai-platform-node22-pnpm:20260824-v1 --build-arg SOURCE_COMMIT=<sha> -f extension_builder/Dockerfile.coolify -t 127.0.0.1:5000/zhuojian/ai-platform-extension-builder-app:source-<short sha> extension_builder`。
+   backend 镜像照常构建（本次含 alembic 数据迁移 `0069_dsh_release_rc8`）。所有镜像都传 `SOURCE_COMMIT`。
+4. **pin digest**：`docker push` 后用 `docker image inspect --format '{{index .RepoDigests 0}}' <tag>` 取 digest，
+   改 `docker-compose.coolify.yml` 中 `dsh-runtime`、`extension-builder`、`backend`（含共用 backend 镜像的
+   worker 服务）的 `image:`，以 `chore(deploy): pin ...` 提交到 `main`。钉之前先 `git pull` 并逐个比对
+   运行镜像的 `org.opencontainers.image.revision`，不要把别人刚钉的新镜像换回旧构建。
+5. **部署**：Coolify 手动 `Deploy`。backend 启动时 alembic 执行 `0069_dsh_release_rc8`：把只含平台基线项的
+   历史发布行从 `0.1.0-rc.5` 改写到 `0.1.0-rc.8` 并重算 checksum（幂等；每行记一条
+   `dsh_version_migrated` 事件，downgrade 依此还原）。含外部扩展的行不由迁移处理，交给下一步的自愈。
+6. **确认基线已自愈**：看 backend 启动日志（`platform_extension_service.sync_active_release_to_runtime`）：
+   - `platform_extension_release_version_healed`：活动发布已被新行取代，`mode=baseline_regenerated`
+     （平台基线按新目录重生成）或 `version_rewritten`（自定义发布只改版本号），旧行转为 `superseded`；
+     活动发布本来就是新版本时没有这条。
+   - `platform_extension_runtime_activated` 或 `platform_extension_runtime_in_sync`：运行时已接受该发布。
+   - `platform_extension_release_version_incompatible`：活动发布是自定义的且含不兼容外部扩展（日志与
+     `release_version_heal_skipped` 事件列出原因），运行时停在内建基线，需超管在扩展中心重新发布。
+   - `platform_extension_runtime_activation_failed`：`runtime_response` 字段带运行时的拒绝原因。
+   扩展中心概览里「活动发布」版本号应比升级前 +1，manifest 的 `dsh_version` 为新版本，
+   dsh-runtime `/health` 报的 `release_id` 与之一致。

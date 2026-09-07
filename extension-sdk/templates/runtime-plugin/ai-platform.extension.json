@@ -11,7 +11,7 @@
   "provides": ["example-hook"],
   "requires": [],
   "conflicts": [],
-  "dsh_version": "0.1.0-rc.5",
+  "dsh_version": "0.1.0-rc.8",
   "config_schema": { "type": "object", "additionalProperties": false },
   "default_config": {},
   "health_check": "healthCheck",

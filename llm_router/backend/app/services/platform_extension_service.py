@@ -8,6 +8,7 @@ import re
 from datetime import UTC, datetime
 from uuid import UUID
 
+import structlog
 from fastapi import HTTPException
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,8 +22,20 @@ from app.models.platform_extension import (
     PlatformExtensionSource,
 )
 from app.services import extension_builder_client, storage_gateway_service
-from app.services.platform_extension_catalog import baseline_manifest, catalog_items
+from app.services.platform_extension_catalog import DSH_VERSION, NODE_VERSION, baseline_manifest, catalog_items
+from app.services.platform_extension_versioning import (
+    BASELINE_RELEASE_NAME,
+    BASELINE_VALIDATION_STATUS,
+    ReleaseVersionHealPlan,
+    ReleaseVersionHealRefusal,
+    manifest_dsh_version,
+    needs_dsh_version_heal,
+    plan_release_version_heal,
+    rewrite_manifest_dsh_version,
+)
 from app.services.platform_tool_registry import platform_managed_tool_names
+
+logger = structlog.get_logger()
 
 _RELEASE_SEQUENCE_LOCK = 6_238_716_421
 
@@ -71,24 +84,28 @@ async def record_event(
     return event
 
 
-async def ensure_baseline(db: AsyncSession, admin_id: int) -> PlatformExtensionRelease:
-    active = (
+async def _active_release(db: AsyncSession) -> PlatformExtensionRelease | None:
+    return (
         await db.execute(select(PlatformExtensionRelease).where(PlatformExtensionRelease.is_active.is_(True)))
     ).scalar_one_or_none()
+
+
+async def ensure_baseline(db: AsyncSession, admin_id: int) -> PlatformExtensionRelease:
+    active = await _active_release(db)
     if active:
+        active, _ = await heal_active_release_version(db, active, actor_admin_id=admin_id)
         return active
     # The console loads overview, catalog and releases in parallel on first use.
     # Serialize baseline creation so those requests cannot create competing active rows.
     await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _RELEASE_SEQUENCE_LOCK})
-    active = (
-        await db.execute(select(PlatformExtensionRelease).where(PlatformExtensionRelease.is_active.is_(True)))
-    ).scalar_one_or_none()
+    active = await _active_release(db)
     if active:
+        active, _ = await heal_active_release_version(db, active, actor_admin_id=admin_id)
         return active
     manifest = baseline_manifest()
     release = PlatformExtensionRelease(
         version_no=1,
-        name="平台基线",
+        name=BASELINE_RELEASE_NAME,
         manifest=manifest,
         checksum=manifest_checksum(manifest),
         status="active",
@@ -96,7 +113,7 @@ async def ensure_baseline(db: AsyncSession, admin_id: int) -> PlatformExtensionR
         created_by_admin_id=admin_id,
         published_by_admin_id=admin_id,
         activated_at=datetime.now(UTC),
-        validation_report={"status": "baseline", "migrated_without_behavior_change": True},
+        validation_report={"status": BASELINE_VALIDATION_STATUS, "migrated_without_behavior_change": True},
     )
     db.add(release)
     await db.flush()
@@ -108,6 +125,134 @@ async def ensure_baseline(db: AsyncSession, admin_id: int) -> PlatformExtensionR
         details={"checksum": release.checksum},
     )
     return release
+
+
+async def _heal_already_refused(db: AsyncSession, release_id: UUID, to_version: str) -> bool:
+    """Only one ``release_version_heal_skipped`` event per release per target version."""
+    existing = (
+        await db.execute(
+            select(PlatformExtensionReleaseEvent.id)
+            .where(
+                PlatformExtensionReleaseEvent.release_id == release_id,
+                PlatformExtensionReleaseEvent.event_type == "release_version_heal_skipped",
+                PlatformExtensionReleaseEvent.details["to_dsh_version"].astext == to_version,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return existing is not None
+
+
+async def heal_active_release_version(
+    db: AsyncSession,
+    active: PlatformExtensionRelease,
+    *,
+    actor_admin_id: int | None,
+) -> tuple[PlatformExtensionRelease, dict | None]:
+    """Bring the active release to the DSH version this backend ships (``DSH_VERSION``).
+
+    Release rows are immutable snapshots, so after a DSH upgrade the active manifest still
+    names the previous version and ``verifyRelease`` in the runtime refuses to activate it.
+    The decision lives in ``platform_extension_versioning.plan_release_version_heal``; this
+    function persists it as a new active row (keeping the stale row as ``superseded`` history)
+    and records a ``release_version_healed`` event.  A custom release whose items are not
+    compatible with the current catalog is left untouched with a warning and one
+    ``release_version_heal_skipped`` event.
+
+    Returns the release to use from now on and the heal details (``None`` when nothing changed).
+    Callers run inside a transaction; the caller commits.
+    """
+    if not needs_dsh_version_heal(active.manifest):
+        return active, None
+    # Same lock as baseline creation / version allocation: parallel console requests and the
+    # startup sync must not race to supersede the same row.  Re-read after acquiring it.
+    await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _RELEASE_SEQUENCE_LOCK})
+    current = await _active_release(db)
+    if current is None:
+        return active, None
+    active = current
+    plan = plan_release_version_heal(
+        name=active.name,
+        validation_report=active.validation_report,
+        manifest=active.manifest,
+    )
+    if plan is None:
+        return active, None
+    if isinstance(plan, ReleaseVersionHealRefusal):
+        logger.warning(
+            "platform_extension_release_version_incompatible",
+            release_id=str(active.id),
+            release_name=active.name,
+            version_no=active.version_no,
+            release_dsh_version=plan.from_dsh_version,
+            platform_dsh_version=plan.to_dsh_version,
+            reasons=plan.reasons,
+            action="republish the release from the extension console; the runtime stays on its built-in baseline",
+        )
+        if not await _heal_already_refused(db, active.id, plan.to_dsh_version):
+            await record_event(
+                db,
+                event_type="release_version_heal_skipped",
+                actor_admin_id=actor_admin_id,
+                release_id=active.id,
+                status="incompatible",
+                details={
+                    "from_dsh_version": plan.from_dsh_version,
+                    "to_dsh_version": plan.to_dsh_version,
+                    "reasons": plan.reasons,
+                },
+            )
+        return active, None
+    assert isinstance(plan, ReleaseVersionHealPlan)
+    previous_id = active.id
+    previous_checksum = active.checksum
+    # Deactivate first: ``uq_platform_extension_releases_one_active`` is checked per statement.
+    active.is_active = False
+    active.status = "superseded"
+    await db.flush()
+    release = PlatformExtensionRelease(
+        version_no=await _next_release_version(db),
+        name=plan.name,
+        manifest=plan.manifest,
+        checksum=manifest_checksum(plan.manifest),
+        status="active",
+        is_active=True,
+        base_release_id=previous_id,
+        created_by_admin_id=actor_admin_id or active.created_by_admin_id,
+        published_by_admin_id=actor_admin_id or active.published_by_admin_id or active.created_by_admin_id,
+        activated_at=datetime.now(UTC),
+        validation_report={
+            **plan.validation_report,
+            "healed_from": {**plan.validation_report.get("healed_from", {}), "release_id": str(previous_id)},
+        },
+    )
+    db.add(release)
+    await db.flush()
+    details = {
+        "mode": plan.mode,
+        "previous_release_id": str(previous_id),
+        "previous_checksum": previous_checksum,
+        "from_dsh_version": plan.from_dsh_version,
+        "to_dsh_version": plan.to_dsh_version,
+        "checksum": release.checksum,
+    }
+    await record_event(
+        db,
+        event_type="release_version_healed",
+        actor_admin_id=actor_admin_id,
+        release_id=release.id,
+        details=details,
+    )
+    logger.info(
+        "platform_extension_release_version_healed",
+        release_id=str(release.id),
+        version_no=release.version_no,
+        previous_release_id=str(previous_id),
+        mode=plan.mode,
+        from_dsh_version=plan.from_dsh_version,
+        to_dsh_version=plan.to_dsh_version,
+    )
+    return release, details
 
 
 async def _next_release_version(db: AsyncSession) -> int:
@@ -132,7 +277,7 @@ def _core_catalog_row(row: dict) -> dict:
         "layer": layer,
         "operation": "replace" if layer == "coordinator" else "add",
         "trust_level": "platform",
-        "runtime_requirements": {"node": "22.19.0", "dsh": "0.1.0-rc.5"},
+        "runtime_requirements": {"node": NODE_VERSION, "dsh": DSH_VERSION},
         "compatibility_status": "needs_adapter" if row["kind"] == "adapter_required" else "compatible",
         "compatibility_reasons": warnings,
         "repository": "https://github.com/deepseek-ai/deepseek-harness",
@@ -601,7 +746,9 @@ async def create_release(
     admin_id: int,
 ) -> PlatformExtensionRelease:
     active = await ensure_baseline(db, admin_id)
-    manifest = json.loads(json.dumps(active.manifest))
+    # A draft is a deep copy of the active snapshot, but ``dsh_version`` (and the core plugin
+    # versions mirroring it) always come from the platform constant, never from the copy.
+    manifest = rewrite_manifest_dsh_version(active.manifest)
     active_extensions_by_source = {
         str(item.get("source_id")): item
         for item in (active.manifest or {}).get("external_extensions") or []
@@ -903,11 +1050,15 @@ async def rollback_release(
 ) -> PlatformExtensionRelease:
     active = await ensure_baseline(db, admin_id)
     next_version = await _next_release_version(db)
+    # History rows predating a DSH upgrade still name the old version; the rollback candidate
+    # must name the version the runtime actually runs or validation fails before it starts.
+    manifest = rewrite_manifest_dsh_version(target.manifest)
+    target_dsh_version = manifest_dsh_version(target.manifest)
     copy = PlatformExtensionRelease(
         version_no=next_version,
         name=f"回滚至 v{target.version_no}",
-        manifest=json.loads(json.dumps(target.manifest)),
-        checksum=target.checksum,
+        manifest=manifest,
+        checksum=manifest_checksum(manifest),
         status="draft",
         is_active=False,
         base_release_id=active.id,
@@ -920,7 +1071,14 @@ async def rollback_release(
         event_type="rollback_created",
         actor_admin_id=admin_id,
         release_id=copy.id,
-        details={"target_release_id": str(target.id)},
+        details={
+            "target_release_id": str(target.id),
+            **(
+                {"dsh_version_rewritten": {"from": target_dsh_version, "to": DSH_VERSION}}
+                if target_dsh_version != DSH_VERSION
+                else {}
+            ),
+        },
     )
     return copy
 
@@ -1082,24 +1240,67 @@ async def rollback_system_tool(
 
 
 async def sync_active_release_to_runtime() -> None:
-    """Re-activate the DB fact-source after a DSH container restart."""
+    """Re-activate the DB fact-source after a backend or DSH container (re)start.
+
+    Runs from the FastAPI lifespan.  First the active release is healed to ``DSH_VERSION``
+    (see ``heal_active_release_version``) so an upgraded runtime accepts it; then the manifest
+    is pushed unless the runtime already reports this release id and checksum.  Every
+    outcome is logged: after a DSH upgrade the deploy checklist looks for
+    ``platform_extension_release_version_healed`` / ``platform_extension_runtime_activated``.
+    """
     async with async_session_factory() as db:
-        active = (
-            await db.execute(select(PlatformExtensionRelease).where(PlatformExtensionRelease.is_active.is_(True)))
-        ).scalar_one_or_none()
+        active = await _active_release(db)
         if not active:
+            logger.info("platform_extension_runtime_sync_skipped", reason="no active release yet")
             return
-        health = await dsh_client.runtime_health()
-        if health.get("release_id") == str(active.id) and health.get("release_checksum") == active.checksum:
-            return
+        healed = None
         try:
-            await dsh_client.activate_release(
-                str(active.id),
-                await runtime_manifest(active.manifest),
-                active.checksum,
-            )
-        except Exception:
-            return
+            active, healed = await heal_active_release_version(db, active, actor_admin_id=None)
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001 - keep the runtime sync going with the stored row
+            await db.rollback()
+            logger.warning("platform_extension_release_heal_failed", release_id=str(active.id), error=str(exc))
+            active = await _active_release(db)
+            if active is None:
+                return
+        release_id = str(active.id)
+        checksum = active.checksum
+        manifest = active.manifest
+        dsh_version = manifest_dsh_version(manifest)
+        version_no = active.version_no
+    health = await dsh_client.runtime_health()
+    if health.get("release_id") == release_id and health.get("release_checksum") == checksum:
+        logger.info("platform_extension_runtime_in_sync", release_id=release_id, dsh_version=dsh_version)
+        return
+    try:
+        result = await dsh_client.activate_release(release_id, await runtime_manifest(manifest), checksum)
+    except Exception as exc:  # noqa: BLE001 - startup must not crash; the failure is logged for operators
+        response = getattr(exc, "response", None)
+        logger.warning(
+            "platform_extension_runtime_activation_failed",
+            release_id=release_id,
+            version_no=version_no,
+            dsh_version=dsh_version,
+            runtime_dsh_version=health.get("dsh_version"),
+            error=str(exc),
+            runtime_response=(getattr(response, "text", None) or "")[:500],
+        )
+        return
+    if not result.get("ok"):
+        logger.warning(
+            "platform_extension_runtime_activation_rejected",
+            release_id=release_id,
+            dsh_version=dsh_version,
+            result=result,
+        )
+        return
+    logger.info(
+        "platform_extension_runtime_activated",
+        release_id=release_id,
+        version_no=version_no,
+        dsh_version=dsh_version,
+        healed=healed is not None,
+    )
 
 
 async def runtime_manifest(manifest: dict) -> dict:

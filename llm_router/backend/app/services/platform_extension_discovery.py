@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import async_session_factory
 from app.models.platform_extension import PlatformExtensionCatalogEntry
-from app.services.platform_extension_catalog import catalog_items
+from app.services.platform_extension_catalog import DSH_VERSION, NODE_VERSION, catalog_items
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SLUG = re.compile(r"[^a-z0-9._-]+")
@@ -143,7 +143,7 @@ def _official_rows() -> list[dict]:
                 "operation": "replace" if layer == "coordinator" else "add",
                 "kind": item["kind"],
                 "trust_level": "official",
-                "runtime_requirements": {"node": "22.19.0", "dsh": "0.1.0-rc.5"},
+                "runtime_requirements": {"node": NODE_VERSION, "dsh": DSH_VERSION},
                 "compatibility_status": status,
                 "compatibility_reasons": item.get("compatibility_warnings") or [],
                 "metadata_payload": {"capabilities": item.get("capabilities") or []},

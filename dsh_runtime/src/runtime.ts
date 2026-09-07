@@ -18,7 +18,7 @@ import {
   approvalReason, installRunPolicies, toolTimeoutMessage, TOOL_TIMEOUT_CODE, truncateModelContent, untilAborted,
 } from './policies.js'
 import {
-  loadExternalExtensions, verifyRelease,
+  DSH_VERSION, loadExternalExtensions, verifyRelease,
   type ExternalToolHandler, type ReleaseManifest, type ReleaseRequest,
 } from './extensions.js'
 
@@ -184,7 +184,7 @@ export class DshRuntime {
     return {
       status: this.ready ? 'ok' : 'starting',
       runtime: 'dsh',
-      dsh_version: '0.1.0-rc.5',
+      dsh_version: DSH_VERSION,
       node: process.version,
       active_runs: this.activeByRun.size,
       hard_concurrency_limit: this.options.maxConcurrentRuns ?? 14,

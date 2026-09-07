@@ -11,6 +11,6 @@ ENV PNPM_HOME=/pnpm \
     NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=600000 \
     NPM_CONFIG_FETCH_TIMEOUT=600000
 
-COPY dsh_runtime/package.json dsh_runtime/pnpm-lock.yaml ./
+COPY dsh_runtime/package.json dsh_runtime/pnpm-lock.yaml dsh_runtime/pnpm-workspace.yaml ./
 COPY dsh_runtime/vendor ./vendor
 RUN pnpm install --frozen-lockfile --trust-lockfile
