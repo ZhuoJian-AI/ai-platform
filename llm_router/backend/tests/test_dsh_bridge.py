@@ -643,6 +643,44 @@ async def test_finalize_bg_error_publishes_error_event_before_done(monkeypatch):
     assert handle.error == "RuntimeError: boom"
 
 
+@pytest.mark.asyncio
+async def test_early_prepare_failure_persists_public_assistant_message(monkeypatch):
+    """准备阶段失败也必须在刷新后保留中文回复，且不得把上游错误正文暴露给用户。"""
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    added = []
+
+    class FakeDb:
+        def add(self, row):
+            added.append(row)
+
+        async def commit(self):
+            return None
+
+    @asynccontextmanager
+    async def fake_session_factory():
+        yield FakeDb()
+
+    monkeypatch.setattr(runner, "async_session_factory", fake_session_factory)
+    state = {"messages": [], "steps": [], "page_context": {"page_key": "progress_dashboard.main"}}
+    task = SimpleNamespace(id="f5fdbb35-b6b9-4223-932a-5f88cc0239fb")
+
+    message_id = await runner._persist_early_failure_reply(
+        state,
+        task,
+        RuntimeError("upstream secret detail"),
+    )
+
+    assert message_id
+    assert len(added) == 1
+    assert added[0].role == "assistant"
+    assert added[0].content == "智能体暂时无法完成本次请求，请稍后重试。"
+    assert "upstream secret detail" not in added[0].content
+    assert state["assistant_message_id"] == message_id
+    assert state["steps"][-1]["step"] == "runtime_prepare_error"
+
+
 def test_unverified_model_error_has_an_actionable_public_message():
     error = runner.DshRunError("当前模型尚未完成全部能力验证，请管理员在“模型提供商”中完成该模型声明的全部能力测试。")
 

@@ -912,6 +912,37 @@ async def _finish_failed_run(
     await _finish(state, deps, writer)
 
 
+async def _persist_early_failure_reply(state: dict, task: Any, exc: Exception) -> str:
+    """Persist a public assistant reply when preparation fails before the DSH run starts."""
+
+    public_message = _public_failure_message(exc)
+    state["error"] = f"DSH runtime failed: {exc}"
+    state["assistant_final"] = public_message
+    state.setdefault("messages", []).append({"role": "assistant", "content": public_message})
+    state.setdefault("steps", []).append({"step": "runtime_prepare_error"})
+    message_id = uuid.uuid4()
+    async with async_session_factory() as db:
+        db.add(
+            TaskMessage(
+                id=message_id,
+                task_id=task.id,
+                role="assistant",
+                content=public_message,
+                metadata_={
+                    "traces": state.get("traces") or [],
+                    "artifacts": [],
+                    "business_turn_intent": state.get("business_turn_intent") or {},
+                    "page_context": state.get("page_context") or {},
+                    "tool_executions": state.get("business_tool_executions") or [],
+                    "runtime_error": True,
+                },
+            )
+        )
+        await db.commit()
+    state["assistant_message_id"] = str(message_id)
+    return str(message_id)
+
+
 async def _run_playground(
     state: dict,
     deps: dict,
@@ -1244,12 +1275,28 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
         raise
     except Exception as exc:  # noqa: BLE001
         logger.error("dsh_general_bg_error", task_id=str(task.id), error=str(exc), exc_info=True)
+        public_message = _public_failure_message(exc)
+        _publish_failure_reply(handle, staged, state, exc)
+        try:
+            assistant_message_id = await _persist_early_failure_reply(state, task, exc)
+            _publish(
+                handle,
+                staged,
+                {
+                    "type": "assistant_message",
+                    "messageId": assistant_message_id,
+                    "content": public_message,
+                    "artifacts": [],
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("dsh_prepare_failure_reply_persist_failed", task_id=str(task.id), exc_info=True)
         await persist_run_events(state.get("run_id"), str(task.id), staged, None)
         await finalize_bg_error(
             handle,
             task,
             state.get("run_id"),
-            str(exc)[:500],
+            public_message,
             str(exc),
             state["session_id"],
             start,
