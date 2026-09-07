@@ -362,6 +362,32 @@ def _safe_json(s: str) -> Any:
         return {}
 
 
+def _is_unsupported_tool_choice_error(status_code: int, data: Any) -> bool:
+    """Return whether an OpenAI-compatible upstream rejected forced tool selection.
+
+    Some reasoning modes support tools but reject the ``tool_choice`` field itself.
+    Retrying the same request without that field is safe here: the advertised tool
+    set is unchanged and every tool call/result is still validated by the SaaS.
+    """
+
+    if status_code != 400:
+        return False
+    try:
+        detail = json.dumps(data, ensure_ascii=False).lower()
+    except (TypeError, ValueError):
+        detail = str(data).lower()
+    return "tool_choice" in detail and any(
+        marker in detail
+        for marker in (
+            "does not support",
+            "doesn't support",
+            "not support",
+            "unsupported",
+            "not allowed",
+        )
+    )
+
+
 async def chat(
     db: AsyncSession,
     org_id: UUID,
@@ -398,7 +424,30 @@ async def chat(
 
     async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
         resp = await client.post(_chat_url(provider), headers=_auth_headers(provider, api_key), json=body)
-    data = resp.json()
+        data = resp.json()
+        if tool_choice and _is_unsupported_tool_choice_error(resp.status_code, data):
+            fallback_body = _build_chat_body(
+                provider,
+                model,
+                messages,
+                system_prompt,
+                temperature,
+                max_tokens,
+                tools,
+                stream=False,
+                tool_choice=None,
+            )
+            logger.info(
+                "llm_tool_choice_compat_retry",
+                provider_id=str(provider.id),
+                model=model,
+            )
+            resp = await client.post(
+                _chat_url(provider),
+                headers=_auth_headers(provider, api_key),
+                json=fallback_body,
+            )
+            data = resp.json()
     if resp.status_code >= 400:
         raise RuntimeError(f"upstream chat error {resp.status_code}: {data}")
 
