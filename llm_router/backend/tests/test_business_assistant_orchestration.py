@@ -408,3 +408,55 @@ def test_structured_query_parameters_cannot_be_silently_widened():
 
     with pytest.raises(ValueError, match="risk"):
         nodes._enforce_business_query_parameters(intent, schema, {})
+
+
+def test_structured_query_compiles_to_free_text_from_server_request():
+    intent = {
+        "intent": "query",
+        "query": {
+            "filters": [{"field": "risk", "operator": "is_null", "value": False}],
+            "timeRange": None,
+            "sort": [],
+            "limit": 100,
+            "aggregation": [{"function": "count", "field": "orderId", "groupBy": []}],
+        },
+    }
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "query": {"type": "string", "maxLength": 8},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        },
+    }
+
+    params = nodes._enforce_business_query_parameters(
+        intent,
+        schema,
+        {"query": "模型猜测", "limit": 1},
+        request_text="当前有多少风险订单？",
+    )
+
+    assert params == {"query": "当前有多少风险订", "limit": 100}
+
+
+def test_structured_query_without_free_text_fallback_is_rejected():
+    intent = {
+        "intent": "query",
+        "query": {
+            "filters": [{"field": "risk", "operator": "eq", "value": "severe"}],
+            "timeRange": None,
+            "sort": [],
+            "limit": None,
+            "aggregation": [],
+        },
+    }
+    schema = {"type": "object", "additionalProperties": False, "properties": {}}
+
+    with pytest.raises(ValueError, match="risk"):
+        nodes._enforce_business_query_parameters(
+            intent,
+            schema,
+            {},
+            request_text="当前有多少风险订单？",
+        )

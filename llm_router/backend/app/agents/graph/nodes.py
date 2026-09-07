@@ -3646,13 +3646,17 @@ def _enforce_business_query_parameters(
     intent: dict[str, Any] | None,
     input_schema: dict[str, Any] | None,
     model_params: dict[str, Any],
+    *,
+    request_text: str = "",
 ) -> dict[str, Any]:
     """Keep the executing Action aligned with the validated query rewrite.
 
     Exact field matches are injected by the server and cannot be widened by
     the bounded execution model. Criteria that cannot be represented directly
-    require a non-empty Action ``query`` value; an empty call is rejected
-    instead of silently becoming an unfiltered query.
+    are compiled into the Action's free-text ``query`` field from the original
+    server-owned request when that is the only representation the Action
+    supports.  An empty call is rejected instead of silently becoming an
+    unfiltered query.
     """
 
     normalized_intent = intent if isinstance(intent, dict) else {}
@@ -3723,6 +3727,14 @@ def _enforce_business_query_parameters(
         maximum = int(limit_schema.get("maximum") or requested_limit)
         minimum = int(limit_schema.get("minimum") or 1)
         params["limit"] = max(minimum, min(int(requested_limit), maximum))
+
+    query_schema = properties.get("query") if isinstance(properties.get("query"), dict) else None
+    trusted_request = str(request_text or "").strip()
+    if unresolved and query_schema is not None and query_schema.get("type") == "string" and trusted_request:
+        maximum = query_schema.get("maxLength")
+        if isinstance(maximum, int) and maximum > 0:
+            trusted_request = trusted_request[:maximum]
+        params["query"] = trusted_request
 
     if unresolved and not str(params.get("query") or "").strip():
         fields = "、".join(dict.fromkeys(unresolved))
@@ -3795,6 +3807,7 @@ async def _execute_enterprise_export_file(
         entry.get("business_intent"),
         getattr(action, "input_schema", None),
         action_params,
+        request_text=str(state.get("request") or ""),
     )
     output_name = PurePosixPath(str(params.get("output_name") or "业务数据.xlsx")).name
     target_format = str(params.get("target_format") or "xlsx").casefold()
@@ -5303,6 +5316,7 @@ async def _execute_tool_call(
                 entry.get("business_intent"),
                 getattr(action, "input_schema", None),
                 params,
+                request_text=str(state.get("request") or ""),
             )
         except ValueError as exc:
             msg = f"业务查询参数需要补充：{exc}"
