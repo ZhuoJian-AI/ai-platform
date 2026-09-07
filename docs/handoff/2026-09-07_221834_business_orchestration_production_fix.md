@@ -8,13 +8,14 @@
 ## Changed behavior
 
 - Forces the single `classify_business_turn` tool when a provider supports tool choice, with OpenAI, Responses API and Anthropic protocol adapters.
+- Sends the all-fields-required strict schema only to providers that explicitly support strict tools; compatible vendors receive the ordinary optional-field schema and remain server-validated.
 - Keeps strict server-side intent validation while filling only missing protocol defaults; it does not infer intent from keywords.
 - Accepts one schema-valid JSON object as a compatibility fallback when a provider ignores function calling.
 - Preserves a URL-selected application conversation while the application catalog is still loading, preventing initial render from removing `conversation=<taskId>`.
 
 ## Verification
 
-- `pytest tests/test_business_assistant_orchestration.py tests/test_business_assistant_evaluation.py tests/test_dsh_policy.py tests/test_dsh_approval.py tests/test_llm_tool_choice_pure.py -q`: 49 passed.
+- `pytest tests/test_business_assistant_orchestration.py tests/test_business_assistant_evaluation.py tests/test_dsh_policy.py tests/test_dsh_approval.py tests/test_llm_tool_choice_pure.py -q`: 50 passed.
 - Focused Ruff check for changed backend and tests: passed.
 - `npm run test:business-conversation`: passed.
 - `npm run test:subsystem-bridge`: passed.

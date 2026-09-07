@@ -23,7 +23,6 @@ from app.services import (
     model_gateway,
     subsystem_action_service,
 )
-from app.services.file_capability_registry import provider_strict_schema
 
 logger = structlog.get_logger()
 
@@ -356,14 +355,13 @@ async def build_business_turn_envelope(
 
 
 def _intent_tool() -> dict[str, Any]:
-    schema = provider_strict_schema(BusinessTurnIntent.model_json_schema(by_alias=True))
     return {
         "type": "function",
         "function": {
             "name": "classify_business_turn",
             "description": "把本轮业务请求改写为唯一、严格且不执行副作用的结构化意图。",
             "strict": True,
-            "parameters": schema,
+            "parameters": BusinessTurnIntent.model_json_schema(by_alias=True),
         },
     }
 

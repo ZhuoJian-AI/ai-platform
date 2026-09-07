@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.agents import llm_client
 from app.agents.graph import nodes
 from app.services import business_assistant_orchestration as orchestration
 from app.services import subsystem_integration_service as integration
@@ -271,7 +272,9 @@ def test_ai_semantics_is_closed_and_default_query_must_be_real():
 
 
 def test_intent_provider_schema_closes_every_object_definition():
-    parameters = orchestration._intent_tool()["function"]["parameters"]
+    strict_provider = SimpleNamespace(provider_type="openai", vendor="openai", config={})
+    prepared = llm_client.prepare_tools_for_provider(strict_provider, [orchestration._intent_tool()])
+    parameters = prepared[0]["function"]["parameters"]
 
     def assert_closed(schema: object):
         if not isinstance(schema, dict):
@@ -287,6 +290,15 @@ def test_intent_provider_schema_closes_every_object_definition():
                     assert_closed(item)
 
     assert_closed(parameters)
+
+
+def test_compatible_provider_keeps_optional_intent_fields_optional():
+    compatible_provider = SimpleNamespace(provider_type="openai", vendor="custom", config={})
+    prepared = llm_client.prepare_tools_for_provider(compatible_provider, [orchestration._intent_tool()])
+    function = prepared[0]["function"]
+    assert "strict" not in function
+    assert "target" not in set(function["parameters"].get("required") or [])
+    assert "query" not in set(function["parameters"].get("required") or [])
 
 
 def test_bridge_context_is_bounded_and_drops_table_sized_payloads():
