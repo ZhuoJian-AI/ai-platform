@@ -49,6 +49,15 @@ SUPPORTED_V2_REVISIONS = {"2.0", "2.1", "2.2", "2.3", "2.4", "2.5"}
 PAGE_REVISIONS = {"2.1", "2.2", "2.3", "2.4", "2.5"}
 ROLE_REVISIONS = {"2.4", "2.5"}
 SSO_CREDENTIAL_PREFIX_LENGTH = 20
+AI_SEMANTICS_FIELDS = {
+    "purpose",
+    "primaryEntities",
+    "fieldSemantics",
+    "supportedIntents",
+    "relatedPages",
+    "businessTerms",
+    "defaultQueryActionKey",
+}
 
 
 def _validate_manifest_url(application: EnterpriseApplication, value: str) -> str:
@@ -158,6 +167,135 @@ def _manifest_requires_review(
     )
 
 
+def _normalize_ai_semantics(
+    page_key: str,
+    value: object,
+    *,
+    page_actions: dict[str, dict],
+) -> dict | None:
+    """Validate a descriptive page map without trusting it as policy."""
+
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"Page '{page_key}' aiSemantics must be an object")
+    unknown = sorted(set(value) - AI_SEMANTICS_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"Page '{page_key}' aiSemantics contains unsupported fields: {', '.join(unknown)}"
+        )
+    purpose = str(value.get("purpose") or "").strip()
+    if not purpose or len(purpose) > 2_000:
+        raise ValueError(f"Page '{page_key}' aiSemantics.purpose is required and must be at most 2000 characters")
+
+    primary_entities = value.get("primaryEntities")
+    if (
+        not isinstance(primary_entities, list)
+        or not primary_entities
+        or len(primary_entities) > 20
+        or any(
+            not isinstance(item, str)
+            or not item.strip()
+            or len(item) > 120
+            or not STABLE_KEY_RE.fullmatch(item.strip())
+            for item in primary_entities
+        )
+    ):
+        raise ValueError(
+            f"Page '{page_key}' aiSemantics.primaryEntities must contain 1-20 stable identifiers"
+        )
+    if len(set(primary_entities)) != len(primary_entities):
+        raise ValueError(f"Page '{page_key}' aiSemantics.primaryEntities must be unique")
+
+    def normalize_pairs(field: str, key_name: str, value_name: str, maximum: int) -> list[dict]:
+        raw = value.get(field, [])
+        if not isinstance(raw, list) or len(raw) > maximum:
+            raise ValueError(f"Page '{page_key}' aiSemantics.{field} must be a bounded list")
+        normalized: list[dict] = []
+        seen: set[str] = set()
+        for item in raw:
+            if not isinstance(item, dict) or set(item) != {key_name, value_name}:
+                raise ValueError(
+                    f"Page '{page_key}' aiSemantics.{field} entries must contain only "
+                    f"{key_name} and {value_name}"
+                )
+            key_value = str(item.get(key_name) or "").strip()
+            description = str(item.get(value_name) or "").strip()
+            if not key_value or len(key_value) > 120 or not description or len(description) > 500:
+                raise ValueError(f"Page '{page_key}' aiSemantics.{field} contains an invalid entry")
+            if key_value in seen:
+                raise ValueError(f"Page '{page_key}' aiSemantics.{field} entries must be unique")
+            seen.add(key_value)
+            normalized.append({key_name: key_value, value_name: description})
+        return normalized
+
+    field_semantics = normalize_pairs("fieldSemantics", "field", "meaning", 100)
+    business_terms = normalize_pairs("businessTerms", "term", "meaning", 100)
+
+    supported_intents = value.get("supportedIntents")
+    if (
+        not isinstance(supported_intents, list)
+        or not supported_intents
+        or len(supported_intents) > 30
+        or any(not isinstance(item, str) or not item.strip() or len(item) > 160 for item in supported_intents)
+    ):
+        raise ValueError(
+            f"Page '{page_key}' aiSemantics.supportedIntents must contain 1-30 concise descriptions"
+        )
+    if len(set(supported_intents)) != len(supported_intents):
+        raise ValueError(f"Page '{page_key}' aiSemantics.supportedIntents must be unique")
+
+    related_pages = value.get("relatedPages", [])
+    if not isinstance(related_pages, list) or len(related_pages) > 30:
+        raise ValueError(f"Page '{page_key}' aiSemantics.relatedPages must be a bounded list")
+    normalized_related: list[dict] = []
+    related_seen: set[tuple[str, str]] = set()
+    for item in related_pages:
+        if not isinstance(item, dict) or set(item) != {"moduleKey", "pageKey", "relationship"}:
+            raise ValueError(
+                f"Page '{page_key}' aiSemantics.relatedPages entries must contain only "
+                "moduleKey, pageKey and relationship"
+            )
+        module_key = str(item.get("moduleKey") or "").strip()
+        related_page_key = str(item.get("pageKey") or "").strip()
+        relationship = str(item.get("relationship") or "").strip()
+        pair = (module_key, related_page_key)
+        if (
+            not module_key
+            or not related_page_key
+            or not STABLE_KEY_RE.fullmatch(module_key)
+            or not STABLE_KEY_RE.fullmatch(related_page_key)
+            or not relationship
+            or len(relationship) > 500
+            or pair in related_seen
+        ):
+            raise ValueError(f"Page '{page_key}' aiSemantics.relatedPages contains an invalid relationship")
+        related_seen.add(pair)
+        normalized_related.append({
+            "moduleKey": module_key,
+            "pageKey": related_page_key,
+            "relationship": relationship,
+        })
+
+    default_query_action_key = str(value.get("defaultQueryActionKey") or "").strip()
+    if default_query_action_key:
+        action = page_actions.get(default_query_action_key)
+        if action is None or action.get("operation") != "query":
+            raise ValueError(
+                f"Page '{page_key}' aiSemantics.defaultQueryActionKey must reference a query Action on the page"
+            )
+
+    return {
+        "purpose": purpose,
+        "primaryEntities": list(primary_entities),
+        "fieldSemantics": field_semantics,
+        "supportedIntents": list(supported_intents),
+        "relatedPages": normalized_related,
+        "businessTerms": business_terms,
+        "defaultQueryActionKey": default_query_action_key or None,
+    }
+
+
 def _validate_manifest_payload(
     payload: object,
     *,
@@ -182,6 +320,7 @@ def _validate_manifest_payload(
     action_keys: set[str] = set()
     page_keys: set[str] = set()
     normalized_modules: list[dict] = []
+    validation_warnings: list[dict[str, str]] = []
     contract_revision = str(payload.get("contractRevision") or "2.0") if version == 2 else "1.0"
     if version == 2:
         if contract_revision not in SUPPORTED_V2_REVISIONS:
@@ -331,6 +470,23 @@ def _validate_manifest_payload(
             context_schema = page.get("contextSchema")
             if not isinstance(context_schema, dict):
                 raise ValueError(f"Page '{page_key}' contextSchema must be an object")
+            page_action_map = {
+                item["actionKey"]: item
+                for item in normalized_actions
+                if item["actionKey"] in page_action_keys
+            }
+            ai_semantics = _normalize_ai_semantics(
+                page_key,
+                page.get("aiSemantics"),
+                page_actions=page_action_map,
+            )
+            if contract_revision == "2.5" and ai_semantics is None:
+                validation_warnings.append({
+                    "code": "ai_semantics_missing",
+                    "moduleKey": key,
+                    "pageKey": page_key,
+                    "message": "该 AI 页面尚未声明 aiSemantics；迁移期间可继续使用，但结构化语义路由不会启用。",
+                })
             normalized_pages.append({
                 **page,
                 "pageKey": page_key,
@@ -339,6 +495,7 @@ def _validate_manifest_payload(
                 "queryActionKey": query_action_key,
                 "actionKeys": list(dict.fromkeys(page_action_keys)),
                 "contextSchema": context_schema,
+                **({"aiSemantics": ai_semantics} if ai_semantics is not None else {}),
             })
         normalized_departments: list[dict] | list[object] = list(departments)
         if version == 2:
@@ -445,6 +602,25 @@ def _validate_manifest_payload(
             "actions": normalized_actions,
             "accessRoles": normalized_access_roles,
         })
+    known_pages = {
+        (str(module["moduleKey"]), str(page["pageKey"]))
+        for module in normalized_modules
+        for page in module.get("pages") or []
+    }
+    for module in normalized_modules:
+        for page in module.get("pages") or []:
+            semantics = page.get("aiSemantics")
+            if not isinstance(semantics, dict):
+                continue
+            source = (str(module["moduleKey"]), str(page["pageKey"]))
+            for related in semantics.get("relatedPages") or []:
+                target = (str(related["moduleKey"]), str(related["pageKey"]))
+                if target == source:
+                    raise ValueError(f"Page '{source[1]}' aiSemantics cannot relate to itself")
+                if target not in known_pages:
+                    raise ValueError(
+                        f"Page '{source[1]}' aiSemantics references unknown page '{target[0]}/{target[1]}'"
+                    )
     if version == 1:
         event_feed = payload.get("eventFeed")
         if not isinstance(event_feed, dict) or not event_feed.get("path"):
@@ -469,6 +645,7 @@ def _validate_manifest_payload(
         "contractRevision": contract_revision,
         "applicationSlug": application_slug,
         "modules": normalized_modules,
+        "validationWarnings": validation_warnings,
     }
     return normalized, events_url, version
 

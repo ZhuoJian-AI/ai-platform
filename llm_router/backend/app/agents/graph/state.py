@@ -29,6 +29,11 @@ class AgentState(TypedDict, total=False):
     template_agent_id: str | None
     application_id: str | None
     page_context: dict
+    business_turn_envelope: dict
+    business_turn_intent: dict
+    business_navigation_suggestion: dict | None
+    business_tool_executions: list[dict]
+    business_approvals: list[dict]
     client_request_id: str | None
 
     # ── Agent 配置（load_config 节点填充）──

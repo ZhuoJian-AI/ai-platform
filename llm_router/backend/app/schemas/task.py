@@ -79,8 +79,8 @@ class TaskRunRequest(BaseModel):
     #   显式传 UUID → 该次用此智能体（load_config 拼 persona + 继承 skill_ids/model_alias）
     #   显式传 null/空 → 强制通用智能体（不绑模板，纯 GENERAL_SYSTEM_PROMPT）
     template_agent_id: str | None = None
-    # 业务小助手可逐轮覆盖任务绑定应用；经过服务端重新鉴权的最后页面上下文会留在
-    # 任务配置中供同一应用的后续轮次使用，切换/清空应用时立即清除。
+    # 业务小助手 Task 首次绑定应用后不可切换；经过服务端重新鉴权的最后页面上下文
+    # 会留在任务配置中供同一应用的后续轮次使用。
     application_id: UUID | None = None
     page_context: dict = Field(default_factory=dict)
     # 文件产物唯一使用这一参数命名。省略时由服务端绑定当前员工个人空间；
@@ -192,6 +192,9 @@ class TaskRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     match_excerpt: str | None = None
+    last_page_context: dict = Field(default_factory=dict)
+    artifact_count: int = 0
+    run_status: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -200,4 +203,3 @@ class TaskReadWithMessages(TaskRead):
     messages: list[TaskMessageRead] = Field(default_factory=list)
     # 该任务最新一次 run 的状态（agent_runs.status）—— 前端据此判断是否需要
     # 调 GET /stream 重连续接（后台 detach 执行，刷新不丢）。None=尚无 run。
-    run_status: str | None = None

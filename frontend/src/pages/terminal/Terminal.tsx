@@ -518,7 +518,12 @@ export default function Terminal() {
   const [applicationNavOpen, setApplicationNavOpen] = useState(false);
   const [applicationNavPinned, setApplicationNavPinned] = useState(() => readApplicationNavPinPreference(user?.id));
   const [applicationImmersive, setApplicationImmersive] = useState(false);
-  const [businessTaskSelection, setBusinessTaskSelection] = useState<Record<string, string | null>>({});
+  const [businessTaskSelection, setBusinessTaskSelection] = useState<Record<string, string | null>>(() => {
+    const params = new URLSearchParams(location.search);
+    const applicationId = params.get('app');
+    const conversationId = params.get('conversation');
+    return applicationId && conversationId ? { [applicationId]: conversationId } : {};
+  });
   const [businessWorkspaceSelection, setBusinessWorkspaceSelection] = useState<Record<string, string>>({});
 
   const updateApplicationNavPinned = useCallback((pinned: boolean) => {
@@ -609,7 +614,9 @@ export default function Terminal() {
     queryKey: ['terminal-tasks', deferredTaskSearch], queryFn: () => terminal.listTasks(deferredTaskSearch),
   });
   const { data: businessTasks } = useQuery<TerminalTask[]>({
-    queryKey: ['terminal-business-tasks'], queryFn: () => terminal.listTasks(),
+    queryKey: ['terminal-business-tasks', selectedApplication?.id],
+    queryFn: () => terminal.listTasks({ applicationId: selectedApplication!.id, limit: 100 }),
+    enabled: Boolean(selectedApplication),
   });
   const selectedBusinessTaskId = selectedApplication ? (
     Object.prototype.hasOwnProperty.call(businessTaskSelection, selectedApplication.id)
@@ -657,12 +664,35 @@ export default function Terminal() {
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
+    if (params.get('view') !== 'application') return;
+    const applicationId = params.get('app');
+    const moduleKey = params.get('module');
+    const conversationId = params.get('conversation');
+    if (applicationId) {
+      setView('application');
+      setSelectedApplicationId(applicationId);
+      if (moduleKey) setSelectedApplicationModuleKey(moduleKey);
+      setBusinessTaskSelection((current) => (
+        current[applicationId] === conversationId
+          ? current
+          : { ...current, [applicationId]: conversationId }
+      ));
+    }
+  }, [location.search]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
     if (view === 'assistant') params.delete('view');
     else params.set('view', view === 'workspaces' ? 'workspace' : view);
     if (view === 'application' && selectedApplicationId) params.set('app', selectedApplicationId);
     else params.delete('app');
     if (view === 'application' && selectedApplicationModuleKey) params.set('module', selectedApplicationModuleKey);
     else params.delete('module');
+    if (view === 'application' && selectedApplicationId && selectedBusinessTaskId) {
+      params.set('conversation', selectedBusinessTaskId);
+    } else {
+      params.delete('conversation');
+    }
     if (view !== 'workspaces') {
       params.delete('workspace');
       params.delete('path');
@@ -677,7 +707,7 @@ export default function Terminal() {
     const routeTaskId = taskId || null;
     if (routeTaskId !== selectedId && (location.pathname === terminalBasePath || location.pathname.startsWith(`${terminalBasePath}/tasks/`))) return;
     if (desired !== current) navigate(desired, { replace: true });
-  }, [composerOpen, location.pathname, location.search, navigate, selectedApplicationId, selectedApplicationModuleKey, selectedId, taskId, terminalBasePath, view]);
+  }, [composerOpen, location.pathname, location.search, navigate, selectedApplicationId, selectedApplicationModuleKey, selectedBusinessTaskId, selectedId, taskId, terminalBasePath, view]);
 
   useEffect(() => {
     if (!selectedTask) return;
@@ -1093,6 +1123,105 @@ export default function Terminal() {
     navigate(id ? `${terminalBasePath}/tasks/${id}` : terminalBasePath);
   }, [selectedId, abortActiveStream, navigate, qc, terminalBasePath]);
 
+  const openTaskFromHistory = useCallback((task: TerminalTask) => {
+    const applicationId = task.config?.application_id;
+    if (applicationId) {
+      const application = terminalApplications.find((item) => item.id === applicationId);
+      if (!application) {
+        message.error('该业务对话所属应用当前不可用或已取消授权');
+        return;
+      }
+      const pageContext = task.last_page_context ?? {};
+      const moduleKey = typeof pageContext.module_key === 'string'
+        ? pageContext.module_key
+        : application.modules?.[0]?.module_key ?? null;
+      setComposerOpen(false);
+      setSelectedApplicationId(applicationId);
+      setSelectedApplicationModuleKey(moduleKey);
+      setBusinessTaskSelection((current) => ({ ...current, [applicationId]: task.id }));
+      setView('application');
+      setApplicationNavOpen(false);
+      navigate(terminalBasePath);
+      return;
+    }
+    void selectTask(task.id);
+    setView('assistant');
+    setApplicationNavOpen(false);
+  }, [navigate, selectTask, terminalApplications, terminalBasePath]);
+
+  const resumeBusinessTask = useCallback(async (
+    taskId: string,
+    applicationId: string,
+    onProgress: (event: Record<string, unknown>) => void,
+  ): Promise<BusinessAssistantTurnResult> => {
+    const controller = new AbortController();
+    let response = await terminal.streamTask(taskId, controller.signal);
+    let streamedAnswer = '';
+    let streamedError = '';
+    let streamedRunId: number | null = null;
+    let streamInterrupted = false;
+    let refreshRequired = false;
+    let completed = false;
+    for (let attempt = 0; attempt < 3 && !completed; attempt += 1) {
+      if (!response.ok || !response.body) {
+        throw new Error(`业务小助手连接恢复失败（HTTP ${response.status}）`);
+      }
+      let sawFinal = false;
+      if (attempt > 0) {
+        streamedAnswer = '';
+        streamedError = '';
+      }
+      try {
+        await consumeTerminalEventStream(response, (event) => {
+          onProgress({ ...event, task_id: taskId });
+          if (event.type === 'text') streamedAnswer += String(event.delta ?? '');
+          if (event.type === 'error') streamedError = String(event.message ?? '业务小助手执行失败');
+          if (event.type === 'final') sawFinal = true;
+          if (event.type === 'final' && event.interrupted === true) streamInterrupted = true;
+          if (event.type === 'tool_result' && event.business_mutation_committed === true) {
+            refreshRequired = true;
+          }
+          if (typeof event.run_id === 'number') streamedRunId = event.run_id;
+        });
+      } catch (streamError) {
+        if ((streamError as Error).name === 'AbortError' || attempt === 2) throw streamError;
+      }
+      if (sawFinal) {
+        completed = true;
+        break;
+      }
+      response = await terminal.streamTask(taskId, controller.signal);
+    }
+    if (!completed) throw new Error('业务小助手连接恢复失败，请稍后重试');
+    if (streamedError) throw new Error(streamedError);
+    await qc.invalidateQueries({ queryKey: ['terminal-business-task', taskId] });
+    await qc.invalidateQueries({ queryKey: ['terminal-business-tasks', applicationId] });
+    const freshTask = await terminal.getTask(taskId, applicationId);
+    const assistantMessage = [...freshTask.messages].reverse().find((item) => item.role === 'assistant');
+    const userMessage = [...freshTask.messages].reverse().find((item) => item.role === 'user');
+    return {
+      taskId,
+      runId: streamedRunId,
+      userMessageId: userMessage?.id ?? null,
+      assistantMessageId: assistantMessage?.id ?? null,
+      status: streamInterrupted
+        ? 'interrupted'
+        : freshTask.run_status === 'cancelled'
+        ? 'cancelled'
+        : ['error', 'timeout', 'busy'].includes(freshTask.run_status ?? '') ? 'failed' : 'completed',
+      content: assistantMessage?.content || streamedAnswer || '操作已完成。',
+      artifacts: businessArtifactsFromMessage(assistantMessage),
+      error: null,
+      refreshRequired,
+      intent: assistantMessage?.metadata?.business_turn_intent as Record<string, unknown> | undefined,
+      pageContext: assistantMessage?.metadata?.page_context as Record<string, unknown> | undefined,
+      toolExecutions: Array.isArray(assistantMessage?.metadata?.tool_executions)
+        ? assistantMessage.metadata.tool_executions as Array<Record<string, unknown>>
+        : [],
+      navigationSuggestion: assistantMessage?.metadata?.navigation_suggestion as Record<string, unknown> | undefined,
+    };
+  }, [qc]);
+
   const stopStream = () => {
     abortRef.current?.abort();
     setStreaming(false);
@@ -1483,7 +1612,7 @@ export default function Terminal() {
                     return (
                       <div
                         key={t.id}
-                        onClick={() => { if (!editing) { selectTask(t.id); setView('assistant'); } }}
+                        onClick={() => { if (!editing) openTaskFromHistory(t); }}
                         onMouseEnter={() => setHoveredId(t.id)}
                         onMouseLeave={() => setHoveredId(null)}
                         style={{
@@ -1508,6 +1637,11 @@ export default function Terminal() {
                           <Tooltip title={t.match_excerpt || t.title || '(未命名)'} placement="right">
                             <span style={{ flex: 1, minWidth: 0 }}>
                               <span style={{ display: 'block', lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title || '(未命名)'}</span>
+                              {t.config?.application_id && (
+                                <span style={{ display: 'block', marginTop: 2, color: '#818cf8', fontSize: 10, lineHeight: 1.35 }}>
+                                  {terminalApplications.find((item) => item.id === t.config.application_id)?.name ?? '业务应用'}
+                                </span>
+                              )}
                               {!!t.match_excerpt && taskSearch && (
                                 <span style={{ display: 'block', marginTop: 2, color: '#9ca3af', fontSize: 10, lineHeight: 1.35, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.match_excerpt}</span>
                               )}
@@ -1613,23 +1747,42 @@ export default function Terminal() {
                 onOpenNavigation={() => setApplicationNavOpen(true)}
                 onToggleImmersive={() => setApplicationImmersive((value) => !value)}
                 businessTaskId={selectedBusinessTaskId}
-                onNewConversation={async () => {
-                  const modelAlias = config.model_alias ?? modelData?.models?.[0] ?? null;
-                  const created = await terminal.createTask({
-                    message: '',
-                    config: {
-                      workspace_id: config.workspace_id,
-                      model_alias: modelAlias,
-                      exec_mode: 'craft',
-                      template_agent_id: null,
-                      application_id: selectedApplication.id,
-                    },
-                  });
+                businessTasks={businessTasks ?? []}
+                onSelectConversation={(taskId) => {
                   setBusinessTaskSelection((current) => ({
-                    ...current, [selectedApplication.id]: created.id,
+                    ...current, [selectedApplication.id]: taskId,
                   }));
-                  await qc.invalidateQueries({ queryKey: ['terminal-business-tasks'] });
-                  qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
+                  const params = new URLSearchParams(location.search);
+                  params.set('view', 'application');
+                  params.set('app', selectedApplication.id);
+                  if (selectedApplicationModuleKey) params.set('module', selectedApplicationModuleKey);
+                  params.set('conversation', taskId);
+                  navigate(`${location.pathname}?${params.toString()}`);
+                }}
+                onDeleteConversation={async (taskId) => {
+                  await terminal.deleteTask(taskId);
+                  const nextTask = taskId === selectedBusinessTaskId
+                    ? (businessTasks ?? []).find((task) => task.id !== taskId)?.id ?? null
+                    : selectedBusinessTaskId;
+                  setBusinessTaskSelection((current) => ({
+                    ...current, [selectedApplication.id]: nextTask,
+                  }));
+                  if (taskId === selectedBusinessTaskId) {
+                    const params = new URLSearchParams(location.search);
+                    if (nextTask) params.set('conversation', nextTask);
+                    else params.delete('conversation');
+                    navigate(`${location.pathname}${params.toString() ? `?${params.toString()}` : ''}`, { replace: true });
+                  }
+                  await qc.invalidateQueries({ queryKey: ['terminal-business-tasks', selectedApplication.id] });
+                  await qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
+                }}
+                onNewConversation={async () => {
+                  setBusinessTaskSelection((current) => ({
+                    ...current, [selectedApplication.id]: null,
+                  }));
+                  const params = new URLSearchParams(location.search);
+                  params.delete('conversation');
+                  navigate(`${location.pathname}${params.toString() ? `?${params.toString()}` : ''}`);
                 }}
                 targetWorkspaceId={selectedBusinessWorkspaceId}
                 workspaceOptions={businessWorkspaceOptions}
@@ -1638,6 +1791,11 @@ export default function Terminal() {
                 }))}
                 onOpenArtifact={(fileId, versionId) => openLink(
                   `${workspaceInternalPath(fileId)}${versionId ? `?version=${encodeURIComponent(versionId)}` : ''}`,
+                )}
+                onResumeAI={(taskId, onProgress) => resumeBusinessTask(
+                  taskId,
+                  selectedApplication.id,
+                  onProgress,
                 )}
                 onAskAI={async (prompt, context, onProgress, fileRefs) => {
                   const modelAlias = config.model_alias ?? modelData?.models?.[0] ?? null;
@@ -1657,7 +1815,7 @@ export default function Terminal() {
                       ...current, [selectedApplication.id]: created.id,
                     }));
                     qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
-                    qc.invalidateQueries({ queryKey: ['terminal-business-tasks'] });
+                    qc.invalidateQueries({ queryKey: ['terminal-business-tasks', selectedApplication.id] });
                   }
                   const controller = new AbortController();
                   const clientRequestId = crypto.randomUUID();
@@ -1724,7 +1882,7 @@ export default function Terminal() {
                   qc.invalidateQueries({ queryKey: ['terminal-business-task', activeTaskId] });
                   qc.invalidateQueries({ queryKey: ['terminal-memory'] });
                   qc.invalidateQueries({ queryKey: ['application-action-confirmations'] });
-                  const freshTask = await terminal.getTask(activeTaskId);
+                  const freshTask = await terminal.getTask(activeTaskId, selectedApplication.id);
                   const assistantMessage = [...freshTask.messages].reverse().find((item) => item.role === 'assistant');
                   const userMessage = [...freshTask.messages].reverse().find((item) => item.role === 'user');
                   const result: BusinessAssistantTurnResult = {
@@ -1736,11 +1894,17 @@ export default function Terminal() {
                       ? 'interrupted'
                       : freshTask.run_status === 'cancelled'
                       ? 'cancelled'
-                      : freshTask.run_status === 'error' ? 'failed' : 'completed',
+                      : ['error', 'timeout', 'busy'].includes(freshTask.run_status ?? '') ? 'failed' : 'completed',
                     content: assistantMessage?.content || streamedAnswer || '操作已完成。',
                     artifacts: businessArtifactsFromMessage(assistantMessage),
                     error: null,
                     refreshRequired,
+                    intent: assistantMessage?.metadata?.business_turn_intent as Record<string, unknown> | undefined,
+                    pageContext: (assistantMessage?.metadata?.page_context as Record<string, unknown> | undefined) ?? context,
+                    toolExecutions: Array.isArray(assistantMessage?.metadata?.tool_executions)
+                      ? assistantMessage.metadata.tool_executions as Array<Record<string, unknown>>
+                      : [],
+                    navigationSuggestion: assistantMessage?.metadata?.navigation_suggestion as Record<string, unknown> | undefined,
                   };
                   return result;
                 }}
@@ -1917,12 +2081,15 @@ export default function Terminal() {
                       return (
                         <div
                           key={task.id}
-                          onClick={() => { selectTask(task.id); setView('assistant'); setApplicationNavOpen(false); }}
+                          onClick={() => openTaskFromHistory(task)}
                           style={{ ...navItemStyle(active), fontSize: 12 }}
                         >
                           <FileTextOutlined style={{ color: active ? WB.primary : '#cbd5e1' }} />
                           <span style={{ minWidth: 0, overflow: 'hidden' }}>
                             <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title || '(未命名)'}</span>
+                            {task.config?.application_id && <span style={{ display: 'block', color: '#818cf8', fontSize: 10 }}>
+                              {terminalApplications.find((item) => item.id === task.config.application_id)?.name ?? '业务应用'}
+                            </span>}
                             {!!task.match_excerpt && taskSearch && <span style={{ display: 'block', color: '#9ca3af', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.match_excerpt}</span>}
                           </span>
                         </div>

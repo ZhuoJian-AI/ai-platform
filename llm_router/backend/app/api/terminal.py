@@ -10,7 +10,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from urllib.parse import quote
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import (
     APIRouter,
@@ -130,6 +130,7 @@ from app.schemas.workspace import (
     WorkspaceUploadSessionRead,
 )
 from app.services import (
+    business_assistant_orchestration,
     doc_parser,
     enterprise_application_service,
     memory_service,
@@ -797,22 +798,61 @@ async def create_task_endpoint(
     return task
 
 
+async def _task_read_summary(db: AsyncSession, task: Task, *, excerpt: str | None = None) -> TaskRead:
+    run_status = (await db.execute(
+        select(AgentRun.status).where(AgentRun.task_id == str(task.id))
+        .order_by(AgentRun.id.desc()).limit(1)
+    )).scalar_one_or_none()
+    artifact_ids = {
+        str(item.get("file_id") or item.get("fileId") or "")
+        for message in task.messages
+        for item in ((message.metadata_ or {}).get("artifacts") or [])
+        if isinstance(item, dict) and (item.get("file_id") or item.get("fileId"))
+    }
+    return TaskRead.model_validate(task).model_copy(update={
+        "match_excerpt": excerpt,
+        "last_page_context": dict((task.config or {}).get("page_context") or {}),
+        "artifact_count": len(artifact_ids),
+        "run_status": run_status,
+    })
+
+
 @router.get("/terminal/tasks", response_model=list[TaskRead])
 async def list_tasks_endpoint(
     q: str | None = Query(default=None, max_length=200),
+    application_id: UUID | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
     if q and q.strip():
         rows = await task_service.search_tasks(db, cu.id, q)
-        return [TaskRead.model_validate(task).model_copy(update={"match_excerpt": excerpt}) for task, excerpt in rows]
-    return await task_service.list_tasks(db, cu.id)
+        if application_id is not None:
+            rows = [
+                (task, excerpt) for task, excerpt in rows
+                if str((task.config or {}).get("application_id") or "") == str(application_id)
+            ]
+        rows = rows[offset:] if limit is None else rows[offset : offset + limit]
+        return [await _task_read_summary(db, task, excerpt=excerpt) for task, excerpt in rows]
+    rows = await task_service.list_tasks(
+        db,
+        cu.id,
+        application_id=application_id,
+        limit=limit,
+        offset=offset,
+    )
+    return [await _task_read_summary(db, task) for task in rows]
 
 
 @router.get("/terminal/tasks/{task_id}", response_model=TaskReadWithMessages)
 async def get_task_endpoint(
-    task_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
+    task_id: UUID,
+    application_id: UUID | None = Query(default=None),
+    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
     task = await _get_owned_task(db, task_id, cu)
+    if application_id is not None and str((task.config or {}).get("application_id") or "") != str(application_id):
+        raise HTTPException(status_code=404, detail="该对话不属于当前应用")
     data = TaskReadWithMessages.model_validate(task)
     # 该任务最新 run 状态：前端据此决定是否调 GET /stream 重连（detach 执行刷新不丢）。
     run_status = (await db.execute(
@@ -820,6 +860,13 @@ async def get_task_endpoint(
         .order_by(AgentRun.id.desc()).limit(1)
     )).scalar_one_or_none()
     data.run_status = run_status
+    data.last_page_context = dict((task.config or {}).get("page_context") or {})
+    data.artifact_count = len({
+        str(item.get("file_id") or item.get("fileId") or "")
+        for message in task.messages
+        for item in ((message.metadata_ or {}).get("artifacts") or [])
+        if isinstance(item, dict) and (item.get("file_id") or item.get("fileId"))
+    })
     return data
 
 
@@ -829,11 +876,17 @@ async def update_task_endpoint(
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
     task = await _get_owned_task(db, task_id, cu)
-    if data.config is not None and data.config.application_id:
-        await enterprise_application_service.assert_application_permission(
-            db, data.config.application_id, cu, "view",
-        )
     if data.config is not None:
+        existing_application_id = str((task.config or {}).get("application_id") or "")
+        requested_application_id = str(data.config.application_id or "")
+        if existing_application_id:
+            if requested_application_id and requested_application_id != existing_application_id:
+                raise HTTPException(status_code=409, detail="业务助手对话已绑定其他应用，请新建对话")
+            data.config.application_id = UUID(existing_application_id)
+        elif data.config.application_id:
+            await enterprise_application_service.assert_application_permission(
+                db, data.config.application_id, cu, "view",
+            )
         data.config.workspace_id = (await _user_defaults(db, cu))["workspace_id"]
     await task_service.update_task(db, task, data)
     await db.commit()
@@ -972,6 +1025,18 @@ async def run_task_endpoint(
                 raise HTTPException(status_code=403, detail="当前账号无权访问该业务页面")
         cfg["application_permissions"] = sorted(application_permissions)
         cfg["application_module_keys"] = allowed_module_keys
+        try:
+            envelope = await business_assistant_orchestration.build_business_turn_envelope(
+                db,
+                application=application,
+                user=cu,
+                page_context=cfg["page_context"],
+                target_workspace_id=str(target_workspace.id),
+                request_id=data.client_request_id or f"turn-{uuid4().hex}",
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        cfg["business_turn_envelope"] = envelope.model_dump(mode="json", by_alias=True)
     persisted_cfg = dict(task.config or {})
     persisted_cfg["application_id"] = cfg.get("application_id")
     persisted_cfg["page_context"] = dict(cfg.get("page_context") or {})

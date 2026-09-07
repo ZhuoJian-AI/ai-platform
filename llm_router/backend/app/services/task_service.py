@@ -63,12 +63,24 @@ async def create_task(
     return task
 
 
-async def list_tasks(db: AsyncSession, user_id: str) -> list[Task]:
+async def list_tasks(
+    db: AsyncSession,
+    user_id: str,
+    *,
+    application_id: UUID | str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[Task]:
     stmt = (
         select(Task)
         .where(Task.user_id == user_id, Task.deleted_at.is_(None))
         .order_by(Task.updated_at.desc())
     )
+    if application_id is not None:
+        stmt = stmt.where(Task.config["application_id"].as_string() == str(application_id))
+    stmt = stmt.offset(offset)
+    if limit is not None:
+        stmt = stmt.limit(limit)
     return list((await db.execute(stmt)).scalars().all())
 
 

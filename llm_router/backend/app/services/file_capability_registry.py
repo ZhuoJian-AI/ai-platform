@@ -653,6 +653,11 @@ def provider_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """
 
     result = copy.deepcopy(schema)
+    if isinstance(result.get("$defs"), dict):
+        result["$defs"] = {
+            name: provider_strict_schema(definition)
+            for name, definition in result["$defs"].items()
+        }
     # UUID ``format`` support is inconsistent across OpenAI-compatible vendors;
     # the server-side validator retains it.
     result.pop("format", None)
