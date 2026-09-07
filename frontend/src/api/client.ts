@@ -2567,6 +2567,9 @@ export interface TerminalTask {
   created_at: string;
   updated_at: string;
   match_excerpt?: string | null;
+  last_page_context?: Record<string, unknown>;
+  artifact_count?: number;
+  run_status?: string | null;
 }
 
 export interface TerminalTaskMessage {
@@ -2730,10 +2733,21 @@ export const terminal = {
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   },
-  listTasks: (q?: string) => userRequest<TerminalTask[]>(`/api/v1/terminal/tasks${q?.trim() ? `?q=${encodeURIComponent(q.trim())}` : ''}`),
+  listTasks: (query?: string | { q?: string; applicationId?: string; limit?: number; offset?: number }) => {
+    const values = typeof query === 'string' ? { q: query } : (query ?? {});
+    const params = new URLSearchParams();
+    if (values.q?.trim()) params.set('q', values.q.trim());
+    if ('applicationId' in values && values.applicationId) params.set('application_id', values.applicationId);
+    if ('limit' in values && values.limit) params.set('limit', String(values.limit));
+    if ('offset' in values && values.offset) params.set('offset', String(values.offset));
+    const suffix = params.toString();
+    return userRequest<TerminalTask[]>(`/api/v1/terminal/tasks${suffix ? `?${suffix}` : ''}`);
+  },
   createTask: (data: { title?: string; message: string; config: TaskConfig }) =>
     userRequest<TerminalTask>('/api/v1/terminal/tasks', { method: 'POST', body: JSON.stringify(data) }),
-  getTask: (id: string) => userRequest<TerminalTaskWithMessages>(`/api/v1/terminal/tasks/${id}`),
+  getTask: (id: string, applicationId?: string) => userRequest<TerminalTaskWithMessages>(
+    `/api/v1/terminal/tasks/${id}${applicationId ? `?application_id=${encodeURIComponent(applicationId)}` : ''}`,
+  ),
   updateTask: (id: string, data: Partial<{ title: string; status: string; config: TaskConfig }>) =>
     userRequest<TerminalTask>(`/api/v1/terminal/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteTask: (id: string) => userRequest<void>(`/api/v1/terminal/tasks/${id}`, { method: 'DELETE' }),

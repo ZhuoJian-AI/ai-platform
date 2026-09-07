@@ -162,6 +162,17 @@ async def test_user_allow_round_trip_publishes_request_then_decision():
         assert staged[1] == {
             "type": "approval_decided", "approval_id": "ap-1", "outcome": "allowed-once", "decided_by": "user",
         }
+        assert context.state["business_approvals"] == [{
+            "approvalId": "ap-1",
+            "tool": "workspace_delete_file",
+            "callId": "call-9",
+            "reason": "硬删除文件",
+            "argumentsPreview": '{"file_id":"f-1"}',
+            "expiresAt": context.state["business_approvals"][0]["expiresAt"],
+            "runId": 42,
+            "outcome": "allowed-once",
+            "decidedBy": "user",
+        }]
         assert [json.loads(item) for item in handle.buffer] == staged
         assert context.state["steps"] == [
             {"step": "approval", "tool": "workspace_delete_file", "outcome": "allowed-once", "decided_by": "user"},

@@ -67,6 +67,7 @@ def general_initial_state(
         "template_agent_id": config.get("template_agent_id"),
         "application_id": config.get("application_id"),
         "page_context": dict(config.get("page_context") or {}),
+        "business_turn_envelope": dict(config.get("business_turn_envelope") or {}),
         "attachment_files": attachments,
         "file_refs_v1": file_refs,
         "referenced_file_ids": referenced_ids,

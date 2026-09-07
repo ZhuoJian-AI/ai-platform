@@ -353,6 +353,8 @@ def _patch_prepare_dependencies(monkeypatch, principal):
         application_id=None,
         page_context=None,
         request_text="",
+        business_intent=None,
+        business_envelope=None,
     ):
         return nodes._builtin_tool_defs(), {}
 

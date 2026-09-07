@@ -42,6 +42,7 @@ from app.config import settings
 from app.database import async_session_factory
 from app.models.agent_run import AgentRun
 from app.models.task import TaskMessage
+from app.services import business_assistant_orchestration
 from app.services.agent_admission import agent_admission
 from app.services.file_capability_registry import FILE_CREATE_TOOL_NAMES, FILE_TOOL_OPERATIONS
 from app.services.message_verification import contains_unverified_tool_success_claim
@@ -288,6 +289,11 @@ def _requests_current_business_data(state: dict) -> bool:
 
     if not state.get("application_id"):
         return False
+    intent = state.get("business_turn_intent") or {}
+    if intent:
+        return bool(intent.get("requiresLiveData")) and intent.get("intent") in {"query", "export_file"}
+    # Compatibility for already registered pages that have not migrated to
+    # aiSemantics. New and updated pages are validated onto the structured path.
     request = str(state.get("request") or "").lower()
     return any(term in request for term in _CURRENT_BUSINESS_DATA_TERMS)
 
@@ -297,10 +303,10 @@ def _requests_business_mutation(state: dict) -> bool:
 
     if not state.get("application_id"):
         return False
+    intent = state.get("business_turn_intent") or {}
+    if intent:
+        return intent.get("intent") == "mutate"
     request = str(state.get("request") or "").lower()
-    # Completed-state descriptions (for example "已保存的核算记录") are query
-    # filters, not commands to mutate data.  Strip the common Chinese forms before
-    # applying the deliberately conservative keyword guard.
     for term in _BUSINESS_MUTATION_TERMS:
         if term.isascii():
             continue
@@ -308,10 +314,6 @@ def _requests_business_mutation(state: dict) -> bool:
             request = request.replace(f"{prefix}{term}", "")
     clauses = [part.strip() for part in _REQUEST_CLAUSE_SEPARATOR.split(request) if part.strip()]
     if _requests_file_delivery(request):
-        # File delivery and subsystem mutation share verbs such as 创建、保存 and
-        # 修改. Ignore clauses whose object/destination is clearly a file or a
-        # workspace, while preserving a separate business clause such as
-        # “新增供应商并生成 Excel”.
         clauses = [
             clause
             for clause in clauses
@@ -359,9 +361,16 @@ def _completion_policy(state: dict) -> dict[str, Any]:
     The DSH runtime enforces it (nudging the model at most ``max_nudges`` times when no
     file-producing tool succeeded); Python only reports the resulting ``policy`` events.
     """
-    require_file = (state.get("exec_mode") or "craft") == "craft" and _requests_file_delivery(
-        str(state.get("request") or "")
-    )
+    if state.get("application_id"):
+        intent = state.get("business_turn_intent") or {}
+        require_file = (
+            business_assistant_orchestration.intent_requires_artifact(intent)
+            if intent
+            else _requests_file_delivery(str(state.get("request") or ""))
+        )
+    else:
+        require_file = _requests_file_delivery(str(state.get("request") or ""))
+    require_file = (state.get("exec_mode") or "craft") == "craft" and require_file
     return {
         "require_file_output": require_file,
         "file_output_tools": _file_output_tools(state),
@@ -371,11 +380,18 @@ def _completion_policy(state: dict) -> dict[str, Any]:
 
 
 def _history(state: dict) -> list[dict[str, str]]:
-    rows = [
-        {"role": item.get("role"), "content": str(item.get("content") or "")}
-        for item in state.get("messages") or []
-        if item.get("role") in {"user", "assistant"} and isinstance(item.get("content"), str)
-    ]
+    rows: list[dict[str, str]] = []
+    for item in state.get("messages") or []:
+        if item.get("role") not in {"user", "assistant"} or not isinstance(item.get("content"), str):
+            continue
+        content = str(item.get("content") or "")
+        business_context = item.get("business_context")
+        if state.get("application_id") and isinstance(business_context, dict) and business_context:
+            content = (
+                f"{content}\n\n[该历史消息的可信业务上下文]\n"
+                f"{json.dumps(business_context, ensure_ascii=False, default=str)}"
+            )
+        rows.append({"role": item.get("role"), "content": content})
     request = str(state.get("request") or "")
     while rows and rows[-1]["role"] == "user" and rows[-1]["content"] == request:
         rows.pop()
@@ -469,9 +485,99 @@ async def _prepare(
     with bind_runtime(deps, writer):
         _merge(state, await load_config(state))
         _merge(state, await load_memory(state))
+        if state.get("application_id") and (state.get("business_turn_envelope") or {}).get("semanticReady"):
+            envelope = business_assistant_orchestration.BusinessTurnEnvelope.model_validate(
+                state.get("business_turn_envelope") or {}
+            )
+            writer(json.dumps({"type": "business_state", "status": "understanding"}, ensure_ascii=False))
+            intent, classifier_usage, attempts = await business_assistant_orchestration.classify_business_turn(
+                deps["db"],
+                envelope=envelope,
+                request_text=str(state.get("request") or ""),
+                model_alias=str(state.get("model_alias") or "default"),
+                department_id=state.get("department_id"),
+                history_refs=[
+                    dict(item.get("business_context") or {})
+                    for item in state.get("messages") or []
+                    if isinstance(item, dict) and item.get("business_context")
+                ],
+            )
+            state["business_turn_intent"] = business_assistant_orchestration.intent_dict(intent)
+            state["usage"] = {
+                "input_tokens": int((state.get("usage") or {}).get("input_tokens") or 0)
+                + classifier_usage["input_tokens"],
+                "output_tokens": int((state.get("usage") or {}).get("output_tokens") or 0)
+                + classifier_usage["output_tokens"],
+            }
+            state.setdefault("steps", []).append({
+                "step": "business_intent",
+                "intent": intent.intent,
+                "target": intent.target.model_dump(mode="json", by_alias=True),
+                "attempts": attempts,
+            })
+            trace = {
+                "category": "business_orchestration",
+                "title": "业务意图与页面路由",
+                "intent": intent.intent,
+                "targetPage": intent.target.page_key,
+                "attempts": attempts,
+            }
+            state.setdefault("traces", []).append(trace)
+            writer(json.dumps({"type": "trace", **trace}, ensure_ascii=False))
+            if intent.intent == "navigate":
+                target_page = next(
+                    (
+                        item for item in envelope.candidate_pages
+                        if item.get("moduleKey") == intent.target.module_key
+                        and item.get("pageKey") == intent.target.page_key
+                    ),
+                    None,
+                )
+                if target_page:
+                    state["business_navigation_suggestion"] = {
+                        "applicationId": envelope.application_id,
+                        "moduleKey": intent.target.module_key,
+                        "pageKey": intent.target.page_key,
+                        "pageName": target_page.get("pageName"),
+                        "route": target_page.get("routePattern"),
+                    }
+            if state.get("user_message_id"):
+                message = await deps["db"].get(TaskMessage, uuid.UUID(str(state["user_message_id"])))
+                if message is not None:
+                    metadata = dict(message.metadata_ or {})
+                    metadata["business_turn_intent"] = state["business_turn_intent"]
+                    metadata["business_turn_envelope"] = {
+                        "requestId": envelope.request_id,
+                        "applicationId": envelope.application_id,
+                        "moduleKey": envelope.module_key,
+                        "pageKey": envelope.page_key,
+                        "pageName": envelope.page_name,
+                        "authEpoch": envelope.auth_epoch,
+                    }
+                    message.metadata_ = metadata
+                    await deps["db"].flush()
+            writer(json.dumps({
+                "type": "business_state",
+                "status": "awaiting_clarification" if intent.intent == "clarify" else "planned",
+                "intent": intent.intent,
+            }, ensure_ascii=False))
         prepared = await prepare_dsh_turn(state)
     state["traces"] = prepared["traces"]
     state["_dsh_tool_registry"] = prepared["registry"]
+    if state.get("application_id"):
+        selected_tools = [
+            str((item.get("function") or {}).get("name") or "")
+            for item in (prepared.get("tools") or [])
+            if str((item.get("function") or {}).get("name") or "")
+        ]
+        tool_trace = {
+            "category": "business_orchestration",
+            "title": "本轮授权工具集合",
+            "intent": (state.get("business_turn_intent") or {}).get("intent") or "legacy",
+            "tools": selected_tools,
+        }
+        state.setdefault("traces", []).append(tool_trace)
+        writer(json.dumps({"type": "trace", **tool_trace}, ensure_ascii=False))
     # ``handle`` / ``staged`` let bridge callbacks (user approvals) publish onto this run's SSE
     # channel and into the persisted event log exactly like the runner's own events.
     context = DshRunContext(
@@ -500,6 +606,25 @@ async def _consume_dsh(
     handle: run_registry.RunHandle | None,
     staged: list[dict],
 ) -> None:
+    intent = state.get("business_turn_intent") or {}
+    if intent.get("intent") == "clarify":
+        text = str(intent.get("clarificationQuestion") or "请补充要处理的业务对象和期望结果。")
+        _publish(handle, staged, {"type": "text", "delta": text})
+        state["assistant_final"] = text
+        state.setdefault("messages", []).append({"role": "assistant", "content": text})
+        state.setdefault("steps", []).append({"step": "awaiting_clarification"})
+        return
+    if intent.get("intent") == "navigate":
+        suggestion = state.get("business_navigation_suggestion") or {}
+        page_name = str(suggestion.get("pageName") or intent.get("target", {}).get("pageKey") or "目标页面")
+        text = f"这个操作需要先进入“{page_name}”。我已为你准备好页面跳转建议，进入后再确认执行。"
+        _publish(handle, staged, {"type": "navigation_suggestion", "suggestion": suggestion})
+        _publish(handle, staged, {"type": "text", "delta": text})
+        state["assistant_final"] = text
+        state.setdefault("messages", []).append({"role": "assistant", "content": text})
+        state.setdefault("steps", []).append({"step": "navigation_required", "suggestion": suggestion})
+        return
+    _publish(handle, staged, {"type": "business_state", "status": "executing", "intent": intent.get("intent")})
     request = {
         "run_id": str(state["run_id"]),
         "user_id": str(state.get("user_id") or "platform-admin"),
@@ -535,7 +660,10 @@ async def _consume_dsh(
     pending_enterprise_mutations = 0
     failed_enterprise_mutations: list[str] = []
     tool_arguments: dict[str, str] = {}
-    usage = {"input_tokens": 0, "output_tokens": 0}
+    usage = {
+        "input_tokens": int((state.get("usage") or {}).get("input_tokens") or 0),
+        "output_tokens": int((state.get("usage") or {}).get("output_tokens") or 0),
+    }
     async for event in client.stream_run(request):
         kind = event.get("type")
         if kind == "text_delta":
@@ -595,6 +723,14 @@ async def _consume_dsh(
                 result_status = _enterprise_result_status(event.get("content"))
                 successful_enterprise_queries += int(ok and result_status not in {"failed", "error"})
             _publish(handle, staged, published_event)
+            state.setdefault("business_tool_executions", []).append({
+                "toolCallId": call_id,
+                "name": name,
+                "kind": entry_kind or "",
+                "operation": published_event.get("business_operation") or _enterprise_operation(entry, name),
+                "ok": ok,
+                "resultStatus": published_event.get("business_result_status") or "",
+            })
             if not ok:
                 failed_tools.append((name, str(event.get("content") or "工具未返回错误详情")))
             state.setdefault("steps", []).append({"step": "tool", "name": name, "ok": ok})
@@ -619,6 +755,7 @@ async def _consume_dsh(
         elif kind == "done":
             text = str(event.get("text") or text)
 
+    _publish(handle, staged, {"type": "business_state", "status": "verifying", "intent": intent.get("intent")})
     mutation_required = _requests_business_mutation(state)
     mutation_unverified = mutation_required and successful_enterprise_mutations == 0
     # A successful mutation already carries the subsystem's authoritative result.
@@ -957,7 +1094,11 @@ async def run_general_agent(
         "assistantMessageId": state.get("assistant_message_id"),
         "status": status,
         "content": state.get("assistant_final", ""),
+        "intent": state.get("business_turn_intent"),
+        "pageContext": state.get("page_context") or {},
+        "toolExecutions": state.get("business_tool_executions") or [],
         "artifacts": state.get("artifacts") or [],
+        "navigationSuggestion": state.get("business_navigation_suggestion"),
     }
 
 
@@ -1076,7 +1217,11 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
                     "assistantMessageId": state.get("assistant_message_id"),
                     "status": "failed" if state.get("error") else "completed",
                     "content": state.get("assistant_final", ""),
+                    "intent": state.get("business_turn_intent"),
+                    "pageContext": state.get("page_context") or {},
+                    "toolExecutions": state.get("business_tool_executions") or [],
                     "artifacts": state.get("artifacts") or [],
+                    "navigationSuggestion": state.get("business_navigation_suggestion"),
                     "error": state.get("error"),
                 },
                 ensure_ascii=False,

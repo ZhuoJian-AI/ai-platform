@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, Drawer, Empty, Input, Result, Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Badge, Button, Card, Drawer, Empty, Input, Popconfirm, Result, Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import {
-  AppstoreOutlined, CheckCircleFilled, CloseCircleFilled, DownloadOutlined, ExportOutlined, EyeOutlined, FileTextOutlined,
+  AppstoreOutlined, CheckCircleFilled, CloseCircleFilled, DeleteOutlined, DownloadOutlined, ExportOutlined, EyeOutlined, FileTextOutlined,
   FullscreenExitOutlined, FullscreenOutlined, LoadingOutlined, ReloadOutlined,
-  RobotOutlined, SendOutlined, UploadOutlined,
+  HistoryOutlined, RobotOutlined, SendOutlined, UploadOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ApiError, terminal, type EnterpriseApplicationLaunch, type TerminalEnterpriseApplication,
-  type TerminalTaskMessage, type WorkspaceFileRefV1, type WorkspaceFileSummary,
+  type TerminalTask, type TerminalTaskMessage, type TerminalTaskWithMessages, type WorkspaceFileRefV1, type WorkspaceFileSummary,
   type TerminalApprovalDecidedBy, type TerminalApprovalOutcome,
 } from '../../api/client';
 import ApprovalCard, { type ApprovalCardData } from '../../components/terminal/ApprovalCard';
@@ -71,6 +71,9 @@ type AssistantConversationMessage = {
   startedAt?: number;
   elapsedSeconds?: number;
   artifacts?: BusinessArtifact[];
+  pageKey?: string;
+  pageName?: string;
+  navigationSuggestion?: Record<string, unknown> | null;
 };
 
 export type BusinessArtifact = {
@@ -95,6 +98,10 @@ export type BusinessAssistantTurnResult = {
   artifacts: BusinessArtifact[];
   error: string | null;
   refreshRequired: boolean;
+  intent?: Record<string, unknown> | null;
+  pageContext?: Record<string, unknown>;
+  toolExecutions?: Array<Record<string, unknown>>;
+  navigationSuggestion?: Record<string, unknown> | null;
 };
 
 function normalizeBusinessArtifact(value: Record<string, unknown>): BusinessArtifact | null {
@@ -142,6 +149,35 @@ function businessArtifactFromEvent(event: Record<string, unknown>): BusinessArti
   return normalizeBusinessArtifact(event.artifact as Record<string, unknown>);
 }
 
+function businessApprovalsFromTask(
+  task: TerminalTaskWithMessages | undefined,
+): BusinessAssistantApproval[] {
+  if (!task || !Array.isArray(task.messages)) return [];
+  const approvals = new Map<string, BusinessAssistantApproval>();
+  for (const message of task.messages) {
+    const raw = message.metadata?.approvals;
+    if (!Array.isArray(raw)) continue;
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue;
+      const value = item as Record<string, unknown>;
+      const approvalId = typeof value.approvalId === 'string' ? value.approvalId : '';
+      if (!approvalId) continue;
+      approvals.set(approvalId, {
+        approvalId,
+        taskId: task.id,
+        tool: typeof value.tool === 'string' ? value.tool : '',
+        reason: typeof value.reason === 'string' ? value.reason : '',
+        argumentsPreview: typeof value.argumentsPreview === 'string' ? value.argumentsPreview : '',
+        expiresAt: typeof value.expiresAt === 'string' ? value.expiresAt : new Date(0).toISOString(),
+        runId: typeof value.runId === 'number' ? value.runId : undefined,
+        outcome: value.outcome as TerminalApprovalOutcome | undefined,
+        decidedBy: value.decidedBy as TerminalApprovalDecidedBy | undefined,
+      });
+    }
+  }
+  return [...approvals.values()];
+}
+
 function formatArtifactBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '大小未知';
   if (value < 1024) return `${value} B`;
@@ -153,6 +189,23 @@ type BusinessAssistantApproval = ApprovalCardData & { taskId: string };
 
 function progressForAssistantEvent(event: Record<string, unknown>): AssistantProgressItem | null {
   const type = String(event.type ?? '');
+  if (type === 'business_state') {
+    const labels: Record<string, string> = {
+      understanding: '正在理解需求并识别业务目标',
+      planned: '已确定目标页面和本轮可用工具',
+      awaiting_clarification: '需要你补充一个关键信息',
+      awaiting_confirmation: '正在等待你确认业务操作',
+      executing: '正在执行已授权的业务步骤',
+      verifying: '正在核验工具结果和完成条件',
+      committing: '正在保存回复和可信产物',
+      completed: '本轮已完成并通过核验',
+      failed: '本轮未通过完成条件',
+    };
+    const status = String(event.status ?? '');
+    return labels[status]
+      ? { key: `business:${status}`, label: labels[status], tone: status === 'failed' ? 'error' : 'normal' }
+      : null;
+  }
   if (type === 'run_status') {
     if (event.status === 'queued') {
       const position = Number(event.position) || 0;
@@ -241,6 +294,7 @@ export default function EnterpriseApplicationView({
   moduleKey,
   onModuleChange,
   onAskAI,
+  onResumeAI,
   models,
   modelAlias,
   onModelAliasChange,
@@ -248,6 +302,9 @@ export default function EnterpriseApplicationView({
   onOpenNavigation,
   onToggleImmersive,
   businessTaskId,
+  businessTasks,
+  onSelectConversation,
+  onDeleteConversation,
   onNewConversation,
   targetWorkspaceId,
   workspaceOptions,
@@ -263,6 +320,10 @@ export default function EnterpriseApplicationView({
     onProgress: (event: Record<string, unknown>) => void,
     fileRefs: WorkspaceFileRefV1[],
   ) => Promise<BusinessAssistantTurnResult>;
+  onResumeAI: (
+    taskId: string,
+    onProgress: (event: Record<string, unknown>) => void,
+  ) => Promise<BusinessAssistantTurnResult>;
   models: string[];
   modelAlias: string | null;
   onModelAliasChange: (modelAlias: string) => void;
@@ -270,6 +331,9 @@ export default function EnterpriseApplicationView({
   onOpenNavigation: () => void;
   onToggleImmersive: () => void;
   businessTaskId: string | null;
+  businessTasks: TerminalTask[];
+  onSelectConversation: (taskId: string) => void;
+  onDeleteConversation: (taskId: string) => Promise<void>;
   onNewConversation: () => Promise<void>;
   targetWorkspaceId: string | null;
   workspaceOptions: Array<{ value: string; label: string }>;
@@ -284,6 +348,7 @@ export default function EnterpriseApplicationView({
   const [selectedInputFileIds, setSelectedInputFileIds] = useState<string[]>([]);
   const [uploadingInput, setUploadingInput] = useState(false);
   const [creatingConversation, setCreatingConversation] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [runtimeApprovals, setRuntimeApprovals] = useState<BusinessAssistantApproval[]>([]);
   const [frameSlots, setFrameSlots] = useState<[
     EnterpriseApplicationLaunch | undefined,
@@ -300,14 +365,18 @@ export default function EnterpriseApplicationView({
   const silentRefreshRunningRef = useRef<Promise<void> | null>(null);
   const silentRefreshQueuedRef = useRef(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const resumingTaskRef = useRef<string | null>(null);
   const launch = frameSlots[activeFrameIndex];
   const [launchLoading, setLaunchLoading] = useState(true);
   const [launchError, setLaunchError] = useState<unknown>();
   const { data: restoredBusinessTask } = useQuery({
     queryKey: ['terminal-business-task', businessTaskId],
-    queryFn: () => terminal.getTask(businessTaskId!),
+    queryFn: () => terminal.getTask(businessTaskId!, application.id),
     enabled: Boolean(businessTaskId),
   });
+  const restoredBusinessTaskRunning = restoredBusinessTask?.run_status === 'queued'
+    || restoredBusinessTask?.run_status === 'running';
+  const conversationLocked = assistantRunning || restoredBusinessTaskRunning;
   const { data: availableInputFiles = [] } = useQuery<WorkspaceFileSummary[]>({
     queryKey: ['terminal-business-input-files'],
     queryFn: () => terminal.listAllWsFiles(),
@@ -342,7 +411,19 @@ export default function EnterpriseApplicationView({
         role: item.role as 'user' | 'assistant',
         content: item.content,
         artifacts: item.role === 'assistant' ? businessArtifactsFromMessage(item) : [],
+        pageKey: typeof (item.metadata?.page_context as Record<string, unknown> | undefined)?.page_key === 'string'
+          ? String((item.metadata.page_context as Record<string, unknown>).page_key)
+          : undefined,
+        pageName: typeof (item.metadata?.page_context as Record<string, unknown> | undefined)?.page_name === 'string'
+          ? String((item.metadata.page_context as Record<string, unknown>).page_name)
+          : typeof (item.metadata?.page_context as Record<string, unknown> | undefined)?.module_name === 'string'
+            ? String((item.metadata.page_context as Record<string, unknown>).module_name)
+            : undefined,
+        navigationSuggestion: item.role === 'assistant'
+          ? item.metadata?.navigation_suggestion as Record<string, unknown> | undefined
+          : undefined,
       })));
+    setRuntimeApprovals(businessApprovalsFromTask(restoredBusinessTask));
   }, [restoredBusinessTask, assistantRunning]);
 
   const updateRunningAssistant = useCallback((
@@ -563,6 +644,63 @@ export default function EnterpriseApplicationView({
     silentRefreshTimerRef.current = window.setTimeout(trigger, 160);
   }, [runSilentBridgeRefresh]);
 
+  useEffect(() => {
+    if (!businessTaskId || !restoredBusinessTaskRunning || assistantRunning) return;
+    if (resumingTaskRef.current === businessTaskId) return;
+    resumingTaskRef.current = businessTaskId;
+    const startedAt = Date.now();
+    setAssistantMessages((items) => items.some((item) => item.role === 'assistant' && item.running)
+      ? items
+      : [...items, {
+        role: 'assistant', content: '', running: true, startedAt, elapsedSeconds: 0,
+        progress: [{ key: 'reconnect', label: '正在恢复这段对话的执行进度' }],
+      }]);
+    setAssistantRunning(true);
+    void onResumeAI(businessTaskId, (event) => {
+      const liveArtifact = businessArtifactFromEvent(event);
+      updateRunningAssistant((item) => {
+        const progress = progressForAssistantEvent(event);
+        const byVersion = new Map(
+          (item.artifacts ?? []).map((artifact) => [`${artifact.fileId}:${artifact.versionId}`, artifact]),
+        );
+        if (liveArtifact) byVersion.set(`${liveArtifact.fileId}:${liveArtifact.versionId}`, liveArtifact);
+        return {
+          ...item,
+          artifacts: [...byVersion.values()],
+          progress: progress ? appendProgress(item.progress, progress) : item.progress,
+        };
+      });
+    }).then((result) => {
+      updateRunningAssistant((item) => ({
+        ...item,
+        content: result.content,
+        artifacts: result.artifacts,
+        navigationSuggestion: result.navigationSuggestion,
+        running: false,
+        failed: result.status === 'failed',
+        elapsedSeconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+      }));
+      if (result.refreshRequired) scheduleSilentRefresh();
+    }).catch((error) => {
+      updateRunningAssistant((item) => ({
+        ...item,
+        content: `执行恢复失败：${error instanceof Error ? error.message : '请稍后重试'}`,
+        running: false,
+        failed: true,
+      }));
+    }).finally(() => {
+      resumingTaskRef.current = null;
+      setAssistantRunning(false);
+    });
+  }, [
+    assistantRunning,
+    businessTaskId,
+    onResumeAI,
+    restoredBusinessTaskRunning,
+    scheduleSilentRefresh,
+    updateRunningAssistant,
+  ]);
+
   const confirmationsQuery = useQuery({
     queryKey: ['application-action-confirmations'],
     queryFn: () => terminal.applicationActionConfirmations(),
@@ -679,7 +817,14 @@ export default function EnterpriseApplicationView({
     const startedAt = Date.now();
     setAssistantMessages((items) => [
       ...items,
-      { role: 'user', content: value },
+      {
+        role: 'user',
+        content: value,
+        pageKey: typeof bridgeContext.page_key === 'string' ? bridgeContext.page_key : fallbackPageKey,
+        pageName: typeof bridgeContext.page_name === 'string'
+          ? bridgeContext.page_name
+          : typeof bridgeContext.module_name === 'string' ? bridgeContext.module_name : activeModule?.name,
+      },
       {
         role: 'assistant',
         content: '',
@@ -761,6 +906,7 @@ export default function EnterpriseApplicationView({
         ...item,
         content: result.content || (result.status === 'completed' ? '操作已完成。' : '执行未完成，请稍后重试。'),
         artifacts: result.artifacts,
+        navigationSuggestion: result.navigationSuggestion,
         running: false,
         failed: result.status === 'failed',
         elapsedSeconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
@@ -899,21 +1045,88 @@ export default function EnterpriseApplicationView({
 
       <Drawer
         title={<Space><RobotOutlined style={{ color: '#6366f1' }} />{application.name} · 业务小助手</Space>}
-        extra={<Button size="small" loading={creatingConversation} disabled={assistantRunning} onClick={async () => {
-          setCreatingConversation(true);
-          try {
-            await onNewConversation();
-            setAssistantMessages([]);
-            setSelectedInputFileIds([]);
-            setRuntimeApprovals([]);
-          } catch (error) {
-            message.error(error instanceof Error ? error.message : '新建对话失败');
-          } finally {
-            setCreatingConversation(false);
-          }
-        }}>新建对话</Button>}
+        extra={<Space>
+          <Button size="small" icon={<HistoryOutlined />} disabled={conversationLocked} onClick={() => setHistoryOpen((value) => !value)}>历史对话</Button>
+          <Button size="small" loading={creatingConversation} disabled={conversationLocked} onClick={async () => {
+            setCreatingConversation(true);
+            try {
+              await onNewConversation();
+              setAssistantMessages([]);
+              setSelectedInputFileIds([]);
+              setRuntimeApprovals([]);
+              setHistoryOpen(false);
+            } catch (error) {
+              message.error(error instanceof Error ? error.message : '新建对话失败');
+            } finally {
+              setCreatingConversation(false);
+            }
+          }}>新建对话</Button>
+        </Space>}
         open={assistantOpen} onClose={() => setAssistantOpen(false)} width={420}
       >
+        {historyOpen && <Card size="small" title="当前应用的历史对话" style={{ marginBottom: 16 }}>
+          {businessTasks.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无历史对话" /> : (
+            <div style={{ display: 'grid', gap: 8 }}>
+              {businessTasks.map((task) => {
+                const page = task.last_page_context ?? {};
+                const pageName = typeof page.page_name === 'string'
+                  ? page.page_name
+                  : typeof page.module_name === 'string' ? page.module_name : '未记录页面';
+                const running = task.run_status === 'queued' || task.run_status === 'running';
+                return <div
+                  key={task.id}
+                  style={{
+                    border: task.id === businessTaskId ? '1px solid #818cf8' : '1px solid #e5e7eb',
+                    borderRadius: 8,
+                    padding: 10,
+                    cursor: conversationLocked ? 'not-allowed' : 'pointer',
+                    background: task.id === businessTaskId ? '#eef2ff' : '#fff',
+                  }}
+                  onClick={() => {
+                    if (conversationLocked || task.id === businessTaskId) return;
+                    onSelectConversation(task.id);
+                    setSelectedInputFileIds([]);
+                    setRuntimeApprovals([]);
+                  }}
+                >
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <Typography.Text strong ellipsis style={{ display: 'block' }}>{task.title || '未命名对话'}</Typography.Text>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        {new Date(task.updated_at).toLocaleString('zh-CN', { hour12: false })} · {pageName}
+                      </Typography.Text>
+                      <div style={{ marginTop: 4 }}>
+                        {running && <Tag color="processing">执行中</Tag>}
+                        <Tag>{task.artifact_count ?? 0} 个文件</Tag>
+                      </div>
+                    </div>
+                    <Popconfirm
+                      title="删除这段对话？"
+                      description="只删除对话引用，已交付到工作空间的文件会保留。"
+                      okText="删除"
+                      cancelText="取消"
+                      disabled={conversationLocked || running}
+                      onConfirm={async (event) => {
+                        event?.stopPropagation();
+                        await onDeleteConversation(task.id);
+                      }}
+                    >
+                      <Button
+                        type="text"
+                        danger
+                        size="small"
+                        aria-label={`删除对话 ${task.title}`}
+                        icon={<DeleteOutlined />}
+                        disabled={conversationLocked || running}
+                        onClick={(event) => event.stopPropagation()}
+                      />
+                    </Popconfirm>
+                  </div>
+                </div>;
+              })}
+            </div>
+          )}
+        </Card>}
         <Alert
           showIcon type="info"
           message={typeof bridgeContext.module_name === 'string' ? `已连接当前模块：${bridgeContext.module_name}` : '助手会携带当前应用上下文'}
@@ -1015,7 +1228,10 @@ export default function EnterpriseApplicationView({
                   marginRight: item.role === 'assistant' ? 28 : 0,
                 }}
               >
-                <Typography.Text strong>{item.role === 'user' ? '我' : '业务小助手'}</Typography.Text>
+                <Space size={6} wrap>
+                  <Typography.Text strong>{item.role === 'user' ? '我' : '业务小助手'}</Typography.Text>
+                  {item.pageName && <Tag style={{ marginInlineEnd: 0 }}>当时页面：{item.pageName}</Tag>}
+                </Space>
                 {item.role === 'assistant' && item.progress?.length ? (
                   <div
                     className={`business-assistant-progress${item.failed ? ' business-assistant-progress--failed' : ''}`}
@@ -1049,6 +1265,18 @@ export default function EnterpriseApplicationView({
                 {item.content && item.role === 'assistant' ? (
                   <div className="business-assistant-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown></div>
                 ) : item.content ? <Typography.Paragraph style={{ margin: '8px 0 0' }}>{item.content}</Typography.Paragraph> : null}
+                {item.role === 'assistant' && item.navigationSuggestion && typeof item.navigationSuggestion.moduleKey === 'string' && (
+                  <Button
+                    size="small"
+                    type="link"
+                    style={{ paddingInline: 0, marginTop: 8 }}
+                    onClick={() => onModuleChange(String(item.navigationSuggestion?.moduleKey))}
+                  >
+                    前往{typeof item.navigationSuggestion.pageName === 'string'
+                      ? `「${item.navigationSuggestion.pageName}」`
+                      : '建议页面'}
+                  </Button>
+                )}
                 {!!item.artifacts?.length && <section aria-label="本轮交付文件" style={{ display: 'grid', gap: 8, marginTop: 10 }}>
                   {item.artifacts.map((artifact) => <Card
                     key={`${artifact.fileId}:${artifact.versionId}`}
@@ -1075,8 +1303,14 @@ export default function EnterpriseApplicationView({
         <Space direction="vertical" style={{ width: '100%', marginBottom: 16 }}>
           {['汇总当前页面异常并给出处理建议', '查询今天待处理的业务记录', '根据当前业务数据生成一份 Excel'].map((item) => <Button key={item} block style={{ textAlign: 'left' }} onClick={() => setPrompt(item)}>{item}</Button>)}
         </Space>
-        <Input.TextArea value={prompt} disabled={assistantRunning} onChange={(event) => setPrompt(event.target.value)} rows={6} placeholder="描述你要查询或执行的业务任务…" onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); void submit(); } }} />
-        <Button type="primary" block icon={<SendOutlined />} loading={assistantRunning} disabled={!prompt.trim()} onClick={() => void submit()} style={{ marginTop: 12 }}>在当前页面执行</Button>
+        {restoredBusinessTaskRunning && <Alert
+          type="info"
+          showIcon
+          message="这段对话仍在执行，暂时不能切换或继续发送。刷新页面后会保留已有记录。"
+          style={{ marginBottom: 12 }}
+        />}
+        <Input.TextArea value={prompt} disabled={conversationLocked} onChange={(event) => setPrompt(event.target.value)} rows={6} placeholder="描述你要查询或执行的业务任务…" onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); void submit(); } }} />
+        <Button type="primary" block icon={<SendOutlined />} loading={assistantRunning} disabled={conversationLocked || !prompt.trim()} onClick={() => void submit()} style={{ marginTop: 12 }}>在当前页面执行</Button>
       </Drawer>
     </div>
   );

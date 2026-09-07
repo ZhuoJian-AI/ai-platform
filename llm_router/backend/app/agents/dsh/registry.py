@@ -124,6 +124,11 @@ def _resolve(context: DshRunContext, approval_id: str, outcome: str, decided_by:
     if record is None or record.future.done():
         return False
     record.future.set_result((outcome, decided_by))
+    for approval in context.state.setdefault("business_approvals", []):
+        if approval.get("approvalId") == approval_id:
+            approval["outcome"] = outcome
+            approval["decidedBy"] = decided_by
+            break
     context.state.setdefault("steps", []).append({
         "step": "approval", "tool": record.tool, "outcome": outcome, "decided_by": decided_by,
     })
@@ -163,6 +168,15 @@ async def await_approval(
         context.approvals[approval_id] = record
         _approval_contexts[approval_id] = context
         expires_at = datetime.now(UTC) + timedelta(milliseconds=timeout_ms)
+        context.state.setdefault("business_approvals", []).append({
+            "approvalId": approval_id,
+            "tool": tool,
+            "callId": call_id,
+            "reason": reason,
+            "argumentsPreview": arguments_preview,
+            "expiresAt": expires_at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "runId": context.state.get("run_id"),
+        })
         publish_event(context, {
             "type": "approval_request", "approval_id": approval_id, "tool": tool, "call_id": call_id,
             "reason": reason, "arguments_preview": arguments_preview,
