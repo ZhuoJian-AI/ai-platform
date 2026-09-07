@@ -610,6 +610,7 @@ async def classify_business_turn(
             max_tokens=900,
             tools=None if json_compatibility_mode else [_intent_tool()],
             tool_choice=None if json_compatibility_mode else "classify_business_turn",
+            disable_thinking=True,
             dept_id=department_id,
         )
         usage["input_tokens"] += int((result.usage or {}).get("input_tokens") or 0)

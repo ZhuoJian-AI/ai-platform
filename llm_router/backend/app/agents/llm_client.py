@@ -210,6 +210,7 @@ def _build_chat_body(
     tools: list[dict] | None,
     stream: bool,
     tool_choice: str | None = None,
+    disable_thinking: bool = False,
 ) -> dict:
     """按 provider 协议构造 chat 请求体。messages 为 OpenAI 风格 [{role, content, tool_calls?}]。"""
     tools = prepare_tools_for_provider(provider, tools)
@@ -249,7 +250,7 @@ def _build_chat_body(
     # 推理模型的思考期是纯等待（DeepSeek v4 系先想数秒再吐字）。对延迟敏感的
     # 部署可按模型显式关掉：CHAT_THINKING_DISABLED_MODELS=deepseek-v4-flash,...
     # 默认为空，不改变任何现有行为。仅 OpenAI 风格通道生效。
-    if model in _THINKING_DISABLED_MODELS:
+    if disable_thinking or model in _THINKING_DISABLED_MODELS:
         body["thinking"] = {"type": "disabled"}
     if temperature is not None:
         body["temperature"] = temperature
@@ -399,6 +400,7 @@ async def chat(
     max_tokens: int | None = None,
     tools: list[dict] | None = None,
     tool_choice: str | None = None,
+    disable_thinking: bool = False,
     dept_id: str | UUID | None = None,
     team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
@@ -420,6 +422,7 @@ async def chat(
         tools,
         stream=False,
         tool_choice=tool_choice,
+        disable_thinking=disable_thinking,
     )
 
     async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
@@ -436,6 +439,7 @@ async def chat(
                 tools,
                 stream=False,
                 tool_choice=None,
+                disable_thinking=disable_thinking,
             )
             logger.info(
                 "llm_tool_choice_compat_retry",

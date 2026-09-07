@@ -1067,6 +1067,7 @@ async def _chat_with_deployment(
         max_tokens=kwargs.get("max_tokens"),
         tools=kwargs.get("tools"),
         tool_choice=kwargs.get("tool_choice"),
+        disable_thinking=bool(kwargs.get("disable_thinking", False)),
         provider_override=effective_provider(provider, deployment),
         model_override=deployment.model_id,
     )
@@ -1083,6 +1084,7 @@ async def _chat_unmetered(
     max_tokens: int | None = None,
     tools: list[dict] | None = None,
     tool_choice: str | None = None,
+    disable_thinking: bool = False,
     dept_id: str | UUID | None = None,
     team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
@@ -1104,6 +1106,7 @@ async def _chat_unmetered(
                     max_tokens=max_tokens,
                     tools=tools,
                     tool_choice=tool_choice,
+                    disable_thinking=disable_thinking,
                 )
         return await legacy_client.chat(
             db,
@@ -1115,6 +1118,7 @@ async def _chat_unmetered(
             max_tokens=max_tokens,
             tools=tools,
             tool_choice=tool_choice,
+            disable_thinking=disable_thinking,
             provider_override=provider_override,
             model_override=model_override,
         )
@@ -1145,6 +1149,7 @@ async def _chat_unmetered(
             max_tokens=max_tokens,
             tools=tools,
             tool_choice=tool_choice,
+            disable_thinking=disable_thinking,
             dept_id=dept_id,
             team_id=team_id,
         )
@@ -1162,6 +1167,7 @@ async def _chat_unmetered(
                 max_tokens=max_tokens,
                 tools=tools,
                 tool_choice=tool_choice,
+                disable_thinking=disable_thinking,
             )
         except Exception as exc:
             last_error = exc
@@ -1182,6 +1188,7 @@ async def chat(
     max_tokens: int | None = None,
     tools: list[dict] | None = None,
     tool_choice: str | None = None,
+    disable_thinking: bool = False,
     dept_id: str | UUID | None = None,
     team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
@@ -1197,6 +1204,7 @@ async def chat(
             "system": system_prompt,
             "tools": tools,
             "tool_choice": tool_choice,
+            "disable_thinking": disable_thinking,
         },
         max_output_tokens=bounded_max,
         dept_id=dept_id,
@@ -1216,6 +1224,7 @@ async def chat(
             max_tokens=bounded_max,
             tools=tools,
             tool_choice=tool_choice,
+            disable_thinking=disable_thinking,
             dept_id=dept_id,
             team_id=team_id,
             provider_override=provider_override,
