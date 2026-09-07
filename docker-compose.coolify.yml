@@ -187,7 +187,7 @@ services:
         limits: { cpus: "1.00", memory: 1G, pids: 256 }
 
   backend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bf150891e7abc4501cb5accf3ed794328b08996d85fc2f0e75b09be7d9a668d4
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5525c253dc8d07e309fb8f4e7fb63a8c37bb16f4a62d50a6c25b01faee3d68d8
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -308,7 +308,7 @@ services:
         limits: { cpus: "1.50", memory: 2560M }
 
   workspace-parser:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bf150891e7abc4501cb5accf3ed794328b08996d85fc2f0e75b09be7d9a668d4
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5525c253dc8d07e309fb8f4e7fb63a8c37bb16f4a62d50a6c25b01faee3d68d8
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -410,7 +410,7 @@ services:
         limits: { cpus: "1.00", memory: 2G, pids: 256 }
 
   office-edit-reconcile:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bf150891e7abc4501cb5accf3ed794328b08996d85fc2f0e75b09be7d9a668d4
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5525c253dc8d07e309fb8f4e7fb63a8c37bb16f4a62d50a6c25b01faee3d68d8
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -460,7 +460,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   storage-lifecycle:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bf150891e7abc4501cb5accf3ed794328b08996d85fc2f0e75b09be7d9a668d4
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5525c253dc8d07e309fb8f4e7fb63a8c37bb16f4a62d50a6c25b01faee3d68d8
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -512,7 +512,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   multimodal-worker:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bf150891e7abc4501cb5accf3ed794328b08996d85fc2f0e75b09be7d9a668d4
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:5525c253dc8d07e309fb8f4e7fb63a8c37bb16f4a62d50a6c25b01faee3d68d8
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -566,7 +566,7 @@ services:
         limits: { cpus: "1.00", memory: 1536M, pids: 256 }
 
   frontend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:62500ff13382fcb8dca9d907561f4f422730bb904b9d77eed71aae2419b106cc
+    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:db9b8b9bea6d7dfd5f3d46666e8c567ec203729018a2675a5f55426e9e782c85
     labels:
       # Coolify also attaches its public application network. Pin Traefik to
       # that network so it never selects the private Compose default network.
