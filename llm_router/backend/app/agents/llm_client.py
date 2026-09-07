@@ -209,6 +209,7 @@ def _build_chat_body(
     max_tokens: int | None,
     tools: list[dict] | None,
     stream: bool,
+    tool_choice: str | None = None,
 ) -> dict:
     """按 provider 协议构造 chat 请求体。messages 为 OpenAI 风格 [{role, content, tool_calls?}]。"""
     tools = prepare_tools_for_provider(provider, tools)
@@ -232,6 +233,10 @@ def _build_chat_body(
                 }
                 for t in tools
             ]
+            if tool_choice:
+                if tool_choice not in {item["name"] for item in body["tools"]}:
+                    raise ValueError("tool_choice must reference an available tool")
+                body["tool_choice"] = {"type": "tool", "name": tool_choice}
         if stream:
             body["stream"] = True
         return body
@@ -252,6 +257,17 @@ def _build_chat_body(
         body["max_tokens"] = max_tokens
     if tools:
         body["tools"] = tools
+        if tool_choice:
+            available_names = {
+                str((item.get("function") or {}).get("name") or "")
+                for item in tools
+            }
+            if tool_choice not in available_names:
+                raise ValueError("tool_choice must reference an available tool")
+            body["tool_choice"] = {
+                "type": "function",
+                "function": {"name": tool_choice},
+            }
     if stream:
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
@@ -356,6 +372,7 @@ async def chat(
     temperature: float | None = None,
     max_tokens: int | None = None,
     tools: list[dict] | None = None,
+    tool_choice: str | None = None,
     dept_id: str | UUID | None = None,
     team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
@@ -367,7 +384,17 @@ async def chat(
     else:
         provider, model = await _resolve(db, org_id, model_alias, dept_id=dept_id, team_id=team_id)
     api_key = await get_decrypted_api_key(provider)
-    body = _build_chat_body(provider, model, messages, system_prompt, temperature, max_tokens, tools, stream=False)
+    body = _build_chat_body(
+        provider,
+        model,
+        messages,
+        system_prompt,
+        temperature,
+        max_tokens,
+        tools,
+        stream=False,
+        tool_choice=tool_choice,
+    )
 
     async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
         resp = await client.post(_chat_url(provider), headers=_auth_headers(provider, api_key), json=body)

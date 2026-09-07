@@ -100,6 +100,7 @@ def _tool_result(arguments: dict):
 @pytest.mark.asyncio
 async def test_structured_query_intent_is_validated_and_keeps_current_page(monkeypatch):
     async def fake_chat(*args, **kwargs):
+        assert kwargs["tool_choice"] == "classify_business_turn"
         return _tool_result({
             "intent": "query",
             "target": {"entityType": "production_order", "entityIds": []},
@@ -129,6 +130,64 @@ async def test_structured_query_intent_is_validated_and_keeps_current_page(monke
     assert intent.query.filters[0].field == "risk"
     assert intent.query.filters[0].value == "severe"
     assert usage == {"input_tokens": 11, "output_tokens": 7}
+    assert attempts == [{"attempt": 1, "status": "valid"}]
+
+
+@pytest.mark.asyncio
+async def test_structured_intent_fills_protocol_defaults_without_keyword_routing(monkeypatch):
+    async def fake_chat(*args, **kwargs):
+        return _tool_result({
+            "intent": "export_file",
+            "target": {"entityIds": None},
+            "query": {"filters": None, "sort": None, "aggregation": None},
+        })
+
+    monkeypatch.setattr(orchestration.model_gateway, "chat", fake_chat)
+    envelope = _envelope()
+    envelope.authorized_actions.append({
+        "moduleKey": "progress_dashboard",
+        "pageKey": "progress_dashboard.main",
+        "actionKey": "progress_dashboard.export",
+        "name": "导出进度",
+        "description": "",
+        "operation": "export",
+        "requiresConfirmation": False,
+    })
+    intent, _usage, attempts = await orchestration.classify_business_turn(
+        object(),
+        envelope=envelope,
+        request_text="请生成文件",
+        model_alias="default",
+        department_id=None,
+    )
+    assert intent.intent == "export_file"
+    assert intent.expected_output == "artifact"
+    assert intent.requires_live_data is True
+    assert intent.target.entity_ids == []
+    assert intent.query.filters == []
+    assert attempts == [{"attempt": 1, "status": "valid"}]
+
+
+@pytest.mark.asyncio
+async def test_structured_intent_accepts_valid_json_content_for_compatible_provider(monkeypatch):
+    async def fake_chat(*args, **kwargs):
+        return SimpleNamespace(
+            content=json.dumps({"intent": "explain_page"}),
+            tool_calls=[],
+            usage={"input_tokens": 4, "output_tokens": 2},
+        )
+
+    monkeypatch.setattr(orchestration.model_gateway, "chat", fake_chat)
+    intent, _usage, attempts = await orchestration.classify_business_turn(
+        object(),
+        envelope=_envelope(),
+        request_text="这个页面有什么用",
+        model_alias="default",
+        department_id=None,
+    )
+    assert intent.intent == "explain_page"
+    assert intent.requires_live_data is False
+    assert intent.expected_output == "text"
     assert attempts == [{"attempt": 1, "status": "valid"}]
 
 
