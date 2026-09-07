@@ -192,6 +192,31 @@ async def test_structured_intent_accepts_valid_json_content_for_compatible_provi
     assert attempts == [{"attempt": 1, "status": "valid"}]
 
 
+@pytest.mark.asyncio
+async def test_protocol_fields_are_derived_from_structured_intent(monkeypatch):
+    async def fake_chat(*args, **kwargs):
+        return _tool_result({
+            "intent": "explain_page",
+            "requiresLiveData": True,
+            "requiresConfirmation": True,
+            "expectedOutput": "artifact",
+        })
+
+    monkeypatch.setattr(orchestration.model_gateway, "chat", fake_chat)
+    intent, _usage, attempts = await orchestration.classify_business_turn(
+        object(),
+        envelope=_envelope(),
+        request_text="当前页面是干嘛的？",
+        model_alias="default",
+        department_id=None,
+    )
+    assert intent.intent == "explain_page"
+    assert intent.requires_live_data is False
+    assert intent.requires_confirmation is False
+    assert intent.expected_output == "text"
+    assert attempts == [{"attempt": 1, "status": "valid"}]
+
+
 def test_cross_page_mutation_is_downgraded_to_navigation():
     envelope = _envelope()
     intent = orchestration.BusinessTurnIntent.model_validate({
@@ -236,6 +261,42 @@ async def test_invalid_structured_intent_retries_once_then_clarifies(monkeypatch
     assert intent.clarification_question
     assert usage == {"input_tokens": 22, "output_tokens": 14}
     assert [item["status"] for item in attempts] == ["invalid", "invalid"]
+
+
+@pytest.mark.asyncio
+async def test_validation_retry_receives_actionable_field_reason(monkeypatch):
+    calls = 0
+
+    async def fake_chat(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _tool_result({
+                "intent": "query",
+                "query": {
+                    "filters": [{"field": "risk", "operator": "eq", "value": None}],
+                },
+            })
+        correction = args[3][-1]["content"]
+        assert "query.filters.0" in correction
+        assert "comparison filter requires value" in correction
+        return _tool_result({
+            "intent": "query",
+            "query": {"filters": []},
+        })
+
+    monkeypatch.setattr(orchestration.model_gateway, "chat", fake_chat)
+    intent, _usage, attempts = await orchestration.classify_business_turn(
+        object(),
+        envelope=_envelope(),
+        request_text="查询当前风险订单",
+        model_alias="default",
+        department_id=None,
+    )
+    assert intent.intent == "query"
+    assert calls == 2
+    assert attempts[0]["reason"].startswith("query.filters.0")
+    assert attempts[1] == {"attempt": 2, "status": "valid"}
 
 
 def test_ai_semantics_is_closed_and_default_query_must_be_real():
