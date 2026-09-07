@@ -404,6 +404,19 @@ def _normalize_intent_payload(payload: Any) -> dict[str, Any]:
     for field in ("filters", "sort", "aggregation"):
         if query.get(field) is None:
             query[field] = []
+    # OpenAI-compatible providers commonly materialize every optional object
+    # from the JSON Schema and fill its optional leaves with null.  Such an
+    # object means "no time range"; treating it as an invalid range turns a
+    # valid page explanation (which never uses query fields) into a needless
+    # clarification.  Only collapse the unambiguous empty shape.  Partially
+    # populated or unknown shapes still go through the closed-schema validator.
+    time_range = query.get("timeRange")
+    if isinstance(time_range, dict):
+        known_fields = {"start", "end", "relative"}
+        if set(time_range).issubset(known_fields) and all(
+            time_range.get(field) in (None, "") for field in known_fields
+        ):
+            query["timeRange"] = None
     # Some OpenAI-compatible providers serialize a single JSON-Schema array
     # item as a scalar even when strict tool mode was requested.  ``groupBy``
     # is descriptive query shape only (never identity, authorization, or a
