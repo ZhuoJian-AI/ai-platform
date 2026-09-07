@@ -27,6 +27,16 @@ try {
   assert.equal(selected?.data_version, 3);
   assert.deepEqual(selected?.selection, { id: 'SR-1', status: 'approved' });
 
+  const pageWithoutSelectedEntity = parseBridgeContext({
+    type: 'zhuojian:context', version: 1, application_slug: 'sample-review',
+    launch_nonce: expected.launchNonce,
+    module_key: 'sample_review', page_key: 'sample_review.list',
+    entity_type: '', entity_id: '', filters: {}, selection: {},
+  }, expected);
+  assert.equal(pageWithoutSelectedEntity?.module_key, 'sample_review');
+  assert.equal('entity_type' in (pageWithoutSelectedEntity ?? {}), false);
+  assert.equal('entity_id' in (pageWithoutSelectedEntity ?? {}), false);
+
   assert.equal(parseBridgeContext({
     type: 'zhuojian:context', version: 1, application_slug: 'other',
     launch_nonce: expected.launchNonce, data_version: 3,

@@ -91,12 +91,13 @@ export function parseBridgeContext(value: unknown, expected: BridgeExpectation):
     const item = value[key];
     if (item === undefined || item === null) continue;
     if (typeof item !== 'string' || item.length > 1_000) return null;
-    if ((key === 'module_key' || key === 'page_key' || key === 'entity_type') && !BRIDGE_KEY_PATTERN.test(item)) return null;
+    if ((key === 'module_key' || key === 'page_key') && !BRIDGE_KEY_PATTERN.test(item)) return null;
+    if (key === 'entity_type' && item && !BRIDGE_KEY_PATTERN.test(item)) return null;
     if (key === 'route' && !isSafeRoute(item)) return null;
     // The enterprise identity always comes from the authenticated host
     // session. A child frame may describe it, but must never override it.
     if (key === 'enterprise_key') continue;
-    context[key] = item;
+    if (item || (key !== 'entity_type' && key !== 'entity_id')) context[key] = item;
   }
   for (const key of ['filters', 'selection']) {
     const item = value[key];
