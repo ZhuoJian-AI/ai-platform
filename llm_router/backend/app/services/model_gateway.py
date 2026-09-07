@@ -976,6 +976,7 @@ async def _responses_chat(
     temperature: float | None,
     max_tokens: int | None,
     tools: list[dict] | None,
+    tool_choice: str | None = None,
 ) -> LlmResult:
     api_key = await get_decrypted_api_key(provider)
     path = _safe_endpoint_path(deployment.endpoint_path or "/responses", "Responses API")
@@ -992,6 +993,10 @@ async def _responses_chat(
     response_tools = _responses_tools(provider, tools)
     if response_tools:
         body["tools"] = response_tools
+        if tool_choice:
+            if tool_choice not in {str(item.get("name") or "") for item in response_tools}:
+                raise ValueError("tool_choice must reference an available tool")
+            body["tool_choice"] = {"type": "function", "name": tool_choice}
     async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
         response = await client.post(
             f"{provider.base_url.rstrip('/')}{path}",
@@ -1050,6 +1055,7 @@ async def _chat_with_deployment(
             temperature=kwargs.get("temperature"),
             max_tokens=kwargs.get("max_tokens"),
             tools=kwargs.get("tools"),
+            tool_choice=kwargs.get("tool_choice"),
         )
     return await legacy_client.chat(
         db,
@@ -1060,6 +1066,7 @@ async def _chat_with_deployment(
         temperature=kwargs.get("temperature"),
         max_tokens=kwargs.get("max_tokens"),
         tools=kwargs.get("tools"),
+        tool_choice=kwargs.get("tool_choice"),
         provider_override=effective_provider(provider, deployment),
         model_override=deployment.model_id,
     )
@@ -1075,6 +1082,7 @@ async def _chat_unmetered(
     temperature: float | None = None,
     max_tokens: int | None = None,
     tools: list[dict] | None = None,
+    tool_choice: str | None = None,
     dept_id: str | UUID | None = None,
     team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
@@ -1095,6 +1103,7 @@ async def _chat_unmetered(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     tools=tools,
+                    tool_choice=tool_choice,
                 )
         return await legacy_client.chat(
             db,
@@ -1105,6 +1114,7 @@ async def _chat_unmetered(
             temperature=temperature,
             max_tokens=max_tokens,
             tools=tools,
+            tool_choice=tool_choice,
             provider_override=provider_override,
             model_override=model_override,
         )
@@ -1134,6 +1144,7 @@ async def _chat_unmetered(
             temperature=temperature,
             max_tokens=max_tokens,
             tools=tools,
+            tool_choice=tool_choice,
             dept_id=dept_id,
             team_id=team_id,
         )
@@ -1150,6 +1161,7 @@ async def _chat_unmetered(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tools=tools,
+                tool_choice=tool_choice,
             )
         except Exception as exc:
             last_error = exc
@@ -1169,6 +1181,7 @@ async def chat(
     temperature: float | None = None,
     max_tokens: int | None = None,
     tools: list[dict] | None = None,
+    tool_choice: str | None = None,
     dept_id: str | UUID | None = None,
     team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
@@ -1183,6 +1196,7 @@ async def chat(
             "messages": messages,
             "system": system_prompt,
             "tools": tools,
+            "tool_choice": tool_choice,
         },
         max_output_tokens=bounded_max,
         dept_id=dept_id,
@@ -1201,6 +1215,7 @@ async def chat(
             temperature=temperature,
             max_tokens=bounded_max,
             tools=tools,
+            tool_choice=tool_choice,
             dept_id=dept_id,
             team_id=team_id,
             provider_override=provider_override,

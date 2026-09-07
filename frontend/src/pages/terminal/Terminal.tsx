@@ -56,6 +56,7 @@ import {
 } from '../../utils/workspacePresentation';
 import { parseWorkspaceInternalUrl, workspaceFileLabel, workspaceInternalPath } from '../../utils/workspaceFileLinks';
 import { useWorkspaceFileEvents } from '../../hooks/useWorkspaceFileEvents';
+import { resolveBusinessConversationId } from '../../utils/businessConversation';
 
 /** WorkBuddy 配色（参考 HTML 的 tailwind theme）。 */
 const WB = {
@@ -618,11 +619,12 @@ export default function Terminal() {
     queryFn: () => terminal.listTasks({ applicationId: selectedApplication!.id, limit: 100 }),
     enabled: Boolean(selectedApplication),
   });
-  const selectedBusinessTaskId = selectedApplication ? (
-    Object.prototype.hasOwnProperty.call(businessTaskSelection, selectedApplication.id)
-      ? businessTaskSelection[selectedApplication.id]
-      : (businessTasks ?? []).find((task) => task.config?.application_id === selectedApplication.id)?.id ?? null
-  ) : null;
+  const selectedBusinessTaskId = resolveBusinessConversationId(
+    selectedApplicationId,
+    Boolean(selectedApplication),
+    businessTaskSelection,
+    businessTasks ?? [],
+  );
   const selectedBusinessWorkspaceId = selectedApplication ? (
     businessWorkspaceSelection[selectedApplication.id]
       ?? resources?.defaults?.workspace_id
