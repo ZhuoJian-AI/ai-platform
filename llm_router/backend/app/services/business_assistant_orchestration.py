@@ -373,7 +373,12 @@ def _tool_call_arguments(call: dict[str, Any]) -> str:
 
 
 def _normalize_intent_payload(payload: Any) -> dict[str, Any]:
-    """Fill protocol defaults without guessing the user's business intent."""
+    """Canonicalize protocol fields after the model has selected an intent.
+
+    Live-data and output requirements are protocol invariants, not model
+    policy decisions.  Deriving them here keeps compatible providers from
+    failing a whole turn merely because they repeated a contradictory value.
+    """
 
     if not isinstance(payload, dict):
         raise ValueError("结构化意图必须是 JSON 对象")
@@ -422,15 +427,28 @@ def _normalize_intent_payload(payload: Any) -> dict[str, Any]:
         "clarify": "text",
     }
     if intent_name in live_data_defaults:
-        if normalized.get("requiresLiveData") is None:
-            normalized["requiresLiveData"] = live_data_defaults[intent_name]
-        if normalized.get("requiresConfirmation") is None:
-            normalized["requiresConfirmation"] = False
-        if normalized.get("expectedOutput") is None:
-            normalized["expectedOutput"] = output_defaults[intent_name]
+        normalized["requiresLiveData"] = live_data_defaults[intent_name]
+        # Confirmation is derived again from the authorized Action metadata
+        # in _validate_intent_target; the model cannot weaken or expand it.
+        normalized["requiresConfirmation"] = False
+        normalized["expectedOutput"] = output_defaults[intent_name]
         if intent_name == "clarify" and not normalized.get("clarificationQuestion"):
             normalized["clarificationQuestion"] = "请补充要处理的业务对象和期望结果。"
     return normalized
+
+
+def _safe_intent_validation_reason(exc: Exception) -> str:
+    """Return actionable validation feedback without echoing model input."""
+
+    if isinstance(exc, ValidationError):
+        reasons: list[str] = []
+        for issue in exc.errors(include_url=False, include_input=False)[:5]:
+            location = ".".join(str(item) for item in issue.get("loc") or ()) or "intent"
+            message = str(issue.get("msg") or "结构化字段无效")
+            reasons.append(f"{location}: {message}")
+        if reasons:
+            return "; ".join(reasons)[:500]
+    return str(exc).splitlines()[0][:500]
 
 
 def _structured_intent_payload(result: Any) -> dict[str, Any]:
@@ -579,7 +597,7 @@ async def classify_business_turn(
             attempts.append({"attempt": attempt + 1, "status": "valid"})
             return intent, usage, attempts
         except (ValidationError, ValueError, json.JSONDecodeError) as exc:
-            safe_reason = str(exc).splitlines()[0][:240]
+            safe_reason = _safe_intent_validation_reason(exc)
             attempts.append({"attempt": attempt + 1, "status": "invalid", "reason": safe_reason})
             correction = f"上次结构化结果无效：{safe_reason}。请只调用工具并修正参数。"
             logger.info("business_intent_invalid", attempt=attempt + 1, reason=safe_reason)
