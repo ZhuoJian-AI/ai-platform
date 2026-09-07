@@ -295,6 +295,30 @@ async def test_single_group_by_from_compatible_provider_is_canonicalized(monkeyp
     assert attempts == [{"attempt": 1, "status": "valid"}]
 
 
+@pytest.mark.asyncio
+async def test_empty_optional_time_range_from_compatible_provider_is_canonicalized(monkeypatch):
+    async def fake_chat(*args, **kwargs):
+        return _tool_result({
+            "intent": "explain_page",
+            "query": {
+                "timeRange": {"start": None, "end": None, "relative": None},
+            },
+        })
+
+    monkeypatch.setattr(orchestration.model_gateway, "chat", fake_chat)
+    intent, _usage, attempts = await orchestration.classify_business_turn(
+        object(),
+        envelope=_envelope(),
+        request_text="当前页面是干嘛的？",
+        model_alias="default",
+        department_id=None,
+    )
+    assert intent.intent == "explain_page"
+    assert intent.query.time_range is None
+    assert intent.requires_live_data is False
+    assert attempts == [{"attempt": 1, "status": "valid"}]
+
+
 def test_cross_page_mutation_is_downgraded_to_navigation():
     envelope = _envelope()
     intent = orchestration.BusinessTurnIntent.model_validate({
