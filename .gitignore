@@ -57,5 +57,7 @@ Thumbs.db
 *.swp
 *.swo
 
-# ── Claude Code 本地工具配置（机器相关，不入库）──────────────────
-.claude/
+# ── Claude Code 本地工具配置（共享定义可入库，机器状态不入库）────────
+.claude/settings.local.json
+.claude/*.lock
+.claude/worktrees/

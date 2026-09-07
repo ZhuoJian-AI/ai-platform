@@ -1,0 +1,4 @@
+* @ZhuoJian-AI/developers
+/llm_router/backend/alembic/ @ZhuoJian-AI/developers
+/llm_router/backend/app/auth/ @ZhuoJian-AI/developers
+/llm_router/backend/app/services/role_permission_service.py @ZhuoJian-AI/developers
