@@ -193,6 +193,54 @@ async def test_structured_intent_accepts_valid_json_content_for_compatible_provi
 
 
 @pytest.mark.asyncio
+async def test_missing_tool_result_retries_through_validated_json_channel(monkeypatch):
+    calls = 0
+
+    async def fake_chat(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            assert kwargs["tool_choice"] == "classify_business_turn"
+            assert kwargs["tools"]
+            return SimpleNamespace(
+                content="",
+                tool_calls=[],
+                usage={"input_tokens": 4, "output_tokens": 1},
+            )
+        assert kwargs["tool_choice"] is None
+        assert kwargs["tools"] is None
+        assert "兼容 JSON 通道" in kwargs["system_prompt"]
+        assert "不要调用工具" in args[3][-1]["content"]
+        return SimpleNamespace(
+            content=json.dumps({
+                "intent": "query",
+                "target": {"entityType": "production_order"},
+                "query": {
+                    "filters": [{"field": "risk", "operator": "eq", "value": "严重"}],
+                    "aggregation": [{"function": "count", "field": "orderId"}],
+                },
+            }, ensure_ascii=False),
+            tool_calls=[],
+            usage={"input_tokens": 9, "output_tokens": 6},
+        )
+
+    monkeypatch.setattr(orchestration.model_gateway, "chat", fake_chat)
+    intent, usage, attempts = await orchestration.classify_business_turn(
+        object(),
+        envelope=_envelope(),
+        request_text="当前有多少风险订单？",
+        model_alias="default",
+        department_id=None,
+    )
+    assert calls == 2
+    assert intent.intent == "query"
+    assert intent.query.aggregation[0].function == "count"
+    assert usage == {"input_tokens": 13, "output_tokens": 7}
+    assert attempts[0]["reason"] == "模型没有返回唯一的结构化意图"
+    assert attempts[1] == {"attempt": 2, "status": "valid"}
+
+
+@pytest.mark.asyncio
 async def test_protocol_fields_are_derived_from_structured_intent(monkeypatch):
     async def fake_chat(*args, **kwargs):
         return _tool_result({

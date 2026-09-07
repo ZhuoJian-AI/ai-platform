@@ -587,20 +587,29 @@ async def classify_business_turn(
     usage = {"input_tokens": 0, "output_tokens": 0}
     attempts: list[dict[str, Any]] = []
     correction = ""
+    json_compatibility_mode = False
     for attempt in range(2):
         current_messages = list(messages)
         if correction:
             current_messages.append({"role": "user", "content": correction})
+        current_system = system
+        if json_compatibility_mode:
+            current_system += (
+                "当前供应商没有可靠返回工具调用，因此进入兼容 JSON 通道。"
+                "只输出一个 JSON 对象，不使用 Markdown，不附加解释。"
+                "对象必须使用与 classify_business_turn 相同的字段；至少填写 intent，"
+                "查询条件放在 query，目标放在 target。"
+            )
         result = await model_gateway.chat(
             db,
             UUID(envelope.organization_id),
             model_alias,
             current_messages,
-            system_prompt=system,
+            system_prompt=current_system,
             temperature=0,
             max_tokens=900,
-            tools=[_intent_tool()],
-            tool_choice="classify_business_turn",
+            tools=None if json_compatibility_mode else [_intent_tool()],
+            tool_choice=None if json_compatibility_mode else "classify_business_turn",
             dept_id=department_id,
         )
         usage["input_tokens"] += int((result.usage or {}).get("input_tokens") or 0)
@@ -613,7 +622,18 @@ async def classify_business_turn(
         except (ValidationError, ValueError, json.JSONDecodeError) as exc:
             safe_reason = _safe_intent_validation_reason(exc)
             attempts.append({"attempt": attempt + 1, "status": "invalid", "reason": safe_reason})
-            correction = f"上次结构化结果无效：{safe_reason}。请只调用工具并修正参数。"
+            protocol_failure = (
+                isinstance(exc, json.JSONDecodeError)
+                or str(exc) == "模型没有返回唯一的结构化意图"
+            )
+            if protocol_failure:
+                json_compatibility_mode = True
+                correction = (
+                    f"上次结构化结果无效：{safe_reason}。"
+                    "请改用纯 JSON 正文返回同一个结构化意图，不要调用工具，不要附加解释。"
+                )
+            else:
+                correction = f"上次结构化结果无效：{safe_reason}。请只调用工具并修正参数。"
             logger.info("business_intent_invalid", attempt=attempt + 1, reason=safe_reason)
     return clarification_intent(envelope, "业务目标还不够明确，请说明具体对象或需要的结果"), usage, attempts
 
