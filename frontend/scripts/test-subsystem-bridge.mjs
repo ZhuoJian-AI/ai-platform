@@ -87,8 +87,18 @@ try {
   assert.match(applicationViewSource, /referrerPolicy="origin"/);
   assert.match(
     applicationViewSource,
-    /onAskAI: \([\s\S]*onProgress: \(event: Record<string, unknown>\) => void,[\s\S]*\) => Promise<string>/,
+    /onAskAI: \([\s\S]*onProgress: \(event: Record<string, unknown>\) => void,[\s\S]*\) => Promise<BusinessAssistantTurnResult>/,
     'business assistant must execute inline and return its answer to the application drawer',
+  );
+  assert.match(
+    applicationViewSource,
+    /isBridgeReady\(event\.data[\s\S]*setFrameLoaded\(true\)/,
+    'only a validated subsystem bridge message may mark the iframe as ready',
+  );
+  assert.doesNotMatch(
+    applicationViewSource,
+    /onLoad=\{[\s\S]{0,500}setFrameLoaded\(true\)/,
+    'browser error documents must not be mistaken for a loaded subsystem',
   );
   assert.match(
     applicationViewSource,
@@ -120,12 +130,12 @@ try {
   );
   assert.match(
     applicationAssistantSource,
-    /consumeTerminalEventStream\(response, \(event\) =>/,
+    /consumeTerminalEventStream\(streamResponse, \(event\) =>/,
     'business assistant must forward real run events to its progress timeline',
   );
   assert.match(
     applicationAssistantSource,
-    /onProgress\(\{ \.\.\.event, task_id: task\.id \}\)/,
+    /onProgress\(\{ \.\.\.event, task_id: activeTaskId \}\)/,
     'business assistant approval events must carry their task id to the inline UI',
   );
   assert.match(

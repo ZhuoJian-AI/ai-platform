@@ -459,6 +459,8 @@ export default function EnterpriseApplicationView({
     const onMessage = (event: MessageEvent) => {
       if (event.source !== frameRef.current?.contentWindow || event.origin !== security.origin) return;
       if (isBridgeReady(event.data, security.expectation)) {
+        setFrameLoaded(true);
+        setFrameSlow(false);
         frameRef.current?.contentWindow?.postMessage(
           buildHostReadyMessage(security.expectation, launch.module_keys ?? [], launch.page_keys ?? []),
           security.origin,
@@ -473,6 +475,8 @@ export default function EnterpriseApplicationView({
         const allowedPages = launch.page_keys ?? [];
         if (!receivedModuleKey || !allowedModules.includes(receivedModuleKey)) return;
         if (!pageKey || !allowedPages.includes(pageKey)) return;
+        setFrameLoaded(true);
+        setFrameSlow(false);
         setBridgeContext(parsed);
       }
     };
@@ -698,20 +702,9 @@ export default function EnterpriseApplicationView({
             sandbox="allow-downloads allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
             allow="camera 'none'; microphone 'none'; geolocation 'none'; payment 'none'; usb 'none'; serial 'none'; clipboard-read 'none'; clipboard-write 'none'; fullscreen"
             referrerPolicy="origin"
-            onLoad={() => {
-              setFrameLoaded(true);
-              setBridgeContext({});
-              try {
-                const security = validatedLaunchOrigin(launch, application);
-                if (security) frameRef.current?.contentWindow?.postMessage(
-                  buildHostReadyMessage(security.expectation, launch.module_keys ?? [], launch.page_keys ?? []),
-                  security.origin,
-                );
-              } catch { /* invalid launch URL is handled by the existing fallback */ }
-            }}
             className="enterprise-app-view__frame"
           />
-          {frameSlow && !frameLoaded && <Alert showIcon type="warning" message="该项目可能禁止 iframe 嵌入" description="可使用右上角“备用打开”。若希望内嵌，需要独立项目允许 AI Platform 域名的 frame-ancestors。" style={{ position: 'absolute', left: 30, right: 30, bottom: 30, zIndex: 2 }} />}
+          {frameSlow && !frameLoaded && <Alert showIcon type="warning" message="业务应用尚未建立连接" description="请先检查 VPN 或网络后重试；若“备用打开”正常但这里仍无法显示，再检查业务系统是否允许 AI Platform 的 iframe 嵌入。" style={{ position: 'absolute', left: 30, right: 30, bottom: 30, zIndex: 2 }} />}
         </div>
       ) : (
         <div style={{ flex: 1, display: 'grid', placeItems: 'center' }}><Result icon={<ExportOutlined style={{ color: '#6366f1' }} />} title={`${application.name} 配置为独立打开`} subTitle="应用仍由原项目独立部署和迭代；AI Platform 负责权限、导航和业务助手。" extra={<Button type="primary" onClick={() => void openFreshLaunch()}>打开应用</Button>} /></div>

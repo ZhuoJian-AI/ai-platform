@@ -11,6 +11,7 @@ const applicationId = process.env.E2E_APPLICATION_ID;
 const moduleKey = process.env.E2E_MODULE_KEY || 'progress_dashboard';
 const prompt = process.env.E2E_PROMPT || '根据当前业务数据生成一份 Excel';
 const browserExecutable = process.env.E2E_BROWSER_EXECUTABLE;
+const proxyServer = process.env.E2E_PROXY_SERVER;
 
 if (!orgSlug || !username || !password || !applicationId) {
   throw new Error('请设置 E2E_ORG_SLUG、E2E_USERNAME、E2E_PASSWORD 和 E2E_APPLICATION_ID');
@@ -19,6 +20,7 @@ if (!orgSlug || !username || !password || !applicationId) {
 const browser = await chromium.launch({
   headless: true,
   executablePath: browserExecutable || undefined,
+  proxy: proxyServer ? { server: proxyServer } : undefined,
   args: ['--disable-quic', '--disable-features=UseDnsHttpsSvcbAlpn'],
 });
 const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'business-artifact-e2e-'));
@@ -52,9 +54,27 @@ try {
   const applicationUrl = `${baseUrl}/${orgSlug}/terminal?view=application&app=${applicationId}&module=${moduleKey}`;
   await page.goto(applicationUrl, { waitUntil: 'commit', timeout: 60_000 });
   await page.getByRole('button', { name: /业务小助手/ }).waitFor({ timeout: 60_000 });
-  console.log('E2E application:ok');
+  const applicationFrameElement = page.locator('iframe.enterprise-app-view__frame');
+  await applicationFrameElement.waitFor({ timeout: 60_000 });
+  const applicationFrameHandle = await applicationFrameElement.elementHandle();
+  const applicationFrame = await applicationFrameHandle?.contentFrame();
+  if (!applicationFrame) throw new Error('业务应用 iframe 没有创建浏览上下文');
+  await applicationFrame.waitForURL((url) => (
+    url.protocol === 'https:'
+    && url.hostname === 'garment-production-collaboration.hk01.aifabei.staging.zhuojianai.com'
+    && !url.pathname.startsWith('/api/integration/sso')
+  ), { timeout: 90_000 });
+  const embeddedBody = applicationFrame.locator('body');
+  await embeddedBody.waitFor({ state: 'visible', timeout: 30_000 });
+  const embeddedText = (await embeddedBody.innerText()).replace(/\s+/g, ' ').trim();
+  if (embeddedText.length < 20) throw new Error('业务应用 iframe 已导航，但没有渲染真实业务内容');
+  if (/意外终止了连接|ERR_|无法访问此网站|This site can.t be reached/i.test(embeddedText)) {
+    throw new Error(`业务应用 iframe 加载失败：${embeddedText.slice(0, 160)}`);
+  }
+  console.log(`E2E application:rendered ${embeddedText.slice(0, 100)}`);
   await page.getByRole('button', { name: /业务小助手/ }).click();
   const drawer = page.getByRole('dialog');
+  await drawer.getByText(/已连接当前模块：/).waitFor({ timeout: 30_000 });
   const modelSelect = drawer.getByRole('combobox', { name: '选择业务小助手模型' });
   const workspaceSelect = drawer.getByRole('combobox', { name: '选择业务小助手文件保存位置' });
   await modelSelect.waitFor({ timeout: 30_000 });
