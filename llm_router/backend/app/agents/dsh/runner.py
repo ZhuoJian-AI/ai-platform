@@ -549,17 +549,30 @@ async def _consume_dsh(
                 tool_arguments[call_id] = str(event.get("arguments") or "")
                 state.setdefault("steps", []).append({"step": "llm", "tool_calls": [event.get("name")]})
         elif kind == "tool_result":
-            _publish(handle, staged, event)
             ok = bool(event.get("ok"))
             name = str(event.get("name") or "tool")
             successful_tools += int(ok)
             call_id = str(event.get("id") or "")
             entry = (state.get("_dsh_tool_registry") or {}).get(name) or {}
             entry_kind = entry.get("kind")
+            published_event = dict(event)
+            published_event["tool_kind"] = entry_kind or ""
             if entry_kind == "enterprise_action":
                 enterprise_action_calls += 1
                 operation = _enterprise_operation(entry, name)
                 result_status = _enterprise_result_status(event.get("content"))
+                mutation_committed = bool(
+                    ok
+                    and operation in {"create", "update", "delete", "approve"}
+                    and result_status not in {"pending", "failed", "error"}
+                )
+                published_event.update(
+                    {
+                        "business_operation": operation,
+                        "business_result_status": result_status,
+                        "business_mutation_committed": mutation_committed,
+                    }
+                )
                 if operation == "query":
                     enterprise_query_calls += 1
                     successful_enterprise_queries += int(ok and result_status != "failed")
@@ -567,7 +580,7 @@ async def _consume_dsh(
                     enterprise_mutation_calls += 1
                     if ok and result_status == "pending":
                         pending_enterprise_mutations += 1
-                    elif ok and result_status != "failed":
+                    elif mutation_committed:
                         successful_enterprise_mutations += 1
                     else:
                         failed_enterprise_mutations.append(str(event.get("content") or "未返回错误详情"))
@@ -581,6 +594,7 @@ async def _consume_dsh(
                 enterprise_query_calls += 1
                 result_status = _enterprise_result_status(event.get("content"))
                 successful_enterprise_queries += int(ok and result_status not in {"failed", "error"})
+            _publish(handle, staged, published_event)
             if not ok:
                 failed_tools.append((name, str(event.get("content") or "工具未返回错误详情")))
             state.setdefault("steps", []).append({"step": "tool", "name": name, "ok": ok})

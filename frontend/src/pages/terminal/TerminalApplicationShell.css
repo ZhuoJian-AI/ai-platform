@@ -47,12 +47,25 @@
 }
 
 .enterprise-app-view__frame {
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  inset: 8px;
+  width: calc(100% - 16px);
+  height: calc(100% - 16px);
   border: 1px solid #e5e7eb;
   border-radius: 10px;
   background: #fff;
   box-shadow: 0 8px 30px rgba(15, 23, 42, .06);
+}
+
+.enterprise-app-view__frame--active {
+  z-index: 0;
+  visibility: visible;
+}
+
+.enterprise-app-view__frame--standby {
+  z-index: -1;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .business-assistant-progress {

@@ -1694,6 +1694,7 @@ export default function Terminal() {
                   let streamedError = '';
                   let streamedRunId: number | null = null;
                   let streamInterrupted = false;
+                  let refreshRequired = false;
                   let streamResponse = response;
                   let streamCompleted = false;
                   for (let attempt = 0; attempt < 3 && !streamCompleted; attempt += 1) {
@@ -1711,6 +1712,9 @@ export default function Terminal() {
                         if (event.type === 'error') streamedError = String(event.message ?? '业务小助手执行失败');
                         if (event.type === 'final') sawFinal = true;
                         if (event.type === 'final' && event.interrupted === true) streamInterrupted = true;
+                        if (event.type === 'tool_result' && event.business_mutation_committed === true) {
+                          refreshRequired = true;
+                        }
                         if (typeof event.run_id === 'number') streamedRunId = event.run_id;
                       });
                     } catch (streamError) {
@@ -1747,6 +1751,7 @@ export default function Terminal() {
                     content: assistantMessage?.content || streamedAnswer || '操作已完成。',
                     artifacts: businessArtifactsFromMessage(assistantMessage),
                     error: null,
+                    refreshRequired,
                   };
                   return result;
                 }}

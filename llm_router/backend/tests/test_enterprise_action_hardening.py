@@ -348,10 +348,16 @@ async def test_successful_mutation_is_not_failed_by_the_generic_record_noun(monk
         },
     }
 
-    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, [])
+    staged: list[dict] = []
+    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, staged)
 
     assert state["assistant_final"] == "已新增供应商记录，编号 3。"
     assert state.get("error") is None
+    mutation_result = next(event for event in staged if event.get("type") == "tool_result")
+    assert mutation_result["tool_kind"] == "enterprise_action"
+    assert mutation_result["business_operation"] == "create"
+    assert mutation_result["business_result_status"] == "completed"
+    assert mutation_result["business_mutation_committed"] is True
 
 
 @pytest.mark.asyncio
@@ -384,10 +390,14 @@ async def test_query_for_saved_records_is_not_misclassified_as_a_mutation(monkey
         },
     }
 
-    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, [])
+    staged: list[dict] = []
+    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, staged)
 
     assert state["assistant_final"] == "当前共有 0 条已保存的核算记录。"
     assert state.get("error") is None
+    query_result = next(event for event in staged if event.get("type") == "tool_result")
+    assert query_result["business_operation"] == "query"
+    assert query_result["business_mutation_committed"] is False
 
 
 @pytest.mark.asyncio
@@ -418,9 +428,14 @@ async def test_pending_mutation_is_not_reported_as_completed(monkeypatch):
         },
     }
 
-    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, [])
+    staged: list[dict] = []
+    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, staged)
 
     assert state["assistant_final"] == "该业务操作尚未执行，正在等待你确认。确认后系统才会真正修改业务数据。"
     assert "已删除" not in state["assistant_final"]
     assert "error" not in state
     assert any(step.get("step") == "business_mutation_pending_confirmation" for step in state["steps"])
+    pending_result = next(event for event in staged if event.get("type") == "tool_result")
+    assert pending_result["business_operation"] == "delete"
+    assert pending_result["business_result_status"] == "pending"
+    assert pending_result["business_mutation_committed"] is False

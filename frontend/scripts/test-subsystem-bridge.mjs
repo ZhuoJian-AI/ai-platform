@@ -12,7 +12,10 @@ try {
   const compiled = await transform(source, { loader: 'ts', format: 'esm', target: 'es2022' });
   const modulePath = join(tempDirectory, 'subsystemBridge.mjs');
   await writeFile(modulePath, compiled.code, 'utf8');
-  const { buildHostReadyMessage, isBridgeReady, parseBridgeContext } = await import(`${pathToFileURL(modulePath).href}?v=${Date.now()}`);
+  const {
+    buildHostReadyMessage, buildRefreshMessage, isBridgeReady,
+    parseBridgeContext, parseBridgeRefreshResult,
+  } = await import(`${pathToFileURL(modulePath).href}?v=${Date.now()}`);
 
   const expected = { applicationSlug: 'sample-review', launchNonce: 'launch-0123456789abcdef' };
 
@@ -75,6 +78,33 @@ try {
     launch_nonce: expected.launchNonce, allowed_module_keys: ['sample_review'],
     allowed_page_keys: ['sample_review.list'],
   });
+  const refreshExpected = {
+    ...expected,
+    moduleKey: 'sample_review',
+    pageKey: 'sample_review.list',
+    requestId: 'refresh-0123456789abcdef',
+  };
+  assert.deepEqual(buildRefreshMessage(refreshExpected), {
+    type: 'zhuojian:refresh', version: 1, application_slug: 'sample-review',
+    launch_nonce: expected.launchNonce, module_key: 'sample_review',
+    page_key: 'sample_review.list', request_id: 'refresh-0123456789abcdef',
+  });
+  assert.deepEqual(parseBridgeRefreshResult({
+    type: 'zhuojian:refresh-result', version: 1, application_slug: 'sample-review',
+    launch_nonce: expected.launchNonce, module_key: 'sample_review',
+    page_key: 'sample_review.list', request_id: 'refresh-0123456789abcdef',
+    status: 'completed', data_version: 12,
+  }, refreshExpected), { status: 'completed', dataVersion: 12 });
+  assert.equal(parseBridgeRefreshResult({
+    type: 'zhuojian:refresh-result', version: 1, application_slug: 'sample-review',
+    launch_nonce: 'stale', module_key: 'sample_review', page_key: 'sample_review.list',
+    request_id: 'refresh-0123456789abcdef', status: 'completed',
+  }, refreshExpected), null, 'refresh results must be bound to the active launch');
+  assert.equal(parseBridgeRefreshResult({
+    type: 'zhuojian:refresh-result', version: 1, application_slug: 'sample-review',
+    launch_nonce: expected.launchNonce, module_key: 'sample_review', page_key: 'sample_review.list',
+    request_id: 'other-request', status: 'completed',
+  }, refreshExpected), null, 'refresh results must be bound to the request');
 
   const applicationViewSource = await readFile(
     resolve('src/pages/terminal/EnterpriseApplicationView.tsx'),
@@ -85,7 +115,7 @@ try {
     /sandbox="[^"]*allow-modals[^"]*"/,
     'embedded enterprise applications must be allowed to show confirmation dialogs',
   );
-  assert.match(applicationViewSource, /event\.source !== frameRef\.current\?\.contentWindow/);
+  assert.match(applicationViewSource, /event\.source !== frameRefs\.current\[activeFrameIndex\]\?\.contentWindow/);
   assert.match(applicationViewSource, /event\.origin !== security\.origin/);
   assert.match(applicationViewSource, /launch\.launch_nonce/);
   assert.match(applicationViewSource, /launch\.page_keys/);
@@ -110,6 +140,24 @@ try {
     /onLoad=\{[\s\S]{0,500}setFrameLoaded\(true\)/,
     'browser error documents must not be mistaken for a loaded subsystem',
   );
+  const submitSource = applicationViewSource.slice(
+    applicationViewSource.indexOf('const submit = async'),
+    applicationViewSource.indexOf('const uploadInputFiles'),
+  );
+  assert.doesNotMatch(
+    submitSource,
+    /refreshFrame\(/,
+    'a completed assistant turn must never destroy and recreate the iframe unconditionally',
+  );
+  assert.match(
+    submitSource,
+    /if \(result\.refreshRequired\) scheduleSilentRefresh\(\)/,
+    'only a trusted successful business mutation may request a silent refresh',
+  );
+  assert.match(applicationViewSource, /buildRefreshMessage\(refreshExpectation\)/);
+  assert.match(applicationViewSource, /parseBridgeRefreshResult\(event\.data, refreshExpectation\)/);
+  assert.match(applicationViewSource, /enterprise-app-view__frame--standby/);
+  assert.match(applicationViewSource, /setActiveFrameIndex\(nextIndex\)/);
   assert.match(
     applicationViewSource,
     /aria-label="选择业务小助手模型"[\s\S]*placeholder="请选择模型"/,
@@ -148,6 +196,12 @@ try {
     /onProgress\(\{ \.\.\.event, task_id: activeTaskId \}\)/,
     'business assistant approval events must carry their task id to the inline UI',
   );
+  assert.match(
+    applicationAssistantSource,
+    /event\.type === 'tool_result' && event\.business_mutation_committed === true/,
+    'the host may refresh only from a backend-authenticated successful mutation result',
+  );
+  assert.match(applicationAssistantSource, /refreshRequired,/);
   assert.match(
     terminalSource,
     /event\.type === 'final'[\s\S]*reader\.cancel\(\)/,

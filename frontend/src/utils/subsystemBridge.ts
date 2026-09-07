@@ -7,6 +7,14 @@ const BRIDGE_CONTEXT_KEYS = new Set([
   'filters', 'selection', 'data_version',
 ]);
 const BRIDGE_READY_KEYS = new Set(['type', 'version', 'launch_nonce', 'application_slug']);
+const BRIDGE_REFRESH_KEYS = new Set([
+  'type', 'version', 'launch_nonce', 'application_slug',
+  'module_key', 'page_key', 'request_id',
+]);
+const BRIDGE_REFRESH_RESULT_KEYS = new Set([
+  'type', 'version', 'launch_nonce', 'application_slug',
+  'module_key', 'page_key', 'request_id', 'status', 'data_version', 'error',
+]);
 const BRIDGE_STRING_KEYS = new Set([
   'enterprise_key', 'application_slug', 'route', 'module_key', 'module_name',
   'page_key', 'page_name', 'entity_type', 'entity_id',
@@ -16,6 +24,18 @@ export interface BridgeExpectation {
   applicationSlug: string;
   launchNonce: string;
 }
+
+export interface BridgeRefreshExpectation extends BridgeExpectation {
+  moduleKey: string;
+  pageKey: string;
+  requestId: string;
+}
+
+export type BridgeRefreshResult = {
+  status: 'completed' | 'deferred' | 'failed';
+  dataVersion?: string | number;
+  error?: string;
+};
 
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -129,5 +149,61 @@ export function buildHostReadyMessage(
     application_slug: expected.applicationSlug,
     allowed_module_keys: allowedModuleKeys.filter((key) => BRIDGE_KEY_PATTERN.test(key)),
     allowed_page_keys: allowedPageKeys.filter((key) => BRIDGE_KEY_PATTERN.test(key)),
+  };
+}
+
+export function buildRefreshMessage(expected: BridgeRefreshExpectation) {
+  if (
+    !BRIDGE_KEY_PATTERN.test(expected.moduleKey)
+    || !BRIDGE_KEY_PATTERN.test(expected.pageKey)
+    || !BRIDGE_KEY_PATTERN.test(expected.requestId)
+  ) throw new Error('静默刷新消息包含无效标识');
+  const value = {
+    type: 'zhuojian:refresh' as const,
+    version: 1 as const,
+    launch_nonce: expected.launchNonce,
+    application_slug: expected.applicationSlug,
+    module_key: expected.moduleKey,
+    page_key: expected.pageKey,
+    request_id: expected.requestId,
+  };
+  if (!hasOnlyKeys(value, BRIDGE_REFRESH_KEYS) || !fitsEnvelope(value)) {
+    throw new Error('静默刷新消息超过协议限制');
+  }
+  return value;
+}
+
+export function parseBridgeRefreshResult(
+  value: unknown,
+  expected: BridgeRefreshExpectation,
+): BridgeRefreshResult | null {
+  if (
+    !isPlainObject(value)
+    || !hasOnlyKeys(value, BRIDGE_REFRESH_RESULT_KEYS)
+    || !fitsEnvelope(value)
+    || value.type !== 'zhuojian:refresh-result'
+    || value.version !== 1
+    || !hasExpectedIdentity(value, expected)
+    || value.module_key !== expected.moduleKey
+    || value.page_key !== expected.pageKey
+    || value.request_id !== expected.requestId
+    || !['completed', 'deferred', 'failed'].includes(String(value.status))
+  ) return null;
+  const dataVersion = value.data_version;
+  if (
+    dataVersion !== undefined
+    && dataVersion !== null
+    && (
+      (typeof dataVersion !== 'string' && typeof dataVersion !== 'number')
+      || (typeof dataVersion === 'string' && dataVersion.length > 1_000)
+      || (typeof dataVersion === 'number' && !Number.isFinite(dataVersion))
+    )
+  ) return null;
+  const error = value.error;
+  if (error !== undefined && error !== null && (typeof error !== 'string' || error.length > 1_000)) return null;
+  return {
+    status: value.status as BridgeRefreshResult['status'],
+    ...(dataVersion !== undefined && dataVersion !== null ? { dataVersion } : {}),
+    ...(typeof error === 'string' && error ? { error } : {}),
   };
 }

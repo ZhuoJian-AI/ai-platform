@@ -15,7 +15,8 @@ import {
 } from '../../api/client';
 import ApprovalCard, { type ApprovalCardData } from '../../components/terminal/ApprovalCard';
 import {
-  buildHostReadyMessage, isBridgeReady, parseBridgeContext, type BridgeExpectation,
+  buildHostReadyMessage, buildRefreshMessage, isBridgeReady, parseBridgeContext,
+  parseBridgeRefreshResult, type BridgeExpectation, type BridgeRefreshExpectation,
 } from '../../utils/subsystemBridge';
 
 function validatedLaunchOrigin(
@@ -93,6 +94,7 @@ export type BusinessAssistantTurnResult = {
   content: string;
   artifacts: BusinessArtifact[];
   error: string | null;
+  refreshRequired: boolean;
 };
 
 function normalizeBusinessArtifact(value: Record<string, unknown>): BusinessArtifact | null {
@@ -283,14 +285,22 @@ export default function EnterpriseApplicationView({
   const [uploadingInput, setUploadingInput] = useState(false);
   const [creatingConversation, setCreatingConversation] = useState(false);
   const [runtimeApprovals, setRuntimeApprovals] = useState<BusinessAssistantApproval[]>([]);
-  const [frameKey, setFrameKey] = useState(0);
+  const [frameSlots, setFrameSlots] = useState<[
+    EnterpriseApplicationLaunch | undefined,
+    EnterpriseApplicationLaunch | undefined,
+  ]>([undefined, undefined]);
+  const [activeFrameIndex, setActiveFrameIndex] = useState<0 | 1>(0);
   const [frameLoaded, setFrameLoaded] = useState(false);
   const [frameSlow, setFrameSlow] = useState(false);
   const [bridgeContext, setBridgeContext] = useState<Record<string, unknown>>({});
-  const frameRef = useRef<HTMLIFrameElement>(null);
+  const frameRefs = useRef<[HTMLIFrameElement | null, HTMLIFrameElement | null]>([null, null]);
   const launchRequestRef = useRef(0);
+  const frameSwapRef = useRef<Promise<void> | null>(null);
+  const silentRefreshTimerRef = useRef<number | null>(null);
+  const silentRefreshRunningRef = useRef<Promise<void> | null>(null);
+  const silentRefreshQueuedRef = useRef(false);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
-  const [launch, setLaunch] = useState<EnterpriseApplicationLaunch>();
+  const launch = frameSlots[activeFrameIndex];
   const [launchLoading, setLaunchLoading] = useState(true);
   const [launchError, setLaunchError] = useState<unknown>();
   const { data: restoredBusinessTask } = useQuery({
@@ -360,21 +370,27 @@ export default function EnterpriseApplicationView({
     const timer = window.setInterval(updateElapsed, 1_000);
     return () => window.clearInterval(timer);
   }, [assistantRunning, updateRunningAssistant]);
+  const acquireFreshLaunch = useCallback(async () => {
+    if (application.is_active === false) throw new ApiError(403, '应用已停用，不能启动');
+    // Launch URLs contain single-use SSO tickets. They must never enter the
+    // shared React Query cache or be reused when an iframe is remounted.
+    const freshLaunch = await terminal.launchApplication(application.id, moduleKey ?? undefined);
+    validatedLaunchOrigin(freshLaunch, application);
+    return freshLaunch;
+  }, [application, moduleKey]);
+
   const requestFreshLaunch = useCallback(async () => {
     const requestId = ++launchRequestRef.current;
     setFrameLoaded(false);
     setFrameSlow(false);
-    setLaunch(undefined);
+    setFrameSlots([undefined, undefined]);
+    setActiveFrameIndex(0);
     setLaunchLoading(true);
     setLaunchError(undefined);
     try {
-      if (application.is_active === false) throw new ApiError(403, '应用已停用，不能启动');
-      // Launch URLs contain single-use SSO tickets. They must never enter the
-      // shared React Query cache or be reused when an iframe is remounted.
-      const freshLaunch = await terminal.launchApplication(application.id, moduleKey ?? undefined);
-      validatedLaunchOrigin(freshLaunch, application);
+      const freshLaunch = await acquireFreshLaunch();
       if (launchRequestRef.current === requestId) {
-        setLaunch(freshLaunch);
+        setFrameSlots([freshLaunch, undefined]);
         setLaunchLoading(false);
       }
       return freshLaunch;
@@ -385,7 +401,168 @@ export default function EnterpriseApplicationView({
       }
       throw launchRequestError;
     }
-  }, [application.id, application.is_active, application.slug, moduleKey]);
+  }, [acquireFreshLaunch]);
+
+  const replaceFrameAtomically = useCallback(async () => {
+    if (frameSwapRef.current) return frameSwapRef.current;
+    const operation = (async () => {
+      const freshLaunch = await acquireFreshLaunch();
+      const security = validatedLaunchOrigin(freshLaunch, application);
+      if (!security || freshLaunch.display_mode !== 'embedded') throw new Error('应用不支持内嵌刷新');
+      const previousIndex = activeFrameIndex;
+      const nextIndex: 0 | 1 = previousIndex === 0 ? 1 : 0;
+      let readySeen = false;
+      let latestContext: Record<string, unknown> | null = null;
+      let cleanup = () => undefined;
+      const ready = new Promise<Record<string, unknown>>((resolve, reject) => {
+        const finish = () => {
+          if (!readySeen || !latestContext) return;
+          cleanup();
+          resolve(latestContext);
+        };
+        const onMessage = (event: MessageEvent) => {
+          if (event.source !== frameRefs.current[nextIndex]?.contentWindow || event.origin !== security.origin) return;
+          if (isBridgeReady(event.data, security.expectation)) {
+            readySeen = true;
+            frameRefs.current[nextIndex]?.contentWindow?.postMessage(
+              buildHostReadyMessage(
+                security.expectation,
+                freshLaunch.module_keys ?? [],
+                freshLaunch.page_keys ?? [],
+              ),
+              security.origin,
+            );
+            finish();
+            return;
+          }
+          const parsed = parseBridgeContext(event.data, security.expectation);
+          if (!parsed) return;
+          const receivedModuleKey = typeof parsed.module_key === 'string' ? parsed.module_key : '';
+          const receivedPageKey = typeof parsed.page_key === 'string' ? parsed.page_key : '';
+          if (!(freshLaunch.module_keys ?? []).includes(receivedModuleKey)) return;
+          if (!(freshLaunch.page_keys ?? []).includes(receivedPageKey)) return;
+          latestContext = parsed;
+          finish();
+        };
+        const timeout = window.setTimeout(() => {
+          cleanup();
+          reject(new Error('业务应用静默刷新超时'));
+        }, 12_000);
+        cleanup = () => {
+          window.clearTimeout(timeout);
+          window.removeEventListener('message', onMessage);
+        };
+        window.addEventListener('message', onMessage);
+      });
+      setFrameSlots((current) => {
+        const next = [...current] as [EnterpriseApplicationLaunch | undefined, EnterpriseApplicationLaunch | undefined];
+        next[nextIndex] = freshLaunch;
+        return next;
+      });
+      try {
+        const context = await ready;
+        setBridgeContext(context);
+        setFrameLoaded(true);
+        setFrameSlow(false);
+        setActiveFrameIndex(nextIndex);
+        window.setTimeout(() => {
+          setFrameSlots((current) => {
+            if (current[nextIndex]?.launch_nonce !== freshLaunch.launch_nonce) return current;
+            const next = [...current] as [EnterpriseApplicationLaunch | undefined, EnterpriseApplicationLaunch | undefined];
+            next[previousIndex] = undefined;
+            return next;
+          });
+        }, 0);
+      } catch (error) {
+        cleanup();
+        setFrameSlots((current) => {
+          const next = [...current] as [EnterpriseApplicationLaunch | undefined, EnterpriseApplicationLaunch | undefined];
+          next[nextIndex] = undefined;
+          return next;
+        });
+        throw error;
+      }
+    })();
+    frameSwapRef.current = operation;
+    try {
+      await operation;
+    } finally {
+      if (frameSwapRef.current === operation) frameSwapRef.current = null;
+    }
+  }, [acquireFreshLaunch, activeFrameIndex, application]);
+
+  const runSilentBridgeRefresh = useCallback(async () => {
+    if (!launch || launch.display_mode !== 'embedded') return;
+    const security = validatedLaunchOrigin(launch, application);
+    const frame = frameRefs.current[activeFrameIndex];
+    const activeModuleKey = typeof bridgeContext.module_key === 'string'
+      ? bridgeContext.module_key
+      : launch.module_key ?? moduleKey ?? '';
+    const activePageKey = typeof bridgeContext.page_key === 'string'
+      ? bridgeContext.page_key
+      : launch.page_keys?.find((key) => key.startsWith(`${activeModuleKey}.`)) ?? '';
+    if (!security || !frame?.contentWindow || !activeModuleKey || !activePageKey) {
+      await replaceFrameAtomically();
+      return;
+    }
+    const refreshExpectation: BridgeRefreshExpectation = {
+      ...security.expectation,
+      moduleKey: activeModuleKey,
+      pageKey: activePageKey,
+      requestId: crypto.randomUUID(),
+    };
+    try {
+      const response = new Promise<ReturnType<typeof parseBridgeRefreshResult>>((resolve, reject) => {
+        const onMessage = (event: MessageEvent) => {
+          if (event.source !== frame.contentWindow || event.origin !== security.origin) return;
+          const parsed = parseBridgeRefreshResult(event.data, refreshExpectation);
+          if (!parsed) return;
+          cleanup();
+          resolve(parsed);
+        };
+        const timeout = window.setTimeout(() => {
+          cleanup();
+          reject(new Error('子系统未响应局部刷新'));
+        }, 4_000);
+        const cleanup = () => {
+          window.clearTimeout(timeout);
+          window.removeEventListener('message', onMessage);
+        };
+        window.addEventListener('message', onMessage);
+      });
+      frame.contentWindow.postMessage(buildRefreshMessage(refreshExpectation), security.origin);
+      const result = await response;
+      if (!result) throw new Error('子系统返回了无效刷新结果');
+      if (result.status === 'deferred') return;
+      if (result.status !== 'completed') throw new Error(result.error || '子系统局部刷新失败');
+      if (result.dataVersion !== undefined) {
+        setBridgeContext((current) => ({ ...current, data_version: result.dataVersion }));
+      }
+    } catch {
+      await replaceFrameAtomically();
+    }
+  }, [activeFrameIndex, application, bridgeContext, launch, moduleKey, replaceFrameAtomically]);
+
+  const scheduleSilentRefresh = useCallback(() => {
+    if (silentRefreshTimerRef.current !== null) window.clearTimeout(silentRefreshTimerRef.current);
+    const trigger = () => {
+      silentRefreshTimerRef.current = null;
+      if (silentRefreshRunningRef.current) {
+        silentRefreshQueuedRef.current = true;
+        return;
+      }
+      const operation = runSilentBridgeRefresh().finally(() => {
+        if (silentRefreshRunningRef.current === operation) silentRefreshRunningRef.current = null;
+        if (silentRefreshQueuedRef.current) {
+          silentRefreshQueuedRef.current = false;
+          silentRefreshTimerRef.current = window.setTimeout(trigger, 160);
+        }
+      });
+      silentRefreshRunningRef.current = operation;
+    };
+    silentRefreshTimerRef.current = window.setTimeout(trigger, 160);
+  }, [runSilentBridgeRefresh]);
+
   const confirmationsQuery = useQuery({
     queryKey: ['application-action-confirmations'],
     queryFn: () => terminal.applicationActionConfirmations(),
@@ -399,8 +576,10 @@ export default function EnterpriseApplicationView({
       terminal.resolveApplicationAction(id, decision),
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['application-action-confirmations'] });
-      if (result.status === 'completed') message.success('操作已执行');
-      else if (result.status === 'rejected') message.info('操作已拒绝');
+      if (result.status === 'completed') {
+        message.success('操作已执行');
+        scheduleSilentRefresh();
+      } else if (result.status === 'rejected') message.info('操作已拒绝');
       else message.warning(result.error || `操作状态：${result.status}`);
     },
     onError: (mutationError) => message.error(
@@ -409,19 +588,18 @@ export default function EnterpriseApplicationView({
   });
 
   const refreshFrame = async () => {
-    setFrameLoaded(false);
     try {
-      await requestFreshLaunch();
-      setFrameKey((value) => value + 1);
-    } catch { /* requestFreshLaunch exposes the error in the page state */ }
+      await replaceFrameAtomically();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '应用刷新失败');
+    }
   };
 
   const openFreshLaunch = async () => {
     const popup = window.open('about:blank', '_blank');
     if (popup) popup.opener = null;
     try {
-      const freshLaunch = await terminal.launchApplication(application.id, moduleKey ?? undefined);
-      validatedLaunchOrigin(freshLaunch, application);
+      const freshLaunch = await acquireFreshLaunch();
       if (freshLaunch.url && popup) popup.location.replace(freshLaunch.url);
       else {
         popup?.close();
@@ -438,6 +616,11 @@ export default function EnterpriseApplicationView({
     return () => { launchRequestRef.current += 1; };
   }, [requestFreshLaunch]);
 
+  useEffect(() => () => {
+    if (silentRefreshTimerRef.current !== null) window.clearTimeout(silentRefreshTimerRef.current);
+    silentRefreshQueuedRef.current = false;
+  }, []);
+
   useEffect(() => {
     if (!moduleKey && launch?.module_key) onModuleChange(launch.module_key);
   }, [launch?.module_key, moduleKey, onModuleChange]);
@@ -446,7 +629,7 @@ export default function EnterpriseApplicationView({
     setFrameLoaded(false); setFrameSlow(false); setBridgeContext({});
     const timer = window.setTimeout(() => setFrameSlow(true), 8000);
     return () => window.clearTimeout(timer);
-  }, [application.id, moduleKey, frameKey]);
+  }, [application.id, moduleKey]);
 
   useEffect(() => {
     if (!launch?.url || launch.display_mode !== 'embedded') return;
@@ -457,11 +640,11 @@ export default function EnterpriseApplicationView({
       security = result;
     } catch { return; }
     const onMessage = (event: MessageEvent) => {
-      if (event.source !== frameRef.current?.contentWindow || event.origin !== security.origin) return;
+      if (event.source !== frameRefs.current[activeFrameIndex]?.contentWindow || event.origin !== security.origin) return;
       if (isBridgeReady(event.data, security.expectation)) {
         setFrameLoaded(true);
         setFrameSlow(false);
-        frameRef.current?.contentWindow?.postMessage(
+        frameRefs.current[activeFrameIndex]?.contentWindow?.postMessage(
           buildHostReadyMessage(security.expectation, launch.module_keys ?? [], launch.page_keys ?? []),
           security.origin,
         );
@@ -482,7 +665,7 @@ export default function EnterpriseApplicationView({
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [application, launch, frameKey]);
+  }, [activeFrameIndex, application, launch]);
 
   const submit = async () => {
     const value = prompt.trim();
@@ -585,7 +768,7 @@ export default function EnterpriseApplicationView({
           ? { key: 'done', label: result.artifacts.length ? '文件已交付' : '回答已经生成' }
           : { key: 'error', label: '执行未完成，请查看下方原因', tone: 'error' }),
       }));
-      await refreshFrame();
+      if (result.refreshRequired) scheduleSilentRefresh();
     } catch (assistantError) {
       const errorMessage = assistantError instanceof Error ? assistantError.message : '业务小助手执行失败';
       updateRunningAssistant((item) => ({
@@ -694,16 +877,20 @@ export default function EnterpriseApplicationView({
       {launch.display_mode === 'embedded' ? (
         <div className="enterprise-app-view__frame-wrap">
           {!frameLoaded && <div className="enterprise-app-view__loading"><Spin tip={frameSlow ? '应用响应较慢，可尝试“备用打开”' : '正在加载业务应用…'} /></div>}
-          <iframe
-            ref={frameRef}
-            key={frameKey}
-            src={launch.url}
-            title={activeModule?.name || application.name}
-            sandbox="allow-downloads allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
-            allow="camera 'none'; microphone 'none'; geolocation 'none'; payment 'none'; usb 'none'; serial 'none'; clipboard-read 'none'; clipboard-write 'none'; fullscreen"
-            referrerPolicy="origin"
-            className="enterprise-app-view__frame"
-          />
+          {frameSlots.map((slotLaunch, slotIndex) => slotLaunch?.display_mode === 'embedded' ? (
+            <iframe
+              ref={(node) => { frameRefs.current[slotIndex as 0 | 1] = node; }}
+              key={`frame-slot-${slotIndex}-${slotLaunch.launch_nonce}`}
+              src={slotLaunch.url}
+              title={activeModule?.name || application.name}
+              sandbox="allow-downloads allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
+              allow="camera 'none'; microphone 'none'; geolocation 'none'; payment 'none'; usb 'none'; serial 'none'; clipboard-read 'none'; clipboard-write 'none'; fullscreen"
+              referrerPolicy="origin"
+              aria-hidden={slotIndex !== activeFrameIndex}
+              tabIndex={slotIndex === activeFrameIndex ? 0 : -1}
+              className={`enterprise-app-view__frame ${slotIndex === activeFrameIndex ? 'enterprise-app-view__frame--active' : 'enterprise-app-view__frame--standby'}`}
+            />
+          ) : null)}
           {frameSlow && !frameLoaded && <Alert showIcon type="warning" message="业务应用尚未建立连接" description="请先检查 VPN 或网络后重试；若“备用打开”正常但这里仍无法显示，再检查业务系统是否允许 AI Platform 的 iframe 嵌入。" style={{ position: 'absolute', left: 30, right: 30, bottom: 30, zIndex: 2 }} />}
         </div>
       ) : (
