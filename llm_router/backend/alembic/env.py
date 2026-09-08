@@ -6,13 +6,12 @@ from logging.config import fileConfig
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from alembic import context
-from app.config import settings
-
 # Import the model package for its registration side effects.  Keeping an
 # explicit symbol list here made every compatibility-model retirement break
 # Alembic before a migration could even connect to PostgreSQL.
 import app.models  # noqa: F401
+from alembic import context
+from app.config import settings
 from app.models.base import Base
 
 config = context.config
