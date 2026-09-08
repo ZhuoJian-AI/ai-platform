@@ -1,11 +1,9 @@
-"""Short-lived, capability-scoped bridge contexts for DSH callbacks.
+"""Short-lived, capability-scoped contexts for native Assistant Core runs.
 
-Besides the run-token → context map used by the model/tool bridges, this module owns the
-in-process state for **user approvals**: when the runtime meets a ``ToolSpec.approval="ask"``
-tool it calls ``POST /internal/dsh/approval/request``, which parks an ``asyncio.Future`` here
-and surfaces ``approval_request`` on the run's SSE channel; the terminal user's decision
-(``POST /terminal/tasks/{task_id}/approvals/{approval_id}``) resolves that future.  Single
-process, like :mod:`app.agents.graph.run_registry` (one uvicorn worker).
+The context map owns in-process state for user approvals. When the native runtime meets a
+tool with ``approval="ask"``, it parks an ``asyncio.Future`` here and surfaces an
+``approval_request`` on the run SSE channel. The terminal user's decision resolves it.
+Single process, like :mod:`app.agents.graph.run_registry` (one uvicorn worker).
 """
 
 from __future__ import annotations
@@ -48,7 +46,7 @@ class ApprovalRecord:
 
 
 @dataclass(slots=True)
-class DshRunContext:
+class AssistantRunContext:
     state: AgentState
     db: Any
     deps: dict[str, Any]
@@ -70,11 +68,11 @@ class DshRunContext:
     approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
 
 
-_contexts: dict[str, DshRunContext] = {}
-_approval_contexts: dict[str, DshRunContext] = {}  # approval_id → owning context
+_contexts: dict[str, AssistantRunContext] = {}
+_approval_contexts: dict[str, AssistantRunContext] = {}  # approval_id → owning context
 
 
-def register(context: DshRunContext) -> str:
+def register(context: AssistantRunContext) -> str:
     _purge_expired()
     token = secrets.token_urlsafe(32)
     context.expires_at = time.monotonic() + 15 * 60
@@ -82,7 +80,7 @@ def register(context: DshRunContext) -> str:
     return token
 
 
-def get(token: str) -> DshRunContext | None:
+def get(token: str) -> AssistantRunContext | None:
     context = _contexts.get(token)
     if context is not None and context.expires_at <= time.monotonic():
         _drop(token)
@@ -110,7 +108,7 @@ def _purge_expired() -> None:
 # ── user approvals ───────────────────────────────────────────────────────
 
 
-def publish_event(context: DshRunContext, event: dict) -> None:
+def publish_event(context: AssistantRunContext, event: dict) -> None:
     """Stage ``event`` for persistence and push it to the live SSE tail (mirrors ``runner._publish``)."""
     if context.staged is not None:
         context.staged.append(event)
@@ -118,7 +116,7 @@ def publish_event(context: DshRunContext, event: dict) -> None:
         live_runs.publish(context.handle, json.dumps(event, ensure_ascii=False))
 
 
-def _resolve(context: DshRunContext, approval_id: str, outcome: str, decided_by: str) -> bool:
+def _resolve(context: AssistantRunContext, approval_id: str, outcome: str, decided_by: str) -> bool:
     """Settle one approval: wake the waiting bridge call, record the step, publish ``approval_decided``."""
     record = context.approvals.get(approval_id)
     if record is None or record.future.done():
@@ -138,7 +136,7 @@ def _resolve(context: DshRunContext, approval_id: str, outcome: str, decided_by:
     return True
 
 
-def _cancel_approvals(context: DshRunContext) -> None:
+def _cancel_approvals(context: AssistantRunContext) -> None:
     for approval_id in list(context.approvals):
         _resolve(context, approval_id, APPROVAL_CANCELLED, "system")
         _approval_contexts.pop(approval_id, None)
@@ -152,7 +150,7 @@ def cancel_approvals(token: str) -> None:
 
 
 async def await_approval(
-    context: DshRunContext, *, approval_id: str, tool: str, call_id: str, reason: str,
+    context: AssistantRunContext, *, approval_id: str, tool: str, call_id: str, reason: str,
     arguments_preview: str, timeout_ms: int = APPROVAL_DEFAULT_TIMEOUT_MS,
 ) -> dict[str, str]:
     """Ask the terminal user about one tool call and block until decided, timed out or cancelled.

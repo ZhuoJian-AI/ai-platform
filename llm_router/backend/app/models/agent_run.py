@@ -31,10 +31,8 @@ class AgentRun(TimestampMixin, Base):
     # 执行模式：craft（自主执行）/ ask（只读问答）/ plan（出方案不执行）。
     # general 运行取自 task.config；自定义智能体运行恒为 craft。
     exec_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="craft")
-    # The server selects one engine before admission and persists it once.  The
-    # database default keeps rollback-compatible images honest: an old image
-    # cannot run the native core, so rows it inserts are necessarily DSH rows.
-    assistant_engine: Mapped[str] = mapped_column(String(16), nullable=False, default="dsh")
+    # Historical rows may still name a retired engine; all newly created runs are native.
+    assistant_engine: Mapped[str] = mapped_column(String(16), nullable=False, default="native")
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     request: Mapped[str] = mapped_column(Text, nullable=False, default="")
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

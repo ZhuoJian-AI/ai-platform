@@ -1,8 +1,7 @@
 """Native model/tool loop for the unified AI Assistant Core.
 
-This coordinator intentionally emits the same normalized events as the legacy DSH
-runtime.  The caller therefore keeps one Task/Run/Message/Artifact/SSE contract while
-the execution engine is changed at a run boundary.
+This coordinator emits the platform's normalized Task, Run, Message, Artifact and SSE
+events directly so every assistant mode shares one execution contract.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ import structlog
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
-from app.agents.dsh import registry as approval_registry
+from app.agents.core import approval_registry
 from app.agents.graph.context import bind_runtime
 from app.agents.graph.nodes import _execute_tool_call
 from app.services import model_gateway

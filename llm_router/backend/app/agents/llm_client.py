@@ -634,7 +634,7 @@ async def stream_chat(
         # Some reasoning-capable OpenAI-compatible models require the
         # assistant's reasoning_content to be carried into
         # the next tool-result turn.  It is intentionally not rendered to the
-        # end user; the DSH bridge stores it as assistant-message metadata.
+        # end user; the Assistant Core stores it as assistant-message metadata.
         yield ("reasoning_content", "".join(reasoning_parts), None)
 
 

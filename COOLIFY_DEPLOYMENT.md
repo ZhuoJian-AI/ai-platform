@@ -39,10 +39,6 @@ Path 留空。不要给 PostgreSQL、Redis 或 backend 配置公网域名或宿�
 - `MASTER_ENCRYPTION_KEY=<Fernet key>`
 - `CODE_SKILLS_ENABLED=true`
 - `SKILL_RUNNER_TOKEN=<随机长字符串>`
-- `ASSISTANT_ENGINE=dsh`
-- `ASSISTANT_NATIVE_CANARY_USER_IDS=<原生引擎灰度员工 UUID，逗号分隔>`
-- `DSH_RUNTIME_TOKEN=<随机长字符串>`
-- `EXTENSION_BUILDER_TOKEN=<随机长字符串>`
 - `SKILL_RUNNER_TIMEOUT_SECONDS=120`
 - `WORKSPACE_OBJECT_STORAGE_ENABLED=true`
 - `STORAGE_GATEWAY_URL=https://storage.staging.zhuojianai.com`
@@ -76,9 +72,8 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 验收要求：
 
-1. `postgres`、`redis`、`skill-runner`、`dsh-runtime`、`extension-builder`、
-   `backend`、`workspace-parser`、`workspace-preview`、`office-edit-reconcile`、`storage-lifecycle`、
-   `multimodal-worker`、`frontend` 均健康；
+1. `postgres`、`redis`、`skill-runner`、`backend`、`workspace-parser`、`workspace-preview`、
+   `storage-lifecycle`、`multimodal-worker`、`frontend` 均健康；
 2. `https://ai-platform.staging.zhuojianai.com/health` 返回 HTTP 200；
 3. 管理员入口 `/login` 可以打开并登录；
 4. Coolify 运行版本对应 GitHub `main` 的 SHA；

@@ -25,6 +25,17 @@ async def test_monitor_overview_empty(client: AsyncClient):
     assert data["router"]["requests"] == 0
     assert data["agent"]["runs"] == 0
     assert data["tool"]["calls"] == 0
+    assert set(data["tool"]) == {
+        "calls",
+        "success_count",
+        "error_count",
+        "error_rate",
+        "avg_latency_ms",
+        "by_skill",
+        "by_action",
+        "inventory",
+    }
+    assert set(data["tool"]["inventory"]) == {"skills"}
     assert data["router"]["by_provider"] == []
 
 

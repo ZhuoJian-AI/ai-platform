@@ -91,13 +91,13 @@ storage-lifecycle
 multimodal-worker
 ```
 
-过渡发布仍临时保留 `dsh-runtime` 和 `extension-builder`，仅用于原生协调器 canary 和镜像回切。确认原生个人助手、业务助手、自定义智能体、文件 Artifact 全部通过且 DSH 运行归零后，再从 Compose 删除。
+原生个人助手、业务助手、自定义智能体和文件 Artifact 已完成灰度验收，DSH 运行已归零；Compose 因此只保留上述九个服务。旧 DSH 与 Extension Builder 镜像、上一版 Compose 和原配置只保留七天用于紧急镜像级回切，不再运行，也不回滚数据库。
 
 ## 8. 退役与删除门禁
 
 - 旧 API 先返回中文 `410 Gone`，随后停止后台注入和写入。
 - Connector/Endpoint 连续七天无调用，且等价 Manifest Action 验证通过后才删除绑定与表。
-- DSH 排队和运行任务为零后才删除 Runtime、市场、外部扩展和旧镜像依赖。
+- DSH 排队和运行任务归零后已删除 Runtime、市场、外部扩展和构建依赖；旧镜像与上一版 Compose 保留七天用于紧急镜像级回切，不回滚数据库。
 - 表删除前必须确认无 ORM、外键、路由、后台任务和工具注册引用。
 - 部署前记录数据库备份、用户文件统计、镜像 digest 和 Git 提交；异常只切回镜像，不回滚数据库或 OSS。
 

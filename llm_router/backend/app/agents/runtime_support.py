@@ -1,4 +1,4 @@
-"""Persistence and SSE helpers shared by the single DSH coordinator."""
+"""Persistence and SSE helpers shared by the native Assistant Core."""
 
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ async def persist_run_events(
                 ))
             await db.commit()
     except Exception:  # noqa: BLE001
-        logger.warning("dsh_event_persist_failed", task_id=task_id, exc_info=True)
+        logger.warning("assistant_event_persist_failed", task_id=task_id, exc_info=True)
 
 
 async def finalize_bg_error(
@@ -138,7 +138,7 @@ async def finalize_bg_error(
             ))
             await db.commit()
     except Exception:  # noqa: BLE001
-        logger.warning("dsh_finalize_persist_failed", task_id=str(task.id), exc_info=True)
+        logger.warning("assistant_finalize_persist_failed", task_id=str(task.id), exc_info=True)
     # 之前只把 err_evt 写进 agent_run_events、没投递到 live SSE 队列：正在看流的用户
     # 只会看到流静默结束。先 publish 再 mark_done（mark_done 之后队列就封口了）。
     # 用户主动 Stop 的 "cancelled" 不推：前端点击停止时已把状态置为「已停止」，

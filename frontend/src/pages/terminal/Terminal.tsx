@@ -3940,7 +3940,7 @@ function extractArtifacts(blocks?: Block[]): ArtifactOutput[] {
   return deduped.filter((artifact) => !artifact.path || !deletedPaths.has(artifact.path));
 }
 
-/** DSH、旧 Runtime 与平台工具的结果包装层略有不同。这里仅在文件写工具内
+/** 历史工具与平台文件工具的结果包装层略有不同。这里仅在文件写工具内
  *  递归解包已知字段，兼容 outputs/files/artifacts 以及 JSON 字符串嵌套。 */
 function artifactRecords(content: string): Record<string, unknown>[] {
   const records: Record<string, unknown>[] = [];

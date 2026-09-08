@@ -1,4 +1,4 @@
-"""Terminal runner backed by the single DSH Agent Runtime."""
+"""Platform-owned coordinator for all Assistant Core runs."""
 
 from __future__ import annotations
 
@@ -13,17 +13,17 @@ import structlog
 from fastapi import HTTPException
 from starlette.responses import Response, StreamingResponse
 
+from app.agents.core import approval_registry
 from app.agents.core import native as native_core
-from app.agents.dsh import client, registry
-from app.agents.dsh.registry import DshRunContext
+from app.agents.core.approval_registry import AssistantRunContext
 from app.agents.graph import run_registry
 from app.agents.graph.context import bind_runtime
 from app.agents.graph.nodes import (
-    dsh_tool_specs,
+    assistant_tool_specs,
     extract_memory,
     load_config,
     load_memory,
-    prepare_dsh_turn,
+    prepare_assistant_turn,
     save_memory,
     write_run_log,
 )
@@ -239,8 +239,8 @@ _POLICY_TITLES = {
 _POLICY_DETAIL_KEYS = ("tool", "detail", "nudge", "approval_id", "outcome", "decided_by")
 
 
-class DshRunError(RuntimeError):
-    """Structured failure emitted by the DSH runtime stream."""
+class AssistantRunError(RuntimeError):
+    """Structured failure emitted by the native Assistant Core."""
 
     def __init__(self, message: str, *, code: str | None = None):
         super().__init__(message)
@@ -248,12 +248,11 @@ class DshRunError(RuntimeError):
 
 
 def _public_failure_message(exc: Exception) -> str:
-    if isinstance(exc, DshRunError) and exc.code == "MAX_STEPS_EXCEEDED":
+    if isinstance(exc, AssistantRunError) and exc.code == "MAX_STEPS_EXCEEDED":
         return "达到最大步数，未产生最终回答。"
-    if isinstance(exc, DshRunError) and exc.code == "CANCELLED":
-        # The runtime now closes a cancelled run with error(code=CANCELLED) instead of done.
+    if isinstance(exc, AssistantRunError) and exc.code == "CANCELLED":
         return "本次运行已停止。"
-    if isinstance(exc, DshRunError):
+    if isinstance(exc, AssistantRunError):
         message = str(exc)
         if "尚未完成全部能力验证" in message:
             return "当前模型尚未完成全部能力验证，请联系管理员完成该模型声明的全部能力测试。"
@@ -268,8 +267,8 @@ def _merge(state: dict, patch: dict | None) -> None:
 
 
 def _tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -> list[dict]:
-    """DSH ToolSpecs (name/description/input_schema + runtime metadata) for the RunRequest."""
-    return dsh_tool_specs(tools, registry or {})
+    """Native tool specs (schema plus runtime metadata) for one run."""
+    return assistant_tool_specs(tools, registry or {})
 
 
 def _requests_file_delivery(request: str) -> bool:
@@ -347,7 +346,7 @@ def _enterprise_result_status(content: object) -> str:
 
 def _file_output_tools(state: dict) -> list[str]:
     names = list(_FILE_OUTPUT_TOOL_NAMES)
-    for name, entry in (state.get("_dsh_tool_registry") or {}).items():
+    for name, entry in (state.get("_assistant_tool_registry") or {}).items():
         if isinstance(entry, dict) and entry.get("kind") in _FILE_OUTPUT_REGISTRY_KINDS and name not in names:
             names.append(name)
     return names
@@ -356,7 +355,7 @@ def _file_output_tools(state: dict) -> list[str]:
 def _completion_policy(state: dict) -> dict[str, Any]:
     """Build the runtime-owned ``completion_policy`` for this run.
 
-    The DSH runtime enforces it (nudging the model at most ``max_nudges`` times when no
+    The native runtime enforces it (nudging the model at most ``max_nudges`` times when no
     file-producing tool succeeded); Python only reports the resulting ``policy`` events.
     """
     if state.get("application_id"):
@@ -418,7 +417,7 @@ def _publish(handle: run_registry.RunHandle | None, staged: list[dict], event: d
 
 
 def _trace_for_tool(state: dict, name: str, call_id: str, arguments: str, result: str, ok: bool) -> None:
-    entry = (state.get("_dsh_tool_registry") or {}).get(name) or {}
+    entry = (state.get("_assistant_tool_registry") or {}).get(name) or {}
     kind = entry.get("kind")
     if name in FILE_TOOL_OPERATIONS or name.endswith("_tool") or name.startswith("workspace_"):
         category, title = "file", "文件解析与引用"
@@ -559,9 +558,9 @@ async def _prepare(
                 "status": "awaiting_clarification" if intent.intent == "clarify" else "planned",
                 "intent": intent.intent,
             }, ensure_ascii=False))
-        prepared = await prepare_dsh_turn(state)
+        prepared = await prepare_assistant_turn(state)
     state["traces"] = prepared["traces"]
-    state["_dsh_tool_registry"] = prepared["registry"]
+    state["_assistant_tool_registry"] = prepared["registry"]
     if state.get("application_id"):
         selected_tools = [
             str((item.get("function") or {}).get("name") or "")
@@ -578,7 +577,7 @@ async def _prepare(
         writer(json.dumps({"type": "trace", **tool_trace}, ensure_ascii=False))
     # ``handle`` / ``staged`` let bridge callbacks (user approvals) publish onto this run's SSE
     # channel and into the persisted event log exactly like the runner's own events.
-    context = DshRunContext(
+    context = AssistantRunContext(
         state=state,
         db=deps["db"],
         deps=deps,
@@ -594,17 +593,16 @@ async def _prepare(
         handle=handle,
         staged=staged,
     )
-    return prepared, registry.register(context)
+    return prepared, approval_registry.register(context)
 
 
-async def _consume_dsh(
+async def _consume_native(
     state: dict,
     prepared: dict,
     run_token: str,
     handle: run_registry.RunHandle | None,
     staged: list[dict],
-    deps: dict | None = None,
-    engine: str = "dsh",
+    deps: dict,
 ) -> None:
     intent = state.get("business_turn_intent") or {}
     if intent.get("intent") == "clarify":
@@ -642,11 +640,11 @@ async def _consume_dsh(
         "exec_mode": state.get("exec_mode") or "craft",
         "tools": _tool_specs(
             prepared["tools"],
-            prepared.get("registry") or state.get("_dsh_tool_registry") or {},
+            prepared.get("registry") or state.get("_assistant_tool_registry") or {},
         ),
         "max_steps": settings.agent_max_steps,
-        # Continuation nudges and repeat-failure blocking live in the DSH pipeline now;
-        # Python never re-runs the request under a "-continuation" id.
+        # The native loop owns continuation nudges and repeat-failure blocking;
+        # the coordinator never re-runs a request under a second id.
         "completion_policy": _completion_policy(state),
     }
     text = ""
@@ -664,19 +662,13 @@ async def _consume_dsh(
         "input_tokens": int((state.get("usage") or {}).get("input_tokens") or 0),
         "output_tokens": int((state.get("usage") or {}).get("output_tokens") or 0),
     }
-    if engine == "native":
-        runtime_deps = deps or getattr(registry.get(run_token), "deps", None)
-        if runtime_deps is None:
-            raise DshRunError("原生执行器缺少运行上下文", code="NATIVE_CONTEXT_MISSING")
-        event_source = native_core.stream_run(
-            request,
-            state=state,
-            prepared=prepared,
-            deps=runtime_deps,
-            run_context=registry.get(run_token),
-        )
-    else:
-        event_source = client.stream_run(request)
+    event_source = native_core.stream_run(
+        request,
+        state=state,
+        prepared=prepared,
+        deps=deps,
+        run_context=approval_registry.get(run_token),
+    )
     async for event in event_source:
         kind = event.get("type")
         if kind == "text_delta":
@@ -694,7 +686,7 @@ async def _consume_dsh(
             name = str(event.get("name") or "tool")
             successful_tools += int(ok)
             call_id = str(event.get("id") or "")
-            entry = (state.get("_dsh_tool_registry") or {}).get(name) or {}
+            entry = (state.get("_assistant_tool_registry") or {}).get(name) or {}
             entry_kind = entry.get("kind")
             published_event = dict(event)
             published_event["tool_kind"] = entry_kind or ""
@@ -761,8 +753,8 @@ async def _consume_dsh(
             usage["input_tokens"] += int(event.get("input_tokens") or 0)
             usage["output_tokens"] += int(event.get("output_tokens") or 0)
         elif kind == "error":
-            raise DshRunError(
-                str(event.get("message") or "DSH runtime failed"),
+            raise AssistantRunError(
+                str(event.get("message") or "Assistant Core failed"),
                 code=str(event.get("code") or "") or None,
             )
         elif kind == "done":
@@ -836,7 +828,7 @@ async def _consume_dsh(
             state["error"] = f"Tool '{tool_name}' failed: {detail[:1000]}"
             text = f"工具执行失败（{tool_name}）：{detail[:500]}"
         else:
-            state["error"] = "DSH runtime completed without a final response"
+            state["error"] = "Assistant Core completed without a final response"
             text = "模型未返回最终回答，请重试。"
         _publish(handle, staged, {"type": "text", "delta": text})
     state["assistant_final"] = text
@@ -860,20 +852,6 @@ async def _set_run_status(
         await db.commit()
 
 
-def _assistant_engine_for_run(user_id: str) -> str:
-    """Resolve one server-owned engine choice; callers persist it in run state."""
-    configured = str(getattr(settings, "assistant_engine", "dsh") or "dsh").strip().lower()
-    if configured not in {"native", "dsh"}:
-        logger.error("assistant_engine_invalid", configured=configured)
-        configured = "dsh"
-    canary_users = {
-        item.strip()
-        for item in str(getattr(settings, "assistant_native_canary_user_ids", "") or "").split(",")
-        if item.strip()
-    }
-    return "native" if configured == "native" or user_id in canary_users else "dsh"
-
-
 async def _admitted_run(
     state: dict,
     deps: dict,
@@ -883,11 +861,9 @@ async def _admitted_run(
     staged: list[dict],
     user_id: str,
 ) -> None:
-    """Acquire a shared Redis permit before entering one immutable run engine."""
+    """Acquire a shared Redis permit before entering the native Assistant Core."""
     run_id = int(state["run_id"])
-    # The choice is server-owned and written once before admission.  It is never
-    # taken from the request and never changes after a side-effecting tool runs.
-    engine = _assistant_engine_for_run(user_id)
+    engine = "native"
     state["assistant_engine"] = engine
     state.setdefault("steps", []).append({"step": "assistant_engine", "engine": engine})
     trace = {"category": "runtime", "title": "助手执行引擎", "engine": engine}
@@ -909,7 +885,7 @@ async def _admitted_run(
             await _set_run_status(deps["db"], run_id, "running")
 
     async with agent_admission.permit(str(run_id), user_id, status):
-        await _consume_dsh(state, prepared, run_token, handle, staged, deps, engine)
+        await _consume_native(state, prepared, run_token, handle, staged, deps)
 
 
 async def _finish(state: dict, deps: dict, writer: Any = lambda _payload: None) -> None:
@@ -949,7 +925,7 @@ async def _finish_failed_run(
     writer: Any = lambda _payload: None,
 ) -> None:
     """Preserve the public graceful-error contract when the coordinator is unavailable."""
-    message = f"DSH runtime failed: {exc}"
+    message = f"Assistant Core failed: {exc}"
     state["error"] = message
     state["assistant_final"] = _public_failure_message(exc)
     state.setdefault("messages", []).append(
@@ -960,10 +936,10 @@ async def _finish_failed_run(
 
 
 async def _persist_early_failure_reply(state: dict, task: Any, exc: Exception) -> str:
-    """Persist a public assistant reply when preparation fails before the DSH run starts."""
+    """Persist a public assistant reply when preparation fails before execution starts."""
 
     public_message = _public_failure_message(exc)
-    state["error"] = f"DSH runtime failed: {exc}"
+    state["error"] = f"Assistant Core failed: {exc}"
     state["assistant_final"] = public_message
     state.setdefault("messages", []).append({"role": "assistant", "content": public_message})
     state.setdefault("steps", []).append({"step": "runtime_prepare_error"})
@@ -1036,11 +1012,11 @@ async def run_general_agent(
             await _admitted_run(state, deps, prepared, run_token, None, staged, str(user.id))
             await _finish(state, deps)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("dsh_terminal_run_failed", error=str(exc), exc_info=True)
+            logger.warning("assistant_terminal_run_failed", error=str(exc), exc_info=True)
             await _finish_failed_run(state, deps, exc)
     finally:
         if run_token:
-            registry.revoke(run_token)
+            approval_registry.revoke(run_token)
     status = "failed" if state.get("error") else "completed"
     return {
         "session_id": state["session_id"],
@@ -1110,7 +1086,7 @@ async def stream_general_agent(
         state["client_request_id"] = client_request_id
         handle.bg_task = asyncio.create_task(
             _run_bg(handle, state=state, user=user, task=task),
-            name=f"dsh_agent_run:{task_id}",
+            name=f"assistant_core_run:{task_id}",
         )
     return StreamingResponse(
         sse_replay_and_tail(handle),
@@ -1155,7 +1131,7 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
                 # 与 run_general_agent 一致：把失败落成一条 assistant TaskMessage + done 事件，
                 # 让流式用户看到明确的错误回复，而不是流悄悄结束、刷新后本轮没有任何回复。
                 logger.warning(
-                    "dsh_general_bg_run_failed",
+                    "assistant_general_bg_run_failed",
                     task_id=str(task.id),
                     error=str(exc),
                     exc_info=True,
@@ -1166,7 +1142,7 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
             finally:
                 # The runtime stream is over (done / failed / user Stop): any approval still waiting
                 # is settled as ``cancelled`` *before* ``staged`` is persisted so the decision is on record.
-                registry.cancel_approvals(run_token)
+                approval_registry.cancel_approvals(run_token)
             final = json.dumps(
                 {
                     "type": "final",
@@ -1191,8 +1167,6 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
             await persist_run_events(state.get("run_id"), str(task.id), staged, final)
             run_registry.mark_done(handle, final, error=str(state.get("error") or "") or None)
     except asyncio.CancelledError:
-        if state.get("run_id") is not None and state.get("assistant_engine") == "dsh":
-            await client.cancel_run(str(state["run_id"]))
         await persist_run_events(state.get("run_id"), str(task.id), staged, None)
         await finalize_bg_error(
             handle,
@@ -1205,7 +1179,7 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
         )
         raise
     except Exception as exc:  # noqa: BLE001
-        logger.error("dsh_general_bg_error", task_id=str(task.id), error=str(exc), exc_info=True)
+        logger.error("assistant_general_bg_error", task_id=str(task.id), error=str(exc), exc_info=True)
         public_message = _public_failure_message(exc)
         _publish_failure_reply(handle, staged, state, exc)
         try:
@@ -1221,7 +1195,7 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
                 },
             )
         except Exception:  # noqa: BLE001
-            logger.warning("dsh_prepare_failure_reply_persist_failed", task_id=str(task.id), exc_info=True)
+            logger.warning("assistant_prepare_failure_reply_persist_failed", task_id=str(task.id), exc_info=True)
         await persist_run_events(state.get("run_id"), str(task.id), staged, None)
         await finalize_bg_error(
             handle,
@@ -1234,6 +1208,6 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
         )
     finally:
         if run_token:
-            registry.revoke(run_token)
+            approval_registry.revoke(run_token)
         if handle.done:
             run_registry.drop(str(task.id))

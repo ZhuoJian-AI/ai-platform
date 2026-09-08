@@ -1,9 +1,4 @@
-"""DB-free contracts for user approval of risky tools (Phase B1).
-
-Covers the three backend halves: ``ToolSpec.approval`` metadata, the runtime bridge
-``POST /internal/dsh/approval/request`` (SSE ``approval_request`` / ``approval_decided``) and the
-terminal decision ``POST /terminal/tasks/{task_id}/approvals/{approval_id}``.
-"""
+"""DB-free contracts for native Assistant Core user approval of risky tools."""
 
 import asyncio
 import json
@@ -13,9 +8,10 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from app.agents.dsh import registry, runner
+from app.agents.core import approval_registry as registry
+from app.agents.core import runner
 from app.agents.graph import nodes, run_registry
-from app.api import dsh_internal, terminal
+from app.api import terminal
 from app.config import settings
 from app.schemas.task import TaskApprovalDecision
 
@@ -35,7 +31,7 @@ def _tool(name: str, **extra) -> dict:
 
 
 def _spec(name: str, entry: dict | None = None, **extra) -> dict:
-    return nodes.dsh_tool_specs([_tool(name, **extra)], {name: entry} if entry is not None else {})[0]
+    return nodes.assistant_tool_specs([_tool(name, **extra)], {name: entry} if entry is not None else {})[0]
 
 
 def _action(operation: str, requires_confirmation: bool = False) -> dict:
@@ -52,9 +48,6 @@ def test_risky_tools_carry_approval_ask():
     assert _spec("workspace_delete_file")["approval"] == "ask"
     delete_endpoint = {"folder": object(), "endpoint": SimpleNamespace(method="DELETE")}
     assert _spec("erp__purge_1234", delete_endpoint)["approval"] == "ask"
-    assert _spec("ext_high", {"kind": "x", "risk_level": "high", "side_effects": False})["approval"] == "ask"
-    assert _spec("ext_critical", {"kind": "x", "risk_level": "critical"})["approval"] == "ask"
-    assert _spec("ext_effects", {"kind": "x", "risk_level": "low", "side_effects": True})["approval"] == "ask"
     for operation in ("create", "update", "delete", "approve"):
         assert _spec(f"crm_{operation}", _action(operation))["approval"] == "ask", operation
     assert _spec("crm_query_confirm", _action("query", requires_confirmation=True))["approval"] == "ask"
@@ -70,38 +63,25 @@ def test_read_only_and_ordinary_write_tools_never_ask():
     assert "approval" not in _spec("load_skill", {"kind": "load_skill"})
     assert "approval" not in _spec("bank_flow", {"kind": "code"})
     assert "approval" not in _spec("erp__query_1234", {"folder": object(), "endpoint": SimpleNamespace(method="POST")})
-    assert "approval" not in _spec("ext_low", {"kind": "x", "risk_level": "low", "side_effects": False})
     for operation in ("query", "export"):
         assert "approval" not in _spec(f"crm_{operation}", _action(operation)), operation
     # A read tool that happens to carry a manifest risk flag is still never gated.
     assert "approval" not in _spec("rag_search", {"kind": "rag_search", "risk_level": "high"})
 
 
-def test_external_extension_tools_use_the_risk_flags_attached_to_their_definition():
-    """Extension tools have no execution registry entry; ``_build_tools`` puts the manifest flags on the def."""
-    high = _spec("node_ext_wipe", risk={"risk_level": "high", "side_effects": False})
-    low = _spec("node_ext_lookup", risk={"risk_level": "low", "side_effects": False})
-    effects = _spec("node_ext_post", risk={"risk_level": "medium", "side_effects": True})
-
-    assert high["kind"] == "external_tool" and high["approval"] == "ask"
-    assert effects["approval"] == "ask"
-    assert low["kind"] == "external_tool" and "approval" not in low
-    assert "approval" not in _spec("node_ext_plain")
-
-
 def test_builtin_defs_only_gate_the_hard_delete():
-    specs = nodes.dsh_tool_specs(nodes._builtin_tool_defs(include_image_generation=True), {})
+    specs = nodes.assistant_tool_specs(nodes._builtin_tool_defs(include_image_generation=True), {})
     gated = sorted(spec["name"] for spec in specs if spec.get("approval") == "ask")
     assert gated == ["workspace_delete_file"]
     assert all(spec.get("approval") in (None, "ask") for spec in specs)
 
 
 def test_approval_metadata_is_gated_by_the_setting(monkeypatch):
-    assert settings.dsh_tool_approval_enabled is True  # default
-    monkeypatch.setattr(settings, "dsh_tool_approval_enabled", False)
-    specs = nodes.dsh_tool_specs(
-        [*nodes._builtin_tool_defs(include_image_generation=True), _tool("crm_delete"), _tool("ext_high")],
-        {"crm_delete": _action("delete"), "ext_high": {"kind": "x", "risk_level": "critical", "side_effects": True}},
+    assert settings.assistant_tool_approval_enabled is True  # default
+    monkeypatch.setattr(settings, "assistant_tool_approval_enabled", False)
+    specs = nodes.assistant_tool_specs(
+        [*nodes._builtin_tool_defs(include_image_generation=True), _tool("crm_delete")],
+        {"crm_delete": _action("delete")},
     )
     assert specs and not any("approval" in spec for spec in specs)
     assert {"kind", "timeout_ms", "concurrency_safe", "max_model_chars"} <= set(specs[0])
@@ -116,7 +96,7 @@ def _context(task_id: str | None = "task-approval", *, with_handle: bool = True)
     state = {"run_id": 42, "steps": []}
     if task_id:
         state["task_id"] = task_id
-    context = registry.DshRunContext(
+    context = registry.AssistantRunContext(
         state=state, db=None, deps={}, tool_registry={}, allowed_tool_names=set(),
         image_inputs=[], handle=handle, staged=staged,
     )
@@ -124,13 +104,19 @@ def _context(task_id: str | None = "task-approval", *, with_handle: bool = True)
 
 
 def _bridge(token: str, approval_id: str = "ap-1", timeout_ms: int = 5_000) -> asyncio.Task:
-    return asyncio.create_task(dsh_internal.request_approval(
-        dsh_internal.ApprovalBridgeRequest(
-            run_token=token, approval_id=approval_id, tool="workspace_delete_file", call_id="call-9",
-            reason="硬删除文件", arguments_preview='{"file_id":"f-1"}', timeout_ms=timeout_ms,
-        ),
-        authorization=f"Bearer {settings.dsh_runtime_token}",
-    ))
+    context = registry.get(token)
+    assert context is not None
+    return asyncio.create_task(
+        registry.await_approval(
+            context,
+            approval_id=approval_id,
+            tool="workspace_delete_file",
+            call_id="call-9",
+            reason="硬删除文件",
+            arguments_preview='{"file_id":"f-1"}',
+            timeout_ms=timeout_ms,
+        )
+    )
 
 
 async def _settle() -> None:
@@ -264,23 +250,6 @@ async def test_stopping_the_run_cancels_pending_approvals():
 
 
 @pytest.mark.asyncio
-async def test_bridge_requires_the_service_token_and_a_live_run_token():
-    with pytest.raises(HTTPException) as unauthenticated:
-        await dsh_internal.request_approval(
-            dsh_internal.ApprovalBridgeRequest(run_token="x", approval_id="a", tool="t", call_id="c"),
-            authorization="Bearer wrong",
-        )
-    assert unauthenticated.value.status_code == 401
-    with pytest.raises(HTTPException) as expired:
-        await dsh_internal.request_approval(
-            dsh_internal.ApprovalBridgeRequest(run_token="expired-token", approval_id="a", tool="t", call_id="c"),
-            authorization=f"Bearer {settings.dsh_runtime_token}",
-        )
-    assert expired.value.status_code == 401
-    assert expired.value.detail == "expired run token"
-
-
-@pytest.mark.asyncio
 async def test_bridge_caps_the_wait_at_five_minutes():
     _context_, token, _handle, staged = _context()
     try:
@@ -343,7 +312,7 @@ def test_terminal_decision_schema_only_accepts_allow_or_reject():
 
 @pytest.mark.asyncio
 async def test_runtime_approval_policy_events_are_traced_like_other_policies(monkeypatch):
-    async def stream_run(_request):
+    async def stream_run(_request, **_kwargs):
         yield {"type": "policy", "action": "approval_requested", "tool": "workspace_delete_file", "approval_id": "ap-1"}
         yield {
             "type": "policy", "action": "approval_decided", "tool": "workspace_delete_file", "approval_id": "ap-1",
@@ -351,11 +320,11 @@ async def test_runtime_approval_policy_events_are_traced_like_other_policies(mon
         }
         yield {"type": "done", "text": "已按你的要求放弃删除。", "steps": 1, "tool_calls": 0}
 
-    monkeypatch.setattr(runner.client, "stream_run", stream_run)
+    monkeypatch.setattr(runner.native_core, "stream_run", stream_run)
     state = {"run_id": 11, "request": "删掉那个文件", "messages": [], "steps": [], "traces": []}
     staged: list[dict] = []
 
-    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, staged)
+    await runner._consume_native(state, {"system_prompt": "", "tools": []}, "run-token", None, staged, {})
 
     traces = [trace for trace in state["traces"] if trace.get("category") == "policy"]
     assert [trace["title"] for trace in traces] == ["审批请求", "审批结果"]

@@ -1,4 +1,4 @@
-"""Serializable platform state exchanged with the single DSH coordinator.
+"""Serializable platform state used by the native Assistant Core.
 
 Database sessions, authenticated principals and provider secrets are never
 included; they remain in the short-lived server-side run registry.
@@ -10,7 +10,7 @@ from typing import TypedDict
 
 
 class AgentState(TypedDict, total=False):
-    """单次智能体执行在平台准备、DSH 协调和持久化阶段间流转的状态。"""
+    """单次智能体执行在平台准备、原生协调和持久化阶段间流转的状态。"""
 
     # ── 标识 ──
     agent_id: str
@@ -60,7 +60,7 @@ class AgentState(TypedDict, total=False):
     # general 模式：当前轮明确调用的技能（结构化 UUID 优先，唯一 /slug 兼容）。
     referenced_skills: list[dict]
     # general 模式：用户在消息中以 @<file_id> 引用的工作空间文件 id（load_config 解析填充）。
-    # DSH turn preparation reads these references; binary files are never inlined as text.
+    # Turn preparation reads these references; binary files are never inlined as text.
     referenced_file_ids: list[str]
     # 本轮结构化附件的服务端校验快照；写入 user TaskMessage.metadata 供历史回放。
     attachment_files: list[dict]
@@ -94,9 +94,9 @@ class AgentState(TypedDict, total=False):
     # 经 stream_writer 下发 ``trace`` 事件实时展示，并随 save_memory 落 assistant
     # TaskMessage.metadata_ 供历史回放还原。技能仅在此落库、不重复发 trace 事件。
     traces: list[dict]
-    # Repeat-failure blocking now lives in the DSH tool pipeline (dsh_runtime/src/policies.ts);
-    # the bridge only records whether this run persisted memory itself.
-    _dsh_memory_written: bool  # 本轮模型已通过 write_memory 落库，extract_memory 跳过
+    # The coordinator records whether this run persisted memory itself so the
+    # extraction pass can avoid duplicating the same fact.
+    _assistant_memory_written: bool  # 本轮模型已通过 write_memory 落库，extract_memory 跳过
 
     # ── 错误 ──
     error: str | None

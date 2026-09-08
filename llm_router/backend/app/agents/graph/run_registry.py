@@ -1,6 +1,6 @@
 """进程内 run 注册表 —— detach 执行的 run 句柄，供「断连续接」回放 + 续接 live。
 
-为什么需要：DSH runner 的 ``stream_general_agent`` 把执行 detach 到后台
+为什么需要：Assistant Core runner 的 ``stream_general_agent`` 把执行 detach 到后台
 ``asyncio.create_task``，执行生命周期不再绑定 SSE 连接。客户端断连后想重连续接，
 需要拿到该 run 已产出的事件 buffer（回放）+ live queue（续接）。本注册表即此中介。
 
