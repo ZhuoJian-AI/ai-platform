@@ -1,4 +1,4 @@
-"""Tests for agent platform CRUD (workspace / agent / judge / rag)."""
+"""Tests for the retained agent platform CRUD (workspace / agent / rag)."""
 
 import pytest
 from httpx import AsyncClient
@@ -71,20 +71,6 @@ async def test_agent_crud(client: AsyncClient):
 
     dele = await client.delete(f"/api/v1/agents/{aid}")
     assert dele.status_code == 204
-
-
-# ── Judge ──
-
-@pytest.mark.asyncio
-async def test_judge_crud(client: AsyncClient):
-    org_id = await _make_org(client, "jg-org")
-    r = await client.post(
-        f"/api/v1/organizations/{org_id}/judges",
-        json={"name": "准确性判官", "slug": "accuracy",
-              "criteria": [{"dimension": "准确性", "weight": 1.0}]},
-    )
-    assert r.status_code == 410
-    assert "Judge 模板已下线" in r.json()["detail"]["message"]
 
 
 # ── RAG collection + ingest（embedding 无 provider 时明确失败）──

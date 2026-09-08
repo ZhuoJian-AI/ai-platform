@@ -32,7 +32,6 @@ from app.agents.core import approval_registry
 from app.agents.core.runner import run_general_agent, stream_general_agent
 from app.agents.graph import run_registry
 from app.agents.runtime_support import stream_persisted_run
-from app.api.retirement import retired_api_dependency
 from app.auth.user_auth import (
     CurrentUser,
     assert_user_org_access,
@@ -188,8 +187,6 @@ from app.tools.skill_manifest import parse_skill_manifest
 from app.utils.workspace_presentation import clean_display_name, presentation_dict
 
 router = APIRouter()
-_RETIRED_SKILLS_PACK = retired_api_dependency("MCP/OAuth Skill Pack 导出")
-_RETIRED_OFFICE_EDIT = retired_api_dependency("WebOffice 在线协作编辑")
 _NON_STREAM_ACTIVE_TASKS: set[str] = set()
 
 _FILE_MENTION_RE = re.compile(
@@ -524,7 +521,6 @@ async def resources_endpoint(
     return {
         "workspaces": workspace_reads,
         "skills": skill_summaries,
-        "ontologies": [],
         "rags": [RagCollectionRead.model_validate(r).model_dump() for r in rags],
         "defaults": defaults,
     }
@@ -536,14 +532,6 @@ async def effective_access_endpoint(
 ):
     """Return role-aware workspace capabilities without listing any files."""
     return await workspace_permission_service.effective_access(db, cu)
-
-
-@router.post("/terminal/skills-pack/export", dependencies=[_RETIRED_SKILLS_PACK])
-async def export_skills_pack_endpoint(
-):
-    """Compatibility endpoint; the route dependency always returns 410."""
-
-    raise HTTPException(status_code=410, detail="MCP/OAuth Skill Pack 已下线")
 
 
 @router.get("/terminal/workspace-files")
@@ -1665,45 +1653,6 @@ async def refresh_preview_session_ws_file_endpoint(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.post(
-    "/terminal/files/{file_id}/edit-session",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_user_edit_session(file_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.post(
-    "/terminal/files/{file_id}/edit-session/refresh",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_user_edit_session_refresh(file_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.get(
-    "/terminal/files/{file_id}/edit-session/{room_id}",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_user_edit_session_status(
-    file_id: UUID,  # noqa: ARG001
-    room_id: UUID,  # noqa: ARG001
-):
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.post(
-    "/terminal/files/{file_id}/edit-session/close",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_user_edit_session_close(file_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
 async def _fallback_preview_ws_file(
     file_id: UUID, response: Response, cu: CurrentUser, db: AsyncSession, *,
     create: bool, version_id: UUID | None = None,
@@ -1931,16 +1880,6 @@ async def reparse_ws_file_endpoint(
     f = await workspace_service.reparse_file(db, f)
     await db.commit()
     return await _terminal_file_read(db, cu, ws, f)
-
-
-# 免登录公开访问的 HTML 类扩展名（content 为 HTML，浏览器可直接渲染）。
-PUBLIC_HTML_EXTS = {"html", "htm", "doc", "docx"}
-
-
-@router.get("/terminal/public/files/{file_id}")
-async def public_ws_file_endpoint(file_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Legacy permanent links are intentionally retired in favour of expiring tokens."""
-    raise HTTPException(status_code=410, detail="永久公开链接已停用，请重新创建限时分享链接")
 
 
 @router.post("/terminal/files/{file_id}/versions", response_model=WorkspaceFileRead)
@@ -2600,23 +2539,6 @@ async def kb_nodes_endpoint(
     return nodes
 
 
-@router.api_route(
-    "/terminal/data-systems",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-@router.api_route(
-    "/terminal/data-systems/{path:path}",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-async def retired_terminal_data_interfaces(path: str = ""):
-    del path
-    from app.api.retirement import retired_response
-
-    return retired_response("Data Interface 已下线；业务数据请通过应用 Manifest Action 使用。")
-
-
 @router.get("/terminal/rag", response_model=list[RagCollectionRead])
 async def list_kb_collections_endpoint(
     scope_type: str = Query(..., description="organization/department/user"),
@@ -3051,34 +2973,3 @@ async def delete_skill_file_endpoint(
         raise HTTPException(status_code=409, detail="Versioned Skill files are immutable; import a new package version")
     await soft_delete_skill_file(db, fl)
     await db.commit()
-
-
-
-# Ontology had duplicate storage and authorization semantics.  Keep one
-# compatibility release with explicit 410 responses, without loading its ORM or
-# CRUD implementation into the user runtime.
-@router.api_route(
-    "/terminal/ontology-folders",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-@router.api_route(
-    "/terminal/ontology-folders/{path:path}",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-@router.api_route(
-    "/terminal/ontology-files",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-@router.api_route(
-    "/terminal/ontology-files/{path:path}",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-async def retired_terminal_ontology(path: str = ""):
-    del path
-    from app.api.retirement import retired_response
-
-    return retired_response("Ontology 已下线；请使用知识库/RAG 与工作空间文件。")

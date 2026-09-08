@@ -138,8 +138,7 @@ async def test_team_endpoints_are_gone_and_department_members_still_block_deleti
         f"/api/v1/departments/{source_id}/teams",
         json={"name": "产品设计组", "slug": "product-design"},
     )
-    assert retired_team.status_code == 410
-    assert "Team 已停用" in retired_team.json()["detail"]
+    assert retired_team.status_code == 404
     user = await client.post(
         f"/api/v1/organizations/{org_id}/users",
         json={

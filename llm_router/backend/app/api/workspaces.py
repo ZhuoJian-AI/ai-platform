@@ -20,7 +20,6 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.retirement import retired_api_dependency
 from app.auth.admin_auth import (
     CurrentAdmin,
     assert_org_access,
@@ -107,7 +106,6 @@ from app.services.workspace_service import (
 )
 
 router = APIRouter()
-_RETIRED_OFFICE_EDIT = retired_api_dependency("WebOffice 在线协作编辑")
 
 
 @router.get("/workspaces/file-capabilities")
@@ -739,45 +737,6 @@ async def refresh_preview_session_endpoint(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except storage_gateway_service.StorageGatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
-@router.post(
-    "/files/{file_id}/edit-session",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_admin_edit_session(file_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.post(
-    "/files/{file_id}/edit-session/refresh",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_admin_edit_session_refresh(file_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.get(
-    "/files/{file_id}/edit-session/{room_id}",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_admin_edit_session_status(
-    file_id: UUID,  # noqa: ARG001
-    room_id: UUID,  # noqa: ARG001
-):
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.post(
-    "/files/{file_id}/edit-session/close",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_admin_edit_session_close(file_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 async def _fallback_preview(

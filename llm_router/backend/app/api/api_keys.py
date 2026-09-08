@@ -62,16 +62,6 @@ async def create_dept_key(
     return ApiKeyCreateResponse(**_build_read(api_key), key=full_key)
 
 
-@router.post("/teams/{team_id}/api-keys", response_model=ApiKeyCreateResponse, status_code=201)
-async def create_team_key(
-    team_id: UUID,
-    data: ApiKeyCreate,
-    auth: CurrentAdmin = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    raise HTTPException(status_code=410, detail="Team 已停用，请在企业或部门范围配置 API Key")
-
-
 @router.get("/organizations/{org_id}/api-keys", response_model=list[ApiKeyRead])
 async def list_keys(org_id: UUID, _: CurrentAdmin = Depends(require_org_access), db: AsyncSession = Depends(get_db)):
     keys = await list_api_keys(db, org_id)

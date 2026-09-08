@@ -27,12 +27,6 @@ from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.models.memory import Memory
 from app.models.multimodal import MultimodalJob, VoiceAuthorizationRecord, VoiceProfile, VoiceProfileGrant
 from app.models.organization import Organization, OrganizationSlugAlias
-from app.models.platform_extension import (
-    PlatformExtensionCatalogEntry,
-    PlatformExtensionRelease,
-    PlatformExtensionReleaseEvent,
-    PlatformExtensionSource,
-)
 from app.models.rag import RagChunk, RagCollection, RagDocument, RagFolder
 from app.models.role import Role, RoleDataDepartment, RolePermission, UserRole
 from app.models.routing_policy import RoutingPolicy
@@ -85,10 +79,6 @@ __all__ = [
     "AuditLog",
     "BudgetUsage",
     "AiQuotaEvent",
-    "PlatformExtensionSource",
-    "PlatformExtensionCatalogEntry",
-    "PlatformExtensionRelease",
-    "PlatformExtensionReleaseEvent",
     # 智能体平台
     "Workspace",
     "WorkspaceFile",

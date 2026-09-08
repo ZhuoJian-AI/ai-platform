@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.retirement import retired_api_dependency
 from app.auth.admin_auth import (
     CurrentAdmin,
     assert_org_access,
@@ -58,45 +57,6 @@ from app.services.skill_store_service import (
 )
 
 router = APIRouter()
-_RETIRED_DEFINITION_SKILL = retired_api_dependency("旧 Definition Skill")
-
-
-@router.post(
-    "/organizations/{org_id}/skills",
-    status_code=410,
-    dependencies=[_RETIRED_DEFINITION_SKILL],
-)
-async def retired_definition_skill_create(org_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.get(
-    "/organizations/{org_id}/skills",
-    status_code=410,
-    dependencies=[_RETIRED_DEFINITION_SKILL],
-)
-async def retired_definition_skill_list(org_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.get("/skills/{skill_id}", status_code=410, dependencies=[_RETIRED_DEFINITION_SKILL])
-async def retired_definition_skill_read(skill_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.patch("/skills/{skill_id}", status_code=410, dependencies=[_RETIRED_DEFINITION_SKILL])
-async def retired_definition_skill_update(skill_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.delete("/skills/{skill_id}", status_code=410, dependencies=[_RETIRED_DEFINITION_SKILL])
-async def retired_definition_skill_delete(skill_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.post("/skills/{skill_id}/test", status_code=410, dependencies=[_RETIRED_DEFINITION_SKILL])
-async def retired_definition_skill_test(skill_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 # ── 技能文件夹化存储（SkillFolder + SkillFile，节点作用域）──────────────

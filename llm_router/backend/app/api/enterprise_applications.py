@@ -585,20 +585,3 @@ async def reject_terminal_application_action_endpoint(
 ):
     return await action_service.resolve_confirmation(db, confirmation_id, cu, approve=False)
 
-
-@router.get("/terminal/cross-department-work-items", status_code=410)
-async def terminal_cross_department_work_items_endpoint(
-    cu: CurrentUser = Depends(require_user),
-):
-    raise HTTPException(status_code=410, detail="平台跨部门待办已停用，请在对应业务系统中处理")
-
-
-@router.patch(
-    "/terminal/cross-department-work-items/{item_id}",
-    status_code=410,
-)
-async def update_terminal_cross_department_work_item_endpoint(
-    item_id: UUID,
-    cu: CurrentUser = Depends(require_user),
-):
-    raise HTTPException(status_code=410, detail="平台跨部门待办已停用，请在对应业务系统中处理")
