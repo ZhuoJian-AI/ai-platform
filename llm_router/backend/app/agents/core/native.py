@@ -261,6 +261,7 @@ async def stream_run(
     visible_text = ""
     last_failure_key = ""
     consecutive_failures = 0
+    successful_side_effects: dict[str, str] = {}
 
     for step_index in range(max_steps):
         yield {"type": "phase", "phase": "llm", "index": step_index}
@@ -315,6 +316,7 @@ async def stream_run(
                 yield {"type": "tool_call", "id": call["id"], "name": name, "arguments": arguments_text}
 
                 failure_key = _failure_key(name, params or {"_raw": arguments_text})
+                dedupe_side_effect = validation_error is None and not bool(spec.get("concurrency_safe"))
                 skip_repeat = failure_key == last_failure_key and consecutive_failures >= 2
                 if skip_repeat:
                     content = _tool_error(
@@ -331,6 +333,15 @@ async def stream_run(
                     }
                 elif validation_error is not None:
                     content, ok = validation_error, False
+                elif dedupe_side_effect and failure_key in successful_side_effects:
+                    content = successful_side_effects[failure_key]
+                    ok = True
+                    yield {
+                        "type": "policy",
+                        "action": "duplicate_side_effect_reused",
+                        "tool": name,
+                        "detail": "same_tool_and_arguments=true; backend_skipped=true",
+                    }
                 else:
                     assert params is not None
                     call["arguments"] = _stable_json(params)
@@ -382,6 +393,8 @@ async def stream_run(
                 if ok:
                     consecutive_failures = 0
                     last_failure_key = failure_key
+                    if dedupe_side_effect:
+                        successful_side_effects.setdefault(failure_key, content)
                     delivered = delivered or name in file_tools
                 else:
                     consecutive_failures = consecutive_failures + 1 if failure_key == last_failure_key else 1

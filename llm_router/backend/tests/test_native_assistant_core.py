@@ -116,6 +116,50 @@ async def test_native_core_executes_authorized_tool_and_preserves_event_contract
 
 
 @pytest.mark.asyncio
+async def test_native_core_reuses_duplicate_side_effect_in_one_model_turn(monkeypatch):
+    monkeypatch.setattr(
+        native.model_gateway,
+        "stream_chat",
+        _scripted_stream(
+            [
+                [
+                    (
+                        "tool_calls",
+                        [
+                            {"id": "c1", "name": "report_create", "arguments": '{"rows":[]}'},
+                            {"id": "c2", "name": "report_create", "arguments": '{"rows":[]}'},
+                        ],
+                        None,
+                    )
+                ],
+                [("text", "文件已生成。", None)],
+            ]
+        ),
+    )
+    calls = []
+
+    async def execute(_state, call, _registry):
+        calls.append(call["id"])
+        payload = json.dumps({"status": "success", "file_id": "f1"}, ensure_ascii=False)
+        return {"role": "tool", "tool_call_id": call["id"], "content": payload}, payload, True
+
+    monkeypatch.setattr(native, "_execute_tool_call", execute)
+    events = [
+        event
+        async for event in native.stream_run(
+            _request(require_file=True), state=_state(), prepared=_prepared(), deps={"db": object()}
+        )
+    ]
+
+    assert calls == ["c1"]
+    results = [item for item in events if item["type"] == "tool_result"]
+    assert [item["id"] for item in results] == ["c1", "c2"]
+    assert results[0]["content"] == results[1]["content"]
+    assert any(item.get("action") == "duplicate_side_effect_reused" for item in events)
+    assert next(item for item in events if item["type"] == "done")["text"] == "文件已生成。"
+
+
+@pytest.mark.asyncio
 async def test_native_core_rejects_json_string_for_array_field_before_execution(monkeypatch):
     monkeypatch.setattr(
         native.model_gateway,
