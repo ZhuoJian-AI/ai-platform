@@ -85,7 +85,7 @@ def _quota_resource(identifier: UUID, **overrides):
 
 
 @pytest.mark.asyncio
-async def test_rag_embedding_paths_forward_department_without_team(monkeypatch) -> None:
+async def test_rag_embedding_paths_forward_department(monkeypatch) -> None:
     department_id, org_id = uuid4(), uuid4()
     observed: list[dict] = []
 
@@ -118,7 +118,6 @@ async def test_rag_embedding_paths_forward_department_without_team(monkeypatch) 
         org_id,
         ["first"],
         department_id=department_id,
-        team_id=uuid4(),
     )
     await rag_service.reingest_document(
         db,
@@ -126,7 +125,6 @@ async def test_rag_embedding_paths_forward_department_without_team(monkeypatch) 
         org_id,
         RagReingestRequest(chunks=["second"]),
         department_id=department_id,
-        team_id=uuid4(),
     )
     await rag_service.retrieve(
         db,
@@ -134,18 +132,16 @@ async def test_rag_embedding_paths_forward_department_without_team(monkeypatch) 
         org_id,
         RagRetrieveRequest(query="needle", top_k=3),
         department_id=department_id,
-        team_id=uuid4(),
     )
 
     assert len(observed) == 3
     assert all(item["dept_id"] == department_id for item in observed)
-    assert all(item["team_id"] is None for item in observed)
 
 
 @pytest.mark.asyncio
 async def test_uploaded_rag_job_keeps_department_scope_for_background_embedding(monkeypatch) -> None:
     department_id, org_id, coll_id = uuid4(), uuid4(), uuid4()
-    captured: tuple[str, str, str, str | None, str | None] | None = None
+    captured: tuple[str, str, str, str | None] | None = None
 
     async def fake_folder_chain(*_args, **_kwargs):
         return None
@@ -176,21 +172,19 @@ async def test_uploaded_rag_job_keeps_department_scope_for_background_embedding(
         content_type="text/plain",
         raw=b"body",
         department_id=department_id,
-        team_id=uuid4(),
     )
 
     assert captured is not None
-    assert captured[2:] == (str(org_id), str(department_id), None)
+    assert captured[2:] == (str(org_id), str(department_id))
 
 
 @pytest.mark.asyncio
-async def test_audio_job_ignores_retired_team_and_forwards_department(monkeypatch, tmp_path: Path) -> None:
-    org_id, user_id, department_id, team_id = (uuid4() for _ in range(4))
+async def test_audio_job_forwards_department(monkeypatch, tmp_path: Path) -> None:
+    org_id, user_id, department_id = (uuid4() for _ in range(3))
     cu = SimpleNamespace(
         organization_id=org_id,
         id=str(user_id),
         department_id=str(department_id),
-        team_id=str(team_id),
     )
     job = await multimodal_audio_service._create_job(
         _FakeDb(),
@@ -202,7 +196,6 @@ async def test_audio_job_ignores_retired_team_and_forwards_department(monkeypatc
         idempotency_key="scope-job",
     )
     assert job.department_id == department_id
-    assert not hasattr(job, "team_id")
 
     source = tmp_path / "segment.mp3"
     source.write_bytes(b"audio")
@@ -246,7 +239,6 @@ async def test_audio_job_ignores_retired_team_and_forwards_department(monkeypatc
 
     await multimodal_worker._transcribe(None, job, tmp_path)
     assert observed["dept_id"] == department_id
-    assert "team_id" not in observed
     assert observed["request_id"] == job.request_id
     assert observed["segment_count"] == 2
 
@@ -348,14 +340,13 @@ async def test_audio_gateway_disables_token_metering_but_keeps_one_credit(monkey
     monkeypatch.setattr(model_gateway, "_metered_result", fake_metered)
     monkeypatch.setattr(model_gateway, "settle_ai_quota", fake_settle)
 
-    db, org_id, department_id, team_id = object(), uuid4(), uuid4(), uuid4()
+    db, org_id, department_id = object(), uuid4(), uuid4()
     await model_gateway.transcribe_audio(
         db,
         org_id,
         b"audio",
         audio_format="mp3",
         dept_id=department_id,
-        team_id=team_id,
         request_id="transcription-job",
     )
     await model_gateway.understand_audio(
@@ -364,7 +355,6 @@ async def test_audio_gateway_disables_token_metering_but_keeps_one_credit(monkey
         "https://storage.example/audio",
         "what happened?",
         dept_id=department_id,
-        team_id=team_id,
     )
     assert [event async for event in model_gateway.stream_understand_audio(
         db,
@@ -372,14 +362,12 @@ async def test_audio_gateway_disables_token_metering_but_keeps_one_credit(monkey
         "https://storage.example/audio",
         "what happened?",
         dept_id=department_id,
-        team_id=team_id,
     )] == [("text", "ok", None)]
     await model_gateway.synthesize_audio(
         db,
         org_id,
         text="hello",
         dept_id=department_id,
-        team_id=team_id,
         request_id="synthesis-job",
     )
 
@@ -398,7 +386,6 @@ async def test_audio_provider_verification_is_credit_only(monkeypatch) -> None:
         id=uuid4(),
         organization_id=uuid4(),
         department_id=uuid4(),
-        team_id=uuid4(),
     )
     deployment = SimpleNamespace(model_id="audio-model")
 
@@ -427,7 +414,7 @@ async def test_audio_provider_verification_is_credit_only(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_vision_fallback_chat_forwards_department_without_team(monkeypatch) -> None:
+async def test_vision_fallback_chat_forwards_department(monkeypatch) -> None:
     org_id, department_id = (uuid4() for _ in range(2))
     primary = SimpleNamespace(id=uuid4(), provider_type="openai")
     fallback_provider = SimpleNamespace(id=uuid4())
@@ -483,7 +470,6 @@ async def test_vision_fallback_chat_forwards_department_without_team(monkeypatch
     )
 
     assert captured["dept_id"] == str(department_id)
-    assert captured["team_id"] is None
 
 
 @pytest.mark.asyncio

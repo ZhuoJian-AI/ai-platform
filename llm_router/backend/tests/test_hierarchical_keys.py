@@ -62,7 +62,7 @@ def test_rate_limit_takes_minimum():
     key = _make_api_key(rate_limit_rpm=None)
 
     perms = resolve_effective_permissions(key, org, dept)
-    assert perms.rate_limit_rpm == 50  # Team 退役后取企业与部门的最小值
+    assert perms.rate_limit_rpm == 50  # 取企业与部门的最小值
 
 
 def test_budget_takes_minimum():

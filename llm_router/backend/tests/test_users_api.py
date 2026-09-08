@@ -128,18 +128,12 @@ async def test_user_belongs_to_one_department(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_team_endpoints_are_gone_and_department_members_still_block_deletion(
+async def test_department_members_still_block_deletion(
     client: AsyncClient,
 ):
     org_id = await _make_org(client, slug="delete-membership-guard-org")
     source_id = await _make_department(client, org_id, "设计部", "design")
     target_id = await _make_department(client, org_id, "生产部", "production")
-    retired_team = await client.post(
-        f"/api/v1/departments/{source_id}/teams",
-        json={"name": "产品设计组", "slug": "product-design"},
-    )
-    assert retired_team.status_code == 410
-    assert "Team 已停用" in retired_team.json()["detail"]
     user = await client.post(
         f"/api/v1/organizations/{org_id}/users",
         json={
@@ -163,17 +157,6 @@ async def test_team_endpoints_are_gone_and_department_members_still_block_deleti
     )
     assert moved.status_code == 200
     assert (await client.delete(f"/api/v1/departments/{source_id}")).status_code == 204
-
-    non_null_team = await client.post(
-        f"/api/v1/organizations/{org_id}/users",
-        json={
-            "username": "legacy-team-member",
-            "password": "test-pass-123",
-            "department_id": target_id,
-            "team_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-        },
-    )
-    assert non_null_team.status_code == 422
 
 
 @pytest.mark.asyncio

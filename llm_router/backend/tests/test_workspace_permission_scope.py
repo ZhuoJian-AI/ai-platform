@@ -16,7 +16,6 @@ def test_role_workspace_codes_add_cross_department_visibility() -> None:
         organization_id="org-1",
         department_id="department-home",
         department_ids=("department-home",),
-        team_id=None,
         role_ids=("role-1",),
         permission_codes=(
             "workspace.department.read:department-design",
@@ -53,7 +52,7 @@ def test_role_workspace_codes_add_cross_department_visibility() -> None:
 async def test_wildcard_role_grants_department_update_but_never_shared_delete() -> None:
     cu = SimpleNamespace(
         id="user-1", organization_id="org-1", department_id="home",
-        team_id=None, permission_codes=("*",),
+        permission_codes=("*",),
     )
     workspace = SimpleNamespace(
         organization_id="org-1", deleted_at=None, scope_type="department",
@@ -80,7 +79,6 @@ async def test_wildcard_role_grants_department_update_but_never_shared_delete() 
 async def test_company_workspace_management_requires_explicit_role_permission() -> None:
     cu = SimpleNamespace(
         id="user-1", organization_id="org-1", department_id="home",
-        team_id=None,
         permission_codes=(workspace_permission_service.ORGANIZATION_MANAGE_PERMISSION,),
     )
     workspace = SimpleNamespace(
@@ -100,7 +98,6 @@ async def test_department_membership_is_read_only_and_roles_are_unioned() -> Non
         id="user-1",
         organization_id="organization-1",
         department_id="department-home",
-        team_id=None,
         permission_codes=(
             "workspace.department.read:department-design",
             "workspace.department.upload:department-production",
@@ -176,20 +173,20 @@ async def test_effective_access_omits_workspaces_with_no_capability(db_session) 
         scope_type="user", scope_id=str(user.id),
     )
     hidden = Workspace(
-        organization_id=org.id, name="其他团队秘密", slug="hidden-catalog",
-        scope_type="team", scope_id="other-team",
+        organization_id=org.id, name="未授权秘密空间", slug="hidden-catalog",
+        scope_type="unsupported", scope_id="retired-scope",
     )
     db_session.add_all([readable, hidden])
     await db_session.flush()
     cu = CurrentUser(
         user=user, id=str(user.id), email=user.username, role=user.role,
-        organization_id=org.id, team_id=None,
+        organization_id=org.id,
     )
 
     access = await workspace_permission_service.effective_access(db_session, cu)
 
     assert [item["id"] for item in access["workspaces"]] == [str(readable.id)]
-    assert "其他团队秘密" not in str(access)
+    assert "未授权秘密空间" not in str(access)
 
 
 @pytest.mark.asyncio

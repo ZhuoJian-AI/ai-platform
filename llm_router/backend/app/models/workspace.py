@@ -47,7 +47,7 @@ class Workspace(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     # 本地后端下的根目录（相对平台 workspace 根的子路径）；s3 后端为 bucket 前缀。
     root_path: Mapped[str] = mapped_column(String(512), nullable=False, default="")
     config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    # 作用范围：organization/department/team/user
+    # 作用范围：organization/department/user
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False, default="organization")
     scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

@@ -11,8 +11,7 @@ from app.database import get_db
 from app.models.api_key import ApiKey
 from app.services.api_key_service import validate_api_key
 
-# 新请求只接受企业或部门范围的 Key。旧 Team Key 在迁移中会被撤销，
-# 这里再做一次入口兜底，避免未迁移实例继续按 Team 放行。
+# 新请求只接受企业或部门范围的 Key。
 API_KEY_PATTERN = re.compile(r"^lr_sk_(organization|department)_[a-zA-Z0-9]{32}$")
 
 

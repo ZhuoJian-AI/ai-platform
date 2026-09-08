@@ -131,8 +131,8 @@ async def create_user(
 ) -> User:
     department_ids = _normalize_department_ids(data.department_ids, data.department_id)
     primary_department_id = data.department_id or (department_ids[0] if department_ids else None)
-    await validate_user_departments(db, org_id, department_ids, data.team_id)
-    await validate_user_membership(db, org_id, primary_department_id, data.team_id)
+    await validate_user_departments(db, org_id, department_ids)
+    await validate_user_membership(db, org_id, primary_department_id)
     # 历史版本软删员工时没有释放登录名，导致列表中已不存在的用户名仍返回 409。
     # 创建前仅修复已软删的同名记录；在职员工的唯一约束保持不变。
     await _release_legacy_deleted_username(db, org_id, data.username)
@@ -201,12 +201,8 @@ async def update_user(
     else:
         next_department_id = user.department_id
         next_department_ids = [UUID(value) for value in user.department_ids]
-    # Historical clients may still send null. Team membership is never
-    # persisted or considered by the active authorization model.
-    values.pop("team_id", None)
-    next_team_id = None
-    await validate_user_departments(db, user.organization_id, next_department_ids, next_team_id)
-    await validate_user_membership(db, user.organization_id, next_department_id, next_team_id)
+    await validate_user_departments(db, user.organization_id, next_department_ids)
+    await validate_user_membership(db, user.organization_id, next_department_id)
     values.pop("role", None)
     for field, value in values.items():
         setattr(user, field, value)

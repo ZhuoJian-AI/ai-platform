@@ -21,6 +21,7 @@ from app.database import get_db
 from app.main import app
 from app.models.admin import Admin
 from app.models.base import Base
+from app.services import ai_quota_service
 
 # 测试用 PostgreSQL 数据库（与生产同构，确保 JSONB / FK / 类型语义一致）。
 # 默认指向本地 Docker Postgres 上的 ai_infra_test 库；可用环境变量覆盖。
@@ -28,6 +29,21 @@ TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql+asyncpg://ai_infra:ai_infra@localhost:5434/ai_infra_test",
 )
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def isolated_quota_enforcer(monkeypatch):
+    """Keep the async Redis client on the same event loop as each test.
+
+    Production workers own one long-lived event loop.  Pytest intentionally
+    creates a fresh loop for each async test, so sharing the module singleton
+    would reuse Redis connections attached to an already closed loop.
+    """
+
+    enforcer = ai_quota_service.RedisQuotaEnforcer()
+    monkeypatch.setattr(ai_quota_service, "quota_enforcer", enforcer)
+    yield
+    await enforcer.redis.aclose()
 
 
 async def _create_test_db_if_missing() -> None:

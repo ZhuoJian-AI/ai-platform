@@ -1,6 +1,6 @@
 """Monitor aggregation helpers — org-scoped time-bucketed metrics.
 
-复用 audit_logs（路由器）/ agent_runs（智能体）/ tool_call_logs（工具）三套落库表，
+复用 audit_logs（路由器）、agent_runs（智能体）、SkillExecution 与 ActionRequest，
 按 budget.py 的实时聚合范式统计。所有查询按 organization_id 作用域过滤。
 """
 
@@ -19,8 +19,7 @@ from app.models.enterprise_application import (
     EnterpriseApplicationActionRequest,
 )
 from app.models.llm_provider import LlmProvider
-from app.models.skill import SkillFile, SkillFolder
-from app.models.tool_call_log import ToolCallLog
+from app.models.skill import SkillExecution, SkillFile, SkillFolder
 
 
 def default_window() -> tuple[datetime, datetime]:
@@ -238,24 +237,28 @@ async def _component_usage(
     }
 
 
-# ── Tool (tool_call_logs) ──────────────────────────────────────────────
+# ── Tool (Skill executions + Manifest Action requests) ────────────────
 
-def _err_cond():
-    """工具调用错误判定：有 error 文本 或 HTTP 状态 >= 400。"""
-    return ToolCallLog.error.is_not(None) | (ToolCallLog.status_code >= 400)
-
-
-async def _tool_by_skill(db: AsyncSession, base: list) -> list[dict]:
+async def _tool_by_skill(
+    db: AsyncSession,
+    org_id: UUID,
+    start: datetime,
+    end: datetime,
+) -> list[dict]:
     """按技能（SkillFolder.id）聚合：调用/错误/延迟 + 技能名/作用域。"""
     rows = (await db.execute(
         select(
-            ToolCallLog.skill_id,
+            SkillExecution.skill_folder_id,
             func.count().label("calls"),
-            func.sum(case((_err_cond(), 1), else_=0)).label("errors"),
-            func.coalesce(func.avg(ToolCallLog.latency_ms), 0).label("avg_lat"),
-        ).where(*base, ToolCallLog.skill_id.is_not(None)).group_by(ToolCallLog.skill_id)
+            func.sum(case((SkillExecution.status == "failed", 1), else_=0)).label("errors"),
+            func.coalesce(func.avg(SkillExecution.latency_ms), 0).label("avg_lat"),
+        ).where(
+            SkillExecution.organization_id == str(org_id),
+            SkillExecution.created_at >= start,
+            SkillExecution.created_at < end,
+        ).group_by(SkillExecution.skill_folder_id)
     )).all()
-    skill_ids = {str(r.skill_id) for r in rows if r.skill_id}
+    skill_ids = {str(r.skill_folder_id) for r in rows if r.skill_folder_id}
     meta: dict[str, SkillFolder] = {}
     if skill_ids:
         got = (await db.execute(
@@ -267,7 +270,7 @@ async def _tool_by_skill(db: AsyncSession, base: list) -> list[dict]:
         meta = {str(s.id): s for s in got}
     out = []
     for r in rows:
-        sid = str(r.skill_id)
+        sid = str(r.skill_folder_id)
         sf = meta.get(sid)
         calls = int(r.calls)
         errs = int(r.errors or 0)
@@ -364,23 +367,25 @@ async def tool_metrics(
     db: AsyncSession, org_id: UUID, start: datetime | None, end: datetime | None,
 ) -> dict:
     s, e = _window(start, end)
-    base = [
-        ToolCallLog.organization_id == str(org_id),
-        ToolCallLog.created_at >= s,
-        ToolCallLog.created_at < e,
+    skill_base = [
+        SkillExecution.organization_id == str(org_id),
+        SkillExecution.created_at >= s,
+        SkillExecution.created_at < e,
     ]
-    total = (await db.execute(
-        select(func.count()).select_from(ToolCallLog).where(*base)
+    skill_total = (await db.execute(
+        select(func.count()).select_from(SkillExecution).where(*skill_base)
     )).scalar() or 0
-    err_cond = _err_cond()
-    errors = (await db.execute(
-        select(func.count()).select_from(ToolCallLog).where(*base, err_cond)
+    skill_errors = (await db.execute(
+        select(func.count()).select_from(SkillExecution).where(
+            *skill_base,
+            SkillExecution.status == "failed",
+        )
     )).scalar() or 0
-    legacy_latency = (await db.execute(
+    skill_latency = (await db.execute(
         select(
-            func.count(ToolCallLog.latency_ms),
-            func.coalesce(func.sum(ToolCallLog.latency_ms), 0),
-        ).where(*base, ToolCallLog.latency_ms.is_not(None))
+            func.count(SkillExecution.latency_ms),
+            func.coalesce(func.sum(SkillExecution.latency_ms), 0),
+        ).where(*skill_base, SkillExecution.latency_ms.is_not(None))
     )).one()
 
     action_base = [
@@ -408,13 +413,13 @@ async def tool_metrics(
         ).where(*action_base, EnterpriseApplicationActionRequest.resolved_at.is_not(None))
     )).one()
 
-    by_skill = await _tool_by_skill(db, base)
+    by_skill = await _tool_by_skill(db, org_id, s, e)
     by_action = await _tool_by_action(db, org_id, s, e)
     inventory = await _tool_inventory(db, org_id)
-    combined_total = int(total) + int(action_total)
-    combined_errors = int(errors) + int(action_errors)
-    latency_count = int(legacy_latency[0] or 0) + int(action_latency[0] or 0)
-    latency_sum = float(legacy_latency[1] or 0) + float(action_latency[1] or 0)
+    combined_total = int(skill_total) + int(action_total)
+    combined_errors = int(skill_errors) + int(action_errors)
+    latency_count = int(skill_latency[0] or 0) + int(action_latency[0] or 0)
+    latency_sum = float(skill_latency[1] or 0) + float(action_latency[1] or 0)
     return {
         "calls": combined_total,
         "success_count": combined_total - combined_errors,

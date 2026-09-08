@@ -7,24 +7,20 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, with_loader_criteria
 
 from app.auth.user_auth import CurrentUser
-from app.models.connector import ToolConnector, ToolEndpoint
-from app.models.data_interface import DataInterface, DataSystem
 from app.models.enterprise_application import (
     EnterpriseApplication,
+    EnterpriseApplicationAction,
+    EnterpriseApplicationActionRequest,
     EnterpriseApplicationGrant,
-    EnterpriseApplicationToolBinding,
 )
-from app.models.skill import SkillFolder
-from app.models.tool_call_log import ToolCallLog
 from app.schemas.enterprise_application import (
     EnterpriseApplicationCreate,
     EnterpriseApplicationGrantInput,
-    EnterpriseApplicationToolBindingInput,
     EnterpriseApplicationUpdate,
 )
 from app.services import role_service, scope_service, skill_scope_service
@@ -80,7 +76,7 @@ def _full_manifest_access(manifest: dict) -> tuple[list[str], list[str], dict]:
         actions = [item for item in (module.get("actions") or []) if isinstance(item, dict)]
         action_keys = [str(item["actionKey"]) for item in actions if item.get("actionKey")]
         pages: dict[str, dict] = {}
-        for page in (module.get("pages") or []):
+        for page in module.get("pages") or []:
             if not isinstance(page, dict) or not page.get("pageKey"):
                 continue
             pages[str(page["pageKey"])] = {
@@ -106,7 +102,7 @@ def _resource_sets(module_access: dict) -> tuple[set[str], set[str], set[str]]:
             continue
         modules.add(module_key)
         actions.update(str(key) for key in (access.get("action_keys") or []))
-        for page_key in (access.get("page_access") or {}):
+        for page_key in access.get("page_access") or {}:
             pages.add(f"{module_key}:{page_key}")
     return modules, pages, actions
 
@@ -135,22 +131,24 @@ async def synchronize_runtime_grants(
 
     builtins = await role_service.ensure_builtin_roles(db, row.organization_id)
     developer = builtins[role_service.BUILTIN_RUNTIME_DEVELOPER]
-    all_grants = list((await db.execute(
-        select(EnterpriseApplicationGrant).where(
-            EnterpriseApplicationGrant.application_id == row.id,
+    all_grants = list(
+        (
+            await db.execute(
+                select(EnterpriseApplicationGrant).where(
+                    EnterpriseApplicationGrant.application_id == row.id,
+                )
+            )
         )
-    )).scalars().all())
+        .scalars()
+        .all()
+    )
     managed = next(
         (grant for grant in all_grants if grant.managed_key == RUNTIME_MANAGED_GRANT),
         None,
     )
     if managed is None:
         managed = next(
-            (
-                grant
-                for grant in all_grants
-                if grant.scope_type == "role" and grant.scope_id == str(developer.id)
-            ),
+            (grant for grant in all_grants if grant.scope_type == "role" and grant.scope_id == str(developer.id)),
             None,
         )
     permissions, module_keys, module_access = _full_manifest_access(manifest)
@@ -214,7 +212,8 @@ async def synchronize_runtime_grants(
                 if module_key in previous_modules or module_key in denied_modules or "view" not in app_ceiling:
                     continue
                 allowed_actions = [
-                    key for key, action in module_actions.items()
+                    key
+                    for key, action in module_actions.items()
                     if _action_permission(action) in app_ceiling and key not in denied_actions
                 ]
                 access[module_key] = {
@@ -254,10 +253,8 @@ async def synchronize_runtime_grants(
                 for page in (module.get("pages") or [])
                 if isinstance(page, dict) and page.get("pageKey")
             }
-            page_access = {
-                key: value for key, value in page_access.items() if key in incoming_pages
-            }
-            for page in (module.get("pages") or []):
+            page_access = {key: value for key, value in page_access.items() if key in incoming_pages}
+            for page in module.get("pages") or []:
                 if not isinstance(page, dict) or not page.get("pageKey"):
                     continue
                 page_key = str(page["pageKey"])
@@ -280,17 +277,13 @@ async def synchronize_runtime_grants(
                 previous_page = next(
                     (
                         item
-                        for item in (
-                            previous_modules.get(module_key, {}).get("pages") or []
-                        )
+                        for item in (previous_modules.get(module_key, {}).get("pages") or [])
                         if isinstance(item, dict) and str(item.get("pageKey")) == page_key
                     ),
                     {},
                 )
-                previous_page_actions = {
-                    str(key) for key in (previous_page.get("actionKeys") or [])
-                }
-                for action_key in (page.get("actionKeys") or []):
+                previous_page_actions = {str(key) for key in (previous_page.get("actionKeys") or [])}
+                for action_key in page.get("actionKeys") or []:
                     action = module_actions.get(str(action_key))
                     if (
                         action
@@ -312,17 +305,11 @@ async def synchronize_runtime_grants(
 def _application_options():
     return (
         selectinload(EnterpriseApplication.grants),
-        selectinload(EnterpriseApplication.tool_bindings),
         selectinload(EnterpriseApplication.integration),
         selectinload(EnterpriseApplication.actions),
         with_loader_criteria(
             EnterpriseApplicationGrant,
             EnterpriseApplicationGrant.deleted_at.is_(None),
-            include_aliases=True,
-        ),
-        with_loader_criteria(
-            EnterpriseApplicationToolBinding,
-            EnterpriseApplicationToolBinding.deleted_at.is_(None),
             include_aliases=True,
         ),
     )
@@ -559,8 +546,6 @@ async def soft_delete_application(db: AsyncSession, row: EnterpriseApplication) 
     row.deleted_at = now
     for grant in row.grants:
         grant.deleted_at = now
-    for binding in row.tool_bindings:
-        binding.deleted_at = now
     await role_service.touch_users_for_role_ids(db, affected_role_ids)
     await db.flush()
 
@@ -582,11 +567,7 @@ async def replace_grants(
         .all()
     )
     current = {(grant.scope_type, grant.scope_id): grant for grant in all_grants}
-    managed_by_scope = {
-        (grant.scope_type, grant.scope_id): grant
-        for grant in all_grants
-        if grant.managed_key
-    }
+    managed_by_scope = {(grant.scope_type, grant.scope_id): grant for grant in all_grants if grant.managed_key}
     role_only = _uses_role_authorization(row)
     normalized: dict[tuple[str, str | None], tuple[list[str], list[str], dict]] = {}
     for item in grants:
@@ -596,10 +577,7 @@ async def replace_grants(
         )
         managed = managed_by_scope.get(requested_key)
         if managed is not None:
-            requested_access = {
-                key: access.model_dump(mode="json")
-                for key, access in item.module_access.items()
-            }
+            requested_access = {key: access.model_dump(mode="json") for key, access in item.module_access.items()}
             if (
                 set(item.permissions) != set(managed.permissions or [])
                 or set(item.module_keys) != set(managed.module_keys or [])
@@ -677,254 +655,72 @@ async def replace_grants(
     return await get_application(db, row.id)  # type: ignore[return-value]
 
 
-async def _assert_binding_target(
-    db: AsyncSession,
-    org_id: UUID | str,
-    item: EnterpriseApplicationToolBindingInput,
-) -> None:
-    target_id = UUID(str(item.target_id))
-    if item.target_type == "tool_endpoint":
-        row = (
-            await db.execute(
-                select(ToolEndpoint)
-                .join(ToolConnector)
-                .where(
-                    ToolEndpoint.id == target_id,
-                    ToolEndpoint.deleted_at.is_(None),
-                    ToolConnector.organization_id == UUID(str(org_id)),
-                    ToolConnector.deleted_at.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
-    elif item.target_type == "data_interface":
-        row = (
-            await db.execute(
-                select(DataInterface)
-                .join(DataSystem)
-                .where(
-                    DataInterface.id == target_id,
-                    DataInterface.deleted_at.is_(None),
-                    DataSystem.organization_id == UUID(str(org_id)),
-                    DataSystem.deleted_at.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
-    else:
-        row = (
-            await db.execute(
-                select(SkillFolder).where(
-                    SkillFolder.id == target_id,
-                    SkillFolder.organization_id == UUID(str(org_id)),
-                    SkillFolder.deleted_at.is_(None),
-                )
-            )
-        ).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status_code=422, detail="Tool binding target does not belong to this organization")
-
-
-async def replace_tool_bindings(
-    db: AsyncSession,
-    row: EnterpriseApplication,
-    bindings: list[EnterpriseApplicationToolBindingInput],
-) -> EnterpriseApplication:
-    normalized: dict[tuple[str, str, str], bool] = {}
-    for item in bindings:
-        await _assert_binding_target(db, row.organization_id, item)
-        normalized[(item.target_type, str(item.target_id), item.operation)] = item.is_active
-    all_bindings = list(
-        (
-            await db.execute(
-                select(EnterpriseApplicationToolBinding).where(
-                    EnterpriseApplicationToolBinding.application_id == row.id,
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    current = {(binding.target_type, binding.target_id, binding.operation): binding for binding in all_bindings}
-    now = datetime.now(UTC)
-    for key, binding in current.items():
-        if key not in normalized:
-            binding.deleted_at = now
-        else:
-            binding.is_active = normalized[key]
-            binding.deleted_at = None
-    for (target_type, target_id, operation), is_active in normalized.items():
-        if (target_type, target_id, operation) not in current:
-            db.add(
-                EnterpriseApplicationToolBinding(
-                    application_id=row.id,
-                    organization_id=row.organization_id,
-                    target_type=target_type,
-                    target_id=target_id,
-                    operation=operation,
-                    is_active=is_active,
-                )
-            )
-    await db.flush()
-    return await get_application(db, row.id)  # type: ignore[return-value]
-
-
 async def get_application_overview(db: AsyncSession, row: EnterpriseApplication) -> dict:
-    """Resolve opaque application bindings into an administrator-facing read model."""
-    active_bindings = [binding for binding in row.tool_bindings if binding.deleted_at is None]
-    endpoint_ids = {
-        UUID(str(binding.target_id)) for binding in active_bindings if binding.target_type == "tool_endpoint"
-    }
-    interface_ids = {
-        UUID(str(binding.target_id)) for binding in active_bindings if binding.target_type == "data_interface"
-    }
-    skill_ids = {UUID(str(binding.target_id)) for binding in active_bindings if binding.target_type == "skill_folder"}
-
-    endpoints: dict[str, tuple[ToolEndpoint, ToolConnector]] = {}
-    if endpoint_ids:
-        result = await db.execute(
-            select(ToolEndpoint, ToolConnector)
-            .join(ToolConnector, ToolEndpoint.connector_id == ToolConnector.id)
-            .where(
-                ToolEndpoint.id.in_(endpoint_ids),
-                ToolConnector.organization_id == row.organization_id,
-                ToolEndpoint.deleted_at.is_(None),
-                ToolConnector.deleted_at.is_(None),
-            )
-        )
-        endpoints = {str(endpoint.id): (endpoint, connector) for endpoint, connector in result.all()}
-
-    interfaces: dict[str, tuple[DataInterface, DataSystem]] = {}
-    if interface_ids:
-        result = await db.execute(
-            select(DataInterface, DataSystem)
-            .join(DataSystem, DataInterface.data_system_id == DataSystem.id)
-            .where(
-                DataInterface.id.in_(interface_ids),
-                DataSystem.organization_id == row.organization_id,
-                DataInterface.deleted_at.is_(None),
-                DataSystem.deleted_at.is_(None),
-            )
-        )
-        interfaces = {str(item.id): (item, system) for item, system in result.all()}
-
-    skills: dict[str, SkillFolder] = {}
-    if skill_ids:
-        result = await db.execute(
-            select(SkillFolder).where(
-                SkillFolder.id.in_(skill_ids),
-                SkillFolder.organization_id == row.organization_id,
-                SkillFolder.deleted_at.is_(None),
-            )
-        )
-        skills = {str(item.id): item for item in result.scalars().all()}
-
-    capabilities: list[dict] = []
-    for binding in active_bindings:
-        target_id = str(binding.target_id)
-        common = {
-            "binding_id": binding.id,
-            "target_type": binding.target_type,
-            "target_id": UUID(target_id),
-            "operation": binding.operation,
-            "binding_active": binding.is_active,
+    """Describe the application's Manifest Actions and their recent executions."""
+    actions = list(row.actions)
+    capabilities = [
+        {
+            "binding_id": action.id,
+            "target_type": "manifest_action",
+            "target_id": action.id,
+            "operation": action.operation,
+            "name": action.name,
+            "source_name": "Manifest Action",
+            "description": action.description,
+            "method": action.operation.upper(),
+            "path": action.action_key,
+            "binding_active": not action.admin_disabled,
+            "target_active": action.is_active and action.ai_enabled,
+            "health_status": row.health_status,
         }
-        if binding.target_type == "tool_endpoint" and target_id in endpoints:
-            endpoint, connector = endpoints[target_id]
-            capabilities.append(
-                {
-                    **common,
-                    "name": endpoint.name,
-                    "source_name": connector.name,
-                    "description": endpoint.description,
-                    "method": endpoint.method,
-                    "path": endpoint.path,
-                    "target_active": endpoint.is_active and connector.is_active,
-                    "health_status": connector.health_status,
-                }
-            )
-        elif binding.target_type == "data_interface" and target_id in interfaces:
-            interface, system = interfaces[target_id]
-            capabilities.append(
-                {
-                    **common,
-                    "name": interface.name,
-                    "source_name": system.name,
-                    "description": interface.description,
-                    "method": interface.method,
-                    "path": interface.path,
-                    "target_active": interface.is_active and system.is_active,
-                    "health_status": None,
-                }
-            )
-        elif binding.target_type == "skill_folder" and target_id in skills:
-            skill = skills[target_id]
-            capabilities.append(
-                {
-                    **common,
-                    "name": skill.name,
-                    "source_name": "Skill 运行包",
-                    "description": None,
-                    "method": None,
-                    "path": None,
-                    "target_active": skill.is_active,
-                    "health_status": "ready" if skill.is_installed else "unavailable",
-                }
-            )
-
-    # Connector-generated Skill wrappers and their direct endpoints may coexist.
-    # Count the direct business APIs when present so the administrator does not
-    # see the same capability twice; Skill-only applications still count Skills.
-    direct_capabilities = [item for item in capabilities if item["target_type"] != "skill_folder"]
-    counted_capabilities = direct_capabilities or capabilities
+        for action in actions
+    ]
     operation_counts = {operation: 0 for operation in OPERATION_PERMISSION}
-    for item in counted_capabilities:
+    for item in capabilities:
         if item["binding_active"] and item["target_active"]:
             operation_counts[item["operation"]] += 1
 
-    recent_calls: list[dict] = []
-    call_filters = []
-    if endpoint_ids:
-        call_filters.append(ToolCallLog.endpoint_id.in_(endpoint_ids))
-    if skill_ids:
-        call_filters.append(ToolCallLog.skill_id.in_(skill_ids))
-    if call_filters:
-        result = await db.execute(
-            select(ToolCallLog)
-            .where(
-                ToolCallLog.organization_id == row.organization_id,
-                or_(*call_filters),
-            )
-            .order_by(ToolCallLog.created_at.desc())
-            .limit(20)
+    result = await db.execute(
+        select(EnterpriseApplicationActionRequest, EnterpriseApplicationAction)
+        .join(
+            EnterpriseApplicationAction,
+            EnterpriseApplicationActionRequest.action_id == EnterpriseApplicationAction.id,
         )
-        endpoint_names = {key: value[0].name for key, value in endpoints.items()}
-        skill_names = {key: value.name for key, value in skills.items()}
-        for call in result.scalars().all():
-            failed = bool(call.error) or bool(call.status_code and call.status_code >= 400)
-            recent_calls.append(
-                {
-                    "id": call.id,
-                    "capability_name": (
-                        endpoint_names.get(str(call.endpoint_id))
-                        or skill_names.get(str(call.skill_id))
-                        or call.path
-                        or "未知工具"
-                    ),
-                    "method": call.method,
-                    "path": call.path,
-                    "status": "failed" if failed else "success",
-                    "status_code": call.status_code,
-                    "latency_ms": call.latency_ms,
-                    "error": call.error,
-                    "created_at": call.created_at,
-                }
+        .where(
+            EnterpriseApplicationActionRequest.application_id == row.id,
+            EnterpriseApplicationActionRequest.organization_id == row.organization_id,
+        )
+        .order_by(EnterpriseApplicationActionRequest.created_at.desc())
+        .limit(20)
+    )
+    recent_calls = []
+    for request, action in result.all():
+        latency_ms = None
+        if request.resolved_at is not None:
+            latency_ms = max(
+                0,
+                int((request.resolved_at - request.created_at).total_seconds() * 1000),
             )
+        recent_calls.append(
+            {
+                "id": request.id,
+                "capability_name": action.name,
+                "method": action.operation.upper(),
+                "path": action.action_key,
+                "status": ("success" if request.status == "completed" else "failed"),
+                "status_code": None,
+                "latency_ms": latency_ms,
+                "error": request.error,
+                "created_at": request.created_at,
+            }
+        )
 
     return {
         "application_id": row.id,
         "operation_counts": operation_counts,
         "active_capability_count": sum(operation_counts.values()),
-        "direct_capability_count": len(direct_capabilities),
-        "skill_binding_count": len([item for item in capabilities if item["target_type"] == "skill_folder"]),
+        "direct_capability_count": len(capabilities),
+        "skill_binding_count": 0,
         "capabilities": capabilities,
         "recent_calls": recent_calls,
     }
@@ -1108,9 +904,7 @@ def effective_module_claims(row: EnterpriseApplication, user: CurrentUser, modul
     action_permissions = {
         action.action_key: OPERATION_PERMISSION[action.operation]
         for action in (getattr(row, "actions", None) or ())
-        if action.module_key == module_key
-        and action.is_active
-        and action.operation in OPERATION_PERMISSION
+        if action.module_key == module_key and action.is_active and action.operation in OPERATION_PERMISSION
     }
     manifest = row.integration.manifest if row.integration and isinstance(row.integration.manifest, dict) else {}
     for module in manifest.get("modules") or []:
@@ -1259,67 +1053,3 @@ async def assert_application_permission(
     if permission not in permissions:
         raise HTTPException(status_code=403, detail=f"Application permission '{permission}' required")
     return row, permissions
-
-
-async def target_allowed_for_user(
-    db: AsyncSession,
-    user: CurrentUser,
-    target_type: str,
-    target_id: UUID | str,
-) -> bool:
-    """Unbound targets retain legacy scope behavior; bound targets require an app grant."""
-    bindings = list(
-        (
-            await db.execute(
-                select(EnterpriseApplicationToolBinding).where(
-                    EnterpriseApplicationToolBinding.organization_id == user.organization_id,
-                    EnterpriseApplicationToolBinding.target_type == target_type,
-                    EnterpriseApplicationToolBinding.target_id == str(target_id),
-                    EnterpriseApplicationToolBinding.is_active.is_(True),
-                    EnterpriseApplicationToolBinding.deleted_at.is_(None),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    if not bindings:
-        return True
-    app_ids = {binding.application_id for binding in bindings}
-    apps = list(
-        (
-            await db.execute(
-                select(EnterpriseApplication)
-                .options(*_application_options())
-                .where(
-                    EnterpriseApplication.id.in_(app_ids),
-                    EnterpriseApplication.organization_id == user.organization_id,
-                    EnterpriseApplication.is_active.is_(True),
-                    EnterpriseApplication.deleted_at.is_(None),
-                )
-            )
-        )
-        .scalars()
-        .unique()
-        .all()
-    )
-    by_id = {str(app.id): app for app in apps}
-    for binding in bindings:
-        app = by_id.get(str(binding.application_id))
-        if app is None:
-            continue
-        required = OPERATION_PERMISSION[binding.operation]
-        permissions = effective_permissions(app, user)
-        if "view" in permissions and required in permissions:
-            return True
-    return False
-
-
-async def assert_target_allowed_for_user(
-    db: AsyncSession,
-    user: CurrentUser,
-    target_type: str,
-    target_id: UUID | str,
-) -> None:
-    if not await target_allowed_for_user(db, user, target_type, target_id):
-        raise HTTPException(status_code=403, detail="Enterprise application permission required for this tool")

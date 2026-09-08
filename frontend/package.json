@@ -18,9 +18,11 @@
     "test:login-feedback": "node scripts/test-login-feedback.mjs",
     "test:responsive": "node scripts/test-responsive-shells.mjs",
     "test:admin-quota": "node scripts/test-admin-quota.mjs",
+    "test:retired-frontend": "node scripts/test-retired-frontend.mjs",
     "test:e2e:attachments": "node scripts/e2e-chat-attachments.mjs",
     "preview": "vite preview",
-    "lint": "eslint ."
+    "typecheck": "tsc -b --pretty false",
+    "lint": "npm run typecheck"
   },
   "dependencies": {
     "@ant-design/icons": "^5.6.1",
@@ -32,7 +34,6 @@
     "dayjs": "^1.11.13",
     "mammoth": "^1.12.0",
     "pdfjs-dist": "5.4.624",
-    "playwright": "^1.61.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
@@ -46,6 +47,7 @@
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
     "patch-package": "^8.0.0",
+    "playwright": "^1.61.1",
     "typescript": "~5.7.2",
     "vite": "^6.2.0"
   }

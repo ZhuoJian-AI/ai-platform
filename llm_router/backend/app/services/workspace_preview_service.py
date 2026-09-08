@@ -13,7 +13,6 @@ from pathlib import PurePosixPath
 
 from app.models.workspace import WorkspaceFile
 
-
 _OFFICE_MIME_TYPES = {
     ".doc": "application/msword",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

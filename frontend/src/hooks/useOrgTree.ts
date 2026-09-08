@@ -1,8 +1,8 @@
 /**
  * Shared enterprise → department → user tree for administrator and employee UI.
  *
- * Team has retired. Role bindings determine access; this tree only represents
- * organizational ownership and user placement.
+ * Role bindings determine access; this tree only represents organizational
+ * ownership and user placement.
  */
 import { useQuery } from '@tanstack/react-query';
 import { departments, organizations, users } from '../api/client';

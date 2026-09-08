@@ -68,7 +68,7 @@ async def proxy_upstream(state: ProxyState) -> dict:
         writer = get_stream_writer()
         tracker = _StreamUsageTracker(protocol)
         resp_rules = await collect_applicable_rules(
-            db, state.get("org_id", ""), state.get("dept_id"), None, direction="response"
+            db, state.get("org_id", ""), state.get("dept_id"), direction="response"
         )
         upstream = response.body_iterator
         outcome = None

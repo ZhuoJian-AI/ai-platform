@@ -139,6 +139,7 @@ async def test_resolved_image_model_keeps_gateway_deployment_routable(
         return SimpleNamespace(raw=_image_bytes("PNG"))
 
     monkeypatch.setattr(model_gateway, "_bailian_generate_image", fake_bailian)
+    monkeypatch.setattr(model_gateway.settings, "app_env", "development")
     result = await model_gateway.generate_image(
         scoped.provider, scoped.model, prompt="blue circle", size="1024x1024",
     )

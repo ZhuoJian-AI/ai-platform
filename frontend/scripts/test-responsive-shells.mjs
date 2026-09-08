@@ -83,7 +83,7 @@ async function installMocks(page) {
     if (path === '/api/v1/auth/me') return json(route, { id: 1, username: 'root', display_name: 'Root', role: 'platform_super_admin', is_active: true });
     if (path === '/api/v1/auth/csrf') return json(route, { csrf_token: 'test-csrf' });
     if (path === '/api/v1/organizations') return json(route, [organization]);
-    if (path === '/api/v1/terminal/resources') return json(route, { workspaces, skills: [], ontologies: [], rags: [], defaults: { workspace_id: 'ws-user', model_alias: 'test-model' } });
+    if (path === '/api/v1/terminal/resources') return json(route, { workspaces, skills: [], rags: [], defaults: { workspace_id: 'ws-user', model_alias: 'test-model' } });
     if (path === '/api/v1/terminal/models') return json(route, { models: ['test-model'], capabilities: { 'test-model': { vision: false } }, vision_fallback_available: false, image_generation_available: false });
     if (path === '/api/v1/terminal/agents') return json(route, { agents: [] });
     if (path === '/api/v1/terminal/applications') return json(route, [application]);

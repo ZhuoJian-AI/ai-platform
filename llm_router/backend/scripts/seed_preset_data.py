@@ -1,7 +1,7 @@
 """导入预置演示数据。
 
 幂等：按 slug / name / username 去重，已存在则跳过，可安全重复执行。
-覆盖：组织 → 部门 → 团队 → 用户 → LLM 提供商 → 模型别名 → 路由策略 → 示例 API Key。
+覆盖：组织 → 部门 → 用户 → LLM 提供商 → 模型别名 → 路由策略 → 示例 API Key。
 
 用法:
     cd llm_router/backend
@@ -27,7 +27,6 @@ from app.models.department import Department
 from app.models.llm_provider import LlmProvider
 from app.models.organization import Organization
 from app.models.routing_policy import RoutingPolicy
-from app.models.team import Team
 from app.models.user import User
 from app.utils.crypto import encrypt_api_key, encrypt_provider_api_key, generate_api_key
 
@@ -63,17 +62,6 @@ DEPARTMENT_DEFS = {
         "rate_limit_rpm": 150,
         "budget_cap_credits": 200,
     },
-}
-
-# dept_slug -> [团队定义]
-TEAM_DEFS = {
-    "eng": [
-        {"name": "平台组", "slug": "platform", "description": "基础设施与网关"},
-        {"name": "AI 组", "slug": "ai-research", "description": "模型应用与提示工程"},
-    ],
-    "product": [
-        {"name": "设计组", "slug": "design", "description": "UI/UX 与品牌"},
-    ],
 }
 
 # 用户定义（username 在组织内唯一）
@@ -165,16 +153,14 @@ APIKEY_DEFS = [
         "key_name": "Acme 默认 Key（组织级）",
         "scope_type": "organization",
         "department_slug": None,
-        "team_slug": None,
         "allowed_models": [],  # 空 = 全部
         "rate_limit_rpm": 60,
         "budget_cap_credits": 50,
     },
     {
-        "key_name": "AI 组 Key（团队级）",
-        "scope_type": "team",
+        "key_name": "工程部 AI Key（部门级）",
+        "scope_type": "department",
         "department_slug": "eng",
-        "team_slug": "ai-research",
         "allowed_models": ["claude-*", "gpt-4o-mini"],
         "rate_limit_rpm": 30,
         "budget_cap_credits": 20,
@@ -202,20 +188,12 @@ async def _get_dept_by_slug(db: AsyncSession, org_id, slug: str) -> Department |
     return result.scalar_one_or_none()
 
 
-async def _get_team_by_slug(db: AsyncSession, dept_id, slug: str) -> Team | None:
-    result = await db.execute(
-        select(Team).where(Team.department_id == dept_id, Team.slug == slug, Team.deleted_at.is_(None))
-    )
-    return result.scalar_one_or_none()
-
-
 # ───────────────────────── 主流程 ─────────────────────────
 
 async def seed() -> dict:
     stats = {
         "organization": 0,
         "department": 0,
-        "team": 0,
         "user": 0,
         "provider": 0,
         "routing_policy": 0,
@@ -247,19 +225,7 @@ async def seed() -> dict:
                 logger.info("seed_dept_created", slug=slug)
             dept_by_slug[slug] = dept
 
-        # 3) 团队
-        for dept_slug, tdefs in TEAM_DEFS.items():
-            dept = dept_by_slug[dept_slug]
-            for tdef in tdefs:
-                team = await _get_team_by_slug(db, dept.id, tdef["slug"])
-                if team is None:
-                    team = Team(department_id=dept.id, organization_id=org.id, **tdef)
-                    db.add(team)
-                    await db.flush()
-                    stats["team"] += 1
-                    logger.info("seed_team_created", slug=tdef["slug"])
-
-        # 4) 用户
+        # 3) 用户
         for udef in USER_DEFS:
             result = await db.execute(
                 select(User).where(
@@ -274,7 +240,7 @@ async def seed() -> dict:
                 stats["user"] += 1
                 logger.info("seed_user_created", username=udef["username"])
 
-        # 5) LLM 提供商
+        # 4) LLM 提供商
         provider_by_name: dict[str, LlmProvider] = {}
         for pdef in PROVIDER_DEFS:
             result = await db.execute(
@@ -308,7 +274,7 @@ async def seed() -> dict:
                 logger.info("seed_provider_created", name=pdef["name"])
             provider_by_name[pdef["name"]] = prov
 
-        # 6) 路由策略
+        # 5) 路由策略
         for rdef in ROUTING_DEFS:
             result = await db.execute(
                 select(RoutingPolicy).where(
@@ -336,7 +302,7 @@ async def seed() -> dict:
                 stats["routing_policy"] += 1
                 logger.info("seed_routing_created", name=rdef["name"])
 
-        # 7) 示例 API Key
+        # 6) 示例 API Key
         for kdef in APIKEY_DEFS:
             result = await db.execute(
                 select(ApiKey).where(
@@ -349,14 +315,8 @@ async def seed() -> dict:
                 continue
 
             dept_id = None
-            team_id = None
             if kdef["department_slug"]:
                 dept_id = dept_by_slug[kdef["department_slug"]].id
-            if kdef["team_slug"]:
-                # 团队在对应部门下
-                dept = dept_by_slug[kdef["department_slug"]]
-                team = await _get_team_by_slug(db, dept.id, kdef["team_slug"])
-                team_id = team.id if team else None
 
             scope = kdef["scope_type"]
             full_key, key_prefix, key_hash = generate_api_key(scope)
@@ -369,7 +329,6 @@ async def seed() -> dict:
                     scope_type=scope,
                     organization_id=org.id,
                     department_id=dept_id,
-                    team_id=team_id,
                     allowed_models=kdef["allowed_models"],
                     rate_limit_rpm=kdef["rate_limit_rpm"],
                     budget_cap_credits=kdef["budget_cap_credits"],
@@ -394,7 +353,6 @@ def _print_report(result: dict) -> None:
     labels = {
         "organization": "组织",
         "department": "部门",
-        "team": "团队",
         "user": "用户",
         "provider": "LLM 提供商",
         "routing_policy": "路由策略",

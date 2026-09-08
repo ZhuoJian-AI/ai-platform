@@ -65,7 +65,6 @@ async def _reserve_gateway_quota(
     max_output_tokens: int = 0,
     input_token_upper_bound: int | None = None,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     supports_token_metering: bool = True,
     operation: str,
     provider_id: str | UUID | None = None,
@@ -79,7 +78,6 @@ async def _reserve_gateway_quota(
             max_output_tokens=max_output_tokens,
             input_token_upper_bound=input_token_upper_bound,
             department_id=dept_id,
-            team_id=None,
             request_id=request_id or monotonic_request_id(operation),
             supports_token_metering=supports_token_metering,
             provider_id=provider_id,
@@ -180,7 +178,6 @@ async def _transcribe_audio_unmetered(
     language: str = "auto",
     model_alias: str = "default",
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> dict[str, Any]:
     """Transcribe MP3/WAV bytes through a same-capability deployment only."""
     normalized_format = audio_format.lower().removeprefix("audio/")
@@ -194,7 +191,6 @@ async def _transcribe_audio_unmetered(
         model_alias,
         "speech_to_text",
         dept_id=dept_id,
-        team_id=team_id,
     )
     if not resolved:
         raise GatewayError("capability_not_configured")
@@ -255,7 +251,6 @@ async def transcribe_audio_segments(
     language: str = "auto",
     model_alias: str = "default",
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     request_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Transcribe every internal segment under one logical quota reservation."""
@@ -265,7 +260,6 @@ async def transcribe_audio_segments(
         org_id,
         payload={"capability": "speech_to_text", "model": model_alias},
         dept_id=dept_id,
-        team_id=team_id,
         supports_token_metering=False,
         operation="speech-to-text",
         request_id=request_id,
@@ -283,7 +277,6 @@ async def transcribe_audio_segments(
                     language=language,
                     model_alias=model_alias,
                     dept_id=dept_id,
-                    team_id=team_id,
                 )
             )
         if not results:
@@ -302,7 +295,6 @@ async def transcribe_audio(
     language: str = "auto",
     model_alias: str = "default",
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     request_id: str | None = None,
 ) -> dict[str, Any]:
     results = await transcribe_audio_segments(
@@ -313,7 +305,6 @@ async def transcribe_audio(
         language=language,
         model_alias=model_alias,
         dept_id=dept_id,
-        team_id=team_id,
         request_id=request_id,
     )
     return results[0]
@@ -327,7 +318,6 @@ async def _understand_audio_unmetered(
     *,
     model_alias: str = "default",
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> LlmResult:
     """Ask a question about an object-scoped, short-lived audio URL."""
     resolved = await resolve_deployment(
@@ -336,7 +326,6 @@ async def _understand_audio_unmetered(
         model_alias,
         "audio_understanding",
         dept_id=dept_id,
-        team_id=team_id,
     )
     if not resolved:
         raise GatewayError("capability_not_configured")
@@ -370,7 +359,6 @@ async def understand_audio(
     *,
     model_alias: str = "default",
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     audio_size_bytes: int | None = None,
 ) -> LlmResult:
     reservation = await _reserve_gateway_quota(
@@ -378,7 +366,6 @@ async def understand_audio(
         org_id,
         payload={"capability": "audio_understanding", "question": question},
         dept_id=dept_id,
-        team_id=team_id,
         supports_token_metering=False,
         operation="audio-understanding",
     )
@@ -391,7 +378,6 @@ async def understand_audio(
             question,
             model_alias=model_alias,
             dept_id=dept_id,
-            team_id=team_id,
         )
 
     return await _metered_result(db, reservation, invoke, lambda result: result.usage)
@@ -405,7 +391,6 @@ async def _stream_understand_audio_unmetered(
     *,
     model_alias: str = "default",
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> AsyncIterator[tuple[str, Any, Any]]:
     """Stream audio understanding without falling back to a chat-only model."""
     resolved = await resolve_deployment(
@@ -414,7 +399,6 @@ async def _stream_understand_audio_unmetered(
         model_alias,
         "audio_understanding",
         dept_id=dept_id,
-        team_id=team_id,
     )
     if not resolved:
         raise GatewayError("capability_not_configured")
@@ -450,7 +434,6 @@ async def stream_understand_audio(
     *,
     model_alias: str = "default",
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     audio_size_bytes: int | None = None,
 ) -> AsyncIterator[tuple[str, Any, Any]]:
     reservation = await _reserve_gateway_quota(
@@ -458,7 +441,6 @@ async def stream_understand_audio(
         org_id,
         payload={"capability": "audio_understanding", "question": question},
         dept_id=dept_id,
-        team_id=team_id,
         supports_token_metering=False,
         operation="stream-audio-understanding",
     )
@@ -472,7 +454,6 @@ async def stream_understand_audio(
             question,
             model_alias=model_alias,
             dept_id=dept_id,
-            team_id=team_id,
         ):
             if event[0] == "usage" and isinstance(event[2], dict):
                 if event[2].get("input_tokens") is not None:
@@ -504,7 +485,6 @@ async def _synthesize_audio_unmetered(
     clone_format: str = "wav",
     model_alias: str = "default",
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> dict[str, Any]:
     capability = "voice_clone" if clone_audio is not None else "voice_design" if design_prompt else "text_to_speech"
     resolved = await resolve_deployment(
@@ -513,7 +493,6 @@ async def _synthesize_audio_unmetered(
         model_alias,
         capability,
         dept_id=dept_id,
-        team_id=team_id,
     )
     if not resolved:
         raise GatewayError("capability_not_configured")
@@ -587,7 +566,6 @@ async def synthesize_audio(
     clone_format: str = "wav",
     model_alias: str = "default",
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     request_id: str | None = None,
 ) -> dict[str, Any]:
     reservation = await _reserve_gateway_quota(
@@ -600,7 +578,6 @@ async def synthesize_audio(
             "design_prompt": design_prompt,
         },
         dept_id=dept_id,
-        team_id=team_id,
         supports_token_metering=False,
         operation="speech-synthesis",
         request_id=request_id,
@@ -620,7 +597,6 @@ async def synthesize_audio(
             clone_format=clone_format,
             model_alias=model_alias,
             dept_id=dept_id,
-            team_id=team_id,
         )
 
     return await _metered_result(db, reservation, invoke, lambda result: result.get("usage"))
@@ -702,7 +678,7 @@ def _normalize_bailian_image_size(value: str) -> str:
     return f"{width}*{height}"
 
 
-def _scope_clause(dept_id: str | UUID | None, team_id: str | UUID | None):  # noqa: ARG001
+def _scope_clause(dept_id: str | UUID | None):
     branches = [LlmProvider.scope_type == "organization"]
     if dept_id:
         branches.append((LlmProvider.scope_type == "department") & (LlmProvider.department_id == UUID(str(dept_id))))
@@ -716,7 +692,6 @@ async def candidate_deployments(
     capability: str,
     *,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     include_unverified: bool = False,
 ) -> list[tuple[LlmProvider, ModelDeployment]]:
     """Return scoped deployments ordered by inheritance, route priority and provider priority."""
@@ -730,7 +705,7 @@ async def candidate_deployments(
             LlmProvider.health_status != "down",
             ModelDeployment.is_active.is_(True),
             ModelDeployment.deleted_at.is_(None),
-            _scope_clause(dept_id, team_id),
+            _scope_clause(dept_id),
         )
     )
     if model_alias and model_alias != "default":
@@ -765,7 +740,6 @@ async def resolve_deployment(
     capability: str,
     *,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     include_unverified: bool = False,
 ) -> tuple[LlmProvider, ModelDeployment] | None:
     candidates = await candidate_deployments(
@@ -774,7 +748,6 @@ async def resolve_deployment(
         model_alias,
         capability,
         dept_id=dept_id,
-        team_id=team_id,
         include_unverified=include_unverified,
     )
     return candidates[0] if candidates else None
@@ -787,7 +760,6 @@ async def _assert_legacy_fallback_allowed(
     capability: str,
     *,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> None:
     """Block the legacy router from bypassing gateway verification/rollout gates."""
     declared = await candidate_deployments(
@@ -796,7 +768,6 @@ async def _assert_legacy_fallback_allowed(
         model_alias,
         capability,
         dept_id=dept_id,
-        team_id=team_id,
         include_unverified=True,
     )
     if declared:
@@ -812,7 +783,6 @@ async def resolve_provider_model(
     *,
     for_embeddings: bool = False,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> tuple[str, str]:
     capability = "embedding" if for_embeddings else "chat"
     resolved = await resolve_deployment(
@@ -821,7 +791,6 @@ async def resolve_provider_model(
         model_alias,
         capability,
         dept_id=dept_id,
-        team_id=team_id,
     )
     if resolved:
         provider, deployment = resolved
@@ -832,7 +801,6 @@ async def resolve_provider_model(
         model_alias,
         capability,
         dept_id=dept_id,
-        team_id=team_id,
     )
     return await legacy_client.resolve_provider_model(
         db,
@@ -840,7 +808,6 @@ async def resolve_provider_model(
         model_alias,
         for_embeddings=for_embeddings,
         dept_id=dept_id,
-        team_id=team_id,
     )
 
 
@@ -850,7 +817,6 @@ async def resolve_provider(
     model_alias: str,
     *,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> tuple[LlmProvider, str]:
     resolved = await resolve_deployment(
         db,
@@ -858,7 +824,6 @@ async def resolve_provider(
         model_alias,
         "chat",
         dept_id=dept_id,
-        team_id=team_id,
     )
     if resolved:
         provider, deployment = resolved
@@ -869,14 +834,12 @@ async def resolve_provider(
         model_alias,
         "chat",
         dept_id=dept_id,
-        team_id=team_id,
     )
     return await legacy_client.resolve_provider(
         db,
         org_id,
         model_alias,
         dept_id=dept_id,
-        team_id=team_id,
     )
 
 
@@ -1086,7 +1049,6 @@ async def _chat_unmetered(
     tool_choice: str | None = None,
     disable_thinking: bool = False,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
     model_override: str | None = None,
 ) -> LlmResult:
@@ -1128,7 +1090,6 @@ async def _chat_unmetered(
         model_alias,
         "chat",
         dept_id=dept_id,
-        team_id=team_id,
     )
     if not candidates:
         await _assert_legacy_fallback_allowed(
@@ -1137,7 +1098,6 @@ async def _chat_unmetered(
             model_alias,
             "chat",
             dept_id=dept_id,
-            team_id=team_id,
         )
         return await legacy_client.chat(
             db,
@@ -1151,7 +1111,6 @@ async def _chat_unmetered(
             tool_choice=tool_choice,
             disable_thinking=disable_thinking,
             dept_id=dept_id,
-            team_id=team_id,
         )
     last_error: Exception | None = None
     for index, (provider, deployment) in enumerate(candidates):
@@ -1190,9 +1149,9 @@ async def chat(
     tool_choice: str | None = None,
     disable_thinking: bool = False,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
     model_override: str | None = None,
+    request_id: str | None = None,
 ) -> LlmResult:
     bounded_max = _bounded_max_tokens(max_tokens)
     reservation = await _reserve_gateway_quota(
@@ -1208,9 +1167,9 @@ async def chat(
         },
         max_output_tokens=bounded_max,
         dept_id=dept_id,
-        team_id=team_id,
         operation="chat",
         provider_id=getattr(provider_override, "id", None),
+        request_id=request_id,
     )
 
     async def invoke() -> LlmResult:
@@ -1226,7 +1185,6 @@ async def chat(
             tool_choice=tool_choice,
             disable_thinking=disable_thinking,
             dept_id=dept_id,
-            team_id=team_id,
             provider_override=provider_override,
             model_override=model_override,
         )
@@ -1245,7 +1203,6 @@ async def _stream_chat_unmetered(
     max_tokens: int | None = None,
     tools: list[dict] | None = None,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
     model_override: str | None = None,
 ) -> AsyncIterator[tuple[str, Any, Any]]:
@@ -1291,7 +1248,6 @@ async def _stream_chat_unmetered(
         model_alias,
         "chat",
         dept_id=dept_id,
-        team_id=team_id,
     )
     if not candidates:
         await _assert_legacy_fallback_allowed(
@@ -1300,7 +1256,6 @@ async def _stream_chat_unmetered(
             model_alias,
             "chat",
             dept_id=dept_id,
-            team_id=team_id,
         )
         async for event in legacy_client.stream_chat(
             db,
@@ -1312,7 +1267,6 @@ async def _stream_chat_unmetered(
             max_tokens=max_tokens,
             tools=tools,
             dept_id=dept_id,
-            team_id=team_id,
         ):
             yield event
         return
@@ -1378,7 +1332,6 @@ async def stream_chat(
     max_tokens: int | None = None,
     tools: list[dict] | None = None,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
     model_override: str | None = None,
 ) -> AsyncIterator[tuple[str, Any, Any]]:
@@ -1394,7 +1347,6 @@ async def stream_chat(
         },
         max_output_tokens=bounded_max,
         dept_id=dept_id,
-        team_id=team_id,
         operation="stream-chat",
         provider_id=getattr(provider_override, "id", None),
     )
@@ -1411,7 +1363,6 @@ async def stream_chat(
             max_tokens=bounded_max,
             tools=tools,
             dept_id=dept_id,
-            team_id=team_id,
             provider_override=provider_override,
             model_override=model_override,
         ):
@@ -1438,7 +1389,6 @@ async def _embed_unmetered(
     texts: list[str],
     *,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> tuple[list[list[float]], dict[str, Any]]:
     resolved = await resolve_deployment(
         db,
@@ -1446,7 +1396,6 @@ async def _embed_unmetered(
         model,
         "embedding",
         dept_id=dept_id,
-        team_id=team_id,
     )
     if not resolved:
         await _assert_legacy_fallback_allowed(
@@ -1455,7 +1404,6 @@ async def _embed_unmetered(
             model,
             "embedding",
             dept_id=dept_id,
-            team_id=team_id,
         )
         return await legacy_client.embed_with_usage(
             db,
@@ -1463,7 +1411,6 @@ async def _embed_unmetered(
             model,
             texts,
             dept_id=dept_id,
-            team_id=team_id,
         )
     provider, deployment = resolved
     return await _embed_with_deployment(effective_provider(provider, deployment), deployment, texts)
@@ -1476,14 +1423,12 @@ async def embed(
     texts: list[str],
     *,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> list[list[float]]:
     reservation = await _reserve_gateway_quota(
         db,
         org_id,
         payload={"model": model, "input": texts},
         dept_id=dept_id,
-        team_id=team_id,
         operation="embedding",
     )
 
@@ -1494,7 +1439,6 @@ async def embed(
             model,
             texts,
             dept_id=dept_id,
-            team_id=team_id,
         )
 
     vectors, _usage = await _metered_result(db, reservation, invoke, lambda result: result[1])
@@ -1621,7 +1565,6 @@ async def generate_image(
     db: AsyncSession | None = None,
     org_id: UUID | None = None,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> ImageGenerationResult:
     if db is None or org_id is None:
         if not settings.is_development:
@@ -1640,7 +1583,6 @@ async def generate_image(
         org_id,
         payload={"model": model, "prompt": prompt, "size": size, "quality": quality},
         dept_id=dept_id,
-        team_id=team_id,
         supports_token_metering=False,
         operation="image-generation",
         provider_id=getattr(provider, "id", None),
@@ -1901,7 +1843,6 @@ async def test_deployment(
             else settings.ai_quota_default_max_output_tokens
         ),
         dept_id=getattr(provider, "department_id", None),
-        team_id=None,
         supports_token_metering=capability
         not in {
             "image_generation",

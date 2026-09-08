@@ -7,6 +7,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import hash_password
+from app.auth.session_cookies import user_session_cookie_name
 from app.models.admin import Admin
 from app.models.user import User
 
@@ -149,7 +150,7 @@ async def test_admin_and_user_login_accept_legacy_slug_and_return_canonical_iden
         headers={"Authorization": f"Bearer {user_login.json()['access_token']}"},
     )
     assert logout.status_code == 204, logout.text
-    assert "ai_infra_user_session" in logout.headers.get("set-cookie", "")
+    assert user_session_cookie_name() in logout.headers.get("set-cookie", "")
     assert "Max-Age=0" in logout.headers.get("set-cookie", "")
     revoked = await client.get(
         "/api/v1/terminal/me",

@@ -21,9 +21,10 @@ from app.models.budget import AiQuotaEvent
 from app.models.department import Department
 from app.models.llm_provider import LlmProvider
 from app.models.organization import Organization
-from app.models.team import Team
 
 router = APIRouter()
+
+_ACTIVE_LEDGER_SCOPE_TYPES = frozenset({"organization", "department", "api_key"})
 
 
 def _month_range(ref: date | None = None) -> tuple[date, date]:
@@ -97,6 +98,14 @@ def _scope_bucket(
             "requests": 0,
         },
     }
+
+
+def _report_scope_key(scope_type: str, scope_id: str) -> tuple[str, str]:
+    """Map retired ledger dimensions into one read-only historical bucket."""
+
+    if scope_type in _ACTIVE_LEDGER_SCOPE_TYPES:
+        return scope_type, scope_id
+    return "retired", "legacy"
 
 
 def _remaining(cap: int | None, used: int) -> int | None:
@@ -185,21 +194,6 @@ async def get_budget_usage(
             ).where(Department.organization_id == org_id_str)
         )
     ).all()
-    team_rows = (
-        await db.execute(
-            select(
-                Team.id,
-                Team.department_id,
-                Team.name,
-                Team.rate_limit_rpm,
-                Team.rate_limit_tpm,
-                Team.budget_cap_tokens,
-                Team.budget_cap_credits,
-                Team.deleted_at,
-            ).where(Team.organization_id == org_id_str)
-        )
-    ).all()
-
     key_rows = (
         await db.execute(
             select(
@@ -210,11 +204,13 @@ async def get_budget_usage(
                 ApiKey.budget_cap_credits,
                 ApiKey.scope_type,
                 ApiKey.department_id,
-                ApiKey.team_id,
                 ApiKey.rate_limit_rpm,
                 ApiKey.rate_limit_tpm,
                 ApiKey.revoked_at,
-            ).where(ApiKey.organization_id == org_id_str)
+            ).where(
+                ApiKey.organization_id == org_id_str,
+                ApiKey.scope_type.in_(("organization", "department")),
+            )
         )
     ).all()
     keys_meta = {
@@ -257,18 +253,9 @@ async def get_budget_usage(
             credit_cap=department.budget_cap_credits,
             is_inactive=department.deleted_at is not None,
         )
-    retired_team_departments = {
-        str(team.id): str(team.department_id)
-        for team in team_rows
-    }
     for key in key_rows:
         key_id = str(key.id)
-        if key.scope_type == "team" and key.team_id:
-            parent_scope_type = "department"
-            parent_scope_id = retired_team_departments.get(str(key.team_id), org_id_str)
-            if parent_scope_id == org_id_str:
-                parent_scope_type = "organization"
-        elif key.scope_type == "department" and key.department_id:
+        if key.scope_type == "department" and key.department_id:
             parent_scope_type, parent_scope_id = "department", str(key.department_id)
         else:
             parent_scope_type, parent_scope_id = "organization", org_id_str
@@ -325,20 +312,24 @@ async def get_budget_usage(
     ).all()
 
     for row in rows:
-        scope_type = str(row.scope_type)
-        scope_id = str(row.scope_id)
-        if scope_type == "team":
-            scope_type = "department"
-            scope_id = retired_team_departments.get(scope_id, org_id_str)
-            if scope_id == org_id_str:
-                scope_type = "organization"
+        # 历史范围只保留聚合用量，不再依赖已经退役的范围资源表，也不
+        # 改写 append-only 额度账本。这样旧记录仍可审计，但不能参与
+        # 当前部门层级或限额计算。
+        scope_type, scope_id = _report_scope_key(
+            str(row.scope_type),
+            str(row.scope_id),
+        )
         scope_key = (scope_type, scope_id)
         bucket = scopes.get(scope_key)
         if bucket is None:
             bucket = _scope_bucket(
                 scope_type=scope_key[0],
                 scope_id=scope_key[1],
-                scope_name="（历史范围）",
+                scope_name=(
+                    "退役范围历史用量"
+                    if scope_type == "retired"
+                    else "（历史范围）"
+                ),
                 parent_scope_type=None,
                 parent_scope_id=None,
                 rate_limit_rpm=None,

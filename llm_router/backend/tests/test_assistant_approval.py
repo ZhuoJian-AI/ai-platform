@@ -46,8 +46,6 @@ def _action(operation: str, requires_confirmation: bool = False) -> dict:
 
 def test_risky_tools_carry_approval_ask():
     assert _spec("workspace_delete_file")["approval"] == "ask"
-    delete_endpoint = {"folder": object(), "endpoint": SimpleNamespace(method="DELETE")}
-    assert _spec("erp__purge_1234", delete_endpoint)["approval"] == "ask"
     for operation in ("create", "update", "delete", "approve"):
         assert _spec(f"crm_{operation}", _action(operation))["approval"] == "ask", operation
     assert _spec("crm_query_confirm", _action("query", requires_confirmation=True))["approval"] == "ask"
@@ -62,7 +60,6 @@ def test_read_only_and_ordinary_write_tools_never_ask():
     assert "approval" not in _spec("rag_search", {"kind": "rag_search", "collection_ids": []})
     assert "approval" not in _spec("load_skill", {"kind": "load_skill"})
     assert "approval" not in _spec("bank_flow", {"kind": "code"})
-    assert "approval" not in _spec("erp__query_1234", {"folder": object(), "endpoint": SimpleNamespace(method="POST")})
     for operation in ("query", "export"):
         assert "approval" not in _spec(f"crm_{operation}", _action(operation)), operation
     # A read tool that happens to carry a manifest risk flag is still never gated.

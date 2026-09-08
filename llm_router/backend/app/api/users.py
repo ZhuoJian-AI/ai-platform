@@ -2,6 +2,7 @@
 
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -46,9 +47,61 @@ from app.services.user_service import (
     soft_delete_user,
     update_user,
 )
+from app.utils.integrity_errors import IntegrityFailure, classify_integrity_error
 from app.utils.request_source import client_source
 
 router = APIRouter()
+logger = structlog.get_logger()
+
+_USERNAME_UNIQUE_CONSTRAINT = "uq_user_org_username"
+
+
+def _user_integrity_http_error(
+    failure: IntegrityFailure,
+    *,
+    username: str | None,
+) -> HTTPException:
+    """Translate a verified PostgreSQL violation into a safe Chinese response."""
+
+    if failure.sqlstate == "23505" and failure.constraint_name == _USERNAME_UNIQUE_CONSTRAINT:
+        display_username = (username or "").strip()
+        detail = (
+            f"用户名“{display_username}”已存在，请换一个用户名"
+            if display_username
+            else "用户名已存在，请换一个用户名"
+        )
+        return HTTPException(status_code=409, detail=detail)
+    if failure.sqlstate == "23503":
+        return HTTPException(status_code=422, detail="关联的部门或角色不存在，请刷新后重试")
+    if failure.sqlstate == "23514":
+        return HTTPException(status_code=422, detail="员工资料不符合系统约束，请检查后重试")
+    if failure.sqlstate == "23502":
+        field = failure.column_name or "必填字段"
+        return HTTPException(status_code=422, detail=f"员工资料缺少必填字段：{field}")
+    return HTTPException(status_code=500, detail="员工保存失败，请稍后重试")
+
+
+async def _raise_user_integrity_error(
+    db: AsyncSession,
+    exc: IntegrityError,
+    *,
+    operation: str,
+    org_id: UUID,
+    username: str | None,
+) -> None:
+    """Rollback and raise a classified error without logging SQL or secrets."""
+
+    await db.rollback()
+    failure = classify_integrity_error(exc)
+    logger.error(
+        "user_write_integrity_error",
+        operation=operation,
+        organization_id=str(org_id),
+        sqlstate=failure.sqlstate,
+        constraint_name=failure.constraint_name,
+        column_name=failure.column_name,
+    )
+    raise _user_integrity_http_error(failure, username=username) from exc
 
 
 @router.post("/users/login", response_model=UserLoginResponse)
@@ -101,7 +154,7 @@ async def change_own_password_endpoint(
     current: CurrentUser = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Let an employee replace an initial/reset password before using OAuth."""
+    """Let an employee replace an initial or reset password before continuing."""
     try:
         result = await change_own_password(
             db,
@@ -146,9 +199,14 @@ async def create_user_endpoint(
         raise HTTPException(status_code=404, detail="Organization not found")
     try:
         return await create_user(db, org_id, data, created_by_admin_id=auth.id)
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail=f"Username '{data.username}' already exists in this organization")
+    except IntegrityError as exc:
+        await _raise_user_integrity_error(
+            db,
+            exc,
+            operation="create",
+            org_id=org_id,
+            username=data.username,
+        )
 
 
 @router.get("/organizations/{org_id}/users", response_model=list[UserRead])
@@ -201,9 +259,14 @@ async def update_user_endpoint(
     assert_org_write_access(auth, user.organization_id)
     try:
         return await update_user(db, user, data, created_by_admin_id=auth.id)
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail="Username already exists in this organization")
+    except IntegrityError as exc:
+        await _raise_user_integrity_error(
+            db,
+            exc,
+            operation="update",
+            org_id=user.organization_id,
+            username=data.username or user.username,
+        )
 
 
 @router.post("/users/{user_id}/reset-password", response_model=UserRead)

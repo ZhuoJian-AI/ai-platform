@@ -131,13 +131,16 @@ export default function UsersPage() {
     onError: (err: unknown) => {
       if (err instanceof ApiError && err.status === 409) {
         const username = String(form.getFieldValue('username') ?? '').trim();
-        const existing = (userList ?? []).find(user => user.username === username) ?? null;
+        const normalizedUsername = username.toLocaleLowerCase();
+        const existing = (userList ?? []).find(
+          user => user.username.toLocaleLowerCase() === normalizedUsername,
+        ) ?? null;
         const existingDepartment = existing
           ? deptName(existing.department_id ?? existing.department_ids?.[0] ?? null)
           : undefined;
         const msg = existing
           ? `用户名“${username}”已由${existingDepartment ? `${existingDepartment}员工` : '现有员工'}“${existing.display_name || existing.username}”使用`
-          : '该用户名已被当前员工使用，请换一个用户名';
+          : err.message;
         setConflictUser(existing);
         setSubmitError(msg);
         form.setFields([{ name: 'username', errors: [msg] }]);

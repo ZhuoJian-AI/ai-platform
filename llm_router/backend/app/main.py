@@ -12,7 +12,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.oauth import well_known_router
 from app.api.router import api_router
 from app.config import settings
 from app.database import async_session_factory
@@ -132,35 +131,9 @@ app.add_middleware(
 
 # 管理 API 路由
 app.include_router(api_router)
-app.include_router(well_known_router)
 
 # LLM 代理路由 — 这是最核心的部分
 app.include_router(proxy_router)
-
-@app.api_route(
-    "/mcp",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-@app.api_route(
-    "/mcp/{path:path}",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-async def retired_mcp_endpoint(path: str = "") -> JSONResponse:
-    """Keep one compatibility release with an explicit retirement response."""
-
-    del path
-    return JSONResponse(
-        status_code=410,
-        content={
-            "detail": {
-                "code": "feature_retired",
-                "message": "MCP/OAuth Skill Pack 已下线；请使用平台内置助手与用户上传 Skill。",
-                "retryable": False,
-            }
-        },
-    )
 
 
 @app.get("/health")

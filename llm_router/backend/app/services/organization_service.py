@@ -1,4 +1,4 @@
-"""Organization service — CRUD for orgs, departments, teams."""
+"""Organization service — CRUD for organizations and departments."""
 
 from datetime import UTC, datetime
 from uuid import UUID

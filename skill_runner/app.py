@@ -84,10 +84,6 @@ FORBIDDEN_PLATFORM_SECRET_KEYS = (
     "MASTER_ENCRYPTION_KEY",
     "CRM_API_KEY",
     "MES_API_KEY",
-    # Deny retired secrets too: deployments keep them for a seven-day rollback
-    # window and user Skill code must never inherit them.
-    "DSH_RUNTIME_TOKEN",
-    "EXTENSION_BUILDER_TOKEN",
     "STORAGE_PROJECT_TOKEN",
 )
 

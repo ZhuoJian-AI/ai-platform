@@ -1,6 +1,20 @@
 """Focused tests for the administrator's hierarchical quota report."""
 
-from app.api.budget import _attach_scope_remaining, _scope_bucket
+import pytest
+
+from app.api.budget import _attach_scope_remaining, _report_scope_key, _scope_bucket
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_test_db():
+    """These scope calculations are pure and do not need PostgreSQL."""
+
+    yield
+
+
+@pytest.fixture(autouse=True)
+def db_engine(_ensure_test_db):
+    yield None
 
 
 def _scope(
@@ -78,3 +92,11 @@ def test_effective_remaining_uses_shared_parent_balance() -> None:
         "monthly_tokens": 20,
         "monthly_credits": 3,
     }
+
+
+def test_retired_ledger_scopes_are_read_only_history() -> None:
+    assert _report_scope_key("legacy_group", "old-id") == ("retired", "legacy")
+    assert _report_scope_key("department", "dept-id") == (
+        "department",
+        "dept-id",
+    )

@@ -32,8 +32,6 @@ async def validate_scope_target(
     db: AsyncSession, org_id: UUID | str, scope_type: str, scope_id: str | UUID | None,
 ) -> str | None:
     """Validate target existence and tenant membership; return normalized string id."""
-    if scope_type == "team":
-        raise HTTPException(status_code=410, detail="Team 已停用，请使用部门归属和角色授权")
     if scope_type not in VALID_SCOPE_TYPES:
         raise HTTPException(status_code=422, detail="Invalid scope_type")
     org = str(org_id)
@@ -54,10 +52,8 @@ async def validate_scope_target(
 
 
 async def validate_user_membership(
-    db: AsyncSession, org_id: UUID | str, department_id: UUID | None, team_id: UUID | None,
+    db: AsyncSession, org_id: UUID | str, department_id: UUID | None,
 ) -> None:
-    if team_id is not None:
-        raise HTTPException(status_code=410, detail="Team 已停用，请使用部门归属和角色授权")
     dept = None
     if department_id:
         dept = (await db.execute(select(Department).where(
@@ -70,9 +66,9 @@ async def validate_user_membership(
 
 
 async def validate_user_departments(
-    db: AsyncSession, org_id: UUID | str, department_ids: list[UUID], team_id: UUID | None,
+    db: AsyncSession, org_id: UUID | str, department_ids: list[UUID],
 ) -> None:
-    """Validate every department membership and the optional primary team."""
+    """Validate every department membership."""
     unique_ids = set(department_ids)
     if unique_ids:
         rows = list((await db.execute(select(Department.id).where(
@@ -82,8 +78,6 @@ async def validate_user_departments(
         ))).scalars().all())
         if set(rows) != unique_ids:
             raise HTTPException(status_code=422, detail="A department does not belong to this organization")
-    if team_id is not None:
-        raise HTTPException(status_code=410, detail="Team 已停用，请使用部门归属和角色授权")
 
 
 async def managed_scopes(db: AsyncSession, cu: CurrentUser) -> set[tuple[str, str | None]]:

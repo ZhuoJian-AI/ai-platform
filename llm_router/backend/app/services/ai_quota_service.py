@@ -96,7 +96,6 @@ class QuotaReservation:
     reserved_credits: int = 1
     organization_id: str | None = None
     department_id: str | None = None
-    team_id: str | None = None
     api_key_id: str | None = None
     provider_id: str | None = None
     operation: str | None = None
@@ -132,7 +131,6 @@ class QuotaReservation:
             enforced=bool(state.get("enforced", True)),
             organization_id=_optional_string(state.get("organization_id")),
             department_id=_optional_string(state.get("department_id")),
-            team_id=_optional_string(state.get("team_id")),
             api_key_id=_optional_string(state.get("api_key_id")),
             provider_id=_optional_string(state.get("provider_id")),
             operation=_optional_string(state.get("operation")),
@@ -708,7 +706,6 @@ async def load_quota_scopes(
     organization_id: str | UUID,
     *,
     department_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,  # noqa: ARG001 - one-release caller compatibility
     api_key: ApiKey | None = None,
     now: datetime | None = None,
     hydrate_baselines: bool = True,
@@ -834,7 +831,6 @@ async def _append_quota_event(
             "reservation_id": reservation.reservation_id,
             "organization_id": reservation.organization_id,
             "department_id": reservation.department_id,
-            "team_id": reservation.team_id,
             "api_key_id": reservation.api_key_id,
             "provider_id": reservation.provider_id,
             "scope_type": scope_type,
@@ -928,7 +924,6 @@ async def reserve_ai_quota(
     max_output_tokens: int = 0,
     input_token_upper_bound: int | None = None,
     department_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     api_key: ApiKey | None = None,
     request_id: str | None = None,
     supports_token_metering: bool = True,
@@ -941,7 +936,6 @@ async def reserve_ai_quota(
         db,
         organization_id,
         department_id=department_id,
-        team_id=team_id,
         api_key=api_key,
         now=instant,
         hydrate_baselines=False,
@@ -980,7 +974,6 @@ async def reserve_ai_quota(
         reservation,
         organization_id=str(organization_id),
         department_id=_optional_string(department_id),
-        team_id=None,
         api_key_id=_optional_string(api_key.id) if api_key is not None else None,
         provider_id=_optional_string(provider_id),
         operation=operation,

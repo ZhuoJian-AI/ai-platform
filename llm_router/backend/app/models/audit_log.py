@@ -17,7 +17,6 @@ class AuditLog(TimestampMixin, Base):
     # 作用范围
     organization_id: Mapped[str] = mapped_column(nullable=False, index=True)
     department_id: Mapped[str | None] = mapped_column(nullable=True)
-    team_id: Mapped[str | None] = mapped_column(nullable=True)
     provider_id: Mapped[str | None] = mapped_column(nullable=True)
 
     # 事件详情

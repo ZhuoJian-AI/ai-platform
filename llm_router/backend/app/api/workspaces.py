@@ -20,7 +20,6 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.retirement import retired_api_dependency
 from app.auth.admin_auth import (
     CurrentAdmin,
     assert_org_access,
@@ -107,7 +106,6 @@ from app.services.workspace_service import (
 )
 
 router = APIRouter()
-_RETIRED_OFFICE_EDIT = retired_api_dependency("WebOffice 在线协作编辑")
 
 
 @router.get("/workspaces/file-capabilities")
@@ -151,7 +149,6 @@ async def _admin_file_read(db: AsyncSession, ws, file) -> WorkspaceFileRead:
             "capabilities": caps,
             "effective_capabilities": caps,
             "internal_url": f"/f/{file.id}",
-            "office_edit_enabled": workspace_service.office_edit_enabled(file, can_update=True),
         }
     )
 
@@ -191,7 +188,6 @@ async def _admin_file_version_read(
         capabilities=caps,
         effective_capabilities=caps,
         internal_url=f"/f/{file.id}?version={version.id}",
-        office_edit_enabled=False,
     )
 
 
@@ -528,7 +524,6 @@ async def list_files_endpoint(
                 "capabilities": {"read": True, "create": True, "update": True, "delete": True},
                 "effective_capabilities": {"read": True, "create": True, "update": True, "delete": True},
                 "internal_url": f"/f/{item.id}",
-                "office_edit_enabled": bool(item.office_edit_enabled),
             }
         )
         for item in items
@@ -739,45 +734,6 @@ async def refresh_preview_session_endpoint(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except storage_gateway_service.StorageGatewayError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-
-@router.post(
-    "/files/{file_id}/edit-session",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_admin_edit_session(file_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.post(
-    "/files/{file_id}/edit-session/refresh",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_admin_edit_session_refresh(file_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.get(
-    "/files/{file_id}/edit-session/{room_id}",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_admin_edit_session_status(
-    file_id: UUID,  # noqa: ARG001
-    room_id: UUID,  # noqa: ARG001
-):
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.post(
-    "/files/{file_id}/edit-session/close",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_admin_edit_session_close(file_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 async def _fallback_preview(
@@ -1125,17 +1081,6 @@ async def update_file_endpoint(
                 "latest_version_id": str(f.current_version_id) if f.current_version_id else None,
             },
         ) from exc
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "workspace_file_active_edit_conflict",
-                "message": str(exc),
-                "room_id": exc.room_id,
-                "current_version_id": exc.current_version_id,
-                "latest_version_id": exc.current_version_id,
-            },
-        ) from exc
     except WorkspaceFileUploadError as exc:
         raise HTTPException(
             status_code=502,
@@ -1184,17 +1129,6 @@ async def delete_file_endpoint(
             detail={
                 "code": "workspace_file_idempotency_conflict",
                 "message": str(exc),
-            },
-        ) from exc
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "workspace_file_active_edit_conflict",
-                "message": str(exc),
-                "room_id": exc.room_id,
-                "current_version_id": exc.current_version_id,
-                "latest_version_id": exc.current_version_id,
             },
         ) from exc
 
@@ -1284,16 +1218,6 @@ async def restore_file_version_endpoint(
                 "message": str(exc),
             },
         ) from exc
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "workspace_file_active_edit_conflict",
-                "message": str(exc),
-                "room_id": exc.room_id,
-                "current_version_id": exc.current_version_id,
-            },
-        ) from exc
     await workspace_governance_service.audit(
         db,
         ws,
@@ -1368,16 +1292,6 @@ async def delete_folder_path_endpoint(
     assert_org_write_access(auth, ws.organization_id)
     try:
         deleted = await soft_delete_folder_path(db, ws.id, path, admin_id=auth.id)
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "workspace_file_active_edit_conflict",
-                "message": str(exc),
-                "room_id": exc.room_id,
-                "current_version_id": exc.current_version_id,
-            },
-        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await workspace_governance_service.audit(
@@ -1412,16 +1326,6 @@ async def bulk_delete_items_endpoint(
             folder_paths=data.folder_paths,
             admin_id=auth.id,
         )
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "workspace_file_active_edit_conflict",
-                "message": str(exc),
-                "room_id": exc.room_id,
-                "current_version_id": exc.current_version_id,
-            },
-        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await workspace_governance_service.audit(
@@ -1474,18 +1378,7 @@ async def delete_folder_endpoint(
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
     assert_org_write_access(auth, await _ws_org_id(db, folder.workspace_id))
-    try:
-        await soft_delete_folder(db, folder, admin_id=auth.id)
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "workspace_file_active_edit_conflict",
-                "message": str(exc),
-                "room_id": exc.room_id,
-                "current_version_id": exc.current_version_id,
-            },
-        ) from exc
+    await soft_delete_folder(db, folder, admin_id=auth.id)
     ws = await get_workspace(db, folder.workspace_id)
     if ws is not None:
         await workspace_governance_service.audit(

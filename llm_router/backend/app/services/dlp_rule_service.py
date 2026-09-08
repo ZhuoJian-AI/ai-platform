@@ -12,7 +12,6 @@ from app.dlp.patterns import ALL_BUILTIN_RULES
 from app.models.dlp_rule import DlpRule
 from app.schemas.dlp_rule import DlpRuleCreate, DlpRuleLibraryEntry, DlpRuleUpdate
 
-
 _BUILTIN_BY_NAME: dict[str, dict] = {r["name"]: r for r in ALL_BUILTIN_RULES}
 
 

@@ -1,8 +1,7 @@
 """Platform-owned Assistant Core tool catalog.
 
-This catalog is code-owned and deliberately independent from the retired DSH
-extension market.  Tenant authorization and per-run tool assembly still happen
-in the Assistant Core; this module only names platform-maintained capabilities.
+Tenant authorization and per-run tool assembly happen in the Assistant Core;
+this module only names platform-maintained capabilities.
 """
 
 SYSTEM_TOOL_GROUPS = [

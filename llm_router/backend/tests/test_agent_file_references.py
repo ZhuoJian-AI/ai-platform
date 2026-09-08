@@ -425,7 +425,7 @@ def test_general_state_and_message_metadata_preserve_attachment_snapshot():
         "scope_type": "user",
         "is_executable": True,
     }
-    user = SimpleNamespace(id=str(uuid4()), department_id=None, team_id=None)
+    user = SimpleNamespace(id=str(uuid4()), department_id=None)
 
     state = runtime_support.general_initial_state(
         org_id=str(uuid4()),
@@ -770,7 +770,6 @@ async def test_history_restores_available_and_unavailable_attachment_refs(
         id=str(user.id),
         organization_id=org.id,
         department_id=None,
-        team_id=None,
     )
     result = await nodes._load_memory_general(
         {
@@ -840,7 +839,6 @@ async def test_business_assistant_does_not_read_long_term_memory(
         id=str(user.id),
         organization_id=org.id,
         department_id=None,
-        team_id=None,
     )
     result = await nodes._load_memory_general(
         {

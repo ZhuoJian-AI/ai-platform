@@ -32,7 +32,6 @@ from app.agents.core import approval_registry
 from app.agents.core.runner import run_general_agent, stream_general_agent
 from app.agents.graph import run_registry
 from app.agents.runtime_support import stream_persisted_run
-from app.api.retirement import retired_api_dependency
 from app.auth.user_auth import (
     CurrentUser,
     assert_user_org_access,
@@ -188,8 +187,6 @@ from app.tools.skill_manifest import parse_skill_manifest
 from app.utils.workspace_presentation import clean_display_name, presentation_dict
 
 router = APIRouter()
-_RETIRED_SKILLS_PACK = retired_api_dependency("MCP/OAuth Skill Pack 导出")
-_RETIRED_OFFICE_EDIT = retired_api_dependency("WebOffice 在线协作编辑")
 _NON_STREAM_ACTIVE_TASKS: set[str] = set()
 
 _FILE_MENTION_RE = re.compile(
@@ -414,9 +411,6 @@ async def _terminal_file_read(
         "capabilities": caps,
         "effective_capabilities": caps,
         "internal_url": internal_url,
-        "office_edit_enabled": workspace_service.office_edit_enabled(
-            f, can_update=bool(caps.get("update")),
-        ),
     })
 
 
@@ -455,7 +449,6 @@ async def _terminal_file_version_read(
         capabilities=read_only_caps,
         effective_capabilities=read_only_caps,
         internal_url=f"/f/{f.id}?version={version.id}",
-        office_edit_enabled=False,
     )
 
 
@@ -524,7 +517,6 @@ async def resources_endpoint(
     return {
         "workspaces": workspace_reads,
         "skills": skill_summaries,
-        "ontologies": [],
         "rags": [RagCollectionRead.model_validate(r).model_dump() for r in rags],
         "defaults": defaults,
     }
@@ -536,14 +528,6 @@ async def effective_access_endpoint(
 ):
     """Return role-aware workspace capabilities without listing any files."""
     return await workspace_permission_service.effective_access(db, cu)
-
-
-@router.post("/terminal/skills-pack/export", dependencies=[_RETIRED_SKILLS_PACK])
-async def export_skills_pack_endpoint(
-):
-    """Compatibility endpoint; the route dependency always returns 410."""
-
-    raise HTTPException(status_code=410, detail="MCP/OAuth Skill Pack 已下线")
 
 
 @router.get("/terminal/workspace-files")
@@ -580,9 +564,6 @@ async def list_all_ws_files_endpoint(
                 "capabilities": caps,
                 "effective_capabilities": caps,
                 "internal_url": f"/f/{f.id}",
-                "office_edit_enabled": workspace_service.office_edit_enabled(
-                    f, can_update=bool(caps.get("update")),
-                ),
             })
     out.sort(key=lambda x: x["path"])
     return out
@@ -859,15 +840,7 @@ async def delete_task_endpoint(
     task_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
     task = await _get_owned_task(db, task_id, cu)
-    try:
-        await task_service.soft_delete_task(db, task)
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-        }) from exc
+    await task_service.soft_delete_task(db, task)
     await db.commit()
 
 
@@ -882,15 +855,7 @@ async def delete_task_message_endpoint(
     只删除该轮对话引用；已交付到工作空间的文件与历史版本保持不变。
     """
     task = await _get_owned_task(db, task_id, cu)
-    try:
-        await task_service.soft_delete_task_turn(db, task, message_id)
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-        }) from exc
+    await task_service.soft_delete_task_turn(db, task, message_id)
     await db.commit()
 
 
@@ -1285,7 +1250,6 @@ async def list_ws_files_endpoint(
         "capabilities": caps,
         "effective_capabilities": caps,
         "internal_url": f"/f/{item.id}",
-        "office_edit_enabled": bool(item.office_edit_enabled and caps.get("update")),
     }) for item in items]
     return WorkspaceFilePage(items=enriched, total=total, page=page, page_size=page_size)
 
@@ -1665,45 +1629,6 @@ async def refresh_preview_session_ws_file_endpoint(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.post(
-    "/terminal/files/{file_id}/edit-session",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_user_edit_session(file_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.post(
-    "/terminal/files/{file_id}/edit-session/refresh",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_user_edit_session_refresh(file_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.get(
-    "/terminal/files/{file_id}/edit-session/{room_id}",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_user_edit_session_status(
-    file_id: UUID,  # noqa: ARG001
-    room_id: UUID,  # noqa: ARG001
-):
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
-@router.post(
-    "/terminal/files/{file_id}/edit-session/close",
-    status_code=410,
-    dependencies=[_RETIRED_OFFICE_EDIT],
-)
-async def retired_user_edit_session_close(file_id: UUID):  # noqa: ARG001
-    """Compatibility path; the dependency always returns Chinese 410."""
-
-
 async def _fallback_preview_ws_file(
     file_id: UUID, response: Response, cu: CurrentUser, db: AsyncSession, *,
     create: bool, version_id: UUID | None = None,
@@ -1933,16 +1858,6 @@ async def reparse_ws_file_endpoint(
     return await _terminal_file_read(db, cu, ws, f)
 
 
-# 免登录公开访问的 HTML 类扩展名（content 为 HTML，浏览器可直接渲染）。
-PUBLIC_HTML_EXTS = {"html", "htm", "doc", "docx"}
-
-
-@router.get("/terminal/public/files/{file_id}")
-async def public_ws_file_endpoint(file_id: UUID, db: AsyncSession = Depends(get_db)):
-    """Legacy permanent links are intentionally retired in favour of expiring tokens."""
-    raise HTTPException(status_code=410, detail="永久公开链接已停用，请重新创建限时分享链接")
-
-
 @router.post("/terminal/files/{file_id}/versions", response_model=WorkspaceFileRead)
 @router.patch("/terminal/files/{file_id}", response_model=WorkspaceFileRead)
 async def update_ws_file_endpoint(
@@ -1989,14 +1904,6 @@ async def update_ws_file_endpoint(
             "message": str(exc),
             "current_version_id": str(f.current_version_id) if f.current_version_id else None,
             "latest_version_id": str(f.current_version_id) if f.current_version_id else None,
-        }) from exc
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-            "latest_version_id": exc.current_version_id,
         }) from exc
     except workspace_service.WorkspaceFileUploadError as exc:
         raise HTTPException(status_code=502, detail={
@@ -2050,11 +1957,6 @@ async def _move_ws_file(
     except workspace_service.WorkspaceFileIdempotencyConflict as exc:
         raise HTTPException(status_code=409, detail={
             "code": "workspace_file_idempotency_conflict", "message": str(exc),
-        }) from exc
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict", "message": str(exc),
-            "room_id": exc.room_id, "current_version_id": exc.current_version_id,
         }) from exc
     except workspace_service.WorkspaceFilePathConflict as exc:
         raise HTTPException(status_code=409, detail={
@@ -2199,14 +2101,6 @@ async def delete_ws_file_endpoint(
         raise HTTPException(status_code=409, detail={
             "code": "workspace_file_idempotency_conflict", "message": str(exc),
         }) from exc
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-            "latest_version_id": exc.current_version_id,
-        }) from exc
     await workspace_governance_service.audit(
         db, ws, "file_deleted", user_id=cu.id, file=f, version_id=f.current_version_id,
     )
@@ -2248,15 +2142,7 @@ async def delete_ws_folder_endpoint(
     if ws is None:
         raise HTTPException(status_code=404, detail="Folder not found")
     await workspace_permission_service.assert_can_delete(db, ws, cu)
-    try:
-        await workspace_service.soft_delete_folder(db, folder, user_id=cu.id)
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-        }) from exc
+    await workspace_service.soft_delete_folder(db, folder, user_id=cu.id)
     await workspace_governance_service.audit(
         db, ws, "folder_deleted", user_id=cu.id, metadata={"path": folder.path},
     )
@@ -2326,11 +2212,6 @@ async def restore_ws_file_version_endpoint(
     except workspace_service.WorkspaceFileIdempotencyConflict as exc:
         raise HTTPException(status_code=409, detail={
             "code": "workspace_file_idempotency_conflict", "message": str(exc),
-        }) from exc
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict", "message": str(exc),
-            "room_id": exc.room_id, "current_version_id": exc.current_version_id,
         }) from exc
     await workspace_governance_service.audit(
         db, ws, "version_restored", user_id=cu.id, file=restored,
@@ -2460,13 +2341,6 @@ async def delete_ws_folder_path_endpoint(
     await workspace_permission_service.assert_can_delete(db, ws, cu)
     try:
         deleted = await workspace_service.soft_delete_folder_path(db, ws.id, path, user_id=cu.id)
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-        }) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await workspace_governance_service.audit(
@@ -2497,13 +2371,6 @@ async def bulk_delete_ws_items_endpoint(
             folder_paths=data.folder_paths,
             user_id=cu.id,
         )
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-        }) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await workspace_governance_service.audit(
@@ -2598,23 +2465,6 @@ async def kb_nodes_endpoint(
     user_name = cu.user.display_name or cu.user.username
     nodes.append({"scope_type": "user", "scope_id": cu.id, "name": user_name})
     return nodes
-
-
-@router.api_route(
-    "/terminal/data-systems",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-@router.api_route(
-    "/terminal/data-systems/{path:path}",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-async def retired_terminal_data_interfaces(path: str = ""):
-    del path
-    from app.api.retirement import retired_response
-
-    return retired_response("Data Interface 已下线；业务数据请通过应用 Manifest Action 使用。")
 
 
 @router.get("/terminal/rag", response_model=list[RagCollectionRead])
@@ -2772,7 +2622,6 @@ async def ingest_kb_document_endpoint(
             data,
             created_by=cu.id,
             department_id=cu.department_id,
-            team_id=None,
         )
     except rag_service.EmbeddingError as exc:
         # service 已置 doc=failed + flush；commit 落库 failed 供排查，转 502
@@ -2808,7 +2657,6 @@ async def upload_kb_document_endpoint(
             folder_path=folder_path,
             created_by=cu.id,
             department_id=cu.department_id,
-            team_id=None,
         )
     except doc_parser.UnsupportedFileTypeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -2902,7 +2750,6 @@ async def reingest_kb_document_endpoint(
             coll.organization_id,
             data,
             department_id=cu.department_id,
-            team_id=None,
         )
     except rag_service.EmbeddingError as exc:
         # 回滚：恢复旧分块与原 doc，不留下 0 chunk 的 failed 行
@@ -3051,34 +2898,3 @@ async def delete_skill_file_endpoint(
         raise HTTPException(status_code=409, detail="Versioned Skill files are immutable; import a new package version")
     await soft_delete_skill_file(db, fl)
     await db.commit()
-
-
-
-# Ontology had duplicate storage and authorization semantics.  Keep one
-# compatibility release with explicit 410 responses, without loading its ORM or
-# CRUD implementation into the user runtime.
-@router.api_route(
-    "/terminal/ontology-folders",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-@router.api_route(
-    "/terminal/ontology-folders/{path:path}",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-@router.api_route(
-    "/terminal/ontology-files",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-@router.api_route(
-    "/terminal/ontology-files/{path:path}",
-    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    include_in_schema=False,
-)
-async def retired_terminal_ontology(path: str = ""):
-    del path
-    from app.api.retirement import retired_response
-
-    return retired_response("Ontology 已下线；请使用知识库/RAG 与工作空间文件。")

@@ -25,7 +25,7 @@ assert.match(files.monitor, /保守占用\/尚未回报/);
 assert.match(files.monitor, /usage\?\.scopes \?\? \[\]/);
 assert.match(files.monitor, /row\.effective_remaining\.monthly_tokens/);
 assert.match(files.monitor, /row\.effective_remaining\.monthly_credits/);
-assert.match(files.monitor, /企业 \/ 部门 \/ 团队 \/ API Key 四级额度/);
+assert.match(files.monitor, /企业 \/ 部门 \/ API Key 三级额度/);
 assert.match(files.monitor, /页面不自行推算/);
 assert.match(files.monitor, /scopeType === 'organization' \? '无限' : '继承'/,
   'a null direct cap is unlimited only at organization scope and inherited below it');
@@ -38,7 +38,7 @@ assert.doesNotMatch(files.monitor, /effective_remaining\s*=|effectiveRemaining\s
 assert.match(files.profile, /enterpriseScoped \? \{/,
   'enterprise administrators must submit profile fields without top-level quotas');
 assert.match(files.profile, /disabled=\{enterpriseScoped\}/);
-assert.match(files.organizations, /isOrgScoped\(\) && editTarget\.kind === 'org' \? profilePayload/);
+assert.match(files.organizations, /isOrgScoped\(\) && editTarget\.kind === 'organization' \? profile/);
 assert.match(files.apiKeys, /失败不退；供应商重试或故障转移不重复扣/);
 
 for (const [name, source] of Object.entries(files)) {

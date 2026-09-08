@@ -90,7 +90,7 @@ class AgentState(TypedDict, total=False):
     # so persistence never has to reverse-parse truncated JSON.
     tool_file_refs: list[dict]
     file_accesses_v1: list[dict]
-    # 五类资源调用痕迹（skill/ontology/rag/memory/data_interface），按执行顺序追加；
+    # 平台资源调用痕迹（skill/rag/memory/Manifest Action），按执行顺序追加；
     # 经 stream_writer 下发 ``trace`` 事件实时展示，并随 save_memory 落 assistant
     # TaskMessage.metadata_ 供历史回放还原。技能仅在此落库、不重复发 trace 事件。
     traces: list[dict]

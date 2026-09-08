@@ -123,29 +123,8 @@ class WorkspaceFileIdempotencyConflict(ValueError):  # noqa: N818
     """An idempotency key was reused for a different mutation."""
 
 
-class WorkspaceFileActiveEditConflict(ValueError):  # noqa: N818
-    """A WebOffice room owns the mutable OSS object for this logical file."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        room_id: str | UUID,
-        current_version_id: str | UUID | None,
-    ):
-        super().__init__(message)
-        self.room_id = str(room_id)
-        self.current_version_id = str(current_version_id) if current_version_id else None
-
-
 class WorkspaceFileVersionNotFound(ValueError):  # noqa: N818
     """The requested immutable version does not belong to the logical file."""
-
-
-def office_edit_enabled(file, *, can_update: bool) -> bool:
-    """Compatibility field for clients built before online editing retired."""
-    del file, can_update
-    return False
 
 
 def raw_tool_file_kind(f: WorkspaceFile) -> str | None:
@@ -643,14 +622,6 @@ def storage_version_id(
     return str((file.metadata_ or {}).get("storage_version_id") or "") or None
 
 
-async def assert_no_active_office_room(
-    db: AsyncSession,
-    file: WorkspaceFile,
-) -> None:
-    """Compatibility no-op after online collaborative editing was retired."""
-    del db, file
-
-
 async def enqueue_file_event(
     db: AsyncSession,
     file: WorkspaceFile,
@@ -941,7 +912,6 @@ def _file_list_item(f: WorkspaceFile) -> WorkspaceFileListItem:
         is_binary=bool(meta.get("binary")),
         content_hash=f.content_hash,
         current_version_id=f.current_version_id,
-        office_edit_enabled=office_edit_enabled(f, can_update=True),
         parse_status=f.parse_status,
         parse_kind=f.parse_kind,
         parse_error=f.parse_error,
@@ -1215,8 +1185,6 @@ async def update_file(
             setattr(locked, "mutation_result_version_id", replay.id)
             return locked
 
-    await assert_no_active_office_room(db, locked)
-
     if data.base_version_id is not None and str(locked.current_version_id or "") != str(data.base_version_id):
         raise WorkspaceFileVersionConflict(
             "文件已被其他人更新，请刷新后重试",
@@ -1338,7 +1306,6 @@ async def replace_file_artifact(
     _assert_artifact_replacement_compatible(
         locked, metadata, content=content, content_ref=content_ref,
     )
-    await assert_no_active_office_room(db, locked)
     if str(locked.current_version_id or "") != str(base_version_id):
         raise WorkspaceFileVersionConflict(
             "文件已被其他人更新，请刷新后重试",
@@ -1432,7 +1399,6 @@ async def move_file(
             raise WorkspaceFileIdempotencyConflict("幂等键已用于不同的文件修改")
         setattr(locked, "mutation_result_version_id", replay.id)
         return locked
-    await assert_no_active_office_room(db, locked)
     if str(locked.current_version_id or "") != str(base_version_id):
         raise WorkspaceFileVersionConflict(
             "文件已被其他人更新，请刷新后重试",
@@ -1631,7 +1597,6 @@ async def restore_file_version(
             raise WorkspaceFileIdempotencyConflict("幂等键已用于不同的文件修改")
         setattr(locked, "mutation_result_version_id", replay.id)
         return locked
-    await assert_no_active_office_room(db, locked)
     if str(locked.current_version_id or "") != str(base_version_id):
         raise WorkspaceFileVersionConflict(
             "文件已被其他人更新，请刷新后重试",
@@ -1672,8 +1637,6 @@ async def _mark_files_deleted_locked(
     """
     if not files:
         return
-    for file in files:
-        await assert_no_active_office_room(db, file)
     deleted_at = now or datetime.now(UTC)
     for file in files:
         mark_deleted(file, now=deleted_at)
@@ -1762,13 +1725,6 @@ async def soft_delete_file(
             "文件已被其他人更新，请刷新后重试",
             current_version_id=locked.current_version_id,
         )
-    try:
-        await assert_no_active_office_room(db, locked)
-    except WorkspaceFileActiveEditConflict:
-        if mutation is not None:
-            await db.delete(mutation)
-            await db.flush()
-        raise
     mark_deleted(locked)
     locked.deleted_by_user_id = user_id
     locked.deleted_by_admin_id = admin_id

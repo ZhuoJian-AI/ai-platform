@@ -24,7 +24,7 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     # 密码登录体系：nullable 以兼容存量用户（无密码则不可密码登录，需管理员重置）
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     must_change_password: Mapped[bool] = mapped_column(default=False)
-    # Monotonic credential/authorization version.  Browser and MCP sessions
+    # Monotonic credential/authorization version.  Browser sessions
     # carry this value and fail immediately after a password, role or scope
     # change instead of waiting for token expiry.
     auth_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -49,16 +49,6 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     def role(self, value: str) -> None:
         if value not in {None, "member"}:
             raise ValueError("员工账号不能作为管理员账号使用")
-
-    @property
-    def team_id(self) -> None:
-        """One-release compatibility field for the retired Team hierarchy."""
-        return None
-
-    @team_id.setter
-    def team_id(self, value: str | None) -> None:
-        if value is not None:
-            raise ValueError("Team 已停用，请使用部门归属和角色授权")
 
     @property
     def roles(self) -> list[dict]:

@@ -118,7 +118,7 @@ def provider_image_generation_model(provider: LlmProvider) -> str | None:
     return model or None
 
 
-def _scope_clause(dept_id: str | UUID | None, team_id: str | UUID | None):  # noqa: ARG001
+def _scope_clause(dept_id: str | UUID | None):
     branches = [LlmProvider.scope_type == "organization"]
     if dept_id:
         branches.append((LlmProvider.scope_type == "department") & (LlmProvider.department_id == str(dept_id)))
@@ -127,14 +127,13 @@ def _scope_clause(dept_id: str | UUID | None, team_id: str | UUID | None):  # no
 
 async def visible_providers(
     db: AsyncSession, org_id: UUID, *, dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> list[LlmProvider]:
     rows = list((await db.execute(select(LlmProvider).where(
         LlmProvider.organization_id == org_id,
         LlmProvider.is_active.is_(True),
         LlmProvider.deleted_at.is_(None),
         LlmProvider.health_status != "down",
-        _scope_clause(dept_id, team_id),
+        _scope_clause(dept_id),
     ))).scalars().all())
     rows.sort(key=lambda p: (_SCOPE_RANK.get(p.scope_type, 0), p.priority), reverse=True)
     return rows
@@ -156,12 +155,11 @@ async def organization_feature_flags(db: AsyncSession, org_id: UUID) -> tuple[bo
 
 async def resolve_vision_fallback(
     db: AsyncSession, org_id: UUID, *, dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> ScopedModel | None:
     vision_enabled, _ = await organization_feature_flags(db, org_id)
     if not vision_enabled:
         return None
-    for provider in await visible_providers(db, org_id, dept_id=dept_id, team_id=team_id):
+    for provider in await visible_providers(db, org_id, dept_id=dept_id):
         deployments = sorted(
             [
                 item for item in (provider.model_deployments or [])
@@ -188,12 +186,11 @@ async def resolve_vision_fallback(
 
 async def resolve_image_generation(
     db: AsyncSession, org_id: UUID, *, dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> ScopedModel | None:
     _, generation_enabled = await organization_feature_flags(db, org_id)
     if not generation_enabled:
         return None
-    for provider in await visible_providers(db, org_id, dept_id=dept_id, team_id=team_id):
+    for provider in await visible_providers(db, org_id, dept_id=dept_id):
         deployments = sorted(
             [
                 item for item in (provider.model_deployments or [])
@@ -225,13 +222,12 @@ async def resolve_image_generation(
 
 async def model_capabilities_for_scope(
     db: AsyncSession, org_id: UUID, models: list[str], *, dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> dict[str, dict[str, bool]]:
     vision_enabled, _ = await organization_feature_flags(db, org_id)
     if not vision_enabled:
         return {model: {"vision": False} for model in models}
     capabilities: dict[str, dict[str, bool]] = {}
-    providers = await visible_providers(db, org_id, dept_id=dept_id, team_id=team_id)
+    providers = await visible_providers(db, org_id, dept_id=dept_id)
     for model in models:
         deployment = next((
             item
@@ -244,7 +240,7 @@ async def model_capabilities_for_scope(
         if deployment is not None:
             capabilities[model] = {"vision": "vision" in (deployment.capabilities or [])}
             continue
-        provider = await find_provider(db, org_id, model, dept_id=dept_id, team_id=team_id)
+        provider = await find_provider(db, org_id, model, dept_id=dept_id)
         capabilities[model] = {
             "vision": bool(
                 provider and provider.provider_type != "anthropic"

@@ -18,7 +18,7 @@ class Agent(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     organization_id: Mapped[str] = mapped_column(
         ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False, index=True
     )
-    # 作用范围：organization / department / team / user；scope_id 为对应 id（org 级为 None）。
+    # 作用范围：organization / department / role / user；scope_id 为对应 id（org 级为 None）。
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False, default="organization")
     scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # 创建者（终端用户 id）：admin / 历史数据为 None（与 SkillFolder/RagCollection 一致，纯字符串无 FK）。

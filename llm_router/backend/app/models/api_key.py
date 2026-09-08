@@ -21,16 +21,13 @@ class ApiKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     key_name: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # 层级范围
-    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)  # organization, department, team
+    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)  # organization, department
 
     organization_id: Mapped[str] = mapped_column(
         ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     department_id: Mapped[str | None] = mapped_column(
         ForeignKey("departments.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    team_id: Mapped[str | None] = mapped_column(
-        ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True
     )
     created_by: Mapped[str | None] = mapped_column(
         ForeignKey("users.id"), nullable=True

@@ -22,7 +22,6 @@ def _current_user() -> CurrentUser:
         role="member",
         organization_id="organization-1",
         department_id="department-1",
-        team_id=None,
         role_ids=("role-1",),
     )
 

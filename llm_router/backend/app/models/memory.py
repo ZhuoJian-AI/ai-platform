@@ -1,13 +1,13 @@
-"""Memory ORM model — hierarchical long-term memory (org / dept / team / user).
+"""Memory ORM model — hierarchical long-term memory (org / dept / role / user).
 
 区别于 ``AgentMessage``（按 session 的对话消息）：Memory 是智能体跨会话沉淀的长期事实/偏好，
 按 scope_type + scope_id 分级。组织/部门/团队级由管理端维护；个人级（scope_type='user'）
 由终端智能体经 ``extract_memory`` 节点自行沉淀。运行时 ``load_memory`` 按 4 级聚合注入。
 """
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text
-from sqlalchemy.dialects.postgresql import JSONB
 from pgvector.sqlalchemy import Vector
+from sqlalchemy import ForeignKey, Index, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -24,9 +24,9 @@ class Memory(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     organization_id: Mapped[str] = mapped_column(
         ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False, index=True
     )
-    # organization / department / team / user
+    # organization / department / role / user
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
-    # org 级为 None；其余为对应 dept/team/user id
+    # org 级为 None；其余为对应 dept/role/user id
     scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     category: Mapped[str] = mapped_column(String(100), nullable=False, default="general")
     content: Mapped[str] = mapped_column(Text, nullable=False)

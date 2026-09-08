@@ -35,8 +35,6 @@ class CurrentUser:
     organization_id: UUID
     department_id: str | None = None
     department_ids: tuple[str, ...] = ()
-    # One-release compatibility field. Team has retired and is always None.
-    team_id: str | None = None
     role_ids: tuple[str, ...] = ()
     permission_codes: tuple[str, ...] = ()
     effective_data_scopes: dict | None = None
@@ -130,7 +128,6 @@ async def current_user_for_user(db: AsyncSession, user: User) -> CurrentUser:
         organization_id=user.organization_id,
         department_id=str(user.department_id) if user.department_id else None,
         department_ids=tuple(str(value) for value in user.department_ids),
-        team_id=None,
         role_ids=rbac["role_ids"],
         permission_codes=rbac["permission_codes"],
         effective_data_scopes=rbac["effective_data_scopes"],

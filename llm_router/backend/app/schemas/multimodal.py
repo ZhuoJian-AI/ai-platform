@@ -61,6 +61,38 @@ class MultimodalJobCreated(BaseModel):
     status: str
 
 
+SubsystemAiCapability = Literal[
+    "vision.ocr",
+    "vision.compare",
+    "vision.classify",
+    "speech.transcribe",
+    "text.extract",
+    "business.predict",
+]
+
+
+class SubsystemAiRunCreated(BaseModel):
+    run_id: UUID
+    request_id: str
+    status: str
+
+
+class SubsystemAiRunRead(BaseModel):
+    run_id: UUID
+    request_id: str
+    capability: SubsystemAiCapability
+    application_id: UUID
+    module_key: str
+    page_key: str
+    action_key: str
+    status: Literal["queued", "processing", "succeeded", "failed", "cancelled"]
+    result: dict = Field(default_factory=dict)
+    error: dict | None = None
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
+
+
 VoiceType = Literal["builtin", "designed", "cloned"]
 VoiceScopeType = Literal["organization", "role", "department", "user"]
 

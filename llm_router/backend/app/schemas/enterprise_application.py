@@ -13,7 +13,7 @@ ApplicationPermission = Literal[
 ]
 ApplicationScope = Literal["organization", "department", "user", "role"]
 EventRouteScope = Literal["organization", "department", "user"]
-ApplicationTarget = Literal["tool_endpoint", "data_interface", "skill_folder"]
+ApplicationTarget = Literal["manifest_action"]
 ApplicationOperation = Literal["query", "create", "update", "delete", "export", "approve"]
 
 
@@ -138,17 +138,6 @@ class EnterpriseApplicationGrantsReplace(BaseModel):
     grants: list[EnterpriseApplicationGrantInput] = Field(default_factory=list, max_length=2000)
 
 
-class EnterpriseApplicationToolBindingInput(BaseModel):
-    target_type: ApplicationTarget
-    target_id: UUID
-    operation: ApplicationOperation
-    is_active: bool = True
-
-
-class EnterpriseApplicationToolBindingsReplace(BaseModel):
-    bindings: list[EnterpriseApplicationToolBindingInput] = Field(default_factory=list, max_length=1000)
-
-
 class EnterpriseApplicationGrantRead(OrmModel):
     id: UUID
     application_id: UUID
@@ -160,18 +149,6 @@ class EnterpriseApplicationGrantRead(OrmModel):
     module_access: dict[str, EnterpriseApplicationModuleAccess] = Field(default_factory=dict)
     managed_key: str | None = None
     denied_resources: dict = Field(default_factory=dict)
-    created_at: datetime
-    updated_at: datetime
-
-
-class EnterpriseApplicationToolBindingRead(OrmModel):
-    id: UUID
-    application_id: UUID
-    organization_id: UUID
-    target_type: str
-    target_id: str
-    operation: str
-    is_active: bool
     created_at: datetime
     updated_at: datetime
 
@@ -193,7 +170,6 @@ class EnterpriseApplicationRead(OrmModel):
     assistant_config: dict
     health_status: str
     grants: list[EnterpriseApplicationGrantRead] = Field(default_factory=list)
-    tool_bindings: list[EnterpriseApplicationToolBindingRead] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -479,7 +455,7 @@ class EnterpriseApplicationCapabilityRead(BaseModel):
 
 
 class EnterpriseApplicationRecentCallRead(BaseModel):
-    id: int
+    id: UUID
     capability_name: str
     method: str | None = None
     path: str | None = None

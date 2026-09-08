@@ -71,16 +71,6 @@ async def create_dept_provider_endpoint(
     return await create_provider(db, dept.organization_id, data, dept_id=dept_id)
 
 
-@router.post("/teams/{team_id}/providers", response_model=LlmProviderRead, status_code=201)
-async def create_team_provider_endpoint(
-    team_id: UUID,
-    data: LlmProviderCreate,
-    auth: CurrentAdmin = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    raise HTTPException(status_code=410, detail="Team 已停用，请在企业或部门范围配置模型供应商")
-
-
 @router.get("/organizations/{org_id}/providers", response_model=list[LlmProviderRead])
 async def list_providers_endpoint(
     org_id: UUID,

@@ -13,7 +13,6 @@ import {
   ApiError, enterpriseApplications, roles,
   type EnterpriseApplication,
   type EnterpriseApplicationInput,
-  type EnterpriseApplicationOperation,
   type EnterpriseApplicationPermission, type EnterpriseApplicationScope,
 } from '../../api/client';
 import OrgSelect from '../../components/OrgSelect';
@@ -33,18 +32,6 @@ const PERMISSIONS: Array<{ value: EnterpriseApplicationPermission; label: string
   { value: 'ai_delete', label: 'AI 删除' },
   { value: 'ai_approve', label: 'AI 审批' },
   { value: 'export', label: '导出' },
-];
-
-const OPERATION_OPTIONS: Array<{ value: EnterpriseApplicationOperation; label: string }> = [
-  { value: 'query', label: '查询' }, { value: 'create', label: '新增' },
-  { value: 'update', label: '更新' }, { value: 'delete', label: '删除' },
-  { value: 'export', label: '导出' },
-];
-
-const TARGET_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: 'tool_endpoint', label: '连接器端点' },
-  { value: 'data_interface', label: '数据接口' },
-  { value: 'skill_folder', label: 'Skill 文件夹' },
 ];
 
 function errorText(error: unknown, fallback: string) {
@@ -389,21 +376,12 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
           <Button type="primary" htmlType="submit">保存助手配置</Button>
         </Form>
       </Card>
-      <Card title="旧工具绑定（只读迁移记录）" extra={<Typography.Text type="secondary">新业务助手仅使用 Manifest Action</Typography.Text>}>
-        <Alert
-          showIcon
-          type="warning"
-          style={{ marginBottom: 16 }}
-          message="旧连接器、数据接口和应用 Skill 绑定已停止新增与修改"
-          description="这里只保留历史记录用于无调用观察和迁移核对。确认 Manifest Action 已覆盖且连续七天没有旧端点调用后，系统才会删除这些记录。"
-        />
-        <Table dataSource={selectedApp.tool_bindings} rowKey="id" pagination={false} columns={[
-          { title: '类型', dataIndex: 'target_type', render: (value: string) => TARGET_OPTIONS.find((item) => item.value === value)?.label ?? value },
-          { title: '资源 UUID', dataIndex: 'target_id' },
-          { title: '操作', dataIndex: 'operation', render: (value: string) => <Tag>{OPERATION_OPTIONS.find((item) => item.value === value)?.label ?? value}</Tag> },
-          { title: '状态', width: 120, render: (_: unknown, row) => <Tag color={row.is_active ? 'gold' : 'default'}>{row.is_active ? '迁移观察中' : '已停用'}</Tag> },
-        ]} />
-      </Card>
+      <Alert
+        showIcon
+        type="info"
+        message="业务小助手仅使用已审核的 Manifest Action"
+        description="可调用操作由子系统 Manifest 声明，并继续受当前员工的页面和 Action 权限约束。"
+      />
     </div>
   ) : <Empty description="请先创建企业应用" />;
 

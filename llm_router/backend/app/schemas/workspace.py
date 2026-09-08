@@ -107,7 +107,6 @@ class WorkspaceFileRead(MetaReadModel):
     capabilities: dict[str, bool] | None = None
     effective_capabilities: dict[str, bool] | None = None
     internal_url: str | None = None
-    office_edit_enabled: bool = False
     presentation: WorkspaceFilePresentation | None = None
 
     @model_validator(mode="after")
@@ -151,7 +150,6 @@ class WorkspaceFileListItem(BaseModel):
     capabilities: dict[str, bool] | None = None
     effective_capabilities: dict[str, bool] | None = None
     internal_url: str | None = None
-    office_edit_enabled: bool = False
     parse_status: str = "unparsed"
     parse_kind: str | None = None
     parse_error: str | None = None

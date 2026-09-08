@@ -27,7 +27,7 @@ async def test_explicit_deployments_never_fall_back_to_unverified_legacy_names(m
     organization_id = uuid4()
     organization = SimpleNamespace(id=organization_id, slug="alphabet")
     current_user = SimpleNamespace(
-        organization_id=organization_id, department_id=None, team_id=None,
+        organization_id=organization_id, department_id=None,
     )
     deployment = SimpleNamespace(
         model_id="mimo-v2.5", capabilities=["chat"], is_active=True,

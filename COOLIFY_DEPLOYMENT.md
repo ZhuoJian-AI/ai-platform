@@ -1,7 +1,7 @@
 # AI Platform — Coolify 部署参数
 
 本项目使用 `docker-compose.coolify.yml`。Coolify 直接把正式域名转发到 `frontend`
-服务的内部端口 `80`。该容器同时提供 Vite 静态前端，并将 `/api`、`/v1` 和 `/mcp`
+服务的内部端口 `80`。该容器同时提供 Vite 静态前端，并将 `/api` 和 `/v1`
 转发到内部 FastAPI 服务。
 
 ## 首次绑定

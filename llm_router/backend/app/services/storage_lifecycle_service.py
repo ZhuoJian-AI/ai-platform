@@ -17,7 +17,6 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models.platform_extension import PlatformExtensionSource
 from app.models.rag import RagChunk, RagCollection, RagDocument, RagFolder
 from app.models.skill import SkillFile, SkillFolder, SkillVersion
 from app.models.workspace import (
@@ -335,7 +334,6 @@ async def _referenced_object_keys(db: AsyncSession) -> set[str]:
         WorkspaceUploadSession.content_ref,
         WorkspacePreviewJob.output_ref,
         SkillVersion.archive_ref,
-        PlatformExtensionSource.artifact_ref,
     )
     refs: set[str] = set()
     for column in columns:

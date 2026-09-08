@@ -12,7 +12,6 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ApiError, enterpriseApplications,
-  type EnterpriseApplicationCapability,
   type EnterpriseApplicationAction,
   type EnterpriseApplicationInput,
   type EnterpriseApplicationOperation,
@@ -42,26 +41,8 @@ const PERMISSION_LABEL: Record<EnterpriseApplicationPermission, string> = {
   export: '导出',
 };
 
-const TARGET_LABEL = {
-  tool_endpoint: '连接器端点',
-  data_interface: '数据接口',
-  skill_folder: 'Skill 运行包',
-};
-
 function errorText(error: unknown, fallback: string) {
   return error instanceof ApiError ? error.message : fallback;
-}
-
-function statusLabel(capability: EnterpriseApplicationCapability) {
-  if (!capability.binding_active) return <Tag>绑定已停用</Tag>;
-  if (!capability.target_active) return <Tag color="red">资源不可用</Tag>;
-  if (capability.health_status === 'healthy' || capability.health_status === 'ready') {
-    return <Tag color="green">可调用</Tag>;
-  }
-  if (capability.health_status === 'unhealthy' || capability.health_status === 'unavailable') {
-    return <Tag color="red">检查失败</Tag>;
-  }
-  return <Tag color="blue">已启用</Tag>;
 }
 
 export default function EnterpriseApplicationDetail() {
@@ -291,9 +272,12 @@ export default function EnterpriseApplicationDetail() {
       ?? (scopeType === 'organization' ? '全企业' : scopeId ?? '未知范围');
   };
 
-  const operationCards = (['query', 'create', 'update', 'delete'] as EnterpriseApplicationOperation[]).map((operation) => ({
+  const manifestActions = actionsQuery.data ?? [];
+  const activeManifestActions = manifestActions.filter((action) => action.is_active && !action.admin_disabled);
+  const aiManifestActions = activeManifestActions.filter((action) => action.ai_enabled);
+  const operationCards = (['query', 'create', 'update', 'delete', 'export', 'approve'] as EnterpriseApplicationOperation[]).map((operation) => ({
     operation,
-    value: overview?.operation_counts[operation] ?? 0,
+    value: activeManifestActions.filter((action) => action.operation === operation).length,
     ...OPERATION_META[operation],
   }));
 
@@ -313,28 +297,24 @@ export default function EnterpriseApplicationDetail() {
 
   const capabilityColumns = useMemo(() => [
     {
-      title: 'AI 工具', dataIndex: 'name',
-      render: (name: string, row: EnterpriseApplicationCapability) => (
+      title: 'Manifest Action', dataIndex: 'name',
+      render: (name: string, row: EnterpriseApplicationAction) => (
         <div className="app-detail-tool-name">
           <Typography.Text strong>{name}</Typography.Text>
-          <Typography.Text type="secondary">{row.description || `${row.source_name}提供的业务能力`}</Typography.Text>
+          <Typography.Text type="secondary">{row.description || row.action_key}</Typography.Text>
         </div>
       ),
     },
-    { title: '来源', dataIndex: 'source_name', width: 180 },
-    {
-      title: '接口', width: 290,
-      render: (_: unknown, row: EnterpriseApplicationCapability) => row.path ? (
-        <Space size={6}><Tag color="blue">{row.method || 'CALL'}</Tag><Typography.Text code>{row.path}</Typography.Text></Space>
-      ) : <Tag>{TARGET_LABEL[row.target_type]}</Tag>,
-    },
+    { title: '子模块', dataIndex: 'module_key', width: 180 },
     {
       title: '权限动作', dataIndex: 'operation', width: 110,
       render: (operation: EnterpriseApplicationOperation) => (
         <Tag color={OPERATION_META[operation].color}>{OPERATION_META[operation].label}</Tag>
       ),
     },
-    { title: '状态', width: 110, render: (_: unknown, row: EnterpriseApplicationCapability) => statusLabel(row) },
+    { title: 'AI', dataIndex: 'ai_enabled', width: 90, render: (value: boolean) => <Tag color={value ? 'purple' : 'default'}>{value ? '可调用' : '页面专用'}</Tag> },
+    { title: '确认', dataIndex: 'requires_confirmation', width: 100, render: (value: boolean) => <Tag color={value ? 'red' : 'green'}>{value ? '用户确认' : '直接执行'}</Tag> },
+    { title: '状态', width: 110, render: (_: unknown, row: EnterpriseApplicationAction) => <Tag color={row.is_active && !row.admin_disabled ? 'green' : 'default'}>{row.is_active && !row.admin_disabled ? '已启用' : '已停用'}</Tag> },
   ], []);
 
   if (appQuery.isLoading || overviewQuery.isLoading) {
@@ -433,16 +413,16 @@ export default function EnterpriseApplicationDetail() {
         ))}
       </div>
       <Card
-        title={<Space><ApiOutlined />AI 实际可调用能力</Space>}
-        extra={<Button type="link" onClick={() => navigate(`/enterprise-apps/assistant?app=${app.id}`)}>管理工具绑定</Button>}
+        title={<Space><ApiOutlined />Manifest Action 能力</Space>}
       >
         <Alert
           showIcon
           type="info"
-          message={`当前应用配置 ${overview?.direct_capability_count ?? 0} 个业务接口${overview?.skill_binding_count ? `，另有 ${overview.skill_binding_count} 个运行包负责执行` : ''}。只有启用且用户具备对应权限的能力才会注册给 AI。`}
+          message={`Manifest 已声明 ${manifestActions.length} 个操作，其中 ${aiManifestActions.length} 个当前允许 AI 调用。`}
+          description="业务小助手只装配已审核、已启用且当前员工拥有页面与 Action 权限的操作。"
           style={{ marginBottom: 16 }}
         />
-        <Table rowKey="binding_id" pagination={false} dataSource={overview?.capabilities ?? []} columns={capabilityColumns} />
+        <Table rowKey="id" pagination={false} dataSource={manifestActions} columns={capabilityColumns} />
       </Card>
       <Card title={<Space><SafetyCertificateOutlined />部门权限</Space>} extra={<Button type="link" onClick={() => navigate(`/enterprise-apps/permissions?app=${app.id}`)}>编辑权限</Button>}>
         {permissionTable}
@@ -452,7 +432,7 @@ export default function EnterpriseApplicationDetail() {
           <Descriptions column={1} size="small">
             <Descriptions.Item label="状态"><Tag color={app.assistant_enabled ? 'green' : 'default'}>{app.assistant_enabled ? '已启用' : '未启用'}</Tag></Descriptions.Item>
             <Descriptions.Item label="业务提示词">{app.assistant_prompt ? '已配置' : '使用平台默认提示词'}</Descriptions.Item>
-            <Descriptions.Item label="绑定能力">{overview?.active_capability_count ?? 0} 个动作</Descriptions.Item>
+            <Descriptions.Item label="可调用 Action">{aiManifestActions.length} 个动作</Descriptions.Item>
           </Descriptions>
           <Button type="link" style={{ paddingInline: 0 }} onClick={() => navigate(`/enterprise-apps/assistant?app=${app.id}`)}>查看助手配置</Button>
         </Card>
@@ -479,12 +459,12 @@ export default function EnterpriseApplicationDetail() {
               <Descriptions.Item label="运行状态"><Tag color={app.is_active ? 'green' : 'default'}>{app.is_active ? '已启用' : '已停用'}</Tag></Descriptions.Item>
               <Descriptions.Item label="页面连接"><Tag color={app.health_status === 'healthy' ? 'green' : 'default'}>{app.health_status === 'healthy' ? '正常' : app.health_status}</Tag></Descriptions.Item>
               <Descriptions.Item label="展示方式">{app.display_mode === 'embedded' ? '平台内嵌' : '外部打开'}</Descriptions.Item>
-              <Descriptions.Item label="工具动作">{overview?.active_capability_count ?? 0}</Descriptions.Item>
+              <Descriptions.Item label="Manifest Action">{activeManifestActions.length}</Descriptions.Item>
             </Descriptions>
           </Card>
           <Card title="管理员下一步">
             <Space direction="vertical" align="start">
-              <Button type="link" icon={<ApiOutlined />} onClick={() => navigate(`/enterprise-apps/assistant?app=${app.id}`)}>确认 AI 能调用哪些接口</Button>
+              <Button type="link" icon={<ApiOutlined />} onClick={() => void actionsQuery.refetch()}>刷新 Manifest Action 状态</Button>
               <Button type="link" icon={<SafetyCertificateOutlined />} onClick={() => navigate(`/enterprise-apps/permissions?app=${app.id}`)}>设置哪些部门可以使用</Button>
               <Button type="link" icon={<RobotOutlined />} onClick={() => navigate(`/enterprise-apps/assistant?app=${app.id}`)}>配置业务小助手</Button>
             </Space>
@@ -699,11 +679,11 @@ export default function EnterpriseApplicationDetail() {
         </div>
       ),
     },
-    { key: 'capabilities', label: `AI 能力 ${overview?.direct_capability_count ?? 0}`, children: capabilitiesPanel },
+    { key: 'capabilities', label: `AI 能力 ${aiManifestActions.length}`, children: capabilitiesPanel },
     { key: 'permissions', label: `部门权限 ${app.grants.length}`, children: <Card extra={<Button type="primary" onClick={() => navigate(`/enterprise-apps/permissions?app=${app.id}`)}>编辑权限</Button>}>{permissionTable}</Card> },
     {
       key: 'assistant', label: '业务助手',
-      children: <Card><Descriptions bordered column={1}><Descriptions.Item label="启用状态">{app.assistant_enabled ? '已启用' : '未启用'}</Descriptions.Item><Descriptions.Item label="提示词">{app.assistant_prompt || '未单独配置，使用平台默认提示词'}</Descriptions.Item><Descriptions.Item label="AI 工具">{overview?.direct_capability_count ?? 0} 个业务接口</Descriptions.Item></Descriptions><Button type="primary" style={{ marginTop: 16 }} onClick={() => navigate(`/enterprise-apps/assistant?app=${app.id}`)}>管理助手与工具</Button></Card>,
+      children: <Card><Descriptions bordered column={1}><Descriptions.Item label="启用状态">{app.assistant_enabled ? '已启用' : '未启用'}</Descriptions.Item><Descriptions.Item label="提示词">{app.assistant_prompt || '未单独配置，使用平台默认提示词'}</Descriptions.Item><Descriptions.Item label="AI 工具">{aiManifestActions.length} 个 Manifest Action</Descriptions.Item></Descriptions><Button type="primary" style={{ marginTop: 16 }} onClick={() => navigate(`/enterprise-apps/assistant?app=${app.id}`)}>管理业务助手</Button></Card>,
     },
     { key: 'calls', label: '调用记录', children: <Card>{recentCallsTable}</Card> },
   ];
@@ -716,7 +696,7 @@ export default function EnterpriseApplicationDetail() {
           <div className="app-detail-identity">
             <div className="app-detail-logo"><AppstoreOutlined /></div>
             <div>
-              <div className="app-detail-title-row"><Typography.Title level={3}>{app.name}</Typography.Title><Tag color={app.is_active ? 'green' : 'default'}>{app.is_active ? '已启用' : '已停用'}</Tag><Tag color={app.health_status === 'healthy' ? 'blue' : 'default'}>{app.health_status === 'healthy' ? '页面正常' : '页面待检查'}</Tag>{(overview?.operation_counts.query ?? 0) > 0 && <Tag color="purple">AI 查询可用</Tag>}</div>
+              <div className="app-detail-title-row"><Typography.Title level={3}>{app.name}</Typography.Title><Tag color={app.is_active ? 'green' : 'default'}>{app.is_active ? '已启用' : '已停用'}</Tag><Tag color={app.health_status === 'healthy' ? 'blue' : 'default'}>{app.health_status === 'healthy' ? '页面正常' : '页面待检查'}</Tag>{aiManifestActions.some((action) => action.operation === 'query') && <Tag color="purple">AI 查询可用</Tag>}</div>
               <Typography.Text type="secondary">{app.description || '企业业务应用'} · {app.slug}</Typography.Text>
             </div>
           </div>

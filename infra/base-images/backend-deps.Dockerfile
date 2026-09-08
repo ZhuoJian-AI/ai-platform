@@ -11,4 +11,4 @@ ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
     PYTHONPATH=/app
 
 COPY llm_router/backend/pyproject.toml ./
-RUN python -m pip install --no-cache-dir --retries 10 --timeout 600 -e ".[dev]"
+RUN python -m pip install --no-cache-dir --retries 10 --timeout 600 -e .
