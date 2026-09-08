@@ -139,7 +139,7 @@ class DLPStreamScanner:
         for rule in self.engine.rules:
             if rule.rule_type == "regex":
                 try:
-                    compiled = regex.compile(rule.pattern)
+                    regex.compile(rule.pattern)
                     # 估算最大可能匹配长度（粗略）
                     max_lookahead = max(max_lookahead, 256)
                 except regex.error:
