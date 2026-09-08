@@ -34,8 +34,10 @@ from app.schemas.enterprise_application import (
     EnterpriseApplicationGrantInput,
     EnterpriseApplicationIntegrationInput,
     EnterpriseApplicationToolBindingInput,
+    EnterpriseApplicationUpdate,
 )
 from app.services import enterprise_application_service as service
+from app.services import role_service
 from app.services import subsystem_action_service as action_service
 from app.services import subsystem_integration_service as integration_service
 
@@ -986,6 +988,266 @@ async def test_protocol_v2_sync_discovers_actions_and_matches_departments_withou
     ]
     assert application.grants == []
 
+
+@pytest.mark.asyncio
+async def test_runtime_manifest_auto_activates_managed_access_and_preserves_admin_stops(
+    db_session, monkeypatch,
+):
+    org, _, department, _, _ = await _organization_tree(db_session)
+    application = await service.create_application(
+        db_session,
+        org.id,
+        EnterpriseApplicationCreate(
+            name="Runtime Sample",
+            slug="runtime-sample",
+            entry_url="https://runtime.example.test/",
+            is_active=False,
+            assistant_config={"deploymentManaged": True, "runtimeId": str(uuid4())},
+        ),
+    )
+    developer = (await role_service.ensure_builtin_roles(db_session, org.id))[
+        role_service.BUILTIN_RUNTIME_DEVELOPER
+    ]
+    legacy_developer_grant = EnterpriseApplicationGrant(
+        application_id=application.id,
+        organization_id=org.id,
+        scope_type="role",
+        scope_id=str(developer.id),
+        permissions=["view"],
+        module_keys=[],
+        module_access={},
+    )
+    db_session.add(legacy_developer_grant)
+    await db_session.flush()
+    await integration_service.configure_integration(
+        db_session,
+        application,
+        _integration_input("https://runtime.example.test/api/integration/manifest"),
+    )
+    manifest = {
+        "protocol": "zhuojian-subsystem",
+        "version": 2,
+        "contractRevision": "2.5",
+        "enterprise": {"key": "alphabet", "name": "爱法贝"},
+        "applicationSlug": application.slug,
+        "applicationName": "Runtime Sample",
+        "bridgeVersion": 1,
+        "eventsUrl": "/api/integration/events",
+        "eventDeliveriesUrl": "/api/integration/event-deliveries",
+        "auth": {"ssoPath": "/api/integration/sso", "mode": "authorization_code"},
+        "modules": [{
+            "moduleKey": "orders",
+            "name": "订单",
+            "route": "/orders",
+            "departments": [{"key": department.slug, "name": department.name, "role": "owner"}],
+            "accessRoles": [{
+                "roleKey": "orders.member",
+                "name": "订单成员",
+                "suggestedDepartmentKey": department.slug,
+                "pageKeys": ["orders.list"],
+                "actionKeys": ["orders.query"],
+            }],
+            "pages": [{
+                "pageKey": "orders.list",
+                "name": "订单列表",
+                "routePattern": "/orders",
+                "queryActionKey": "orders.query",
+                "actionKeys": ["orders.query"],
+                "contextSchema": {"type": "object"},
+            }],
+            "actions": [{
+                "actionKey": "orders.query",
+                "name": "查询订单",
+                "operation": "query",
+                "aiEnabled": True,
+                "requiresConfirmation": False,
+                "inputSchema": {"type": "object", "additionalProperties": False},
+                "resultSchema": {"type": "object"},
+            }],
+            "events": {"publishes": [], "subscribes": []},
+        }],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/manifest"):
+            return httpx.Response(200, json=manifest)
+        return httpx.Response(200, json={"items": [], "nextAfter": 0, "hasMore": False})
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        integration_service.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: original_client(transport=httpx.MockTransport(handler)),
+    )
+
+    first = await integration_service.sync_integration(
+        db_session, application, allow_initial_inactive_candidate=True
+    )
+    assert first["status"] == "healthy"
+    assert application.is_active is True
+    active_integration = await integration_service.get_integration(db_session, application.id)
+    assert active_integration.manifest_review_status == "approved"
+    managed = (
+        await db_session.execute(
+            select(EnterpriseApplicationGrant).where(
+                EnterpriseApplicationGrant.application_id == application.id,
+                EnterpriseApplicationGrant.managed_key == "runtime_developer",
+            )
+        )
+    ).scalar_one()
+    assert managed.id == legacy_developer_grant.id
+    assert managed.module_access["orders"]["page_access"]["orders.list"]["ai_enabled"] is True
+    await service.replace_grants(db_session, application, [])
+    await db_session.refresh(managed)
+    assert managed.deleted_at is None
+
+    runtime_id = application.assistant_config["runtimeId"]
+    await service.update_application(
+        db_session,
+        application,
+        EnterpriseApplicationUpdate(assistant_config={"note": "管理员备注"}),
+    )
+    assert application.assistant_config == {
+        "note": "管理员备注",
+        "deploymentManaged": True,
+        "runtimeId": runtime_id,
+    }
+
+    action = (await db_session.execute(select(EnterpriseApplicationAction))).scalar_one()
+    await action_service.set_action_active(db_session, application, action.action_key, False)
+    assert action.admin_disabled is True
+    assert action.is_active is False
+
+    await service.update_application(
+        db_session, application, EnterpriseApplicationUpdate(is_active=False)
+    )
+    assert application.admin_disabled is True
+    manifest["applicationName"] = "Runtime Sample 2"
+    second = await integration_service.sync_integration(
+        db_session, application, allow_initial_inactive_candidate=True
+    )
+    assert second["status"] == "healthy"
+    assert application.is_active is False
+    assert action.is_active is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_new_resources_inherit_only_existing_ceiling_and_respect_denials(
+    db_session,
+):
+    org, _, _, _, _ = await _organization_tree(db_session)
+    role = Role(
+        organization_id=org.id,
+        name="订单维护",
+        code=f"orders-{uuid4().hex[:8]}",
+        data_scope="self",
+        is_active=True,
+    )
+    db_session.add(role)
+    application = await service.create_application(
+        db_session,
+        org.id,
+        EnterpriseApplicationCreate(
+            name="Runtime Orders",
+            slug="runtime-orders",
+            entry_url="https://runtime-orders.example.test/",
+            assistant_config={"deploymentManaged": True},
+        ),
+    )
+    await db_session.flush()
+    grant = EnterpriseApplicationGrant(
+        application_id=application.id,
+        organization_id=org.id,
+        scope_type="role",
+        scope_id=str(role.id),
+        permissions=["view", "ai_query", "ai_update"],
+        module_keys=["orders"],
+        module_access={
+            "orders": {
+                "role": "member",
+                "permissions": ["view", "ai_query", "ai_update"],
+                "action_keys": ["orders.query"],
+                "page_access": {
+                    "orders.list": {
+                        "permissions": ["view", "ai_query", "ai_update"],
+                        "action_keys": ["orders.query"],
+                        "ai_enabled": True,
+                    }
+                },
+            }
+        },
+    )
+    db_session.add(grant)
+    await db_session.flush()
+    before = {
+        "modules": [{
+            "moduleKey": "orders",
+            "actions": [{"actionKey": "orders.query", "operation": "query"}],
+            "pages": [{"pageKey": "orders.list", "actionKeys": ["orders.query"]}],
+        }]
+    }
+    after = deepcopy(before)
+    after["modules"][0]["actions"].extend([
+        {"actionKey": "orders.assign", "operation": "update"},
+        {"actionKey": "orders.create", "operation": "create"},
+    ])
+    after["modules"][0]["pages"].append({
+        "pageKey": "orders.dispatch",
+        "actionKeys": ["orders.query", "orders.assign", "orders.create"],
+    })
+
+    await service.synchronize_runtime_grants(db_session, application, before, after)
+    await db_session.refresh(grant)
+    inherited = grant.module_access["orders"]
+    assert "orders.assign" in inherited["action_keys"]
+    assert "orders.create" not in inherited["action_keys"]
+    assert inherited["page_access"]["orders.dispatch"]["action_keys"] == [
+        "orders.assign",
+        "orders.query",
+    ]
+
+    removed = deepcopy(after)
+    removed["modules"][0]["actions"] = removed["modules"][0]["actions"][:1]
+    removed["modules"][0]["pages"] = removed["modules"][0]["pages"][:1]
+    await service.synchronize_runtime_grants(db_session, application, after, removed)
+    await db_session.refresh(grant)
+    assert "orders.dispatch" not in grant.module_access["orders"]["page_access"]
+    assert "orders.assign" not in grant.module_access["orders"]["action_keys"]
+
+    await service.synchronize_runtime_grants(db_session, application, removed, after)
+    await db_session.refresh(grant)
+    assert "orders.dispatch" in grant.module_access["orders"]["page_access"]
+    assert "orders.assign" in grant.module_access["orders"]["action_keys"]
+
+    requested = EnterpriseApplicationGrantInput(
+        scope_type="role",
+        scope_id=role.id,
+        permissions=["view", "ai_query", "ai_update"],
+        module_keys=["orders"],
+        module_access={
+            "orders": {
+                "role": "member",
+                "permissions": ["view", "ai_query", "ai_update"],
+                "action_keys": ["orders.query"],
+                "page_access": {
+                    "orders.list": {
+                        "permissions": ["view", "ai_query", "ai_update"],
+                        "action_keys": ["orders.query"],
+                        "ai_enabled": True,
+                    }
+                },
+            }
+        },
+    )
+    await service.replace_grants(db_session, application, [requested])
+    await db_session.refresh(grant)
+    assert "orders:orders.dispatch" in grant.denied_resources["pages"]
+    assert "orders.assign" in grant.denied_resources["actions"]
+
+    await service.synchronize_runtime_grants(db_session, application, removed, after)
+    await db_session.refresh(grant)
+    assert "orders.dispatch" not in grant.module_access["orders"]["page_access"]
+    assert "orders.assign" not in grant.module_access["orders"]["action_keys"]
 
 @pytest.mark.asyncio
 async def test_module_permissions_and_high_risk_action_confirmation_are_replay_safe(

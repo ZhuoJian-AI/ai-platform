@@ -87,3 +87,39 @@ async def test_assigned_custom_role_must_be_unassigned_before_it_can_be_disabled
     )
     assert disabled.status_code == 200
     assert disabled.json()["is_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_developer_is_managed_but_can_be_bound_to_an_employee(
+    client: AsyncClient,
+):
+    org_id = await _make_org(client, "runtime-developer-role-org")
+    listed = await client.get(f"/api/v1/organizations/{org_id}/roles")
+    assert listed.status_code == 200
+    developer = next(
+        role for role in listed.json() if role["system_key"] == "runtime_developer"
+    )
+    assert developer["name"] == "系统研发者"
+    assert developer["code"] == "zj-runtime-developer"
+    assert developer["data_scope"] == "all"
+    assert developer["permission_codes"] == ["runtime.developer"]
+
+    user = await client.post(
+        f"/api/v1/organizations/{org_id}/users",
+        json={"username": "runtime-dev", "password": "test-pass-123"},
+    )
+    assert user.status_code == 201
+    bound = await client.put(
+        f"/api/v1/users/{user.json()['id']}/roles",
+        json={"role_ids": [developer["id"]]},
+    )
+    assert bound.status_code == 200
+    assert bound.json()["role_ids"] == [developer["id"]]
+
+    for method, path, body in (
+        ("patch", f"/api/v1/roles/{developer['id']}", {"name": "可改名"}),
+        ("put", f"/api/v1/roles/{developer['id']}/permissions", {"permission_codes": ["*"]}),
+        ("put", f"/api/v1/roles/{developer['id']}/data-scope", {"data_scope": "self", "department_ids": []}),
+    ):
+        response = await getattr(client, method)(path, json=body)
+        assert response.status_code == 422

@@ -250,6 +250,8 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
             application_id=None,
             page_context=None,
             request_text="",
+            business_intent=None,
+            business_envelope=None,
         ):
         return nodes._builtin_tool_defs(), {}
 
@@ -339,6 +341,8 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
             application_id=None,
             page_context=None,
             request_text="",
+            business_intent=None,
+            business_envelope=None,
         ):
         return nodes._builtin_tool_defs(), {}
 

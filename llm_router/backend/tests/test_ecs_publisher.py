@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.models.ecs_runtime import EcsModuleRelease, EcsRuntime
 from app.models.enterprise_application import EnterpriseApplication, EnterpriseApplicationGrant
 from app.models.organization import Organization
+from app.models.role import Role
 from app.schemas.ecs_publisher import EcsModuleCredentialsInput
 from app.services import ecs_publisher_service, subsystem_access_service
 
@@ -119,7 +120,7 @@ async def test_admin_creates_runtime_and_credential_is_returned_once(client, db_
     assert "credential_hash" not in listed.json()[0]
 
 
-async def test_runtime_registers_and_resyncs_module_without_grants(
+async def test_runtime_registers_and_resyncs_module_with_managed_developer_grant(
     client, db_session, monkeypatch
 ):
     organization = await _organization(db_session)
@@ -152,6 +153,17 @@ async def test_runtime_registers_and_resyncs_module_without_grants(
         }
 
     async def fake_sync(_db, _application, **_kwargs):
+        integration = await ecs_publisher_service.subsystem_integration_service.get_integration(
+            _db, _application.id
+        )
+        await ecs_publisher_service.subsystem_integration_service._activate_manifest(
+            _db,
+            _application,
+            integration,
+            manifest,
+            "https://sample-review.aifabei.example/api/integration/events",
+            2,
+        )
         return {"status": "healthy", "detail": None}
 
     monkeypatch.setattr(
@@ -211,12 +223,7 @@ async def test_runtime_registers_and_resyncs_module_without_grants(
             )
         )
     ).scalar_one()
-    with pytest.raises(HTTPException, match="not approved"):
-        await subsystem_access_service.assert_application_available(
-            db_session,
-            application,
-            require_application_active=False,
-        )
+    await subsystem_access_service.assert_application_available(db_session, application)
     cancel = await client.post(
         "/api/v1/ecs-publisher/modules/sample-review/cancel-change",
         json={"target_commit": "b" * 40},
@@ -286,7 +293,7 @@ async def test_runtime_registers_and_resyncs_module_without_grants(
 
     await db_session.refresh(application)
     assert application.assistant_config["deploymentProvider"] == "direct-ecs"
-    assert application.is_active is False
+    assert application.is_active is True
     grants = list(
         (
             await db_session.execute(
@@ -296,7 +303,20 @@ async def test_runtime_registers_and_resyncs_module_without_grants(
             )
         ).scalars()
     )
-    assert grants == []
+    assert len(grants) == 1
+    assert grants[0].managed_key == "runtime_developer"
+    assert set(grants[0].permissions) == {
+        "view", "ai_query", "ai_create", "ai_update", "ai_delete", "ai_approve", "export"
+    }
+    developer = (
+        await db_session.execute(
+            select(Role).where(Role.system_key == "runtime_developer")
+        )
+    ).scalar_one()
+    assert grants[0].scope_id == str(developer.id)
+    assert developer.code == "zj-runtime-developer"
+    assert developer.data_scope == "all"
+    assert developer.permission_codes == ["runtime.developer"]
 
     disabled = await client.patch(
         f"/api/v1/ecs-publisher/organizations/{organization.id}/runtimes/"
@@ -339,7 +359,7 @@ async def test_runtime_cannot_register_outside_its_domain(client, db_session):
     assert "sample-review.aifabei.example" in response.json()["detail"]
 
 
-async def test_manifest_review_is_bound_to_the_pending_release_commit(
+async def test_runtime_registration_rejects_legacy_pending_review_state(
     client, db_session, monkeypatch
 ):
     organization = await _organization(db_session)
@@ -396,32 +416,8 @@ async def test_manifest_review_is_bound_to_the_pending_release_commit(
         },
     )
     assert registered.status_code == 200, registered.text
-    assert registered.json()["status"] == "pending_review"
-    application = await db_session.get(
-        EnterpriseApplication, registered.json()["application_id"]
-    )
-    integration = (
-        await ecs_publisher_service.subsystem_integration_service.get_integration(
-            db_session, application.id
-        )
-    )
-    pending_digest = ecs_publisher_service.subsystem_integration_service._canonical_digest(
-        integration.pending_manifest
-    )
-
-    begin_next = await client.post(
-        "/api/v1/ecs-publisher/modules/sample-review/begin-change",
-        json={"target_commit": "b" * 40},
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-    assert begin_next.status_code == 204, begin_next.text
-    with pytest.raises(HTTPException, match="pending release changed"):
-        await ecs_publisher_service.subsystem_integration_service.review_pending_manifest(
-            db_session,
-            application,
-            "approve",
-            pending_digest,
-        )
+    assert registered.json()["status"] == "failed"
+    assert "Manifest synchronization failed" in registered.json()["last_error"]
 
 
 async def test_begin_change_fail_closes_an_existing_unmanaged_application(
@@ -457,7 +453,7 @@ async def test_begin_change_fail_closes_an_existing_unmanaged_application(
     release = (await db_session.execute(select(EcsModuleRelease))).scalar_one()
     assert release.application_id == application.id
     assert release.status == "verifying"
-    with pytest.raises(HTTPException, match="not approved"):
+    with pytest.raises(HTTPException, match="healthy active release"):
         await subsystem_access_service.assert_application_available(db_session, application)
 
     cancel = await client.post(

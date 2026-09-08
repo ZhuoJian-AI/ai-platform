@@ -37,6 +37,253 @@ OPERATION_PERMISSION = {
     "approve": "ai_approve",
     "export": "export",
 }
+RUNTIME_MANAGED_GRANT = "runtime_developer"
+
+
+def is_runtime_managed(row: EnterpriseApplication) -> bool:
+    config = row.assistant_config if isinstance(row.assistant_config, dict) else {}
+    return config.get("deploymentManaged") is True
+
+
+def _manifest_modules(manifest: dict) -> dict[str, dict]:
+    return {
+        str(module.get("moduleKey")): module
+        for module in (manifest.get("modules") or [])
+        if isinstance(module, dict) and module.get("moduleKey")
+    }
+
+
+def _action_permission(action: dict) -> str | None:
+    return OPERATION_PERMISSION.get(str(action.get("operation") or ""))
+
+
+def _full_manifest_access(manifest: dict) -> tuple[list[str], list[str], dict]:
+    permissions = sorted(PERMISSIONS)
+    module_access: dict[str, dict] = {}
+    for module_key, module in _manifest_modules(manifest).items():
+        actions = [item for item in (module.get("actions") or []) if isinstance(item, dict)]
+        action_keys = [str(item["actionKey"]) for item in actions if item.get("actionKey")]
+        pages: dict[str, dict] = {}
+        for page in (module.get("pages") or []):
+            if not isinstance(page, dict) or not page.get("pageKey"):
+                continue
+            pages[str(page["pageKey"])] = {
+                "permissions": permissions,
+                "action_keys": [str(key) for key in (page.get("actionKeys") or [])],
+                "ai_enabled": True,
+            }
+        module_access[module_key] = {
+            "role": RUNTIME_MANAGED_GRANT,
+            "permissions": permissions,
+            "action_keys": action_keys,
+            "page_access": pages,
+        }
+    return permissions, list(module_access), module_access
+
+
+def _resource_sets(module_access: dict) -> tuple[set[str], set[str], set[str]]:
+    modules: set[str] = set()
+    pages: set[str] = set()
+    actions: set[str] = set()
+    for module_key, access in (module_access or {}).items():
+        if not isinstance(access, dict):
+            continue
+        modules.add(module_key)
+        actions.update(str(key) for key in (access.get("action_keys") or []))
+        for page_key in (access.get("page_access") or {}):
+            pages.add(f"{module_key}:{page_key}")
+    return modules, pages, actions
+
+
+def _updated_denials(previous: dict, before: dict, after: dict) -> dict:
+    denied = {
+        "modules": set(previous.get("modules") or []),
+        "pages": set(previous.get("pages") or []),
+        "actions": set(previous.get("actions") or []),
+    }
+    before_sets = _resource_sets(before)
+    after_sets = _resource_sets(after)
+    for index, key in enumerate(("modules", "pages", "actions")):
+        denied[key].update(before_sets[index] - after_sets[index])
+        denied[key].difference_update(after_sets[index] - before_sets[index])
+    return {key: sorted(values) for key, values in denied.items() if values}
+
+
+async def synchronize_runtime_grants(
+    db: AsyncSession,
+    row: EnterpriseApplication,
+    previous_manifest: dict,
+    manifest: dict,
+) -> None:
+    """Maintain the system developer grant and bounded grant inheritance."""
+
+    builtins = await role_service.ensure_builtin_roles(db, row.organization_id)
+    developer = builtins[role_service.BUILTIN_RUNTIME_DEVELOPER]
+    all_grants = list((await db.execute(
+        select(EnterpriseApplicationGrant).where(
+            EnterpriseApplicationGrant.application_id == row.id,
+        )
+    )).scalars().all())
+    managed = next(
+        (grant for grant in all_grants if grant.managed_key == RUNTIME_MANAGED_GRANT),
+        None,
+    )
+    if managed is None:
+        managed = next(
+            (
+                grant
+                for grant in all_grants
+                if grant.scope_type == "role" and grant.scope_id == str(developer.id)
+            ),
+            None,
+        )
+    permissions, module_keys, module_access = _full_manifest_access(manifest)
+    if managed is None:
+        managed = EnterpriseApplicationGrant(
+            application_id=row.id,
+            organization_id=row.organization_id,
+            scope_type="role",
+            scope_id=str(developer.id),
+            managed_key=RUNTIME_MANAGED_GRANT,
+        )
+        db.add(managed)
+    managed.scope_type = "role"
+    managed.scope_id = str(developer.id)
+    managed.managed_key = RUNTIME_MANAGED_GRANT
+    managed.permissions = permissions
+    managed.module_keys = module_keys
+    managed.module_access = module_access
+    managed.denied_resources = {}
+    managed.deleted_at = None
+
+    previous_modules = _manifest_modules(previous_manifest)
+    incoming_modules = _manifest_modules(manifest)
+    affected: set[str | UUID] = {developer.id}
+    for grant in all_grants:
+        if (
+            grant.managed_key
+            or grant.deleted_at is not None
+            or grant.scope_type != "role"
+            or not grant.scope_id
+            or not isinstance(grant.module_access, dict)
+            or not grant.module_access
+        ):
+            continue
+        access = {
+            key: dict(value)
+            for key, value in grant.module_access.items()
+            if isinstance(value, dict) and key in incoming_modules
+        }
+        denied = grant.denied_resources or {}
+        denied_modules = set(denied.get("modules") or [])
+        denied_pages = set(denied.get("pages") or [])
+        denied_actions = set(denied.get("actions") or [])
+        app_ceiling = set(grant.permissions or [])
+        if not app_ceiling:
+            for item in access.values():
+                app_ceiling.update(item.get("permissions") or [])
+        for module_key, module in incoming_modules.items():
+            module_actions = {
+                str(action.get("actionKey")): action
+                for action in (module.get("actions") or [])
+                if isinstance(action, dict) and action.get("actionKey")
+            }
+            if module_key not in access:
+                if module_key in previous_modules or module_key in denied_modules or "view" not in app_ceiling:
+                    continue
+                allowed_actions = [
+                    key for key, action in module_actions.items()
+                    if _action_permission(action) in app_ceiling and key not in denied_actions
+                ]
+                access[module_key] = {
+                    "role": "member",
+                    "permissions": sorted(app_ceiling),
+                    "action_keys": allowed_actions,
+                    "page_access": {},
+                }
+            module_grant = access[module_key]
+            ceiling = set(module_grant.get("permissions") or [])
+            granted_actions = set(module_grant.get("action_keys") or []) & set(module_actions)
+            previous_actions = {
+                str(action.get("actionKey"))
+                for action in (previous_modules.get(module_key, {}).get("actions") or [])
+                if isinstance(action, dict) and action.get("actionKey")
+            }
+            for action_key, action in module_actions.items():
+                if (
+                    action_key not in previous_actions
+                    and action_key not in denied_actions
+                    and _action_permission(action) in ceiling
+                ):
+                    granted_actions.add(action_key)
+            module_grant["action_keys"] = sorted(granted_actions)
+            page_access = {
+                key: dict(value)
+                for key, value in (module_grant.get("page_access") or {}).items()
+                if isinstance(value, dict)
+            }
+            previous_pages = {
+                str(page.get("pageKey"))
+                for page in (previous_modules.get(module_key, {}).get("pages") or [])
+                if isinstance(page, dict) and page.get("pageKey")
+            }
+            incoming_pages = {
+                str(page.get("pageKey")): page
+                for page in (module.get("pages") or [])
+                if isinstance(page, dict) and page.get("pageKey")
+            }
+            page_access = {
+                key: value for key, value in page_access.items() if key in incoming_pages
+            }
+            for page in (module.get("pages") or []):
+                if not isinstance(page, dict) or not page.get("pageKey"):
+                    continue
+                page_key = str(page["pageKey"])
+                if page_key not in page_access:
+                    if (
+                        page_key in previous_pages
+                        or f"{module_key}:{page_key}" in denied_pages
+                        or "view" not in ceiling
+                    ):
+                        continue
+                    page_access[page_key] = {
+                        "permissions": sorted(ceiling),
+                        "action_keys": [],
+                        "ai_enabled": True,
+                    }
+                page_grant = page_access[page_key]
+                page_ceiling = set(page_grant.get("permissions") or [])
+                declared_page_actions = {str(key) for key in (page.get("actionKeys") or [])}
+                page_actions = set(page_grant.get("action_keys") or []) & declared_page_actions
+                previous_page = next(
+                    (
+                        item
+                        for item in (
+                            previous_modules.get(module_key, {}).get("pages") or []
+                        )
+                        if isinstance(item, dict) and str(item.get("pageKey")) == page_key
+                    ),
+                    {},
+                )
+                previous_page_actions = {
+                    str(key) for key in (previous_page.get("actionKeys") or [])
+                }
+                for action_key in (page.get("actionKeys") or []):
+                    action = module_actions.get(str(action_key))
+                    if (
+                        action
+                        and str(action_key) not in previous_page_actions
+                        and str(action_key) not in denied_actions
+                        and _action_permission(action) in page_ceiling
+                    ):
+                        page_actions.add(str(action_key))
+                page_grant["action_keys"] = sorted(page_actions)
+            module_grant["page_access"] = page_access
+        grant.module_access = access
+        grant.module_keys = list(access)
+        affected.add(grant.scope_id)
+    await role_service.touch_users_for_role_ids(db, affected)
+    await db.flush()
 
 
 def _application_options():
@@ -265,7 +512,16 @@ async def update_application(
     data: EnterpriseApplicationUpdate,
 ) -> EnterpriseApplication:
     values = data.model_dump(exclude_unset=True, mode="json")
+    if is_runtime_managed(row) and "assistant_config" in values:
+        incoming_config = values.get("assistant_config") or {}
+        current_config = row.assistant_config or {}
+        for key in ("deploymentManaged", "deploymentProvider", "runtimeId", "runtimeKey"):
+            if key in current_config:
+                incoming_config[key] = current_config[key]
+        values["assistant_config"] = incoming_config
     access_changed = "is_active" in values and values["is_active"] != row.is_active
+    if "is_active" in values and is_runtime_managed(row):
+        row.admin_disabled = values["is_active"] is False
     for field, value in values.items():
         setattr(row, field, str(value) if field in {"entry_url", "icon_url"} and value else value)
     if access_changed:
@@ -303,6 +559,11 @@ async def replace_grants(
         .all()
     )
     current = {(grant.scope_type, grant.scope_id): grant for grant in all_grants}
+    managed_by_scope = {
+        (grant.scope_type, grant.scope_id): grant
+        for grant in all_grants
+        if grant.managed_key
+    }
     role_only = _uses_role_authorization(row)
     normalized: dict[tuple[str, str | None], tuple[list[str], list[str], dict]] = {}
     for item in grants:
@@ -310,6 +571,19 @@ async def replace_grants(
             item.scope_type,
             str(item.scope_id) if item.scope_id else None,
         )
+        managed = managed_by_scope.get(requested_key)
+        if managed is not None:
+            requested_access = {
+                key: access.model_dump(mode="json")
+                for key, access in item.module_access.items()
+            }
+            if (
+                set(item.permissions) != set(managed.permissions or [])
+                or set(item.module_keys) != set(managed.module_keys or [])
+                or requested_access != (managed.module_access or {})
+            ):
+                raise HTTPException(status_code=422, detail="系统研发者的应用权限由 Runtime 自动托管")
+            continue
         if role_only and item.scope_type != "role":
             # A replace-all client may echo a historical grant while upgrading an
             # application to 2.4. Existing legacy rows are omitted and therefore
@@ -346,9 +620,17 @@ async def replace_grants(
 
     now = datetime.now(UTC)
     for key, grant in current.items():
+        if grant.managed_key:
+            grant.deleted_at = None
+            continue
         if key not in normalized:
             grant.deleted_at = now
         else:
+            grant.denied_resources = _updated_denials(
+                grant.denied_resources or {},
+                grant.module_access or {},
+                normalized[key][2],
+            )
             grant.permissions, grant.module_keys, grant.module_access = normalized[key]
             grant.deleted_at = None
     for (scope_type, scope_id), (permissions, module_keys, module_access) in normalized.items():

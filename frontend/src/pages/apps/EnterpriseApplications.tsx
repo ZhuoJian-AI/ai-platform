@@ -351,17 +351,17 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
       ) },
       { title: '入口地址', dataIndex: 'entry_url', ellipsis: true },
       { title: '展示', dataIndex: 'display_mode', width: 100, render: (value: string) => <Tag>{value === 'embedded' ? '平台内嵌' : '外部打开'}</Tag> },
-      { title: '状态', width: 170, render: (_: unknown, row: EnterpriseApplication) => <Space><Tag color={row.is_active ? 'green' : 'gold'}>{row.is_active ? '已审核启用' : '待审核 / 已停用'}</Tag><Tag>{row.health_status}</Tag></Space> },
+      { title: '状态', width: 170, render: (_: unknown, row: EnterpriseApplication) => <Space><Tag color={row.is_active ? 'green' : 'gold'}>{row.is_active ? '已启用' : '已停用'}</Tag><Tag>{row.health_status}</Tag></Space> },
       { title: '操作', width: 360, render: (_: unknown, row: EnterpriseApplication) => <Space>
         <Button size="small" type="primary" onClick={() => navigate(`/enterprise-apps/${row.id}`)}>管理</Button>
         <Button size="small" icon={<ThunderboltOutlined />} loading={testApp.isPending} onClick={() => testApp.mutate(row.id)}>测试</Button>
         {!row.is_active && <Popconfirm
-          title="审核并启用这个应用？"
-          description="请先确认入口域名、Manifest、页面和 Action；启用后仍只有获授权角色可进入。"
-          okText="审核通过并启用"
+          title="重新启用这个应用？"
+          description="Runtime 系统通过契约校验后自动生效；这里用于恢复管理员此前的全局停用。"
+          okText="启用"
           cancelText="取消"
           onConfirm={() => updateApp.mutate({ id: row.id, data: { is_active: true } })}
-        ><Button size="small" icon={<CheckCircleOutlined />}>审核启用</Button></Popconfirm>}
+        ><Button size="small" icon={<CheckCircleOutlined />}>启用</Button></Popconfirm>}
         <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>编辑</Button>
         <Button size="small" danger icon={<DeleteOutlined />} onClick={() => setDeleteTarget(row)}>删除</Button>
       </Space> },
@@ -410,7 +410,9 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
             </Space>;
           })}</Space>;
         } },
-        { title: '操作', width: 150, render: (_: unknown, row, index) => <Space><Button size="small" onClick={() => {
+        { title: '操作', width: 150, render: (_: unknown, row, index) => row.managed_key
+          ? <Tag color="purple">Runtime 托管</Tag>
+          : <Space><Button size="small" onClick={() => {
           setGrantIndex(index);
           const moduleAccess = row.module_access ?? {};
           const moduleKeys = row.module_keys?.length ? row.module_keys : Object.keys(moduleAccess);
@@ -490,7 +492,7 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
         <Form form={grantForm} layout="vertical" onFinish={(values) => saveGrant.mutate(values)}>
           <Form.Item name="scope" label="授权对象" rules={[{ required: true }]}><TreeSelect treeData={orgTree} treeDefaultExpandAll showSearch treeNodeFilterProp="title" loading={treeLoading || rolesLoading} placeholder="选择角色、部门或用户" /></Form.Item>
           {selectedIntegration?.modules.length ? <>
-            <Form.Item name="module_keys" label="授权哪些子模块" rules={[{ required: true, message: '至少选择一个子模块' }]} extra="每个子模块独立配置权限；以后新同步的子模块不会自动获得授权。">
+            <Form.Item name="module_keys" label="授权哪些子模块" rules={[{ required: true, message: '至少选择一个子模块' }]} extra="每个子模块独立配置权限；同一应用新增资源会在当前权限上限内继承，管理员明确移除的资源不会被重新授予。">
               <Checkbox.Group options={selectedIntegration.modules.map((item) => ({
                 value: item.moduleKey, label: item.name || item.moduleKey,
               })).filter((item) => item.value)} />

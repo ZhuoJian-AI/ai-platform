@@ -52,8 +52,12 @@ async def assert_application_available(
     runtime = await db.get(EcsRuntime, release.runtime_id)
     if runtime is None or not runtime.is_active:
         raise HTTPException(status_code=409, detail="ECS runtime is disabled")
-    if require_release_healthy and release.status != "healthy":
+    # A candidate is separate from the active release. Once a healthy commit has
+    # been accepted, verification/failure of a later candidate must not take the
+    # active application offline.
+    has_active_release = bool(release.last_success_commit and application.is_active)
+    if require_release_healthy and release.status != "healthy" and not has_active_release:
         raise HTTPException(
             status_code=409,
-            detail="Subsystem release is not approved and healthy",
+            detail="Subsystem does not have a healthy active release",
         )

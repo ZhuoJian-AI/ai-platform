@@ -212,6 +212,16 @@ export default function EnterpriseApplicationDetail() {
     },
     onError: (error) => message.error(errorText(error, '子系统同步失败')),
   });
+  const updateAction = useMutation({
+    mutationFn: ({ actionKey, isActive }: { actionKey: string; isActive: boolean }) => (
+      enterpriseApplications.updateAction(appId, actionKey, isActive)
+    ),
+    onSuccess: (_, variables) => {
+      qc.invalidateQueries({ queryKey: ['enterprise-application-actions', appId] });
+      message.success(variables.isActive ? '业务操作已启用' : '业务操作已停用，Runtime 同步不会自动重新启用');
+    },
+    onError: error => message.error(errorText(error, '业务操作状态更新失败')),
+  });
   const reviewManifest = useMutation({
     mutationFn: (decision: 'approve' | 'reject') => {
       const expectedDigest = integrationQuery.data?.pending_manifest_digest;
@@ -334,7 +344,9 @@ export default function EnterpriseApplicationDetail() {
     return <FinderShell><Empty description="应用不存在或无权访问" /></FinderShell>;
   }
 
-  const pendingManifestReview = integrationQuery.data?.manifest_review_status === 'pending'
+  const pendingManifestReview = app?.assistant_config?.deploymentManaged === true
+    ? null
+    : integrationQuery.data?.manifest_review_status === 'pending'
     ? integrationQuery.data
     : null;
   const changedManifestPaths = Array.from(new Set(
@@ -663,7 +675,13 @@ export default function EnterpriseApplicationDetail() {
                 { title: '类型', dataIndex: 'operation', width: 100, render: (value: EnterpriseApplicationOperation) => <Tag color={OPERATION_META[value].color}>{OPERATION_META[value].label}</Tag> },
                 { title: 'AI', dataIndex: 'ai_enabled', width: 90, render: (value: boolean) => <Tag color={value ? 'purple' : 'default'}>{value ? '可调用' : '页面专用'}</Tag> },
                 { title: '确认', dataIndex: 'requires_confirmation', width: 100, render: (value: boolean) => <Tag color={value ? 'red' : 'green'}>{value ? '用户确认' : '直接执行'}</Tag> },
-                { title: '状态', dataIndex: 'is_active', width: 90, render: (value: boolean) => <Tag color={value ? 'green' : 'default'}>{value ? '启用' : '已停用'}</Tag> },
+                { title: '状态', dataIndex: 'is_active', width: 130, render: (value: boolean, row) => <Switch
+                  checked={value}
+                  checkedChildren="启用"
+                  unCheckedChildren="停用"
+                  loading={updateAction.isPending}
+                  onChange={checked => updateAction.mutate({ actionKey: row.action_key, isActive: checked })}
+                /> },
               ]}
             />
           </Card>
