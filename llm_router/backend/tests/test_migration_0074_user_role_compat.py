@@ -13,6 +13,12 @@ from uuid import UUID, uuid4
 import asyncpg
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from app.api.users import _user_integrity_http_error
 from app.auth.admin_auth import CurrentAdmin, require_admin, require_org_access_write
 from app.database import get_db
@@ -21,11 +27,6 @@ from app.models.admin import Admin
 from app.models.organization import Organization
 from app.models.user import User
 from app.utils.integrity_errors import classify_integrity_error
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
-from sqlalchemy.engine import URL, make_url
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_TEST_DATABASE_URL = (

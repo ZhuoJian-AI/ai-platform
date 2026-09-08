@@ -100,9 +100,14 @@ async def _proxy_stream(
                         return
                 except (httpx.TimeoutException, httpx.ConnectError):
                     if attempt == provider.max_retries:
-                        error_event = (
-                            f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'upstream_error', 'message': 'Upstream provider unavailable'}})}\n\n"
-                        )
+                        error_payload = {
+                            "type": "error",
+                            "error": {
+                                "type": "upstream_error",
+                                "message": "Upstream provider unavailable",
+                            },
+                        }
+                        error_event = f"event: error\ndata: {json.dumps(error_payload)}\n\n"
                         yield error_event.encode()
                         return
         finally:

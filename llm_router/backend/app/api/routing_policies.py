@@ -23,7 +23,12 @@ router = APIRouter()
 
 
 @router.post("/organizations/{org_id}/routing-policies", response_model=RoutingPolicyRead, status_code=201)
-async def create_policy(org_id: UUID, data: RoutingPolicyCreate, _: CurrentAdmin = Depends(require_org_access_write), db: AsyncSession = Depends(get_db)):
+async def create_policy(
+    org_id: UUID,
+    data: RoutingPolicyCreate,
+    _: CurrentAdmin = Depends(require_org_access_write),
+    db: AsyncSession = Depends(get_db),
+):
     policy = RoutingPolicy(organization_id=org_id, **data.model_dump())
     db.add(policy)
     await db.flush()
@@ -31,7 +36,11 @@ async def create_policy(org_id: UUID, data: RoutingPolicyCreate, _: CurrentAdmin
 
 
 @router.get("/organizations/{org_id}/routing-policies", response_model=list[RoutingPolicyRead])
-async def list_policies(org_id: UUID, _: CurrentAdmin = Depends(require_org_access), db: AsyncSession = Depends(get_db)):
+async def list_policies(
+    org_id: UUID,
+    _: CurrentAdmin = Depends(require_org_access),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
         select(RoutingPolicy).where(
             RoutingPolicy.organization_id == org_id, RoutingPolicy.deleted_at.is_(None)
@@ -41,7 +50,11 @@ async def list_policies(org_id: UUID, _: CurrentAdmin = Depends(require_org_acce
 
 
 @router.get("/routing-policies/{policy_id}", response_model=RoutingPolicyRead)
-async def get_policy(policy_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def get_policy(
+    policy_id: UUID,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
         select(RoutingPolicy).where(RoutingPolicy.id == policy_id, RoutingPolicy.deleted_at.is_(None))
     )
@@ -53,7 +66,12 @@ async def get_policy(policy_id: UUID, auth: CurrentAdmin = Depends(require_admin
 
 
 @router.patch("/routing-policies/{policy_id}", response_model=RoutingPolicyRead)
-async def update_policy(policy_id: UUID, data: RoutingPolicyUpdate, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def update_policy(
+    policy_id: UUID,
+    data: RoutingPolicyUpdate,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
         select(RoutingPolicy).where(RoutingPolicy.id == policy_id, RoutingPolicy.deleted_at.is_(None))
     )
@@ -68,7 +86,11 @@ async def update_policy(policy_id: UUID, data: RoutingPolicyUpdate, auth: Curren
 
 
 @router.delete("/routing-policies/{policy_id}", status_code=204)
-async def delete_policy(policy_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+async def delete_policy(
+    policy_id: UUID,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
         select(RoutingPolicy).where(RoutingPolicy.id == policy_id, RoutingPolicy.deleted_at.is_(None))
     )

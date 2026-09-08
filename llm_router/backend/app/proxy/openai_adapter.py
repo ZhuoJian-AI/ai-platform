@@ -109,7 +109,9 @@ async def _proxy_stream(
                             # 尝试解析上游错误体里的 message
                             try:
                                 err_json = json.loads(error_body)
-                                msg = err_json.get("error", {}).get("message", "") or error_body.decode("utf-8", errors="replace")[:200]
+                                msg = err_json.get("error", {}).get("message", "") or error_body.decode(
+                                    "utf-8", errors="replace"
+                                )[:200]
                             except (json.JSONDecodeError, AttributeError):
                                 msg = error_body.decode("utf-8", errors="replace")[:200]
 
@@ -133,7 +135,11 @@ async def _proxy_stream(
                 except (httpx.TimeoutException, httpx.ConnectError):
                     if attempt == provider.max_retries:
                         error_data = json.dumps({
-                            "error": {"message": "Upstream provider unavailable", "type": "upstream_error", "code": "502"},
+                            "error": {
+                                "message": "Upstream provider unavailable",
+                                "type": "upstream_error",
+                                "code": "502",
+                            },
                         })
                         yield f"data: {error_data}\n\n".encode()
                         yield b"data: [DONE]\n\n"
