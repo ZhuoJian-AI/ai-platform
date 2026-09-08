@@ -13,6 +13,7 @@ import structlog
 from fastapi import HTTPException
 from starlette.responses import Response, StreamingResponse
 
+from app.agents.core import native as native_core
 from app.agents.dsh import client, registry
 from app.agents.dsh.registry import DshRunContext
 from app.agents.graph import run_registry
@@ -605,6 +606,8 @@ async def _consume_dsh(
     run_token: str,
     handle: run_registry.RunHandle | None,
     staged: list[dict],
+    deps: dict | None = None,
+    engine: str = "dsh",
 ) -> None:
     intent = state.get("business_turn_intent") or {}
     if intent.get("intent") == "clarify":
@@ -664,7 +667,20 @@ async def _consume_dsh(
         "input_tokens": int((state.get("usage") or {}).get("input_tokens") or 0),
         "output_tokens": int((state.get("usage") or {}).get("output_tokens") or 0),
     }
-    async for event in client.stream_run(request):
+    if engine == "native":
+        runtime_deps = deps or getattr(registry.get(run_token), "deps", None)
+        if runtime_deps is None:
+            raise DshRunError("原生执行器缺少运行上下文", code="NATIVE_CONTEXT_MISSING")
+        event_source = native_core.stream_run(
+            request,
+            state=state,
+            prepared=prepared,
+            deps=runtime_deps,
+            run_context=registry.get(run_token),
+        )
+    else:
+        event_source = client.stream_run(request)
+    async for event in event_source:
         kind = event.get("type")
         if kind == "text_delta":
             delta = str(event.get("delta") or "")
@@ -839,6 +855,20 @@ async def _set_run_status(db: Any, run_id: int, status: str) -> None:
         await db.commit()
 
 
+def _assistant_engine_for_run(user_id: str) -> str:
+    """Resolve one server-owned engine choice; callers persist it in run state."""
+    configured = str(getattr(settings, "assistant_engine", "dsh") or "dsh").strip().lower()
+    if configured not in {"native", "dsh"}:
+        logger.error("assistant_engine_invalid", configured=configured)
+        configured = "dsh"
+    canary_users = {
+        item.strip()
+        for item in str(getattr(settings, "assistant_native_canary_user_ids", "") or "").split(",")
+        if item.strip()
+    }
+    return "native" if configured == "native" or user_id in canary_users else "dsh"
+
+
 async def _admitted_run(
     state: dict,
     deps: dict,
@@ -848,8 +878,16 @@ async def _admitted_run(
     staged: list[dict],
     user_id: str,
 ) -> None:
-    """Acquire a shared Redis permit before entering the DSH process."""
+    """Acquire a shared Redis permit before entering one immutable run engine."""
     run_id = int(state["run_id"])
+    # The choice is server-owned and written once before admission.  It is never
+    # taken from the request and never changes after a side-effecting tool runs.
+    engine = _assistant_engine_for_run(user_id)
+    state["assistant_engine"] = engine
+    state.setdefault("steps", []).append({"step": "assistant_engine", "engine": engine})
+    trace = {"category": "runtime", "title": "助手执行引擎", "engine": engine}
+    state.setdefault("traces", []).append(trace)
+    _publish(handle, staged, {"type": "trace", **trace})
     await _set_run_status(deps["db"], run_id, "queued")
 
     async def status(value: str, position: int | None) -> None:
@@ -861,7 +899,7 @@ async def _admitted_run(
             await _set_run_status(deps["db"], run_id, "running")
 
     async with agent_admission.permit(str(run_id), user_id, status):
-        await _consume_dsh(state, prepared, run_token, handle, staged)
+        await _consume_dsh(state, prepared, run_token, handle, staged, deps, engine)
 
 
 async def _finish(state: dict, deps: dict, writer: Any = lambda _payload: None) -> None:
@@ -1260,7 +1298,7 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
             await persist_run_events(state.get("run_id"), str(task.id), staged, final)
             run_registry.mark_done(handle, final, error=str(state.get("error") or "") or None)
     except asyncio.CancelledError:
-        if state.get("run_id") is not None:
+        if state.get("run_id") is not None and state.get("assistant_engine") == "dsh":
             await client.cancel_run(str(state["run_id"]))
         await persist_run_events(state.get("run_id"), str(task.id), staged, None)
         await finalize_bg_error(

@@ -71,7 +71,11 @@ class Settings(BaseSettings):
     storage_lifecycle_interval_seconds: int = 60 * 60
     storage_orphan_grace_days: int = 7
 
-    # Single coordinator runtime (Docker-internal only).
+    # Assistant Core coordinator.  ``native`` runs the platform-owned loop;
+    # ``dsh`` remains a temporary rollback engine during the migration window.
+    assistant_engine: str = "dsh"
+    assistant_native_canary_user_ids: str = ""
+    # Legacy DSH coordinator (Docker-internal only, removed after canary drain).
     dsh_runtime_url: str = "http://localhost:8030"
     dsh_runtime_token: str = "dsh-runtime-dev-token-change-in-production"
     dsh_runtime_timeout_seconds: int = 600
