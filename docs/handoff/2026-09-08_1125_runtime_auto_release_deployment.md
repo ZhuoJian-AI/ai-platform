@@ -28,9 +28,9 @@
 - A pre-`0070` PostgreSQL custom-format backup was created, SHA-256 checked and parsed by `pg_restore -l`; the backup file is mode `0600`.
 - Rollback is image-only. The additive migration will not be rolled back.
 
-## Pending completion checks
+## Deployment completion
 
-- Coolify deployment ID and all-service health.
-- Running digest and OCI revision verification.
-- Cross-service token fingerprint verification.
-- Public health, database revision and real employee browser acceptance.
+- Coolify deployment `kvqnprysyq43ufvzomqiaflz` completed successfully.
+- All 13 Compose services became healthy. The five backend application services ran backend digest `sha256:7113e95993ef620eb3c40ed447e3509d57691a5bfe0fc7a6ac6593779961ff08`; the frontend ran `sha256:dbb557d65d1a27bfccfe334aee2dc08b79c21a4da8f7a0c858f440bf9ff33cda`.
+- The public health endpoint returned HTTP 200 and the database advanced to `0070_runtime_auto_release`.
+- Real employee acceptance found one follow-up defect: an identical background Runtime synchronization still incremented the bound employee's `auth_epoch`, so an otherwise valid browser session could receive HTTP 401 immediately after login. The follow-up hotfix and final production evidence are recorded in `2026-09-08_1205_runtime_auth_epoch_hotfix.md`.
