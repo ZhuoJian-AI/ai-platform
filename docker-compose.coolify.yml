@@ -566,7 +566,7 @@ services:
         limits: { cpus: "1.00", memory: 1536M, pids: 256 }
 
   frontend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:dbb557d65d1a27bfccfe334aee2dc08b79c21a4da8f7a0c858f440bf9ff33cda
+    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:da8f96f31f03eb1643e5ff3ff1eb1d1ecab5c9e1708117712c5c67e1914380f7
     labels:
       # Coolify also attaches its public application network. Pin Traefik to
       # that network so it never selects the private Compose default network.
