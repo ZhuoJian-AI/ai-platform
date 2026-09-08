@@ -18,7 +18,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python -m pip install --no-cache-dir --retries 10 --timeout 120 -e ".[dev]"
+RUN python -m pip install --no-cache-dir --retries 10 --timeout 120 -e .
 
 COPY . .
 

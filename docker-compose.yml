@@ -53,9 +53,6 @@ services:
       REDIS_PASSWORD: ""
       SECRET_KEY: ""
       MASTER_ENCRYPTION_KEY: ""
-      # Retired deployment variables may still exist in a developer shell.
-      DSH_RUNTIME_TOKEN: ""
-      EXTENSION_BUILDER_TOKEN: ""
       SKILL_CACHE_ROOT: /cache
       STORAGE_GATEWAY_URL: ""
       STORAGE_PROJECT_TOKEN: ""

@@ -77,10 +77,6 @@ services:
       REDIS_PASSWORD: ""
       SECRET_KEY: ""
       MASTER_ENCRYPTION_KEY: ""
-      # Keep retired service secrets explicitly blank until Coolify project
-      # variables are removed after the seven-day rollback window.
-      DSH_RUNTIME_TOKEN: ""
-      EXTENSION_BUILDER_TOKEN: ""
       STORAGE_GATEWAY_URL: ""
       STORAGE_PROJECT_TOKEN: ""
       SKILL_CACHE_ROOT: /cache
