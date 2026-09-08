@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -38,6 +39,21 @@ OPERATION_PERMISSION = {
     "export": "export",
 }
 RUNTIME_MANAGED_GRANT = "runtime_developer"
+
+
+def _authorization_snapshot(grant: EnterpriseApplicationGrant) -> dict:
+    """Capture the authorization fields whose change must invalidate user tokens."""
+
+    return {
+        "scope_type": grant.scope_type,
+        "scope_id": grant.scope_id,
+        "managed_key": grant.managed_key,
+        "permissions": sorted(set(grant.permissions or [])),
+        "module_keys": sorted(set(grant.module_keys or [])),
+        "module_access": deepcopy(grant.module_access or {}),
+        "denied_resources": deepcopy(grant.denied_resources or {}),
+        "deleted": grant.deleted_at is not None,
+    }
 
 
 def is_runtime_managed(row: EnterpriseApplication) -> bool:
@@ -147,6 +163,9 @@ async def synchronize_runtime_grants(
             managed_key=RUNTIME_MANAGED_GRANT,
         )
         db.add(managed)
+        managed_before = None
+    else:
+        managed_before = _authorization_snapshot(managed)
     managed.scope_type = "role"
     managed.scope_id = str(developer.id)
     managed.managed_key = RUNTIME_MANAGED_GRANT
@@ -158,7 +177,9 @@ async def synchronize_runtime_grants(
 
     previous_modules = _manifest_modules(previous_manifest)
     incoming_modules = _manifest_modules(manifest)
-    affected: set[str | UUID] = {developer.id}
+    affected: set[str | UUID] = set()
+    if managed_before != _authorization_snapshot(managed):
+        affected.add(developer.id)
     for grant in all_grants:
         if (
             grant.managed_key
@@ -169,6 +190,7 @@ async def synchronize_runtime_grants(
             or not grant.module_access
         ):
             continue
+        grant_before = _authorization_snapshot(grant)
         access = {
             key: dict(value)
             for key, value in grant.module_access.items()
@@ -281,7 +303,8 @@ async def synchronize_runtime_grants(
             module_grant["page_access"] = page_access
         grant.module_access = access
         grant.module_keys = list(access)
-        affected.add(grant.scope_id)
+        if grant_before != _authorization_snapshot(grant):
+            affected.add(grant.scope_id)
     await role_service.touch_users_for_role_ids(db, affected)
     await db.flush()
 
