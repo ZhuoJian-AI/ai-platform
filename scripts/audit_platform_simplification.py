@@ -104,13 +104,15 @@ async def build_report(connection: asyncpg.Connection, *, required_zero_days: in
 
     active_bindings = 0
     if await _table_exists(connection, "enterprise_application_tool_bindings"):
+        binding_clauses: list[str] = []
+        if await _column_exists(connection, "enterprise_application_tool_bindings", "deleted_at"):
+            binding_clauses.append("deleted_at IS NULL")
+        if await _column_exists(connection, "enterprise_application_tool_bindings", "is_active"):
+            binding_clauses.append("is_active IS TRUE")
+        binding_where = f" WHERE {' AND '.join(binding_clauses)}" if binding_clauses else ""
         active_bindings = await _count(
             connection,
-            """
-            SELECT COUNT(*)
-            FROM enterprise_application_tool_bindings
-            WHERE deleted_at IS NULL AND is_active IS TRUE
-            """,
+            f"SELECT COUNT(*) FROM enterprise_application_tool_bindings{binding_where}",
         )
 
     invalid_agent_skills = 0
@@ -130,15 +132,26 @@ async def build_report(connection: asyncpg.Connection, *, required_zero_days: in
         )
 
     team_refs: dict[str, int] = {}
-    for table, predicate in (
-        ("users", "team_id IS NOT NULL AND deleted_at IS NULL"),
-        ("tasks", "team_id IS NOT NULL AND deleted_at IS NULL"),
-        ("multimodal_jobs", "team_id IS NOT NULL AND deleted_at IS NULL"),
-        ("api_keys", "team_id IS NOT NULL AND is_active IS TRUE AND revoked_at IS NULL"),
-        ("llm_providers", "team_id IS NOT NULL AND is_active IS TRUE AND deleted_at IS NULL"),
-    ):
+    team_tables = (
+        "users",
+        "tasks",
+        "multimodal_jobs",
+        "api_keys",
+        "llm_providers",
+    )
+    for table in team_tables:
         if await _table_exists(connection, table) and await _column_exists(connection, table, "team_id"):
-            team_refs[table] = await _count(connection, f"SELECT COUNT(*) FROM {table} WHERE {predicate}")
+            clauses = ["team_id IS NOT NULL"]
+            if await _column_exists(connection, table, "deleted_at"):
+                clauses.append("deleted_at IS NULL")
+            if await _column_exists(connection, table, "is_active"):
+                clauses.append("is_active IS TRUE")
+            if await _column_exists(connection, table, "revoked_at"):
+                clauses.append("revoked_at IS NULL")
+            team_refs[table] = await _count(
+                connection,
+                f"SELECT COUNT(*) FROM {table} WHERE {' AND '.join(clauses)}",
+            )
         else:
             team_refs[table] = 0
 
