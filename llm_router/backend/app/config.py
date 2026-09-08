@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     extension_catalog_sync_interval_seconds: int = 24 * 60 * 60
     extension_catalog_sync_poll_seconds: int = 60 * 60
     subsystem_sync_poll_seconds: int = 30
+    # Public origin embedded in ECS Runtime bootstrap metadata.  This belongs
+    # to the retained ECS Publisher contract, not the retired GitHub/Coolify
+    # module publisher.
+    module_saas_origin: str = "https://ai-platform.staging.zhuojianai.com"
     original_preview_enabled: bool = False
     # Native file preview is part of the staging-wide workspace experience;
     # keep the emergency deployment switch but no tenant allowlist.
