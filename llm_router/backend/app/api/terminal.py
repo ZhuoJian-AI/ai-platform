@@ -411,9 +411,6 @@ async def _terminal_file_read(
         "capabilities": caps,
         "effective_capabilities": caps,
         "internal_url": internal_url,
-        "office_edit_enabled": workspace_service.office_edit_enabled(
-            f, can_update=bool(caps.get("update")),
-        ),
     })
 
 
@@ -452,7 +449,6 @@ async def _terminal_file_version_read(
         capabilities=read_only_caps,
         effective_capabilities=read_only_caps,
         internal_url=f"/f/{f.id}?version={version.id}",
-        office_edit_enabled=False,
     )
 
 
@@ -568,9 +564,6 @@ async def list_all_ws_files_endpoint(
                 "capabilities": caps,
                 "effective_capabilities": caps,
                 "internal_url": f"/f/{f.id}",
-                "office_edit_enabled": workspace_service.office_edit_enabled(
-                    f, can_update=bool(caps.get("update")),
-                ),
             })
     out.sort(key=lambda x: x["path"])
     return out
@@ -847,15 +840,7 @@ async def delete_task_endpoint(
     task_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
     task = await _get_owned_task(db, task_id, cu)
-    try:
-        await task_service.soft_delete_task(db, task)
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-        }) from exc
+    await task_service.soft_delete_task(db, task)
     await db.commit()
 
 
@@ -870,15 +855,7 @@ async def delete_task_message_endpoint(
     只删除该轮对话引用；已交付到工作空间的文件与历史版本保持不变。
     """
     task = await _get_owned_task(db, task_id, cu)
-    try:
-        await task_service.soft_delete_task_turn(db, task, message_id)
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-        }) from exc
+    await task_service.soft_delete_task_turn(db, task, message_id)
     await db.commit()
 
 
@@ -1273,7 +1250,6 @@ async def list_ws_files_endpoint(
         "capabilities": caps,
         "effective_capabilities": caps,
         "internal_url": f"/f/{item.id}",
-        "office_edit_enabled": bool(item.office_edit_enabled and caps.get("update")),
     }) for item in items]
     return WorkspaceFilePage(items=enriched, total=total, page=page, page_size=page_size)
 
@@ -1929,14 +1905,6 @@ async def update_ws_file_endpoint(
             "current_version_id": str(f.current_version_id) if f.current_version_id else None,
             "latest_version_id": str(f.current_version_id) if f.current_version_id else None,
         }) from exc
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-            "latest_version_id": exc.current_version_id,
-        }) from exc
     except workspace_service.WorkspaceFileUploadError as exc:
         raise HTTPException(status_code=502, detail={
             "code": "workspace_file_storage_write_failed",
@@ -1989,11 +1957,6 @@ async def _move_ws_file(
     except workspace_service.WorkspaceFileIdempotencyConflict as exc:
         raise HTTPException(status_code=409, detail={
             "code": "workspace_file_idempotency_conflict", "message": str(exc),
-        }) from exc
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict", "message": str(exc),
-            "room_id": exc.room_id, "current_version_id": exc.current_version_id,
         }) from exc
     except workspace_service.WorkspaceFilePathConflict as exc:
         raise HTTPException(status_code=409, detail={
@@ -2138,14 +2101,6 @@ async def delete_ws_file_endpoint(
         raise HTTPException(status_code=409, detail={
             "code": "workspace_file_idempotency_conflict", "message": str(exc),
         }) from exc
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-            "latest_version_id": exc.current_version_id,
-        }) from exc
     await workspace_governance_service.audit(
         db, ws, "file_deleted", user_id=cu.id, file=f, version_id=f.current_version_id,
     )
@@ -2187,15 +2142,7 @@ async def delete_ws_folder_endpoint(
     if ws is None:
         raise HTTPException(status_code=404, detail="Folder not found")
     await workspace_permission_service.assert_can_delete(db, ws, cu)
-    try:
-        await workspace_service.soft_delete_folder(db, folder, user_id=cu.id)
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-        }) from exc
+    await workspace_service.soft_delete_folder(db, folder, user_id=cu.id)
     await workspace_governance_service.audit(
         db, ws, "folder_deleted", user_id=cu.id, metadata={"path": folder.path},
     )
@@ -2265,11 +2212,6 @@ async def restore_ws_file_version_endpoint(
     except workspace_service.WorkspaceFileIdempotencyConflict as exc:
         raise HTTPException(status_code=409, detail={
             "code": "workspace_file_idempotency_conflict", "message": str(exc),
-        }) from exc
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict", "message": str(exc),
-            "room_id": exc.room_id, "current_version_id": exc.current_version_id,
         }) from exc
     await workspace_governance_service.audit(
         db, ws, "version_restored", user_id=cu.id, file=restored,
@@ -2399,13 +2341,6 @@ async def delete_ws_folder_path_endpoint(
     await workspace_permission_service.assert_can_delete(db, ws, cu)
     try:
         deleted = await workspace_service.soft_delete_folder_path(db, ws.id, path, user_id=cu.id)
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-        }) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await workspace_governance_service.audit(
@@ -2436,13 +2371,6 @@ async def bulk_delete_ws_items_endpoint(
             folder_paths=data.folder_paths,
             user_id=cu.id,
         )
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-        }) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await workspace_governance_service.audit(

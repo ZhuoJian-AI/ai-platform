@@ -1658,16 +1658,6 @@ async def _execute_platform_file_tool(
                         current_version_id=str(target_file.current_version_id),
                         latest_version_id=str(target_file.current_version_id),
                     )
-                except workspace_service.WorkspaceFileActiveEditConflict as exc:
-                    return _file_tool_error(
-                        "workspace_file_active_edit_conflict",
-                        "文件正在被协作编辑，本次修改未覆盖现有内容",
-                        "等待协作编辑结束并读取最新版本后重试",
-                        status="conflict",
-                        room_id=exc.room_id,
-                        current_version_id=exc.current_version_id,
-                        latest_version_id=exc.current_version_id,
-                    )
                 if inline_content is not None:
                     await workspace_service.reparse_file(db, saved)
                 if user is not None:
@@ -2209,17 +2199,6 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                         )
                     except workspace_service.WorkspaceFileIdempotencyConflict as exc:
                         return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
-                    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-                        return json.dumps(
-                            {
-                                "status": "conflict",
-                                "code": "workspace_file_active_edit_conflict",
-                                "error": str(exc),
-                                "room_id": exc.room_id,
-                                "current_version_id": exc.current_version_id,
-                            },
-                            ensure_ascii=False,
-                        )
                     except workspace_service.WorkspaceFileUnsupportedTextUpdate as exc:
                         return json.dumps(
                             {
@@ -2421,17 +2400,6 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     )
                 except workspace_service.WorkspaceFileIdempotencyConflict as exc:
                     return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
-                except workspace_service.WorkspaceFileActiveEditConflict as exc:
-                    return json.dumps(
-                        {
-                            "status": "conflict",
-                            "code": "workspace_file_active_edit_conflict",
-                            "error": str(exc),
-                            "room_id": exc.room_id,
-                            "current_version_id": exc.current_version_id,
-                        },
-                        ensure_ascii=False,
-                    )
                 except workspace_service.WorkspaceFilePathConflict as exc:
                     return json.dumps(
                         {
@@ -2615,17 +2583,6 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     )
                 except workspace_service.WorkspaceFileIdempotencyConflict as exc:
                     return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
-                except workspace_service.WorkspaceFileActiveEditConflict as exc:
-                    return json.dumps(
-                        {
-                            "status": "conflict",
-                            "code": "workspace_file_active_edit_conflict",
-                            "error": str(exc),
-                            "room_id": exc.room_id,
-                            "current_version_id": exc.current_version_id,
-                        },
-                        ensure_ascii=False,
-                    )
                 if user is not None:
                     await workspace_governance_service.audit(
                         db,
@@ -2696,17 +2653,6 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     )
                 except workspace_service.WorkspaceFileIdempotencyConflict as exc:
                     return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
-                except workspace_service.WorkspaceFileActiveEditConflict as exc:
-                    return json.dumps(
-                        {
-                            "status": "conflict",
-                            "code": "workspace_file_active_edit_conflict",
-                            "error": str(exc),
-                            "room_id": exc.room_id,
-                            "current_version_id": exc.current_version_id,
-                        },
-                        ensure_ascii=False,
-                    )
                 if user is not None:
                     await workspace_governance_service.audit(
                         db,
@@ -4773,17 +4719,6 @@ async def _execute_code_skill(
                     )
                 except workspace_service.WorkspaceFileIdempotencyConflict as exc:
                     return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
-                except workspace_service.WorkspaceFileActiveEditConflict as exc:
-                    return json.dumps(
-                        {
-                            "status": "conflict",
-                            "code": "workspace_file_active_edit_conflict",
-                            "error": str(exc),
-                            "room_id": exc.room_id,
-                            "current_version_id": exc.current_version_id,
-                        },
-                        ensure_ascii=False,
-                    )
                 if inline_content is not None:
                     await workspace_service.reparse_file(db, saved)
                 await workspace_governance_service.audit(

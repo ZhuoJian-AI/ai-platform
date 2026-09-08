@@ -85,15 +85,6 @@ async def _resolve_upload_target(
                 str(target.current_version_id) if target.current_version_id else None
             ),
         })
-    try:
-        await workspace_service.assert_no_active_office_room(db, target)
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
-        }) from exc
     return target
 
 
@@ -473,13 +464,6 @@ async def complete_direct_upload(
         raise HTTPException(status_code=409, detail={
             "code": "workspace_file_idempotency_conflict",
             "message": str(exc),
-        }) from exc
-    except workspace_service.WorkspaceFileActiveEditConflict as exc:
-        raise HTTPException(status_code=409, detail={
-            "code": "workspace_file_active_edit_conflict",
-            "message": str(exc),
-            "room_id": exc.room_id,
-            "current_version_id": exc.current_version_id,
         }) from exc
     except workspace_service.WorkspaceFileUnsupportedTextUpdate as exc:
         raise HTTPException(status_code=422, detail={

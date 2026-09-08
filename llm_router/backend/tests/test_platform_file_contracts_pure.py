@@ -208,18 +208,6 @@ def test_plain_text_mutation_rejects_known_binary_but_allows_code():
     workspace_service._assert_plain_text_update_supported(source_code)
 
 
-def test_online_office_edit_capability_is_retired():
-    file = SimpleNamespace(
-        path="共享/明细.xlsx",
-        content_ref="oss://projects/repo/assets/source.xlsx",
-        current_version_id=uuid4(),
-        size=1024,
-        metadata_={"binary": True, "name": "明细.xlsx"},
-    )
-    assert not workspace_service.office_edit_enabled(file, can_update=True)
-    assert not workspace_service.office_edit_enabled(file, can_update=False)
-
-
 def test_terminal_delete_contract_requires_explicit_version_and_key():
     with pytest.raises(ValidationError):
         WorkspaceFileDeleteRequest(base_version_id=uuid4())
@@ -454,44 +442,6 @@ async def test_public_share_never_renders_same_origin_active_html(monkeypatch):
     assert response.headers["content-disposition"].startswith("attachment;")
     assert response.headers["x-content-type-options"] == "nosniff"
     assert "sandbox" in response.headers["content-security-policy"]
-
-
-@pytest.mark.asyncio
-async def test_recursive_delete_checks_every_active_room_before_any_tombstone(monkeypatch):
-    first = SimpleNamespace(
-        id=uuid4(),
-        current_version_id=uuid4(),
-        deleted_at=None,
-        purge_after=None,
-        deleted_by_user_id=None,
-        deleted_by_admin_id=None,
-    )
-    blocked = SimpleNamespace(
-        id=uuid4(),
-        current_version_id=uuid4(),
-        deleted_at=None,
-        purge_after=None,
-        deleted_by_user_id=None,
-        deleted_by_admin_id=None,
-    )
-
-    async def assert_room(_db, file):
-        if file is blocked:
-            raise workspace_service.WorkspaceFileActiveEditConflict(
-                "active",
-                room_id=uuid4(),
-                current_version_id=file.current_version_id,
-            )
-
-    monkeypatch.setattr(workspace_service, "assert_no_active_office_room", assert_room)
-    with pytest.raises(workspace_service.WorkspaceFileActiveEditConflict):
-        await workspace_service._mark_files_deleted_locked(
-            SimpleNamespace(),
-            [first, blocked],
-            user_id=uuid4(),
-        )
-    assert first.deleted_at is None
-    assert blocked.deleted_at is None
 
 
 @pytest.mark.asyncio

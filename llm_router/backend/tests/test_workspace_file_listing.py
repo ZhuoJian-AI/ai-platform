@@ -61,7 +61,6 @@ async def test_admin_file_list_is_paged_and_excludes_payloads(
     assert item["original_filename"] == "a.txt"
     assert item["presentation"]["display_name"] == "a.txt"
     assert item["presentation"]["source_kind"] == "upload"
-    assert item["office_edit_enabled"] is False
     assert "content" not in item
     assert "extracted_text" not in item
     assert "不得出现在列表" not in response.text
@@ -180,7 +179,6 @@ async def test_terminal_global_file_summary_can_read_projected_metadata(
             "publish": False,
         },
         "internal_url": f"/f/{file.id}",
-        "office_edit_enabled": False,
     }]
 
 
@@ -235,8 +233,6 @@ async def test_terminal_patch_preserves_id_replays_and_reports_stale_version(
     assert body["id"] == str(file.id)
     assert body["current_version_id"] != base_version_id
     assert body["canonical_path"] == "个人空间:/notes.txt"
-    assert body["office_edit_enabled"] is False
-
     replay = await client.patch(f"/api/v1/terminal/files/{file.id}", json=payload)
     assert replay.status_code == 200
     versions = list((await db_session.execute(select(WorkspaceFileVersion).where(
