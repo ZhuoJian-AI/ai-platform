@@ -23,4 +23,9 @@
 
 ## Deployment completion
 
-- Pending manifest merge and Coolify deployment verification.
+- Manifest merge: `41842c3e103ad75f0c4146b6aa8bafab69dcb3ef` (PR #56).
+- Coolify deployment: `wlcgddam5xt1u8vqap2ina3b`, source `Manual`, status `Success`, duration `01m 31s`.
+- The running frontend container is healthy and uses `sha256:da8f96f31f03eb1643e5ff3ff1eb1d1ecab5c9e1708117712c5c67e1914380f7` with OCI revision `be65e7b5f1aae165286cbbf1a69ee3e419e6224a`.
+- All 13 Compose services were running healthy after deployment. The public `/health` endpoint returned HTTP 200 with `{"status":"ok"}`.
+- Authenticated browser smoke tests used the existing `zhangsan` employee and Root administrator sessions. Mobile navigation, two-stage workspace browsing, the embedded application shell, locally scrolling tables, the administrator drawer, and the 1024px tablet layout were operable with no root-page horizontal overflow.
+- No backend image, database migration, domain, Nginx configuration, or subsystem deployment was changed.
