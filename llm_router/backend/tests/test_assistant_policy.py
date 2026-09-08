@@ -246,7 +246,6 @@ def test_registry_backed_tool_specs_are_classified_by_kind():
         "load_bank_flow": {"kind": "prompt"},
         "bank_flow": {"kind": "code"},
         "rag_search": {"kind": "rag_search", "collection_ids": []},
-        "erp__query_stock_1234abcd": {"folder": object(), "endpoint": object()},
         "crm_create_order": {"kind": "enterprise_action"},
         "read_memory": {"kind": "memory", "operation": "read"},
         "write_memory": {"kind": "memory", "operation": "write"},
@@ -276,7 +275,6 @@ def test_registry_backed_tool_specs_are_classified_by_kind():
     check("read_skill_resource", "skill", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
     check("load_bank_flow", "skill", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
     check("rag_search", "rag", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
-    check("erp__query_stock_1234abcd", "connector", nodes.ASSISTANT_TOOL_TIMEOUT_DEFAULT_MS, False)
     check("crm_create_order", "enterprise_action", nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS, False)
     check("read_memory", "memory", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
     check("write_memory", "memory", nodes.ASSISTANT_TOOL_TIMEOUT_DEFAULT_MS, False)

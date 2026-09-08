@@ -6,8 +6,6 @@ from app.models.agent_run import AgentRun, AgentRunEvent
 from app.models.api_key import ApiKey
 from app.models.audit_log import AuditLog
 from app.models.budget import AiQuotaEvent, BudgetUsage
-from app.models.connector import ToolConnector, ToolEndpoint
-from app.models.data_interface import DataInterface, DataSystem
 from app.models.department import Department
 from app.models.dlp_rule import DlpRule
 from app.models.ecs_runtime import EcsModuleRelease, EcsRuntime
@@ -21,7 +19,6 @@ from app.models.enterprise_application import (
     EnterpriseApplicationGrant,
     EnterpriseApplicationIntegration,
     EnterpriseApplicationSsoCode,
-    EnterpriseApplicationToolBinding,
 )
 from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.models.memory import Memory
@@ -33,7 +30,6 @@ from app.models.routing_policy import RoutingPolicy
 from app.models.skill import SkillExecution, SkillFile, SkillFolder, SkillVersion
 from app.models.task import Task, TaskFileRef, TaskMessage
 from app.models.team import Team
-from app.models.tool_call_log import ToolCallLog
 from app.models.user import User
 from app.models.workspace import (
     Workspace,
@@ -70,7 +66,6 @@ __all__ = [
     "EnterpriseApplicationEventDelivery",
     "EnterpriseApplicationEventRoute",
     "EnterpriseApplicationGrant",
-    "EnterpriseApplicationToolBinding",
     "RoutingPolicy",
     "Role",
     "UserRole",
@@ -97,16 +92,10 @@ __all__ = [
     "RagDocument",
     "RagFolder",
     "RagChunk",
-    # 工具连接器
-    "ToolConnector",
-    "ToolEndpoint",
-    "DataSystem",
-    "DataInterface",
     "SkillFolder",
     "SkillFile",
     "SkillVersion",
     "SkillExecution",
-    "ToolCallLog",
     # 终端用户端
     "Task",
     "TaskFileRef",

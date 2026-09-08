@@ -36,7 +36,6 @@ from app.dlp.scanner import scan_request
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.audit_log import AuditLog
-from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.organization import Organization
 from app.models.skill import SkillExecution, SkillFolder, SkillVersion
 from app.models.task import Task
@@ -72,7 +71,6 @@ from app.services.file_capability_registry import (
 from app.services.rag_service import retrieve as rag_retrieve
 from app.services.skill_store_service import SKILL_MANIFEST_PATH
 from app.services.skill_store_service import get_file_by_path as get_skill_file_by_path
-from app.tools.executor import execute_endpoint
 from app.tools.skill_manifest import parse_skill_manifest
 from app.utils.workspace_presentation import (
     clean_display_name,
@@ -1118,7 +1116,7 @@ async def _verified_tool_file_records(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Re-resolve server-recorded tool files before persisting refs/cards.
 
-    A connector or model can return an arbitrary ``file_id`` string.  Only the
+    A model or subsystem can return an arbitrary ``file_id`` string. Only the
     canonical file tools populate ``tool_file_refs`` and every candidate is
     then checked against the live logical file, tenant and fresh RBAC state.
     No metadata from an untrusted tool result is copied into the UI card.
@@ -3985,13 +3983,7 @@ async def _build_tools(
     business_intent: dict | None = None,
     business_envelope: dict | None = None,
 ) -> tuple[list[dict], dict[str, dict]]:
-    """加载技能文件夹 → 读取 skill.md manifest → OpenAI tools 列表 + name→(folder, endpoint) 映射。
-
-    技能已文件夹化：每个 SkillFolder 的 ``skill.md`` 含 ```skill JSON 块定义
-    （name / description / parameters / bound_endpoint_ids）。一个技能可绑定多个端点，
-    这里为**每个绑定端点各发一个 function-tool**，让 LLM 直接按端点名/描述选用，
-    避免"只调 endpoints[0]"导致其余端点永远不可达。manifest 缺失或非法则跳过。
-    """
+    """Load user Skills and the current page's authorized Manifest Actions."""
     tools: list[dict] = []
     registry: dict[str, dict] = {}
     if application_id and user is not None:
@@ -4164,13 +4156,6 @@ async def _build_tools(
             continue
         if user is not None and not skill_scope_service.user_can_use_folder(user, folder):
             continue
-        if user is not None and not await enterprise_application_service.target_allowed_for_user(
-            db,
-            user,
-            "skill_folder",
-            folder.id,
-        ):
-            continue
         version = await db.get(SkillVersion, folder.active_version_id) if folder.active_version_id else None
         if version is not None and version.install_status != "ready":
             continue
@@ -4242,7 +4227,7 @@ async def _build_tools(
             )
             registry[tool_name] = {"kind": "code", "folder": folder, "version": version}
             continue
-        if version is not None and not manifest.bound_endpoint_ids:
+        if manifest is not None:
             tool_name = f"load_{re.sub(r'[^a-zA-Z0-9_-]', '_', folder.slug)[:55]}"
             tools.append(
                 {
@@ -4261,47 +4246,6 @@ async def _build_tools(
                 "content": manifest_file.content or "",
             }
             continue
-        for eid in manifest.bound_endpoint_ids:
-            try:
-                ep = await db.get(ToolEndpoint, UUID(eid))
-            except (ValueError, AttributeError):
-                ep = None
-            if not (ep and ep.is_active):
-                continue
-            if user is not None and not await enterprise_application_service.target_allowed_for_user(
-                db,
-                user,
-                "tool_endpoint",
-                ep.id,
-            ):
-                continue
-            # OpenAI-compatible providers only accept [a-zA-Z0-9_-] tool names.
-            # Imported operationIds are not guaranteed to follow that rule.
-            namespace = re.sub(r"[^a-zA-Z0-9_-]", "_", manifest.name)
-            endpoint_name = re.sub(r"[^a-zA-Z0-9_-]", "_", ep.name)
-            base_name = f"{namespace}__{endpoint_name}".strip("_") or "enterprise_endpoint"
-            endpoint_suffix = str(ep.id).replace("-", "")[:8]
-            tool_name = f"{base_name[:55]}_{endpoint_suffix}"
-            # manifest.parameters 含手工策划的 properties 时优先；否则用端点自带 params_schema。
-            # 注意 `{"type":"object","properties":{}}` 是 seed 脚本的占位空 schema，
-            # 真值判定会把这种占位当成"有手工 schema"，导致端点 schema 被覆盖、LLM 不传参。
-            mp = manifest.parameters or {}
-            mp_props = mp.get("properties") if isinstance(mp, dict) else None
-            if mp_props:
-                params = mp
-            else:
-                params = ep.params_schema or {"type": "object", "properties": {}}
-            tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "description": ep.description or manifest.description or "",
-                        "parameters": params,
-                    },
-                }
-            )
-            registry[tool_name] = {"folder": folder, "endpoint": ep}
     if agent_skills:
         summaries = "; ".join(
             f"{skill_id} ({entry['folder'].slug}): "
@@ -4456,13 +4400,6 @@ async def _execute_code_skill(
     version: SkillVersion = entry["version"]
     if user is None or not skill_scope_service.user_can_use_folder(user, folder):
         return json.dumps({"status": "error", "error": "Skill is outside the current user scope"})
-    if not await enterprise_application_service.target_allowed_for_user(
-        db,
-        user,
-        "skill_folder",
-        folder.id,
-    ):
-        return json.dumps({"status": "error", "error": "Enterprise application permission required"})
     # Re-check mutable authorization/lifecycle state immediately before each
     # execution. A Skill may be disabled, upgraded, or revoked after the LLM
     # received its tool schema but before it returns the tool call.
@@ -4925,13 +4862,6 @@ async def _resolve_agent_skill(state: AgentState, entry: dict, params: dict) -> 
     version: SkillVersion = selected["version"]
     if user is None or not skill_scope_service.user_can_use_folder(user, folder):
         return None, "Skill is outside the current user scope"
-    if not await enterprise_application_service.target_allowed_for_user(
-        db,
-        user,
-        "skill_folder",
-        folder.id,
-    ):
-        return None, "Enterprise application permission required"
     await db.refresh(folder)
     await db.refresh(version)
     if not folder.is_active or str(folder.active_version_id or "") != str(version.id):
@@ -5241,46 +5171,8 @@ async def _execute_tool_call(
             logger.warning("enterprise_action_failed", action=action.action_key, error=str(exc))
             msg = f"enterprise action error: {exc}"
             return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
-    folder: SkillFolder = entry["folder"]
-    ep: ToolEndpoint = entry["endpoint"]
-    user = deps.get("user")
-    if user is not None:
-        skill_allowed = await enterprise_application_service.target_allowed_for_user(
-            db,
-            user,
-            "skill_folder",
-            folder.id,
-        )
-        endpoint_allowed = await enterprise_application_service.target_allowed_for_user(
-            db,
-            user,
-            "tool_endpoint",
-            ep.id,
-        )
-        if not skill_allowed or not endpoint_allowed:
-            msg = "Enterprise application permission required"
-            return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
-    conn = await db.get(ToolConnector, ep.connector_id)
-    if conn is None:
-        msg = "connector not found"
-        return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
-
-    try:
-        result = await execute_endpoint(
-            db,
-            org_id=UUID(state["org_id"]),
-            connector=conn,
-            endpoint=ep,
-            params=params,
-            skill_id=folder.id,
-        )
-        preview = json.dumps(result.body, ensure_ascii=False) if result.body is not None else (result.error or "")
-        ok = 200 <= int(result.status_code or 0) < 400
-        return ({"role": "tool", "tool_call_id": tool_call_id, "content": preview[:4000]}, preview[:4000], ok)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("tool_call_failed", tool=name, error_type=type(exc).__name__)
-        msg = "外部工具调用失败，请检查连接器状态后重试"
-        return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
+    msg = "工具已下线或当前不可用，请刷新后重试"
+    return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
 
 
 def _skill_catalog_prompt(state: AgentState, *, load_skill_available: bool) -> str:
@@ -5393,7 +5285,6 @@ _ASSISTANT_SKILL_REGISTRY_KINDS = {"code", "prompt", "load_skill", "read_skill_r
 _ASSISTANT_APPROVAL_TOOL_NAMES = {"workspace_delete_file", "workspace_delete_folder"}
 _ASSISTANT_APPROVAL_RISK_LEVELS = {"high", "critical"}
 _ASSISTANT_APPROVAL_ENTERPRISE_OPERATIONS = {"create", "update", "delete", "approve"}
-_ASSISTANT_APPROVAL_CONNECTOR_METHODS = {"DELETE"}
 
 
 def _assistant_tool_requires_approval(name: str, entry: dict | None) -> bool:
@@ -5414,8 +5305,7 @@ def _assistant_tool_requires_approval(name: str, entry: dict | None) -> bool:
             bool(getattr(action, "requires_confirmation", False))
             or operation in _ASSISTANT_APPROVAL_ENTERPRISE_OPERATIONS
         )
-    endpoint = entry.get("endpoint")
-    return str(getattr(endpoint, "method", "") or "").upper() in _ASSISTANT_APPROVAL_CONNECTOR_METHODS
+    return False
 
 
 def _assistant_tool_kind(name: str, entry: dict | None) -> str:
@@ -5432,8 +5322,6 @@ def _assistant_tool_kind(name: str, entry: dict | None) -> str:
         return "rag"
     if kind in {"enterprise_action", "enterprise_export_file", "memory"}:
         return kind
-    if entry is not None and entry.get("endpoint") is not None:
-        return "connector"
     # Unknown registry kinds remain identifiable in traces, but no retired external
     # extension definition is injected into a run.
     return "external_tool"

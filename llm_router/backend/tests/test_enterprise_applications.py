@@ -3,7 +3,7 @@
 import hashlib
 import json
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -14,7 +14,6 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.auth.user_auth import CurrentUser
-from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.department import Department
 from app.models.enterprise_application import (
     EnterpriseApplicationAction,
@@ -25,15 +24,12 @@ from app.models.enterprise_application import (
 )
 from app.models.organization import Organization
 from app.models.role import Role
-from app.models.skill import SkillFile, SkillFolder
-from app.models.tool_call_log import ToolCallLog
 from app.models.user import User
 from app.schemas.enterprise_application import (
     EnterpriseApplicationCreate,
     EnterpriseApplicationEventRouteInput,
     EnterpriseApplicationGrantInput,
     EnterpriseApplicationIntegrationInput,
-    EnterpriseApplicationToolBindingInput,
     EnterpriseApplicationUpdate,
 )
 from app.services import enterprise_application_service as service
@@ -639,64 +635,12 @@ async def test_one_department_can_receive_multiple_applications_and_modules(db_s
 
 
 @pytest.mark.asyncio
-async def test_bound_tool_requires_matching_application_operation_permission(db_session):
-    org, _, department, _, current = await _organization_tree(db_session)
-    connector = ToolConnector(
-        organization_id=org.id, name="ERP", slug=f"erp-{uuid4().hex[:6]}",
-        base_url="https://erp.example.test", auth_type="none",
-    )
-    db_session.add(connector)
-    await db_session.flush()
-    endpoint = ToolEndpoint(
-        connector_id=connector.id, name="update_order", method="POST", path="/orders/update",
-    )
-    db_session.add(endpoint)
-    await db_session.flush()
-
-    application = await service.create_application(db_session, org.id, EnterpriseApplicationCreate(
-        name="ERP Console", slug="erp-console", entry_url="https://erp.example.test/app",
-    ))
-    application = await service.replace_grants(db_session, application, [
-        EnterpriseApplicationGrantInput(
-            scope_type="department", scope_id=department.id, permissions=["view", "ai_query"],
-        ),
-    ])
-    await service.replace_tool_bindings(db_session, application, [
-        EnterpriseApplicationToolBindingInput(
-            target_type="tool_endpoint", target_id=endpoint.id, operation="update",
-        ),
-    ])
-
-    assert not await service.target_allowed_for_user(
-        db_session, current, "tool_endpoint", endpoint.id,
-    )
-    await service.replace_grants(db_session, application, [
-        EnterpriseApplicationGrantInput(
-            scope_type="department", scope_id=department.id,
-            permissions=["view", "ai_query", "ai_update"],
-        ),
-    ])
-    assert await service.target_allowed_for_user(
-        db_session, current, "tool_endpoint", endpoint.id,
-    )
-
-
-@pytest.mark.asyncio
-async def test_cross_tenant_scope_and_binding_targets_are_rejected(db_session):
+async def test_cross_tenant_grant_scope_is_rejected(db_session):
     org, other, _, _, _ = await _organization_tree(db_session)
     foreign_department = Department(
         organization_id=other.id, name="Foreign", slug=f"foreign-{uuid4().hex[:6]}",
     )
-    foreign_connector = ToolConnector(
-        organization_id=other.id, name="Foreign ERP", slug=f"foreign-erp-{uuid4().hex[:6]}",
-        base_url="https://foreign.example.test", auth_type="none",
-    )
-    db_session.add_all([foreign_department, foreign_connector])
-    await db_session.flush()
-    foreign_endpoint = ToolEndpoint(
-        connector_id=foreign_connector.id, name="foreign", method="GET", path="/foreign",
-    )
-    db_session.add(foreign_endpoint)
+    db_session.add(foreign_department)
     await db_session.flush()
     application = await service.create_application(db_session, org.id, EnterpriseApplicationCreate(
         name="Local App", slug="local-app", entry_url="https://local.example.test",
@@ -710,64 +654,55 @@ async def test_cross_tenant_scope_and_binding_targets_are_rejected(db_session):
         ])
     assert getattr(grant_error.value, "status_code", None) == 422
 
-    with pytest.raises(Exception) as binding_error:
-        await service.replace_tool_bindings(db_session, application, [
-            EnterpriseApplicationToolBindingInput(
-                target_type="tool_endpoint", target_id=foreign_endpoint.id, operation="query",
-            ),
-        ])
-    assert getattr(binding_error.value, "status_code", None) == 422
-
-
 @pytest.mark.asyncio
-async def test_application_overview_resolves_tools_without_double_counting_skill_wrapper(db_session):
-    org, _, _, _, _ = await _organization_tree(db_session)
-    connector = ToolConnector(
-        organization_id=org.id, name="Production API", slug=f"production-{uuid4().hex[:6]}",
-        base_url="https://production.example.test", auth_type="none", health_status="healthy",
-    )
-    db_session.add(connector)
-    await db_session.flush()
-    endpoints = [
-        ToolEndpoint(connector_id=connector.id, name=f"query_progress_{index}", method="GET", path=f"/progress/{index}")
-        for index in range(4)
-    ]
-    skill = SkillFolder(
-        organization_id=org.id, scope_type="organization", scope_id=None,
-        name="Production API Skill", slug=f"production-api-{uuid4().hex[:6]}", is_active=True,
-    )
-    db_session.add_all([*endpoints, skill])
-    await db_session.flush()
-    db_session.add(SkillFile(skill_folder_id=skill.id, path="skill.md", size=20, content="# Production API"))
-
+async def test_application_overview_uses_manifest_actions_and_action_requests(db_session):
+    org, _, _, _, current = await _organization_tree(db_session)
     application = await service.create_application(db_session, org.id, EnterpriseApplicationCreate(
         name="Production Collaboration", slug="production-overview",
         entry_url="https://production.example.test/app",
     ))
-    bindings = [
-        EnterpriseApplicationToolBindingInput(
-            target_type="tool_endpoint", target_id=endpoint.id, operation="query",
+    actions = [
+        EnterpriseApplicationAction(
+            application=application,
+            organization_id=org.id,
+            module_key="progress",
+            action_key=f"progress.query.{index}",
+            name=f"Query progress {index}",
+            operation="query",
+            ai_enabled=True,
+            is_active=True,
         )
-        for endpoint in endpoints
+        for index in range(4)
     ]
-    bindings.append(EnterpriseApplicationToolBindingInput(
-        target_type="skill_folder", target_id=skill.id, operation="query",
-    ))
-    application = await service.replace_tool_bindings(db_session, application, bindings)
-    db_session.add(ToolCallLog(
-        organization_id=org.id, connector_id=connector.id, endpoint_id=endpoints[0].id,
-        method="GET", path=endpoints[0].path, status_code=200, latency_ms=42,
-    ))
+    db_session.add_all(actions)
+    await db_session.flush()
+    started_at = datetime.now(UTC)
+    request = EnterpriseApplicationActionRequest(
+        application_id=application.id,
+        organization_id=org.id,
+        action_id=actions[0].id,
+        user_id=current.id,
+        request_id=f"overview-{uuid4()}",
+        module_key="progress",
+        status="completed",
+        expires_at=started_at + timedelta(minutes=5),
+        result={"status": "ok"},
+    )
+    db_session.add(request)
+    await db_session.flush()
+    request.resolved_at = request.created_at + timedelta(milliseconds=42)
     await db_session.flush()
 
     overview = await service.get_application_overview(db_session, application)
 
     assert overview["operation_counts"]["query"] == 4
     assert overview["direct_capability_count"] == 4
-    assert overview["skill_binding_count"] == 1
-    assert len(overview["capabilities"]) == 5
-    assert overview["recent_calls"][0]["capability_name"] == endpoints[0].name
+    assert overview["skill_binding_count"] == 0
+    assert len(overview["capabilities"]) == 4
+    assert {item["target_type"] for item in overview["capabilities"]} == {"manifest_action"}
+    assert overview["recent_calls"][0]["capability_name"] == actions[0].name
     assert overview["recent_calls"][0]["status"] == "success"
+    assert overview["recent_calls"][0]["latency_ms"] == 42
 
 
 @pytest.mark.asyncio

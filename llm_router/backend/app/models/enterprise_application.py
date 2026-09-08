@@ -50,7 +50,6 @@ class EnterpriseApplication(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin
     health_status: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
 
     grants = relationship("EnterpriseApplicationGrant", back_populates="application", lazy="selectin")
-    tool_bindings = relationship("EnterpriseApplicationToolBinding", back_populates="application", lazy="selectin")
     integration = relationship(
         "EnterpriseApplicationIntegration",
         back_populates="application",
@@ -114,44 +113,6 @@ class EnterpriseApplicationGrant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDelete
     denied_resources: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     application = relationship("EnterpriseApplication", back_populates="grants")
-
-
-class EnterpriseApplicationToolBinding(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
-    __tablename__ = "enterprise_application_tool_bindings"
-    __table_args__ = (
-        UniqueConstraint(
-            "application_id",
-            "target_type",
-            "target_id",
-            "operation",
-            name="uq_enterprise_application_tool_binding",
-        ),
-        CheckConstraint(
-            "target_type IN ('tool_endpoint','data_interface','skill_folder')",
-            name="ck_enterprise_application_tool_binding_target_type",
-        ),
-        CheckConstraint(
-            "operation IN ('query','create','update','delete','export','approve')",
-            name="ck_enterprise_application_tool_binding_operation",
-        ),
-    )
-
-    application_id: Mapped[str] = mapped_column(
-        ForeignKey("enterprise_applications.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    organization_id: Mapped[str] = mapped_column(
-        ForeignKey("organizations.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    target_type: Mapped[str] = mapped_column(String(30), nullable=False)
-    target_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    operation: Mapped[str] = mapped_column(String(20), nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-
-    application = relationship("EnterpriseApplication", back_populates="tool_bindings")
 
 
 class EnterpriseApplicationIntegration(UUIDPrimaryKeyMixin, TimestampMixin, Base):

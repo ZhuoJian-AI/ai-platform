@@ -6,8 +6,7 @@
     {
       "name": "get_order",
       "description": "按订单号查询订单",
-      "parameters": {<JSON Schema>},
-      "bound_endpoint_ids": ["<endpoint uuid>", "..."]
+      "parameters": {<JSON Schema>}
     }
     ```
     ````
@@ -32,7 +31,6 @@ class SkillManifest:
     name: str
     description: str = ""
     parameters: dict = field(default_factory=dict)
-    bound_endpoint_ids: list[str] = field(default_factory=list)
     runtime: str = "prompt"
     entrypoint: str | None = None
     command: str | None = None
@@ -83,10 +81,6 @@ def parse_skill_manifest(content: str | None) -> SkillManifest | None:
     parameters = data.get("parameters") or {}
     if not isinstance(parameters, dict):
         parameters = {}
-    bound = data.get("bound_endpoint_ids") or []
-    if not isinstance(bound, list):
-        bound = []
-    bound = [str(x) for x in bound]
     runtime = str(data.get("runtime") or "prompt").lower()
     if runtime not in {"prompt", "python", "node"}:
         runtime = "prompt"
@@ -96,7 +90,6 @@ def parse_skill_manifest(content: str | None) -> SkillManifest | None:
         name=name,
         description=description,
         parameters=parameters,
-        bound_endpoint_ids=bound,
         runtime=runtime,
         entrypoint=entrypoint,
         command=command,

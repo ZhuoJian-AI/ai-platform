@@ -10,10 +10,6 @@ from app.api.api_keys import router as api_key_router
 from app.api.audit_logs import router as audit_router
 from app.api.budget import router as budget_router
 from app.api.config import router as config_router
-
-# 工具连接器
-from app.api.connectors import router as connector_router
-from app.api.data_interfaces import router as data_interface_router
 from app.api.departments import router as dept_router
 from app.api.dlp_rules import router as dlp_router
 from app.api.ecs_publisher import router as ecs_publisher_router
@@ -53,9 +49,6 @@ api_router.include_router(role_router, tags=["roles"])
 api_router.include_router(workspace_router, tags=["workspaces"])
 api_router.include_router(agent_router, tags=["agents"])
 api_router.include_router(rag_router, tags=["rag"])
-# 工具连接器
-api_router.include_router(connector_router, tags=["connectors"])
-api_router.include_router(data_interface_router, tags=["data-interfaces"])
 api_router.include_router(skill_router, tags=["skills"])
 api_router.include_router(skill_package_router, tags=["skill-packages"])
 api_router.include_router(api_key_router, tags=["api-keys"])
