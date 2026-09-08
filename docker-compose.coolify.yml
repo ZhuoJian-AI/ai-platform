@@ -187,7 +187,7 @@ services:
         limits: { cpus: "1.00", memory: 1G, pids: 256 }
 
   backend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:7113e95993ef620eb3c40ed447e3509d57691a5bfe0fc7a6ac6593779961ff08
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0d2e00c8a07b1c586c6f289033f48ea2cba76cfb88e65e34a735389754485390
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -308,7 +308,7 @@ services:
         limits: { cpus: "1.50", memory: 2560M }
 
   workspace-parser:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:7113e95993ef620eb3c40ed447e3509d57691a5bfe0fc7a6ac6593779961ff08
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0d2e00c8a07b1c586c6f289033f48ea2cba76cfb88e65e34a735389754485390
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -410,7 +410,7 @@ services:
         limits: { cpus: "1.00", memory: 2G, pids: 256 }
 
   office-edit-reconcile:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:7113e95993ef620eb3c40ed447e3509d57691a5bfe0fc7a6ac6593779961ff08
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0d2e00c8a07b1c586c6f289033f48ea2cba76cfb88e65e34a735389754485390
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -460,7 +460,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   storage-lifecycle:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:7113e95993ef620eb3c40ed447e3509d57691a5bfe0fc7a6ac6593779961ff08
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0d2e00c8a07b1c586c6f289033f48ea2cba76cfb88e65e34a735389754485390
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -512,7 +512,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   multimodal-worker:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:7113e95993ef620eb3c40ed447e3509d57691a5bfe0fc7a6ac6593779961ff08
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:0d2e00c8a07b1c586c6f289033f48ea2cba76cfb88e65e34a735389754485390
     environment:
       APP_ENV: production
       DEBUG: "false"
