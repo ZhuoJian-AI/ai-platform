@@ -43,5 +43,10 @@
 - 精确源码归档 SHA-256：`a1a8380f6e6e6e24ced2b1576fbb48ad3e993057a64bed9937ffdcaa7f1fb399`。
 - Backend：`sha256:da739de71b86fda0334495079adf2a42637513c115f150919fbee1946fd6b5db` → `sha256:fee95d62608e89ae863c7ea89acb27bff226d2389a93f9f78eca4f4495c34d34`。
 - Frontend：`sha256:9fb5353909085e25fb92ac12d90bcb9ea714ed9934b1655c14131383d3bcf4ec` → `sha256:5d75829aa09a39db2e046680161c394ecc9e64d53c72aa63d79a308ba22f2a6c`。
-- Coolify deployment UUID 与健康检查：待发布后补充。
-- 管理员、员工、个人助手、业务助手、Artifact 与自定义智能体浏览器验收：待发布后补充。
+- Release PR：`#63`，merge commit `46a3a0aed55ce486b11385635cb1e972af72d751`。
+- Coolify deployment UUID：`ufuosa2ldx7g0c8sm87edkf2`，状态 Success；主栈 9 个容器全部 healthy，公共 `/health` 返回 200，Alembic 当前版本为 `0073_native_assistant_default`。
+- 管理员端工具监控已显示 Manifest Action 与用户 Skill，不再显示 Connector/Data Interface；新页面控制台无错误。
+- 李四真实员工验收：个人助手运行 `351`、业务查询运行 `352`、生产进度 Excel Artifact 运行 `353`、自定义智能体运行 `354` 均为 `native/success`。
+- Excel 仅生成一份工作空间文件，预览成功；下载请求与 OSS 分段读取均返回成功响应。
+- 发布后 DSH 新运行数为 0；6 个自定义智能体及其 SkillFolder 引用仍有效。
+- 受保护数据未减少：工作空间、记忆、Skill、Task、消息、事件、文件和文件版本均保持或因验收产生正常增量。
