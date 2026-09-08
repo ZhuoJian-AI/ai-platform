@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.retirement import retired_api_dependency
 from app.auth.admin_auth import (
     CurrentAdmin,
     assert_org_access,
@@ -24,7 +25,7 @@ from app.services.judge_service import (
     update_judge,
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[retired_api_dependency("Judge 模板")])
 
 
 @router.post("/organizations/{org_id}/judges", response_model=JudgeTemplateRead, status_code=201)

@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.retirement import retired_api_dependency
 from app.auth.admin_auth import CurrentAdmin, require_org_access_write
 from app.auth.api_key_auth import AuthenticatedKey, authenticate_request
 from app.config import settings
@@ -22,7 +23,10 @@ from app.services import module_deployment_service
 from app.services.coolify_module_client import CoolifyModuleError
 from app.services.github_module_publisher_service import ModulePublisherError, provision_repository
 
-router = APIRouter(prefix="/module-publisher")
+router = APIRouter(
+    prefix="/module-publisher",
+    dependencies=[retired_api_dependency("旧 GitHub/Coolify 模块发布器")],
+)
 
 
 @router.post("/repositories", response_model=ModuleRepositoryProvisionRead)

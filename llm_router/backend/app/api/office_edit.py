@@ -11,11 +11,15 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.retirement import retired_api_dependency
 from app.config import settings
 from app.database import get_db
 from app.services import workspace_office_edit_service
 
-router = APIRouter(prefix="/internal/weboffice")
+router = APIRouter(
+    prefix="/internal/weboffice",
+    dependencies=[retired_api_dependency("WebOffice 在线协作编辑")],
+)
 
 
 class OfficeSaveEventReceipt(BaseModel):

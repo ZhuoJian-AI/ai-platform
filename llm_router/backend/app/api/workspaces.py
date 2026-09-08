@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.retirement import retired_api_dependency
 from app.auth.admin_auth import (
     CurrentAdmin,
     assert_org_access,
@@ -110,6 +111,7 @@ from app.services.workspace_service import (
 )
 
 router = APIRouter()
+_RETIRED_OFFICE_EDIT = retired_api_dependency("WebOffice 在线协作编辑")
 
 
 @router.get("/workspaces/file-capabilities")
@@ -743,7 +745,11 @@ async def refresh_preview_session_endpoint(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.post("/files/{file_id}/edit-session", response_model=WorkspacePreviewSessionRead)
+@router.post(
+    "/files/{file_id}/edit-session",
+    response_model=WorkspacePreviewSessionRead,
+    dependencies=[_RETIRED_OFFICE_EDIT],
+)
 async def edit_session_endpoint(
     file_id: UUID,
     data: WorkspaceEditSessionCreate,
@@ -778,6 +784,7 @@ async def edit_session_endpoint(
 @router.post(
     "/files/{file_id}/edit-session/refresh",
     response_model=WorkspacePreviewSessionRead,
+    dependencies=[_RETIRED_OFFICE_EDIT],
 )
 async def refresh_edit_session_endpoint(
     file_id: UUID,
@@ -818,6 +825,7 @@ async def refresh_edit_session_endpoint(
 @router.get(
     "/files/{file_id}/edit-session/{room_id}",
     response_model=WorkspaceEditRoomStatusRead,
+    dependencies=[_RETIRED_OFFICE_EDIT],
 )
 async def edit_session_status_endpoint(
     file_id: UUID,
@@ -849,6 +857,7 @@ async def edit_session_status_endpoint(
 @router.post(
     "/files/{file_id}/edit-session/close",
     response_model=WorkspaceEditRoomStatusRead,
+    dependencies=[_RETIRED_OFFICE_EDIT],
 )
 async def close_edit_session_endpoint(
     file_id: UUID,

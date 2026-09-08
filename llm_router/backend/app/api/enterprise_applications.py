@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.retirement import retired_api_dependency
 from app.auth.admin_auth import (
     CurrentAdmin,
     assert_org_access,
@@ -55,6 +56,7 @@ from app.services import subsystem_integration_service as integration_service
 from app.utils.public_url import request_public_http, same_origin
 
 router = APIRouter()
+_RETIRED_APPLICATION_TOOL_BINDING = retired_api_dependency("旧应用工具绑定")
 
 
 @router.post(
@@ -206,7 +208,11 @@ async def replace_application_grants_endpoint(
     return await service.replace_grants(db, row, data.grants)
 
 
-@router.put("/applications/{app_id}/tool-bindings", response_model=EnterpriseApplicationRead)
+@router.put(
+    "/applications/{app_id}/tool-bindings",
+    response_model=EnterpriseApplicationRead,
+    dependencies=[_RETIRED_APPLICATION_TOOL_BINDING],
+)
 async def replace_application_tool_bindings_endpoint(
     app_id: UUID,
     data: EnterpriseApplicationToolBindingsReplace,

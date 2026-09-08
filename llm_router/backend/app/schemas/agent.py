@@ -4,10 +4,23 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
-class AgentCreate(BaseModel):
+class _AgentApplicationContextMixin(BaseModel):
+    application_id: UUID | None = None
+    module_key: str | None = Field(None, min_length=1, max_length=128)
+    page_key: str | None = Field(None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def complete_application_context(self):
+        values = (self.application_id, self.module_key, self.page_key)
+        if any(value is not None for value in values) and not all(value is not None for value in values):
+            raise ValueError("application_id、module_key 和 page_key 必须同时提供")
+        return self
+
+
+class AgentCreate(_AgentApplicationContextMixin):
     name: str = Field(..., max_length=255)
     # slug 可不填：未提供时由 service 按编码规则自动生成（名称派生 + 同 scope 内唯一）。
     slug: str | None = Field(None, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -43,6 +56,9 @@ class AgentUpdate(BaseModel):
     rag_collection_ids: list[str] | None = None
     judge_template_id: UUID | None = None
     skill_ids: list[str] | None = None
+    application_id: UUID | None = None
+    module_key: str | None = Field(None, min_length=1, max_length=128)
+    page_key: str | None = Field(None, min_length=1, max_length=128)
     temperature: float | None = None
     max_tokens: int | None = None
     is_active: bool | None = None
@@ -70,6 +86,9 @@ class AgentRead(BaseModel):
     rag_collection_ids: list[str]
     judge_template_id: UUID | None
     skill_ids: list[str]
+    application_id: UUID | None
+    module_key: str | None
+    page_key: str | None
     temperature: float | None
     max_tokens: int | None
     is_active: bool

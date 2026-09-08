@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.retirement import retired_api_dependency
 from app.auth.login_throttle import (
     assert_login_allowed,
     clear_login_failures,
@@ -33,8 +34,9 @@ from app.services import oauth_service
 from app.services.user_service import login_user
 from app.utils.request_source import client_source
 
-router = APIRouter(prefix="/oauth")
-well_known_router = APIRouter()
+_oauth_retired = retired_api_dependency("MCP/OAuth Skill Pack 授权")
+router = APIRouter(prefix="/oauth", dependencies=[_oauth_retired])
+well_known_router = APIRouter(dependencies=[_oauth_retired])
 
 
 class ClientRegistrationRequest(BaseModel):

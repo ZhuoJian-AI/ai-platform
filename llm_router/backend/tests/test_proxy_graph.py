@@ -1,7 +1,7 @@
-"""LangGraph 代理流水线端到端测试。
+"""固定异步代理流水线端到端测试。
 
 通过 HTTP 层（ASGITransport）驱动 ``/v1/messages`` 与 ``/v1/chat/completions``，
-验证请求经 LangGraph StateGraph 节点流转后的行为与原过程式流水线一致：
+验证请求经固定处理步骤流转后的协议、权限、配额、DLP 和审计行为：
 - 模型越权 → 403（build_error 节点）
 - DLP 请求 block → 400（dlp_request 节点 → build_error）
 - 无可用 provider → 404（resolve_route 节点 → build_error）

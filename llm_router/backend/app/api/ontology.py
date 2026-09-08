@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.retirement import retired_api_dependency
 from app.auth.admin_auth import (
     CurrentAdmin,
     assert_org_access,
@@ -48,7 +49,7 @@ from app.services.ontology_store_service import (
     upsert_file,
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[retired_api_dependency("Ontology")])
 
 
 @router.post("/organizations/{org_id}/ontologies", response_model=OntologyRead, status_code=201)

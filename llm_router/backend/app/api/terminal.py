@@ -32,6 +32,7 @@ from app.agents.dsh import registry as dsh_registry
 from app.agents.dsh import run_general_agent, stream_general_agent
 from app.agents.graph import run_registry
 from app.agents.runtime_support import stream_persisted_run
+from app.api.retirement import retired_api_dependency
 from app.auth.user_auth import (
     CurrentUser,
     assert_user_org_access,
@@ -158,7 +159,13 @@ from app.services.agent_service import (
     list_agents as list_agents_svc,
 )
 from app.services.agent_service import (
+    merged_application_context,
+)
+from app.services.agent_service import (
     soft_delete_agent as soft_delete_agent_svc,
+)
+from app.services.agent_service import (
+    validate_application_context as validate_agent_application_context,
 )
 from app.services.data_interface_service import (
     get_system,
@@ -231,6 +238,10 @@ from app.tools.skill_manifest import parse_skill_manifest
 from app.utils.workspace_presentation import clean_display_name, presentation_dict
 
 router = APIRouter()
+_RETIRED_SKILLS_PACK = retired_api_dependency("MCP/OAuth Skill Pack 导出")
+_RETIRED_OFFICE_EDIT = retired_api_dependency("WebOffice 在线协作编辑")
+_RETIRED_DATA_INTERFACE = retired_api_dependency("Data Interface")
+_RETIRED_ONTOLOGY = retired_api_dependency("Ontology")
 _NON_STREAM_ACTIVE_TASKS: set[str] = set()
 
 _FILE_MENTION_RE = re.compile(
@@ -554,7 +565,6 @@ async def resources_endpoint(
     """用户有效 scope 内的全部资源（供下拉与「全部自动匹配」预览）。"""
     workspaces = await scope_service.list_workspaces_for_user(db, cu)
     skills = await scope_service.list_skills_for_user(db, cu)
-    ontologies = await scope_service.list_ontologies_for_user(db, cu)
     rags = await scope_service.list_rags_for_user(db, cu)
     defaults = await _user_defaults(db, cu)
     skill_summaries = await _skill_summaries(db, skills)
@@ -566,11 +576,7 @@ async def resources_endpoint(
     return {
         "workspaces": workspace_reads,
         "skills": skill_summaries,
-        # 本体已文件化：返回轻量摘要（id / name=文件名 / path），供下拉与计数。
-        "ontologies": [
-            {"id": str(o.id), "name": o.path.rsplit("/", 1)[-1], "path": o.path}
-            for o in ontologies
-        ],
+        "ontologies": [],
         "rags": [RagCollectionRead.model_validate(r).model_dump() for r in rags],
         "defaults": defaults,
     }
@@ -584,7 +590,7 @@ async def effective_access_endpoint(
     return await workspace_permission_service.effective_access(db, cu)
 
 
-@router.post("/terminal/skills-pack/export")
+@router.post("/terminal/skills-pack/export", dependencies=[_RETIRED_SKILLS_PACK])
 async def export_skills_pack_endpoint(
     request: Request,
     cu: CurrentUser = Depends(require_user),
@@ -703,6 +709,14 @@ async def create_agent_endpoint(
             raise HTTPException(status_code=400, detail="所选模型当前不可用，请重新选择模型")
     await skill_scope_service.assert_bound_skills_visible(db, cu, data.skill_ids)
     await scope_service.assert_bound_rags_visible(db, cu, data.rag_collection_ids)
+    await validate_agent_application_context(
+        db,
+        cu.organization_id,
+        data.application_id,
+        data.module_key,
+        data.page_key,
+        user=cu,
+    )
     try:
         agent = await create_agent_svc(db, cu.organization_id, data, created_by=cu.id)
     except IntegrityError:
@@ -733,6 +747,17 @@ async def update_agent_endpoint(
         await skill_scope_service.assert_bound_skills_visible(db, cu, provided["skill_ids"] or [])
     if "rag_collection_ids" in provided:
         await scope_service.assert_bound_rags_visible(db, cu, provided["rag_collection_ids"] or [])
+    application_id, module_key, page_key = merged_application_context(agent, data)
+    await validate_agent_application_context(
+        db,
+        cu.organization_id,
+        application_id,
+        module_key,
+        page_key,
+        user=cu,
+    )
+    if provided.get("application_id") is not None:
+        provided["application_id"] = str(provided["application_id"])
     for field, value in provided.items():
         setattr(agent, field, value)
     agent.version += 1
@@ -1027,6 +1052,35 @@ async def run_task_endpoint(
         application_id=data.application_id,
         page_context=data.page_context,
     )
+    # The model cannot select an application or page. A custom Agent may carry
+    # a server-validated Manifest page; bind it before assembling any tools.
+    if "template_agent_id" in provided:
+        tpl = provided["template_agent_id"]
+        cfg["template_agent_id"] = tpl or None
+    selected_agent = None
+    if cfg.get("template_agent_id"):
+        selected_agent = await _get_visible_agent(db, UUID(str(cfg["template_agent_id"])), cu)
+        await skill_scope_service.assert_bound_skills_visible(db, cu, list(selected_agent.skill_ids or []))
+        await scope_service.assert_bound_rags_visible(db, cu, list(selected_agent.rag_collection_ids or []))
+        if selected_agent.application_id:
+            await validate_agent_application_context(
+                db,
+                cu.organization_id,
+                selected_agent.application_id,
+                selected_agent.module_key,
+                selected_agent.page_key,
+                user=cu,
+            )
+            previous_application_id = str(cfg.get("application_id") or "")
+            if previous_application_id and previous_application_id != str(selected_agent.application_id):
+                raise HTTPException(status_code=409, detail="当前对话已绑定其他业务应用，请新建对话")
+            cfg["application_id"] = str(selected_agent.application_id)
+            cfg["page_context"] = {
+                **dict(cfg.get("page_context") or {}),
+                "application_id": str(selected_agent.application_id),
+                "module_key": selected_agent.module_key,
+                "page_key": selected_agent.page_key,
+            }
     defaults = await _user_defaults(db, cu)
     target_workspace_id = data.target_workspace_id or UUID(str(defaults["workspace_id"]))
     target_workspace = await workspace_service.get_workspace(db, target_workspace_id)
@@ -1141,13 +1195,6 @@ async def run_task_endpoint(
     # 逐次运行覆盖智能体（不落库）：
     #   字段未传 → 沿用 task.config.template_agent_id（向后兼容 demo 旧 /run 调用）
     #   显式传（UUID 或 null/空）→ 覆盖：UUID 用此智能体，null 强制通用智能体。
-    if "template_agent_id" in provided:
-        tpl = provided["template_agent_id"]
-        cfg["template_agent_id"] = (tpl or None)
-    if cfg.get("template_agent_id"):
-        selected_agent = await _get_visible_agent(db, UUID(str(cfg["template_agent_id"])), cu)
-        await skill_scope_service.assert_bound_skills_visible(db, cu, list(selected_agent.skill_ids or []))
-        await scope_service.assert_bound_rags_visible(db, cu, list(selected_agent.rag_collection_ids or []))
     if data.stream:
         await _assert_client_request_not_completed(db, task, data.client_request_id)
         if str(task.id) in _NON_STREAM_ACTIVE_TASKS:
@@ -1685,6 +1732,7 @@ async def refresh_preview_session_ws_file_endpoint(
 @router.post(
     "/terminal/files/{file_id}/edit-session",
     response_model=WorkspacePreviewSessionRead,
+    dependencies=[_RETIRED_OFFICE_EDIT],
 )
 async def edit_session_ws_file_endpoint(
     file_id: UUID,
@@ -1723,6 +1771,7 @@ async def edit_session_ws_file_endpoint(
 @router.post(
     "/terminal/files/{file_id}/edit-session/refresh",
     response_model=WorkspacePreviewSessionRead,
+    dependencies=[_RETIRED_OFFICE_EDIT],
 )
 async def refresh_edit_session_ws_file_endpoint(
     file_id: UUID,
@@ -1765,6 +1814,7 @@ async def refresh_edit_session_ws_file_endpoint(
 @router.get(
     "/terminal/files/{file_id}/edit-session/{room_id}",
     response_model=WorkspaceEditRoomStatusRead,
+    dependencies=[_RETIRED_OFFICE_EDIT],
 )
 async def edit_session_status_ws_file_endpoint(
     file_id: UUID,
@@ -1796,6 +1846,7 @@ async def edit_session_status_ws_file_endpoint(
 @router.post(
     "/terminal/files/{file_id}/edit-session/close",
     response_model=WorkspaceEditRoomStatusRead,
+    dependencies=[_RETIRED_OFFICE_EDIT],
 )
 async def close_edit_session_ws_file_endpoint(
     file_id: UUID,
@@ -2735,7 +2786,11 @@ async def kb_nodes_endpoint(
     return nodes
 
 
-@router.get("/terminal/data-systems", response_model=list[DataSystemRead])
+@router.get(
+    "/terminal/data-systems",
+    response_model=list[DataSystemRead],
+    dependencies=[_RETIRED_DATA_INTERFACE],
+)
 async def list_data_systems_endpoint(
     scope_type: str = Query(..., description="organization/department/user"),
     scope_id: str | None = Query(default=None),
@@ -2750,6 +2805,7 @@ async def list_data_systems_endpoint(
 @router.get(
     "/terminal/data-systems/{system_id}/data-interfaces",
     response_model=list[DataInterfaceRead],
+    dependencies=[_RETIRED_DATA_INTERFACE],
 )
 async def list_data_interfaces_endpoint(
     system_id: UUID,
@@ -3222,7 +3278,11 @@ async def _get_visible_ontology_file(db: AsyncSession, file_id: UUID, cu: Curren
     return f
 
 
-@router.get("/terminal/ontology-folders", response_model=list[OntologyFolderRead])
+@router.get(
+    "/terminal/ontology-folders",
+    response_model=list[OntologyFolderRead],
+    dependencies=[_RETIRED_ONTOLOGY],
+)
 async def list_ontology_folders_endpoint(
     scope_type: str = Query(..., description="organization/department/user"),
     scope_id: str | None = Query(default=None),
@@ -3234,7 +3294,12 @@ async def list_ontology_folders_endpoint(
     return await list_ontology_folders(db, cu.organization_id, scope_type, scope_id)
 
 
-@router.post("/terminal/ontology-folders", response_model=OntologyFolderRead, status_code=201)
+@router.post(
+    "/terminal/ontology-folders",
+    response_model=OntologyFolderRead,
+    status_code=201,
+    dependencies=[_RETIRED_ONTOLOGY],
+)
 async def create_ontology_folder_endpoint(
     data: OntologyFolderCreate,
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
@@ -3251,7 +3316,11 @@ async def create_ontology_folder_endpoint(
     return f
 
 
-@router.patch("/terminal/ontology-folders/{folder_id}", response_model=OntologyFolderRead)
+@router.patch(
+    "/terminal/ontology-folders/{folder_id}",
+    response_model=OntologyFolderRead,
+    dependencies=[_RETIRED_ONTOLOGY],
+)
 async def rename_ontology_folder_endpoint(
     folder_id: UUID, data: OntologyFolderRename,
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
@@ -3266,7 +3335,11 @@ async def rename_ontology_folder_endpoint(
     return f
 
 
-@router.delete("/terminal/ontology-folders/{folder_id}", status_code=204)
+@router.delete(
+    "/terminal/ontology-folders/{folder_id}",
+    status_code=204,
+    dependencies=[_RETIRED_ONTOLOGY],
+)
 async def delete_ontology_folder_endpoint(
     folder_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
@@ -3278,7 +3351,11 @@ async def delete_ontology_folder_endpoint(
     await db.commit()
 
 
-@router.get("/terminal/ontology-files", response_model=list[OntologyFileRead])
+@router.get(
+    "/terminal/ontology-files",
+    response_model=list[OntologyFileRead],
+    dependencies=[_RETIRED_ONTOLOGY],
+)
 async def list_ontology_files_endpoint(
     scope_type: str = Query(..., description="organization/department/user"),
     scope_id: str | None = Query(default=None),
@@ -3290,7 +3367,12 @@ async def list_ontology_files_endpoint(
     return await list_ontology_files(db, cu.organization_id, scope_type, scope_id)
 
 
-@router.post("/terminal/ontology-files", response_model=OntologyFileRead, status_code=201)
+@router.post(
+    "/terminal/ontology-files",
+    response_model=OntologyFileRead,
+    status_code=201,
+    dependencies=[_RETIRED_ONTOLOGY],
+)
 async def upsert_ontology_file_endpoint(
     data: OntologyFileCreate,
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
@@ -3307,7 +3389,11 @@ async def upsert_ontology_file_endpoint(
     return f
 
 
-@router.get("/terminal/ontology-files/{file_id}", response_model=OntologyFileRead)
+@router.get(
+    "/terminal/ontology-files/{file_id}",
+    response_model=OntologyFileRead,
+    dependencies=[_RETIRED_ONTOLOGY],
+)
 async def get_ontology_file_endpoint(
     file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
@@ -3315,7 +3401,11 @@ async def get_ontology_file_endpoint(
     return await _get_visible_ontology_file(db, file_id, cu)
 
 
-@router.patch("/terminal/ontology-files/{file_id}", response_model=OntologyFileRead)
+@router.patch(
+    "/terminal/ontology-files/{file_id}",
+    response_model=OntologyFileRead,
+    dependencies=[_RETIRED_ONTOLOGY],
+)
 async def update_ontology_file_endpoint(
     file_id: UUID, data: OntologyFileUpdate,
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
@@ -3330,7 +3420,11 @@ async def update_ontology_file_endpoint(
     return f
 
 
-@router.delete("/terminal/ontology-files/{file_id}", status_code=204)
+@router.delete(
+    "/terminal/ontology-files/{file_id}",
+    status_code=204,
+    dependencies=[_RETIRED_ONTOLOGY],
+)
 async def delete_ontology_file_endpoint(
     file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):

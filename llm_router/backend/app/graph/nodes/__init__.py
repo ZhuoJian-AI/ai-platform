@@ -1,4 +1,4 @@
-"""LangGraph 代理流水线的节点实现。"""
+"""固定异步代理流水线的处理步骤。"""
 
 from app.graph.nodes.audit import write_audit
 from app.graph.nodes.dlp import dlp_request, dlp_response, route_after_dlp, route_after_dlp_response

@@ -1,4 +1,4 @@
-"""Agent ORM model — agent configuration (system prompt / workflow / memory / judge)."""
+"""Agent ORM model — reusable Assistant Core configuration."""
 
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
@@ -8,7 +8,7 @@ from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKe
 
 
 class Agent(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
-    """智能体配置：系统提示词 + 模型 + workflow + 记忆 + 判官 + RAG + 技能 绑定。"""
+    """智能体配置：提示词、模型、工作空间、RAG、Skill 与可选业务页面。"""
 
     __tablename__ = "agents"
     __table_args__ = (
@@ -52,6 +52,14 @@ class Agent(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     )
     # 绑定的技能 ID 列表（Skill.id）
     skill_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+
+    # 可选的企业应用页面上下文。仅保存 Manifest 中的稳定标识；运行时仍需按
+    # 当前员工权限重新解析页面与 Action，绝不在 Agent 配置中保存业务令牌。
+    application_id: Mapped[str | None] = mapped_column(
+        ForeignKey("enterprise_applications.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    module_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    page_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     temperature: Mapped[float | None] = mapped_column(nullable=True)
     max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

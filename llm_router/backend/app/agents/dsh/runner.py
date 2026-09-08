@@ -21,7 +21,6 @@ from app.agents.graph.context import bind_runtime
 from app.agents.graph.nodes import (
     dsh_tool_specs,
     extract_memory,
-    judge,
     load_config,
     load_memory,
     prepare_dsh_turn,
@@ -907,7 +906,6 @@ async def _finish(state: dict, deps: dict, writer: Any = lambda _payload: None) 
     with bind_runtime(deps, writer):
         await save_memory(state)
         _merge(state, await extract_memory(state))
-        _merge(state, await judge(state))
         await write_run_log(state)
         await deps["db"].commit()
 
@@ -1027,7 +1025,6 @@ async def _run_playground(
         "assistant": state.get("assistant_final", ""),
         "steps": state.get("steps", []),
         "usage": state.get("usage", {}),
-        "judge": state.get("judge_result"),
         "error": state.get("error"),
         "run_id": state.get("run_id"),
         "latency_ms": int((time.monotonic() - start) * 1000),

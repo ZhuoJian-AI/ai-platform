@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.dsh import run_agent, stream_agent
+from app.api.retirement import retired_api_dependency
 from app.auth.admin_auth import (
     CurrentAdmin,
     assert_org_access,
@@ -19,7 +20,7 @@ from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.schemas.agent import AgentRunRead
 
-router = APIRouter()
+router = APIRouter(dependencies=[retired_api_dependency("管理员智能体测试广场")])
 
 
 class PlaygroundRequest(BaseModel):

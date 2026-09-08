@@ -25,6 +25,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.agents.graph.context import get_deps, get_stream_writer
@@ -36,15 +37,14 @@ from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.audit_log import AuditLog
 from app.models.connector import ToolConnector, ToolEndpoint
-from app.models.ontology import OntologyFile
 from app.models.organization import Organization
-from app.models.platform_extension import PlatformExtensionRelease
 from app.models.skill import SkillExecution, SkillFolder, SkillVersion
 from app.models.task import Task
 from app.models.workspace import WorkspaceFile, WorkspaceFileMutation, WorkspaceFileVersion
 from app.schemas.rag import RagRetrieveRequest
 from app.schemas.workspace import WorkspaceFileCreate, WorkspaceFileUpdate
 from app.services import (
+    agent_service,
     enterprise_application_service,
     memory_service,
     multimodal_service,
@@ -113,7 +113,7 @@ GENERAL_SYSTEM_PROMPT = (
     "你是组织智能助手。默认用 Markdown 直接回答；只有用户明确要求生成、编辑、转换或导出文件时，"
     "才调用相应的平台文件工具。你可以：按需调用当前用户有权使用的技能完成专业业务操作；使用平台"
     "文件工具处理表格、文档、演示文稿、PDF、文本、图片与压缩包；按需搜索和读取公开网页；"
-    "管理当前工作空间文件；参考组织本体与四级长期记忆。"
+    "管理当前工作空间文件；参考获准的知识库与四级长期记忆。"
     "用户明确调用 Skill 或某个 Skill 明显匹配专业流程时优先遵循该 Skill，平台文件工具作为通用能力。只有系统实际提供了"
     "[知识库检索结果]时才能使用RAG内容，通用智能体不会自动加载知识库。"
     "请基于上述上下文完成用户任务，必要时分步调用工具，最终给出清晰的结果。"
@@ -139,7 +139,7 @@ PLAN_PROMPT = (
 # 而非把所有端点都试一遍；失败后据返回信息修正而非无差别重试。
 TOOL_STRATEGY_PROMPT = (
     "\n\n[工具调用策略] 调用任何技能/端点前，请先按以下原则规划：\n"
-    "1. 结合上方[组织本体]与[数据接口]目录，分析任务到底需要哪些数据或操作，确定**最少且最直接可达**"
+    "1. 结合当前任务、已授权工具与文件上下文，分析任务到底需要哪些数据或操作，确定**最少且最直接可达**"
     "的端点集合——不要把所有端点都试一遍，只调用与当前步骤真正相关的。\n"
     "2. 对每个选定端点，按其参数清单（名称/是否必填/类型）准备入参：优先使用任务上下文里已有的具体"
     "标识（款号、工单号、编码等），不要省略必填参数，也不要臆造值。\n"
@@ -2865,6 +2865,8 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
             tpl = await db.get(Agent, UUID(str(tpl_id)))
         except Exception:  # noqa: BLE001
             tpl = None
+        if tpl is not None and (tpl.deleted_at is not None or not tpl.is_active):
+            raise HTTPException(status_code=404, detail="智能体不存在或已停用")
         if tpl is not None and tpl.system_prompt:
             base_prompt = f"{tpl.system_prompt.rstrip()}\n\n{GENERAL_SYSTEM_PROMPT}"
             tpl_traces.append(
@@ -2873,6 +2875,27 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
             if not state.get("model_alias") or state.get("model_alias") == "default":
                 if tpl.model_alias and tpl.model_alias != "default":
                     state["model_alias"] = tpl.model_alias
+        if tpl is not None and tpl.application_id:
+            if user is None:
+                raise HTTPException(status_code=403, detail="业务智能体必须由已登录员工运行")
+            await agent_service.validate_application_context(
+                db,
+                org_id,
+                tpl.application_id,
+                tpl.module_key,
+                tpl.page_key,
+                user=user,
+            )
+            current_application_id = str(state.get("application_id") or "")
+            if current_application_id and current_application_id != str(tpl.application_id):
+                raise HTTPException(status_code=409, detail="当前对话已绑定其他业务应用，请新建对话")
+            state["application_id"] = str(tpl.application_id)
+            state["page_context"] = {
+                **dict(state.get("page_context") or {}),
+                "application_id": str(tpl.application_id),
+                "module_key": tpl.module_key,
+                "page_key": tpl.page_key,
+            }
 
     # RAG remains fixed to the selected Agent. Skill bindings are recommendations, not an allowlist.
     default_skill_ids = [str(s) for s in (tpl.skill_ids or [])] if tpl_id and tpl is not None else []
@@ -2883,7 +2906,6 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
     skill_ids: list[str] = []
     skill_catalog: list[dict] = []
     default_skills: list[dict] = []
-    ontology_ids = list(state.get("ontology_ids") or [])
     rag_ids = [str(r) for r in (tpl.rag_collection_ids or [])] if tpl_id and tpl is not None else []
     referenced_skills: list[dict] = list(state.get("invoked_skills") or [])
     slug_ambiguities: list[str] = []
@@ -2938,8 +2960,6 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
         ]
         bound_rags = await scope_service.assert_bound_rags_visible(db, user, rag_ids)
         rag_ids = [str(r.id) for r in bound_rags]
-        if not ontology_ids:
-            ontology_ids = [str(o.id) for o in await scope_service.list_ontologies_for_user(db, user)]
         # /slug remains current-turn compatibility. A duplicate visible slug is deliberately ambiguous.
         slug_to_rows: dict[str, list[dict]] = {}
         for row in skill_catalog:
@@ -2996,7 +3016,7 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
 
     run = AgentRun(
         organization_id=org_id,
-        agent_id=None,
+        agent_id=tpl.id if tpl_id and tpl is not None else None,
         task_id=state.get("task_id"),
         user_id=state.get("user_id"),
         session_id=state["session_id"],
@@ -3019,7 +3039,7 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
             "step": "load_config",
             "mode": "general",
             "skills": len(skill_ids),
-            "ontologies": len(ontology_ids),
+            "ontologies": 0,
             "rags": len(rag_ids),
             "default_skills": len(default_skills),
             "referenced_skills": len(referenced_skills),
@@ -3045,13 +3065,15 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
         "loaded_skills": [],
         "executed_skills": [],
         "skill_slug_ambiguities": slug_ambiguities,
-        "ontology_ids": ontology_ids,
+        "ontology_ids": [],
         "rag_collection_ids": rag_ids,
         "referenced_skills": referenced_skills,
         "referenced_file_ids": referenced_file_ids,
         "effective_access": access_summary,
         "workspace_intent": workspace_intent,
         "workspace_id": state.get("workspace_id"),
+        "application_id": state.get("application_id"),
+        "page_context": dict(state.get("page_context") or {}),
         "temperature": None,
         "max_tokens": None,
         "messages": messages,
@@ -4483,11 +4505,7 @@ async def _build_tools(
             )
             is not None
         )
-    from app.services.platform_tool_registry import (
-        active_external_tool_defs,
-        active_platform_tool_names,
-        platform_managed_tool_names,
-    )
+    from app.services.platform_tool_registry import active_platform_tool_names, platform_managed_tool_names
 
     builtin_defs = _builtin_tool_defs(
         include_workspace=bool(workspace_id) or user is not None,
@@ -4504,46 +4522,8 @@ async def _build_tools(
         tools = [item for item in tools if item.get("function", {}).get("name") not in disabled_managed_names]
         for name in disabled_managed_names:
             registry.pop(name, None)
-    # 企业应用内的业务小助手只能使用当前页面获准的契约 Action。
-    # 普通聊天可见的全局扩展工具可能仍指向旧系统地址；把它们混入应用会话不仅越过
-    # 应用边界，也会让模型先逐个等待失效接口超时，造成抽屉长期停在“正在理解”。
-    external_defs = (
-        []
-        if application_id
-        else await active_external_tool_defs(
-            db,
-            organization_id=str(user.organization_id) if user is not None else "",
-            user_role=str(user.role) if user is not None else None,
-            exec_mode=exec_mode,
-        )
-    )
-    if external_defs:
-        # Extension tools execute inside the runtime, so they get no execution registry entry;
-        # their manifest risk flags ride on the tool definition for ``dsh_tool_specs`` only.
-        risk_flags = await _external_tool_risk_flags(db)
-        for item in external_defs:
-            flags = risk_flags.get(str(item.get("function", {}).get("name") or ""))
-            if flags:
-                item["risk"] = flags
-    builtin_defs.extend(external_defs)
     tools.extend(builtin_defs)
     return tools, registry
-
-
-async def _external_tool_risk_flags(db) -> dict[str, dict]:
-    """``risk_level`` / ``side_effects`` declared by approved extension tools in the active release."""
-    release = (
-        await db.execute(select(PlatformExtensionRelease).where(PlatformExtensionRelease.is_active.is_(True)))
-    ).scalar_one_or_none()
-    flags: dict[str, dict] = {}
-    for extension in ((release.manifest if release is not None else None) or {}).get("external_extensions") or []:
-        if extension.get("type") != "system_tool":
-            continue
-        for tool in extension.get("tools") or []:
-            name = str(tool.get("name") or "")
-            if name:
-                flags[name] = {"risk_level": tool.get("risk_level"), "side_effects": tool.get("side_effects")}
-    return flags
 
 
 async def _execute_code_skill(
@@ -5400,46 +5380,6 @@ async def _execute_tool_call(
         return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
 
 
-def _format_data_interface_params(di) -> str:
-    """把数据接口 params_schema 压缩成一行参数提示，供 agent 规划时判断该提交哪些入参。
-
-    形如 ``参数: style_code!(str), days(str)``——``!`` 表示必填（required）。
-    schema 缺失或无 properties 时返回空串（不额外渲染）。
-    """
-    schema = di.params_schema or {}
-    if not isinstance(schema, dict):
-        return ""
-    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-    if not props:
-        return ""
-    required = set(schema.get("required") or [])
-    parts = []
-    for pname, pschema in props.items():
-        ptype = (pschema or {}).get("type", "any") if isinstance(pschema, dict) else "any"
-        mark = "!" if pname in required else ""
-        desc = (pschema or {}).get("description") if isinstance(pschema, dict) else None
-        seg = f"{pname}{mark}({ptype})"
-        if desc:
-            seg += f":{str(desc)[:24]}"
-        parts.append(seg)
-    return "\n  参数: " + ", ".join(parts)
-
-
-def _compact_ontologies(files: list[OntologyFile]) -> str:
-    """把多个本体 Markdown 文件压缩为可注入 system_prompt 的文本。
-
-    本体已文件化：每个 OntologyFile 的 content 即 Markdown 文本，直接按文件拼接，
-    每段以文件路径为标题，便于智能体引用。
-    """
-    parts: list[str] = []
-    for f in files:
-        content = (f.content or "").strip()
-        if not content:
-            continue
-        parts.append(f"[本体 {f.path}]\n{content}")
-    return "\n\n".join(parts)
-
-
 def _skill_catalog_prompt(state: AgentState, *, load_skill_available: bool) -> str:
     """Render Skill discovery without advertising an unavailable host tool."""
     skill_catalog = list(state.get("skill_catalog") or [])
@@ -5733,38 +5673,8 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
         ]
         memory_context = "[长期记忆]\n" + "\n\n".join(parts)
 
-    ontology_ids = state.get("ontology_ids") or []
-    if ontology_ids:
-        ontologies = [item for item in [await db.get(OntologyFile, UUID(oid)) for oid in ontology_ids] if item]
-        ont_text = _compact_ontologies(ontologies)
-        if ont_text:
-            system_prompt = f"{system_prompt}\n\n[组织本体]\n{ont_text}"
-        trace = {
-            "category": "ontology",
-            "title": "组织本体注入",
-            "files": len(ontologies),
-            "paths": [item.path for item in ontologies],
-        }
-        _emit({"type": "trace", **trace})
-        traces.append(trace)
-
     user = deps.get("user")
     if user is not None:
-        try:
-            interfaces = [] if application_id else await scope_service.list_data_interfaces_for_user(db, user)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("load_data_interfaces_failed", error=str(exc))
-            interfaces = []
-        interfaces = [
-            item
-            for item in interfaces
-            if await enterprise_application_service.target_allowed_for_user(
-                db,
-                user,
-                "data_interface",
-                item.id,
-            )
-        ]
         if application_id:
             application, permissions = await enterprise_application_service.assert_application_permission(
                 db,
@@ -5808,31 +5718,6 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
                 system_prompt = (
                     f"{system_prompt}\n\n[企业管理员配置的业务助手规则]\n{application.assistant_prompt.strip()}"
                 )
-        system_names = sorted({(item.system.name if item.system else "?") for item in interfaces})
-        if interfaces:
-            lines = []
-            for item in interfaces:
-                system_name = item.system.name if item.system else "?"
-                lines.append(
-                    f"- {system_name}/{item.name}"
-                    f"{f' {item.method}' if item.method else ''}"
-                    f"{f' {item.path}' if item.path else ''}"
-                    f"{f': {item.description}' if item.description else ''}"
-                    f"{_format_data_interface_params(item)}"
-                )
-            system_prompt = (
-                f"{system_prompt}\n\n[数据接口] 以下为当前可用数据接口（仅供参考其参数/返回结构，"
-                "不能直接执行调用；path 中 {占位符} 为路径参数，调用时须提供实际值）：\n" + "\n".join(lines)
-            )
-        trace = {
-            "category": "data_interface",
-            "title": "数据接口注入",
-            "systems": len(system_names),
-            "interfaces": len(interfaces),
-            "names": [f"{(item.system.name if item.system else '?')}/{item.name}" for item in interfaces],
-        }
-        _emit({"type": "trace", **trace})
-        traces.append(trace)
 
     ambiguities = state.get("skill_slug_ambiguities") or []
     if ambiguities:

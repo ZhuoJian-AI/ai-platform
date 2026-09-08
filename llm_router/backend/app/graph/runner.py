@@ -1,16 +1,13 @@
-"""Runner —— FastAPI endpoint 与 LangGraph 之间的桥接层。
+"""平台公开模型 API 的固定异步代理流水线。
 
-- ``run_proxy``：非流式，``graph.ainvoke`` 跑完整图后由最终 state 构造 ``Response``。
-- ``stream_proxy``：流式，返回 ``StreamingResponse``，其 body_iterator 消费
-  ``graph.astream(stream_mode="custom")``，将 proxy 节点经 ``stream_writer`` 下发的
-  chunk 实时转发给客户端。流结束后图自动完成 write_audit（消费方迭代至结束即图完成）。
-
-``context`` 注入 db session / Request / auth（非序列化，不进 checkpoint）；
-``thread_id = request_id`` 供 InMemorySaver 按请求隔离状态。
+链路顺序固定为：权限 → 请求 DLP → 路由 → 配额 → 上游 → 响应 DLP → 审计。
+普通异步函数足以表达这条单路径处理流程，也避免为每个 HTTP 请求维护图 checkpoint。
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 import uuid
 from typing import Any
@@ -19,6 +16,14 @@ import structlog
 from starlette.responses import Response, StreamingResponse
 
 from app.auth.api_key_auth import AuthenticatedKey
+from app.graph.context import ProxyContext, bind_proxy_runtime
+from app.graph.nodes.audit import write_audit
+from app.graph.nodes.dlp import dlp_request, dlp_response
+from app.graph.nodes.errors import build_error
+from app.graph.nodes.proxy import proxy_upstream
+from app.graph.nodes.quota import reserve_quota
+from app.graph.nodes.routing import resolve_route
+from app.graph.nodes.scope import resolve_permissions
 from app.graph.state import ProxyState
 
 logger = structlog.get_logger()
@@ -35,16 +40,31 @@ def _initial_state(body: dict, protocol: str, is_stream: bool) -> ProxyState:
     }
 
 
-def _config(request_id: str) -> dict:
-    return {"configurable": {"thread_id": request_id}}
-
-
-def _context(db: Any, request: Any, auth: AuthenticatedKey) -> dict:
+def _context(db: Any, request: Any, auth: AuthenticatedKey) -> ProxyContext:
     return {"db": db, "request": request, "auth": auth}
 
 
+def _apply(state: ProxyState, update: dict | None) -> None:
+    if update:
+        state.update(update)
+
+
+async def _finalize_error(state: ProxyState) -> None:
+    _apply(state, await build_error(state))
+    await write_audit(state)
+
+
+async def _run_preflight(state: ProxyState) -> bool:
+    """执行上游调用前的固定决策链；返回是否可以继续。"""
+    for node in (resolve_permissions, dlp_request, resolve_route, reserve_quota):
+        _apply(state, await node(state))
+        if state.get("error"):
+            await _finalize_error(state)
+            return False
+    return True
+
+
 async def run_proxy(
-    graph,
     *,
     request: Any,
     auth: AuthenticatedKey,
@@ -52,22 +72,28 @@ async def run_proxy(
     body: dict,
     protocol: str,
 ) -> Response:
-    """非流式：跑完整图，由最终 state 构造 HTTP 响应。"""
-    initial = _initial_state(body, protocol, is_stream=False)
-    config = _config(initial["request_id"])
-    ctx = _context(db, request, auth)
-
-    final = await graph.ainvoke(initial, config=config, context=ctx)
+    """执行非流式代理链并构造 HTTP 响应。"""
+    state = _initial_state(body, protocol, is_stream=False)
+    with bind_proxy_runtime(_context(db, request, auth)):
+        if await _run_preflight(state):
+            _apply(state, await proxy_upstream(state))
+            if state.get("error"):
+                await _finalize_error(state)
+            else:
+                _apply(state, await dlp_response(state))
+                if state.get("error"):
+                    await _finalize_error(state)
+                else:
+                    await write_audit(state)
 
     return Response(
-        content=final.get("response_body", b""),
-        status_code=final.get("status_code", 200),
-        media_type=final.get("content_type", "application/json"),
+        content=state.get("response_body", b""),
+        status_code=state.get("status_code", 200),
+        media_type=state.get("content_type", "application/json"),
     )
 
 
 async def stream_proxy(
-    graph,
     *,
     request: Any,
     auth: AuthenticatedKey,
@@ -75,54 +101,72 @@ async def stream_proxy(
     body: dict,
     protocol: str,
 ) -> Response:
-    """流式：先跑决策段，再按结果返回错误响应或流式响应。
-
-    为与原代码语义一致（DLP block / 模型越权 / 无 provider 等早错误在进入流前即
-    返回错误 JSON，而非空 200 流），采用 LangGraph ``interrupt_before`` 模式：
-
-    1. ``ainvoke(interrupt_before=["proxy_upstream"])`` 跑 resolve_permissions →
-       dlp_request → resolve_route，在 proxy 前停住。
-       - 若早错误：build_error + write_audit 跑完，图到达 END（``next`` 为空），
-         返回 build_error 构造的错误 Response。
-       - 否则：图停在 proxy 前（``next == ("proxy_upstream",)``），进入步骤 2。
-    2. ``astream(None, stream_mode="custom")`` 从 checkpoint 恢复，跑 proxy_upstream
-       （经 stream_writer 实时下发 chunk）→ write_audit，返回 StreamingResponse。
-    """
-    initial = _initial_state(body, protocol, is_stream=True)
-    config = _config(initial["request_id"])
+    """先完成早期决策，再实时透传上游字节并在结束后审计。"""
+    state = _initial_state(body, protocol, is_stream=True)
     ctx = _context(db, request, auth)
-    request_id = initial["request_id"]
+    request_id = state["request_id"]
 
-    # 1. 决策段（到 proxy 前停住）
-    await graph.ainvoke(initial, config=config, context=ctx, interrupt_before=["proxy_upstream"])
-    snapshot = graph.get_state(config)
-
-    # 早错误路径：图已跑完，build_error 已构造错误响应
-    if not snapshot.next:
-        values = snapshot.values or {}
+    with bind_proxy_runtime(ctx):
+        can_continue = await _run_preflight(state)
+    if not can_continue:
         return Response(
-            content=values.get("response_body", b""),
-            status_code=values.get("status_code", 200),
-            media_type=values.get("content_type", "application/json"),
+            content=state.get("response_body", b""),
+            status_code=state.get("status_code", 200),
+            media_type=state.get("content_type", "application/json"),
         )
 
-    # 2. happy path：恢复执行，流式转发 proxy 下发的 chunk
     async def body_iterator():
+        queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=16)
+
+        async def writer(chunk: Any) -> None:
+            if isinstance(chunk, bytes):
+                await queue.put(chunk)
+            elif isinstance(chunk, bytearray):
+                await queue.put(bytes(chunk))
+            elif isinstance(chunk, str):
+                await queue.put(chunk.encode("utf-8"))
+            else:
+                logger.warning(
+                    "proxy_stream_unexpected_chunk",
+                    request_id=request_id,
+                    chunk_type=type(chunk).__name__,
+                )
+
+        async def execute() -> None:
+            cancelled = False
+            try:
+                with bind_proxy_runtime(ctx, stream_writer=writer):
+                    _apply(state, await proxy_upstream(state))
+                    if state.get("error"):
+                        _apply(state, await build_error(state))
+                    await write_audit(state)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "proxy_stream_pipeline_error",
+                    request_id=request_id,
+                    error=str(exc),
+                    exc_info=True,
+                )
+            finally:
+                if not cancelled:
+                    await queue.put(None)
+
+        task = asyncio.create_task(execute(), name=f"proxy-stream-{request_id}")
         try:
-            async for chunk in graph.astream(None, config=config, context=ctx, stream_mode="custom"):
-                if isinstance(chunk, (bytes, bytearray)):
-                    yield bytes(chunk)
-                elif isinstance(chunk, str):
-                    yield chunk.encode("utf-8")
-                else:
-                    # writer 收到的非字节载荷（不应发生于透传路径），跳过
-                    logger.warning(
-                        "proxy_stream_unexpected_chunk",
-                        request_id=request_id,
-                        chunk_type=type(chunk).__name__,
-                    )
-        except Exception as e:  # noqa: BLE001
-            logger.error("proxy_stream_error", request_id=request_id, error=str(e), exc_info=True)
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    break
+                yield chunk
+            await task
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     return StreamingResponse(
         body_iterator(),

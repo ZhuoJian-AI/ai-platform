@@ -14,16 +14,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.dsh.client import runtime_health
+from app.api.retirement import retired_api_dependency
 from app.auth.admin_auth import CurrentAdmin, require_super_admin
 from app.config import settings
 from app.database import get_db
+from app.models.agent_run import AgentRun, AgentRunEvent
 from app.models.platform_extension import (
     PlatformExtensionCatalogEntry,
     PlatformExtensionRelease,
     PlatformExtensionReleaseEvent,
     PlatformExtensionSource,
 )
-from app.models.agent_run import AgentRun, AgentRunEvent
 from app.schemas.platform_extension import (
     ExtensionApproveRequest,
     ExtensionArtifactSign,
@@ -37,13 +38,16 @@ from app.schemas.platform_extension import (
     ExtensionReleaseEventRead,
     ExtensionReleaseRead,
     ExtensionSourceRead,
-    ExtensionToolInstallRequest,
     ExtensionToolExecutionRead,
+    ExtensionToolInstallRequest,
 )
 from app.services import platform_extension_service, storage_gateway_service
 from app.services.platform_extension_discovery import sync_discovery_catalog
 
-router = APIRouter(prefix="/platform/extensions")
+router = APIRouter(
+    prefix="/platform/extensions",
+    dependencies=[retired_api_dependency("DSH 外部扩展与市场")],
+)
 
 
 @router.post("/internal/artifacts/sign", include_in_schema=False)
