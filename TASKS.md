@@ -1,5 +1,11 @@
 # Active tasks
 
+## STAGING-CORE-E2E-20260909 — 双端核心浏览器回归脚本 (@codex-e2e-matrix-audit)
+
+- 从最新 `origin/main` 提供可复用的 staging 核心回归脚本，使用真实 UI 分别登录管理员与员工端。
+- 覆盖中文登录错误、保留导航、管理员—员工权限只读闭环、企业应用 iframe 与业务助手 Artifact。
+- 凭据只从运行时环境变量读取；不修改真实授权、不删除真实数据、不提交或部署到 `main`。
+
 ## PLATFORM-SLIM-E2E-20260909 — 鉴权回归修复、遗留链路物理清理与双端全量验收 (@codex-platform-slim-e2e)
 
 - 修复升级数据库中 `users.role NOT NULL` 导致的新建员工回归，并精确区分用户名冲突与其他数据库错误。
