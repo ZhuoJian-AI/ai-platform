@@ -22,7 +22,7 @@
 └─ 业务小助手：Bridge 上下文 + 当前页面获权 Manifest Action
 ```
 
-所有新运行均由平台原生 Assistant Core 执行。历史 DSH Runtime 和外部扩展构建服务已退出部署；旧 Connector 工具绑定只读保留至连续七天无调用，新业务助手不再注入 Connector、Data Interface、Ontology 或外部扩展。
+所有新运行均由平台原生 Assistant Core 执行。历史 DSH Runtime、外部扩展构建服务和 Connector 工具绑定已经退出运行时；业务小助手只装配当前页面实时获权的 Manifest Action。
 
 ## 本地开发
 
@@ -55,4 +55,4 @@ Staging 使用 `docker-compose.coolify.yml`，具体参数见 [COOLIFY_DEPLOYMEN
 
 ## 已退役能力
 
-DSH 市场与外部扩展、Connector/Data Interface/Ontology 重复抽象、Judge 与管理员测试广场、MCP/OAuth Skill Pack、旧模块发布器、Team、Production Mock 和 WebOffice 在线协作编辑均不再接受新配置。兼容路由在一个发布期内统一返回中文 `410 Gone`，数据只会在迁移门禁满足后物理删除。
+DSH 市场与外部扩展、Connector/Data Interface/Ontology 重复抽象、Judge 与管理员测试广场、MCP/OAuth Skill Pack、旧模块发布器、Team、Production Mock 和 WebOffice 在线协作编辑已经退出产品和运行时。对应旧路由不再注册，访问时返回 `404 Not Found`。

@@ -486,7 +486,6 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
             "step": "load_config",
             "mode": "general",
             "skills": len(skill_ids),
-            "ontologies": 0,
             "rags": len(rag_ids),
             "default_skills": len(default_skills),
             "referenced_skills": len(referenced_skills),
@@ -3308,7 +3307,7 @@ async def save_memory(state: AgentState) -> dict:
         state["assistant_message_id"] = str(assistant_message.id)
         # **立即提交**：让 assistant 回复（及本轮工具写入的工作空间文件）当场持久化，
         # 不再依赖 _run_graph_bg 末尾的统一 commit。这样即使后续 extract_memory /
-        # judge / write_run_log 抛异常或末尾 commit 失败，回复也不会被回滚「消失」
+        # 后续日志写入抛异常或末尾 commit 失败，回复也不会被回滚「消失」
         # （与起首 user 消息同等耐久）。commit 自身极少失败（TaskMessage 无唯一约束），
         # 真失败则 rollback 清理会话并告警——不让本节点把图搞崩。
         try:

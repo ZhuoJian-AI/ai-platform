@@ -154,7 +154,7 @@ async def change_own_password_endpoint(
     current: CurrentUser = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Let an employee replace an initial/reset password before using OAuth."""
+    """Let an employee replace an initial or reset password before continuing."""
     try:
         result = await change_own_password(
             db,

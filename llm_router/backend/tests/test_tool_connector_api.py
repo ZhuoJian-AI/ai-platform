@@ -3,6 +3,28 @@
 import pytest
 from httpx import AsyncClient
 
+from app.main import app
+
+
+def test_all_retired_product_routes_are_absent_from_openapi():
+    paths = app.openapi()["paths"]
+    retired_fragments = (
+        "/connectors",
+        "/data-systems",
+        "/data-interfaces",
+        "/tool-bindings",
+        "/ontologies",
+        "/judges",
+        "/oauth",
+        "/mcp",
+        "/platform-extensions",
+        "/module-publisher",
+        "/teams",
+        "/office-edit",
+        "/scope-manager",
+    )
+    assert not any(fragment in path for path in paths for fragment in retired_fragments)
+
 
 async def _make_org(client: AsyncClient, slug: str) -> str:
     response = await client.post(

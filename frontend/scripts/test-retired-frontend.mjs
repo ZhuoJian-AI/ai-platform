@@ -15,6 +15,7 @@ const [
   skills,
   workspaces,
   pkgSource,
+  nginxConfig,
 ] = await Promise.all([
   read('src/App.tsx'),
   read('src/api/client.ts'),
@@ -27,6 +28,7 @@ const [
   read('src/pages/tools/Skills.tsx'),
   read('src/pages/agent/Workspaces.tsx'),
   read('package.json'),
+  read('nginx.coolify.conf'),
 ]);
 
 const runtimeSources = [client, terminal, applications, applicationDetail, applicationView, uploadQueue].join('\n');
@@ -42,6 +44,7 @@ assert.match(app, /<Route path="\/:slug\/terminal\/\*" element=\{<NotFoundPage \
 assert.match(app, /<Route path="\/terminal\/\*" element=\{<NotFoundPage \/>\} \/>/);
 assert.doesNotMatch(app, /<Route path="\/\*" element=\{<Navigate to="\/monitor\/router"/);
 assert.doesNotMatch(app, /path:\s*['"]\/(?:connectors|data-interfaces|ontology|judge|teams|extensions|office-edit|mcp)/);
+assert.doesNotMatch(nginxConfig, /mcp|well-known/);
 
 assert.match(applicationDetail, /Manifest Action 能力/);
 assert.match(applicationDetail, /actionsQuery\.data/);
