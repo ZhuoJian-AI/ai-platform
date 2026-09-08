@@ -45,6 +45,7 @@ import AgentManagerView from './AgentManagerView';
 import EnterpriseApplicationView, {
   businessArtifactsFromMessage, type BusinessAssistantTurnResult,
 } from './EnterpriseApplicationView';
+import { useMobileBackDismiss, useResponsiveLayout } from '../../hooks/useResponsiveLayout';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from '../../branding/BrandLogoSlot';
 import { BRAND_TITLES, useBrandTitle } from '../../branding/brand';
@@ -519,6 +520,13 @@ export default function Terminal() {
   const [applicationNavOpen, setApplicationNavOpen] = useState(false);
   const [applicationNavPinned, setApplicationNavPinned] = useState(() => readApplicationNavPinPreference(user?.id));
   const [applicationImmersive, setApplicationImmersive] = useState(false);
+  const [terminalNavOpen, setTerminalNavOpen] = useState(false);
+  const terminalNavRef = useRef<HTMLElement>(null);
+  const terminalNavTriggerRef = useRef<HTMLButtonElement>(null);
+  const terminalMainRef = useRef<HTMLElement>(null);
+  const { isMobile, isCompact } = useResponsiveLayout();
+  const closeTerminalNav = useMobileBackDismiss(terminalNavOpen, isMobile, setTerminalNavOpen, 'terminal-navigation');
+  const closeApplicationNav = useMobileBackDismiss(applicationNavOpen, isMobile, setApplicationNavOpen, 'application-navigation');
   const [businessTaskSelection, setBusinessTaskSelection] = useState<Record<string, string | null>>(() => {
     const params = new URLSearchParams(location.search);
     const applicationId = params.get('app');
@@ -583,6 +591,7 @@ export default function Terminal() {
   });
   const selectedApplication = terminalApplications.find((item) => item.id === selectedApplicationId) ?? null;
   const applicationShellActive = view === 'application' && selectedApplication !== null;
+  const effectiveApplicationNavPinned = applicationNavPinned && !isCompact;
 
   useEffect(() => {
     setApplicationNavOpen(false);
@@ -601,7 +610,66 @@ export default function Terminal() {
       setApplicationNavOpen(false);
       setApplicationImmersive(false);
     }
+    setTerminalNavOpen(false);
   }, [view]);
+
+  useEffect(() => {
+    if (!isMobile) setTerminalNavOpen(false);
+  }, [isMobile]);
+
+  useEffect(() => {
+    if (!isMobile || !terminalNavOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const focusable = () => Array.from(terminalNavRef.current?.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    ) ?? []).filter((item) => !item.hasAttribute('disabled'));
+    const focusFrame = window.requestAnimationFrame(() => terminalNavRef.current?.focus());
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeTerminalNav();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const items = focusable();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', onKeyDown);
+      if (terminalNavRef.current?.contains(document.activeElement)) {
+        window.requestAnimationFrame(() => terminalNavTriggerRef.current?.focus());
+      }
+    };
+  }, [closeTerminalNav, isMobile, terminalNavOpen]);
+
+  useEffect(() => {
+    const main = terminalMainRef.current;
+    if (!main) return undefined;
+    if (isMobile && terminalNavOpen) {
+      main.setAttribute('inert', '');
+      main.setAttribute('aria-hidden', 'true');
+    } else {
+      main.removeAttribute('inert');
+      main.removeAttribute('aria-hidden');
+    }
+    return () => {
+      main.removeAttribute('inert');
+      main.removeAttribute('aria-hidden');
+    };
+  }, [isMobile, terminalNavOpen]);
   // 智能体 chip 文案：业务应用助手优先显示实际应用名，不再退化成“通用”。
   const composerApplication = terminalApplications.find((item) => item.id === config.application_id);
   const agentLabel = selectedAgentId
@@ -1505,11 +1573,24 @@ export default function Terminal() {
         },
       }}
     >
-      <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#f5f5f5', fontFamily: WB_FONT }}>
+      <div className="terminal-shell" style={{ background: '#f5f5f5', fontFamily: WB_FONT }}>
         {/* 主内容区 */}
-        <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        <div className="terminal-shell__body" style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+          {!applicationShellActive && (
+            <button
+              ref={terminalNavTriggerRef}
+              type="button"
+              className="terminal-shell__mobile-trigger"
+              aria-label={terminalNavOpen ? '关闭平台导航' : '打开平台导航'}
+              aria-expanded={terminalNavOpen}
+              onClick={() => setTerminalNavOpen((open) => !open)}
+            >
+              {terminalNavOpen ? <CloseOutlined /> : <MenuUnfoldOutlined />}
+            </button>
+          )}
+          {terminalNavOpen && <button type="button" className="responsive-shell__scrim terminal-shell__scrim" aria-label="关闭平台导航" onClick={closeTerminalNav} />}
           {/* 企业应用使用极窄导航轨；平台其他页面继续使用完整侧栏。 */}
-          {applicationShellActive && !applicationImmersive && !applicationNavPinned ? (
+          {applicationShellActive && !applicationImmersive && !effectiveApplicationNavPinned ? (
             <aside className="terminal-app-rail" aria-label="平台快捷导航">
               <Tooltip title="展开平台导航" placement="right">
                 <button type="button" className="terminal-app-rail__button terminal-app-rail__button--primary" aria-label="展开平台导航" onClick={() => setApplicationNavOpen(true)}>
@@ -1545,7 +1626,19 @@ export default function Terminal() {
               </Tooltip>
             </aside>
           ) : !applicationShellActive ? (
-          <aside style={{ width: 224, background: WB.sidebar, borderRight: `1px solid ${WB.border}`, display: 'flex', flexDirection: 'column', flex: '0 0 auto' }}>
+          <aside
+            ref={terminalNavRef}
+            className={`terminal-shell__sidebar${terminalNavOpen ? ' terminal-shell__sidebar--open' : ''}`}
+            role={isMobile ? 'dialog' : undefined}
+            aria-modal={isMobile ? true : undefined}
+            aria-label="员工平台导航"
+            aria-hidden={isMobile && !terminalNavOpen}
+            tabIndex={isMobile ? -1 : undefined}
+            onTransitionEnd={() => {
+              if (isMobile && terminalNavOpen) terminalNavRef.current?.focus();
+            }}
+            style={{ width: 224, background: WB.sidebar, borderRight: `1px solid ${WB.border}`, display: 'flex', flexDirection: 'column', flex: '0 0 auto' }}
+          >
             <div style={{ padding: 12 }}>
               <Button type="primary" icon={<PlusOutlined />} block onClick={newTask}>新建任务</Button>
             </div>
@@ -1555,7 +1648,8 @@ export default function Terminal() {
                 <div style={{ padding: '6px 10px 4px', fontSize: 11, color: '#9ca3af', fontWeight: 600, letterSpacing: .4 }}>企业应用</div>
               )}
               {terminalApplications.map((application) => (
-                <div
+                <button
+                  type="button"
                   key={application.id}
                   onClick={() => { setSelectedApplicationId(application.id); setView('application'); }}
                   style={navItemStyle(view === 'application' && selectedApplicationId === application.id)}
@@ -1565,25 +1659,25 @@ export default function Terminal() {
                     : <AppstoreOutlined style={{ fontSize: 16 }} />}
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{application.name}</span>
                   {application.assistant_enabled && <Tag color="purple" bordered={false} style={{ margin: '0 0 0 auto', fontSize: 9, lineHeight: '17px' }}>AI</Tag>}
-                </div>
+                </button>
               ))}
               {terminalApplications.length > 0 && <div style={{ height: 1, background: '#e5e7eb', margin: '8px 10px' }} />}
-              <div onClick={() => setView('workspaces')} style={navItemStyle(view === 'workspaces')}>
+              <button type="button" onClick={() => setView('workspaces')} style={navItemStyle(view === 'workspaces')}>
                 <FolderOpenOutlined style={{ fontSize: 16 }} />
                 <span>工作空间</span>
-              </div>
-              <div onClick={() => setView('agents')} style={navItemStyle(view === 'agents')}>
+              </button>
+              <button type="button" onClick={() => setView('agents')} style={navItemStyle(view === 'agents')}>
                 <RobotOutlined style={{ fontSize: 16 }} />
                 <span>智能体</span>
-              </div>
-              <div onClick={() => setView('knowledge')} style={navItemStyle(view === 'knowledge')}>
+              </button>
+              <button type="button" onClick={() => setView('knowledge')} style={navItemStyle(view === 'knowledge')}>
                 <BookOutlined style={{ fontSize: 16 }} />
                 <span>知识库</span>
-              </div>
-              <div onClick={() => setView('skills')} style={navItemStyle(view === 'skills')}>
+              </button>
+              <button type="button" onClick={() => setView('skills')} style={navItemStyle(view === 'skills')}>
                 <ThunderboltOutlined style={{ fontSize: 16 }} />
                 <span>技能</span>
-              </div>
+              </button>
             </nav>
 
             {/* 任务列表 */}
@@ -1701,13 +1795,15 @@ export default function Terminal() {
 
           {/* 右侧主区 */}
           <main
+            ref={terminalMainRef}
+            className="terminal-shell__main"
             style={{
               flex: 1,
               display: 'flex',
               flexDirection: 'column',
               background: '#fff',
               minWidth: 0,
-              marginLeft: applicationShellActive && !applicationImmersive && applicationNavPinned ? 248 : 0,
+              marginLeft: applicationShellActive && !applicationImmersive && effectiveApplicationNavPinned ? 248 : 0,
               transition: 'margin-left 180ms ease',
             }}
           >
@@ -1965,34 +2061,34 @@ export default function Terminal() {
 
           <Drawer
             placement="left"
-            width={applicationNavPinned ? 248 : 280}
-            open={applicationShellActive && !applicationImmersive && (applicationNavPinned || applicationNavOpen)}
-            onClose={() => setApplicationNavOpen(false)}
+            width={isMobile ? 'min(88vw, 320px)' : (effectiveApplicationNavPinned ? 248 : 280)}
+            open={applicationShellActive && !applicationImmersive && (effectiveApplicationNavPinned || applicationNavOpen)}
+            onClose={closeApplicationNav}
             closable={false}
-            keyboard={!applicationNavPinned}
-            mask={!applicationNavPinned}
-            rootClassName={`terminal-app-nav-drawer${applicationNavPinned ? ' terminal-app-nav-drawer--pinned' : ''}`}
+            keyboard={!effectiveApplicationNavPinned}
+            mask={!effectiveApplicationNavPinned}
+            rootClassName={`terminal-app-nav-drawer${effectiveApplicationNavPinned ? ' terminal-app-nav-drawer--pinned' : ''}`}
             styles={{ body: { padding: 0 }, mask: { background: 'rgba(15, 23, 42, .08)' } }}
           >
             <div className="terminal-app-nav-drawer__panel">
               <div className="terminal-app-nav-drawer__header">
                 <Typography.Text strong><AppstoreOutlined style={{ marginRight: 8, color: WB.primary }} />平台导航</Typography.Text>
                 <div className="terminal-app-nav-drawer__header-actions">
-                  <Button
+                  {!isCompact && <Button
                     size="small"
-                    type={applicationNavPinned ? 'primary' : 'text'}
+                    type={effectiveApplicationNavPinned ? 'primary' : 'text'}
                     className="terminal-app-nav-drawer__pin"
-                    aria-label={applicationNavPinned ? '取消固定平台导航' : '固定平台导航'}
-                    icon={applicationNavPinned ? <PushpinFilled /> : <PushpinOutlined />}
+                    aria-label={effectiveApplicationNavPinned ? '取消固定平台导航' : '固定平台导航'}
+                    icon={effectiveApplicationNavPinned ? <PushpinFilled /> : <PushpinOutlined />}
                     onClick={() => updateApplicationNavPinned(!applicationNavPinned)}
                   >
-                    {applicationNavPinned ? '已固定' : '固定'}
-                  </Button>
+                    {effectiveApplicationNavPinned ? '已固定' : '固定'}
+                  </Button>}
                   <Button
                     type="text"
-                    aria-label={applicationNavPinned ? '收起固定平台导航' : '关闭平台导航'}
-                    icon={applicationNavPinned ? <MenuFoldOutlined /> : <CloseOutlined />}
-                    onClick={() => applicationNavPinned ? updateApplicationNavPinned(false) : setApplicationNavOpen(false)}
+                    aria-label={effectiveApplicationNavPinned ? '收起固定平台导航' : '关闭平台导航'}
+                    icon={effectiveApplicationNavPinned ? <MenuFoldOutlined /> : <CloseOutlined />}
+                    onClick={() => effectiveApplicationNavPinned ? updateApplicationNavPinned(false) : setApplicationNavOpen(false)}
                   />
                 </div>
               </div>
@@ -2010,7 +2106,8 @@ export default function Terminal() {
                   const applicationActive = selectedApplicationId === application.id;
                   if (modules.length === 0) {
                     return (
-                      <div
+                      <button
+                        type="button"
                         key={application.id}
                         onClick={() => {
                           setSelectedApplicationId(application.id);
@@ -2025,7 +2122,7 @@ export default function Terminal() {
                           : <AppstoreOutlined style={{ fontSize: 16 }} />}
                         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{application.name}</span>
                         {application.assistant_enabled && <Tag color="purple" bordered={false} style={{ margin: '0 0 0 auto', fontSize: 9, lineHeight: '17px' }}>AI</Tag>}
-                      </div>
+                      </button>
                     );
                   }
                   return (
@@ -2063,10 +2160,10 @@ export default function Terminal() {
                   );
                 })}
                 {terminalApplications.length > 0 && <div style={{ height: 1, background: '#e5e7eb', margin: '8px 10px' }} />}
-                <div onClick={() => { setApplicationNavOpen(false); setView('workspaces'); }} style={navItemStyle(false)}><FolderOpenOutlined style={{ fontSize: 16 }} /><span>工作空间</span></div>
-                <div onClick={() => { setApplicationNavOpen(false); setView('agents'); }} style={navItemStyle(false)}><RobotOutlined style={{ fontSize: 16 }} /><span>智能体</span></div>
-                <div onClick={() => { setApplicationNavOpen(false); setView('knowledge'); }} style={navItemStyle(false)}><BookOutlined style={{ fontSize: 16 }} /><span>知识库</span></div>
-                <div onClick={() => { setApplicationNavOpen(false); setView('skills'); }} style={navItemStyle(false)}><ThunderboltOutlined style={{ fontSize: 16 }} /><span>技能</span></div>
+                <button type="button" onClick={() => { setApplicationNavOpen(false); setView('workspaces'); }} style={navItemStyle(false)}><FolderOpenOutlined style={{ fontSize: 16 }} /><span>工作空间</span></button>
+                <button type="button" onClick={() => { setApplicationNavOpen(false); setView('agents'); }} style={navItemStyle(false)}><RobotOutlined style={{ fontSize: 16 }} /><span>智能体</span></button>
+                <button type="button" onClick={() => { setApplicationNavOpen(false); setView('knowledge'); }} style={navItemStyle(false)}><BookOutlined style={{ fontSize: 16 }} /><span>知识库</span></button>
+                <button type="button" onClick={() => { setApplicationNavOpen(false); setView('skills'); }} style={navItemStyle(false)}><ThunderboltOutlined style={{ fontSize: 16 }} /><span>技能</span></button>
               </nav>
 
               <div style={{ padding: '12px 16px 8px' }}>
@@ -2118,8 +2215,9 @@ export default function Terminal() {
 
         {/* 右侧抽屉：资源·文件·记忆·轨迹（默认收起，按需展开） */}
         <Drawer
-          placement="right" open={drawerOpen} width={460}
+          placement="right" open={drawerOpen} width={isMobile ? '100%' : 460}
           onClose={() => setDrawerOpen(false)}
+          rootClassName="responsive-fullscreen-drawer"
           styles={{ body: { padding: '12px 16px', background: '#fafafa' } }}
           title={<span><UnorderedListOutlined /> 资源 · 文件 · 记忆 · 轨迹</span>}
         >
@@ -4513,9 +4611,9 @@ function MemoryPanel({ items }: { items: TerminalMemoryItem[] }) {
 function navItemStyle(active: boolean): CSSProperties {
   return {
     display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', borderRadius: 8,
-    cursor: 'pointer', fontSize: 13,
+    width: '100%', border: 0, textAlign: 'left', fontFamily: 'inherit', cursor: 'pointer', fontSize: 13,
     color: active ? WB.primary : '#4b5563',
-    background: active ? `${WB.primary}1A` : undefined,
+    background: active ? `${WB.primary}1A` : 'transparent',
   };
 }
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, type CSSProperties, type ReactNode } from 'react';
+import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { Drawer, ConfigProvider, Avatar, Popover, Button } from 'antd';
 import {
@@ -11,6 +11,7 @@ import {
   AudioOutlined,
   AppstoreAddOutlined, DeploymentUnitOutlined, ShopOutlined, HistoryOutlined,
   AppstoreOutlined, LinkOutlined, SettingOutlined, RightOutlined, DownOutlined,
+  MenuOutlined, CloseOutlined,
 } from '@ant-design/icons';
 import { WB, WB_FONT, FS, antdTheme } from './components/finder/theme';
 import { AuthProvider, useAuth, RequireAuth } from './context/AuthContext';
@@ -51,6 +52,7 @@ import PlatformExtensions from './pages/platform/PlatformExtensions';
 import EnterpriseApplications from './pages/apps/EnterpriseApplications';
 import EnterpriseApplicationDetail from './pages/apps/EnterpriseApplicationDetail';
 import EnterpriseAccessControl from './pages/apps/EnterpriseAccessControl';
+import { useMobileBackDismiss, useResponsiveLayout } from './hooks/useResponsiveLayout';
 
 interface MenuEntry {
   path: string;
@@ -198,6 +200,12 @@ function AppLayout() {
   const navigate = useNavigate();
   const { admin, logout, isSuperAdmin, isOrgScoped } = useAuth();
   const [helpOpen, setHelpOpen] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const mobileNavRef = useRef<HTMLElement>(null);
+  const mobileNavTriggerRef = useRef<HTMLButtonElement>(null);
+  const adminMainRef = useRef<HTMLElement>(null);
+  const { isMobile } = useResponsiveLayout();
+  const closeMobileNav = useMobileBackDismiss(mobileNavOpen, isMobile, setMobileNavOpen, 'admin-navigation');
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set(
     SUBSYSTEMS.filter((subsystem) => subsystem.built).map((subsystem) => subsystem.key),
   ));
@@ -212,7 +220,66 @@ function AppLayout() {
   useEffect(() => {
     const active = SUBSYSTEMS.find((subsystem) => subsystem.menu.some((item) => item.path === location.pathname));
     if (active) setExpandedGroups((current) => current.has(active.key) ? current : new Set([...current, active.key]));
+    setMobileNavOpen(false);
   }, [location.pathname]);
+
+  useEffect(() => {
+    if (!isMobile) setMobileNavOpen(false);
+  }, [isMobile]);
+
+  useEffect(() => {
+    if (!isMobile || !mobileNavOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const focusable = () => Array.from(mobileNavRef.current?.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    ) ?? []).filter((item) => !item.hasAttribute('disabled'));
+    const focusFrame = window.requestAnimationFrame(() => mobileNavRef.current?.focus());
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeMobileNav();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const items = focusable();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', onKeyDown);
+      if (mobileNavRef.current?.contains(document.activeElement)) {
+        window.requestAnimationFrame(() => mobileNavTriggerRef.current?.focus());
+      }
+    };
+  }, [closeMobileNav, isMobile, mobileNavOpen]);
+
+  useEffect(() => {
+    const main = adminMainRef.current;
+    if (!main) return undefined;
+    if (isMobile && mobileNavOpen) {
+      main.setAttribute('inert', '');
+      main.setAttribute('aria-hidden', 'true');
+    } else {
+      main.removeAttribute('inert');
+      main.removeAttribute('aria-hidden');
+    }
+    return () => {
+      main.removeAttribute('inert');
+      main.removeAttribute('aria-hidden');
+    };
+  }, [isMobile, mobileNavOpen]);
 
   const ROLE_LABELS: Record<string, string> = {
     platform_super_admin: '超级平台管理员',
@@ -230,8 +297,9 @@ function AppLayout() {
 
   const navItemStyle = (active: boolean): CSSProperties => ({
     display: 'flex', alignItems: 'center', gap: 10, padding: '7px 12px', borderRadius: 6,
+    width: 'calc(100% - 12px)', border: 0, textAlign: 'left', fontFamily: 'inherit',
     cursor: 'pointer', fontSize: FS.body, lineHeight: 1, userSelect: 'none', margin: '1px 6px',
-    background: active ? `${WB.primary}1A` : undefined,
+    background: active ? `${WB.primary}1A` : 'transparent',
     color: active ? WB.primary : '#4b5563', fontWeight: active ? 600 : 400,
   });
 
@@ -239,9 +307,45 @@ function AppLayout() {
 
   return (
     <ConfigProvider theme={antdTheme}>
-      <div style={{ height: '100vh', display: 'flex', fontFamily: WB_FONT, background: '#f5f5f5' }}>
+      <div className="admin-shell" style={{ fontFamily: WB_FONT, background: '#f5f5f5' }}>
+        <Button
+          ref={mobileNavTriggerRef}
+          className="admin-shell__mobile-trigger"
+          aria-label={mobileNavOpen ? '关闭管理导航' : '打开管理导航'}
+          aria-expanded={mobileNavOpen}
+          icon={mobileNavOpen ? <CloseOutlined /> : <MenuOutlined />}
+          onClick={() => {
+            const willOpen = !mobileNavOpen;
+            setMobileNavOpen(willOpen);
+            if (willOpen) window.setTimeout(() => mobileNavRef.current?.focus(), 0);
+          }}
+        />
+        {mobileNavOpen && <button className="responsive-shell__scrim" aria-label="关闭管理导航" onClick={closeMobileNav} />}
         {/* 左侧栏：终端式单栏（品牌 / 分组导航 / 底部用户） */}
-        <aside style={{ width: 220, background: WB.sidebar, borderRight: `1px solid ${WB.border}`, display: 'flex', flexDirection: 'column', flex: '0 0 auto' }}>
+        <aside
+          ref={mobileNavRef}
+          className={`admin-shell__sidebar${mobileNavOpen ? ' admin-shell__sidebar--open' : ''}`}
+          role={isMobile ? 'dialog' : undefined}
+          aria-modal={isMobile ? true : undefined}
+          aria-label="管理导航"
+          aria-hidden={isMobile && !mobileNavOpen}
+          tabIndex={isMobile ? -1 : undefined}
+          onTransitionEnd={() => {
+            if (isMobile && mobileNavOpen) mobileNavRef.current?.focus();
+          }}
+          style={{ width: 220, background: WB.sidebar, borderRight: `1px solid ${WB.border}`, display: 'flex', flexDirection: 'column', flex: '0 0 auto' }}
+        >
+          {isMobile && mobileNavOpen && (
+            <button
+              type="button"
+              className="admin-shell__sidebar-close"
+              aria-label="关闭管理导航"
+              autoFocus
+              onClick={closeMobileNav}
+            >
+              <CloseOutlined />
+            </button>
+          )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '14px 16px', flex: '0 0 auto' }}>
             <BrandLogoSlot
               slot={BRAND_LOGO_SLOTS.adminSidebar}
@@ -258,21 +362,24 @@ function AppLayout() {
               const expanded = expandedGroups.has(s.key);
               return (
                 <div key={s.key} style={{ marginBottom: 6 }}>
-                  <div
+                  <button
+                    type="button"
+                    aria-expanded={expanded}
                     onClick={() => setExpandedGroups((current) => {
                       const next = new Set(current);
                       if (next.has(s.key)) next.delete(s.key); else next.add(s.key);
                       return next;
                     })}
-                    style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: FS.micro, fontWeight: 600, color: WB.textAux, letterSpacing: 0.4, textTransform: 'uppercase', padding: '8px 14px 4px 18px', userSelect: 'none' }}
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', border: 0, background: 'transparent', textAlign: 'left', cursor: 'pointer', fontSize: FS.micro, fontWeight: 600, color: WB.textAux, letterSpacing: 0.4, textTransform: 'uppercase', padding: '8px 14px 4px 18px', userSelect: 'none' }}
                   >
                     <span style={{ display: 'inline-flex', fontSize: 10 }}>{expanded ? <DownOutlined /> : <RightOutlined />}</span>
                     <span>{s.label}</span>
-                  </div>
+                  </button>
                   {expanded && items.map((m) => {
                     const active = location.pathname === m.path;
                     return (
-                      <div
+                      <button
+                        type="button"
                         key={m.path}
                         onClick={() => navigate(m.path)}
                         style={navItemStyle(active)}
@@ -281,7 +388,7 @@ function AppLayout() {
                       >
                         <span style={{ fontSize: 16, display: 'inline-flex', color: active ? WB.primary : WB.textAux }}>{m.icon}</span>
                         <span>{m.label}</span>
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
@@ -318,7 +425,7 @@ function AppLayout() {
           </div>
         </aside>
 
-        <main style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#fff', minWidth: 0 }}>
+        <main ref={adminMainRef} className="admin-shell__main" style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#fff', minWidth: 0 }}>
           <Routes>
             {allRoutes.map((r) => (
               <Route key={r.path} path={r.path} element={r.element} />
@@ -331,7 +438,8 @@ function AppLayout() {
           placement="right"
           open={helpOpen}
           onClose={() => setHelpOpen(false)}
-          width={720}
+          width={isMobile ? '100%' : 720}
+          rootClassName="responsive-fullscreen-drawer"
           title={<span><QuestionCircleOutlined style={{ color: WB.primary, marginRight: 6 }} />帮助文档</span>}
           styles={{ header: { borderBottom: `1px solid ${WB.border}`, marginBottom: 0 }, body: { padding: '18px 20px', background: '#fafafa' } }}
         >

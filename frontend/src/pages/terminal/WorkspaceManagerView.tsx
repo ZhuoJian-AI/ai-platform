@@ -5,7 +5,7 @@ import {
 import {
   DeleteOutlined, BankOutlined, ApartmentOutlined, UserOutlined,
   FolderOutlined, FileTextOutlined, FolderAddOutlined, ArrowUpOutlined,
-  HomeOutlined, UploadOutlined, EyeOutlined, RightOutlined,
+  HomeOutlined, UploadOutlined, EyeOutlined, RightOutlined, ArrowLeftOutlined,
   AppstoreOutlined, UnorderedListOutlined, SearchOutlined, CheckSquareOutlined,
   HistoryOutlined, RestOutlined, ShareAltOutlined, SendOutlined, AuditOutlined, MoreOutlined,
   LinkOutlined,
@@ -24,6 +24,7 @@ import {
   useWorkspaceUploadQueue, WorkspaceUploadPicker, WorkspaceUploadQueueStatus,
   workspaceUploadErrorText, type WorkspaceUploadRequest,
 } from '../../components/files/WorkspaceUploadQueue';
+import { useResponsiveLayout } from '../../hooks/useResponsiveLayout';
 // extOf 已由 classifyFile 内部使用，此处不再直接引用
 
 /** WorkBuddy 配色（与 Terminal.tsx 保持一致）。 */
@@ -131,6 +132,8 @@ export default function WorkspaceManagerView({
   const linkedWorkspaceId = urlParams.get('workspace');
   const linkedFileId = urlParams.get('file');
   const linkedVersionId = urlParams.get('version');
+  const { isMobile } = useResponsiveLayout();
+  const [mobileShowingFiles, setMobileShowingFiles] = useState(() => Boolean(linkedWorkspaceId || linkedFileId));
   const workspaces = resources?.workspaces ?? [];
   const { treeData, wsById } = useMemo(
     () => buildTree(workspaces, homeDepartmentId),
@@ -181,6 +184,10 @@ export default function WorkspaceManagerView({
   const [browserOpen, setBrowserOpen] = useState(false);
   const [browserFileId, setBrowserFileId] = useState<string | null>(null);
   const [browserVersionId, setBrowserVersionId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (linkedFileId) setMobileShowingFiles(true);
+  }, [linkedFileId]);
 
   const wsId = selectedWs?.id ?? null;
   const { data: files, isLoading: filesLoading } = useQuery({
@@ -692,9 +699,10 @@ export default function WorkspaceManagerView({
   };
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, fontFamily: WB_FONT, background: '#fff' }}>
+    <div className={`workspace-manager${isMobile ? ' workspace-manager--mobile' : ''}${mobileShowingFiles ? ' workspace-manager--show-files' : ' workspace-manager--show-spaces'}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, fontFamily: WB_FONT, background: '#fff' }}>
       {/* 顶部标题栏 */}
-      <div style={titleBarStyle}>
+      <div className="workspace-manager__title" style={titleBarStyle}>
+        {isMobile && mobileShowingFiles && <button className="workspace-manager__back" type="button" aria-label="返回工作空间列表" onClick={() => setMobileShowingFiles(false)}><ArrowLeftOutlined /></button>}
         <FolderOutlined style={{ color: WB.primary, fontSize: 16 }} />
         <span style={{ fontSize: 13, fontWeight: 600, color: '#1d1d1f' }}>工作空间</span>
         <Typography.Text style={{ fontSize: 12, color: '#86868b' }}>
@@ -703,9 +711,9 @@ export default function WorkspaceManagerView({
       </div>
 
       {/* 2:8 主体 */}
-      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+      <div className="workspace-manager__body" style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         {/* 左栏：MacOS 风格工作空间树 */}
-        <aside style={sidebarStyle}>
+        <aside className="workspace-manager__spaces" style={sidebarStyle} aria-label="工作空间列表">
           <div style={sidebarHeaderStyle}>收藏</div>
           {treeData.length === 0 ? (
             <div style={{ padding: '8px 12px', color: '#86868b', fontSize: 12 }}>暂无可访问的工作空间</div>
@@ -719,13 +727,14 @@ export default function WorkspaceManagerView({
                 setBrowserFileId(null);
                 setBrowserVersionId(null);
                 replaceWorkspaceLocation(wsIdSel);
+                if (isMobile) setMobileShowingFiles(true);
               }}
             />
           )}
         </aside>
 
         {/* 右栏：MacOS Finder 风格文件夹 / 文件浏览器 */}
-        <section style={{ flex: 8, minWidth: 0, display: 'flex', flexDirection: 'column', background: '#fff' }}>
+        <section className="workspace-manager__files" style={{ flex: 8, minWidth: 0, display: 'flex', flexDirection: 'column', background: '#fff' }} aria-label="工作空间文件">
           {!selectedWs ? (
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择左侧工作空间节点以管理其文件夹 / 文件" />
@@ -733,8 +742,8 @@ export default function WorkspaceManagerView({
           ) : (
             <>
               {/* 工具条 + Mac 路径栏 */}
-              <div style={toolbarStyle}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+              <div className="workspace-manager__toolbar" style={toolbarStyle}>
+                <div className="workspace-manager__path-tools" style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
                   <button
                     style={navBtnStyle(cwd.length === 0)}
                     disabled={cwd.length === 0}
@@ -755,13 +764,14 @@ export default function WorkspaceManagerView({
                     ))}
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <div className="workspace-manager__actions" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <Input
                     allowClear
                     prefix={<SearchOutlined />}
                     placeholder="搜索整个工作空间"
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
+                    className="workspace-manager__search"
                     style={{ width: 190, height: 28, fontSize: 12 }}
                   />
                   <Select
@@ -863,6 +873,7 @@ export default function WorkspaceManagerView({
                         <div
                           key={key}
                           data-workspace-item
+                          className={`workspace-manager__item workspace-manager__item--${viewMode}`}
                           data-workspace-key={key}
                           role="button"
                           tabIndex={0}
@@ -921,6 +932,7 @@ export default function WorkspaceManagerView({
                         <div
                           key={key}
                           data-workspace-item
+                          className={`workspace-manager__item workspace-manager__item--${viewMode}`}
                           data-workspace-key={key}
                           role="button"
                           tabIndex={0}
@@ -1328,10 +1340,10 @@ const marqueeStyle = (box: { left: number; top: number; width: number; height: n
 
 const modalOverlayStyle: CSSProperties = {
   position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 1000,
-  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12,
 };
 
 const modalCardStyle: CSSProperties = {
-  width: 380, background: '#fff', borderRadius: 12,
-  boxShadow: '0 12px 32px rgba(0,0,0,0.18)', overflow: 'hidden',
+  width: 380, maxWidth: 'calc(100vw - 24px)', maxHeight: 'calc(100dvh - 24px)', background: '#fff', borderRadius: 12,
+  boxShadow: '0 12px 32px rgba(0,0,0,0.18)', overflowY: 'auto', overflowX: 'hidden',
 };

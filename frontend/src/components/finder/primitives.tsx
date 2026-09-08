@@ -12,7 +12,7 @@ export function FinderShell({ children, background = '#fff', style }: {
 }) {
   return (
     <ConfigProvider theme={antdTheme}>
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, fontFamily: WB_FONT, background, ...style }}>
+      <div className="finder-shell" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, fontFamily: WB_FONT, background, ...style }}>
         {children}
       </div>
     </ConfigProvider>
@@ -26,14 +26,14 @@ export function TitleBar({ icon, title, titleExtra, extra }: {
   icon: ReactNode; title: ReactNode; titleExtra?: ReactNode; extra?: ReactNode;
 }) {
   return (
-    <div style={titleBarStyle}>
+    <div className="finder-title-bar" style={titleBarStyle}>
       <span style={{ display: 'inline-flex', color: WB.primary, fontSize: 16 }}>{icon}</span>
-      <span style={{ fontSize: FS.body, fontWeight: 600, color: WB.text }}>{title}</span>
+      <span className="finder-title-bar__title" style={{ fontSize: FS.body, fontWeight: 600, color: WB.text }}>{title}</span>
       {titleExtra !== undefined && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>{titleExtra}</div>
+        <div className="finder-title-bar__inline" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>{titleExtra}</div>
       )}
       {extra !== undefined && (
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>{extra}</div>
+        <div className="finder-title-bar__actions" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>{extra}</div>
       )}
     </div>
   );
@@ -44,7 +44,7 @@ export function Sidebar({ header, children, style }: {
   header?: ReactNode; children: ReactNode; style?: CSSProperties;
 }) {
   return (
-    <aside style={{ ...sidebarStyle, ...style }}>
+    <aside className="finder-sidebar" style={{ ...sidebarStyle, ...style }}>
       {header !== undefined && <div style={sidebarHeaderStyle}>{header}</div>}
       {children}
     </aside>
@@ -131,9 +131,9 @@ function flattenKeys(nodes: FinderTreeNode[]): string[] {
 /* ── 工具条 / 路径栏 / 按钮 ─────────────────────────────────────────── */
 export function Toolbar({ left, right }: { left: ReactNode; right?: ReactNode }) {
   return (
-    <div style={toolbarStyle}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>{left}</div>
-      {right !== undefined && <div style={{ display: 'flex', gap: 8 }}>{right}</div>}
+    <div className="finder-toolbar" style={toolbarStyle}>
+      <div className="finder-toolbar__main" style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>{left}</div>
+      {right !== undefined && <div className="finder-toolbar__actions" style={{ display: 'flex', gap: 8 }}>{right}</div>}
     </div>
   );
 }
@@ -191,6 +191,7 @@ export function IconCard({ onClick, children, actions }: {
   const [hover, setHover] = useState(false);
   return (
     <div
+      className="finder-icon-card"
       style={iconCardStyle(hover)}
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
@@ -371,12 +372,12 @@ export const iconActionBtnStyle = (variant: 'default' | 'danger'): CSSProperties
 
 export const modalOverlayStyle: CSSProperties = {
   position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 1000,
-  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12,
 };
 
 export const modalCardStyle: CSSProperties = {
-  width: 380, background: '#fff', borderRadius: 12,
-  boxShadow: '0 12px 32px rgba(0,0,0,0.18)', overflow: 'hidden',
+  width: 380, maxWidth: 'calc(100vw - 24px)', maxHeight: 'calc(100dvh - 24px)', background: '#fff', borderRadius: 12,
+  boxShadow: '0 12px 32px rgba(0,0,0,0.18)', overflowY: 'auto', overflowX: 'hidden',
 };
 
 // 保留 Typography 导入以备个别页直接使用（如文件大小等辅助文本）
