@@ -18,7 +18,6 @@ class TaskConfig(BaseModel):
 
     workspace_id: str | None = None
     skill_ids: list[str] = Field(default_factory=list)
-    ontology_ids: list[str] = Field(default_factory=list)
     rag_collection_ids: list[str] = Field(default_factory=list)
     model_alias: str | None = None
     # 执行模式：craft（自主多步执行）/ ask（只读单轮问答）/ plan（出方案不执行）

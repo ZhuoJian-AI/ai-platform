@@ -17,7 +17,6 @@ from app.models.audit_log import AuditLog
 from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.data_interface import DataInterface, DataSystem
 from app.models.llm_provider import LlmProvider
-from app.models.ontology import OntologyFile, OntologyFolder
 from app.models.skill import SkillFile, SkillFolder
 from app.models.tool_call_log import ToolCallLog
 
@@ -379,7 +378,7 @@ async def _tool_by_endpoint(db: AsyncSession, base: list) -> list[dict]:
 
 
 async def _tool_inventory(db: AsyncSession, org_id: UUID) -> dict:
-    """四组件资源盘点（全量，不按时间窗口）：连接器 / 数据接口 / 技能 / 本体。"""
+    """Legacy migration inventory plus retained SkillFolder inventory."""
     org = str(org_id)
     soft = ToolConnector.deleted_at.is_(None)
     conn_total = (await db.execute(
@@ -418,15 +417,6 @@ async def _tool_inventory(db: AsyncSession, org_id: UUID) -> dict:
         .where(SkillFolder.organization_id == org, SkillFile.deleted_at.is_(None))
     )).scalar() or 0
 
-    of_total = (await db.execute(
-        select(func.count()).select_from(OntologyFolder)
-        .where(OntologyFolder.organization_id == org, OntologyFolder.deleted_at.is_(None))
-    )).scalar() or 0
-    ofile_total = (await db.execute(
-        select(func.count()).select_from(OntologyFile)
-        .where(OntologyFile.organization_id == org, OntologyFile.deleted_at.is_(None))
-    )).scalar() or 0
-
     return {
         "connectors": {
             "total": int(conn_total),
@@ -441,7 +431,6 @@ async def _tool_inventory(db: AsyncSession, org_id: UUID) -> dict:
             "inactive": di_total - di_active,
         },
         "skills": {"folders_total": int(sf_total), "files_total": int(sfile_total)},
-        "ontology": {"folders_total": int(of_total), "files_total": int(ofile_total)},
     }
 
 

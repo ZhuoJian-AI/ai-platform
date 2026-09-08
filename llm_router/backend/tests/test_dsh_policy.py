@@ -361,16 +361,12 @@ def _patch_prepare_dependencies(monkeypatch, principal):
     async def fake_visual(_state, _db, _user, _messages, prompt):
         return None, None, prompt
 
-    async def no_interfaces(_db, _user):
-        return []
-
     async def no_release(_db):
         return None
 
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": object(), "user": principal})
     monkeypatch.setattr(nodes, "_build_tools", fake_build_tools)
     monkeypatch.setattr(nodes, "_configure_visual_turn", fake_visual)
-    monkeypatch.setattr(nodes.scope_service, "list_data_interfaces_for_user", no_interfaces)
     monkeypatch.setattr(platform_tool_registry, "active_platform_tool_names", no_release)
 
 

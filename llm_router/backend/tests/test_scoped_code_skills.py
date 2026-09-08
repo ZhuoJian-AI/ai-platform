@@ -832,7 +832,6 @@ Follow these instructions.
         "template_agent_id": str(agent.id),
         "model_alias": "default",
         "skill_ids": [],
-        "ontology_ids": [],
         "invoked_skill_ids": [str(explicit_folder.id)],
         "invoked_skills": [{"id": str(explicit_folder.id)}],
         "referenced_file_ids": [],

@@ -56,7 +56,6 @@ class AgentState(TypedDict, total=False):
     max_tokens: int | None
     workspace_id: str | None
     # general 模式多资源装配（空数组 = 按用户权限自动匹配全集，由 load_config 解析填充）
-    ontology_ids: list[str]
     rag_collection_ids: list[str]
     # general 模式：当前轮明确调用的技能（结构化 UUID 优先，唯一 /slug 兼容）。
     referenced_skills: list[dict]

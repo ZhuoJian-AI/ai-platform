@@ -6,7 +6,7 @@ owns step scheduling, observations and termination.
 
 两种模式（state["mode"]）：
 - ``agent``：管理端测试广场，load_config 读预配置 ``Agent`` 行（单 RAG / session 记忆）。
-- ``general``：终端通用智能体，按任务配置动态装配（多 RAG / 多 Ontology / 内置工作空间文件
+- ``general``：终端通用智能体，按任务配置动态装配（多 RAG / 内置工作空间文件
   工具 / 4 级长期记忆 / 个人记忆沉淀），不创建 ``Agent`` 行。
 """
 
@@ -3061,7 +3061,6 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
         "loaded_skills": [],
         "executed_skills": [],
         "skill_slug_ambiguities": slug_ambiguities,
-        "ontology_ids": [],
         "rag_collection_ids": rag_ids,
         "referenced_skills": referenced_skills,
         "referenced_file_ids": referenced_file_ids,

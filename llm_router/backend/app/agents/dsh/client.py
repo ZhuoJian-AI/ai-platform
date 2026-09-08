@@ -56,25 +56,3 @@ async def runtime_health() -> dict[str, Any]:
             return response.json()
     except httpx.HTTPError as exc:
         return {"status": "unavailable", "error": str(exc)}
-
-
-async def validate_release(release_id: str, manifest: dict, checksum: str) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=settings.dsh_runtime_timeout_seconds) as client:
-        response = await client.post(
-            f"{settings.dsh_runtime_url.rstrip('/')}/v1/extensions/validate",
-            headers={**_headers(), "content-type": "application/json"},
-            json={"release_id": release_id, "manifest": manifest, "checksum": checksum},
-        )
-        response.raise_for_status()
-        return response.json()
-
-
-async def activate_release(release_id: str, manifest: dict, checksum: str) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=settings.dsh_runtime_timeout_seconds) as client:
-        response = await client.post(
-            f"{settings.dsh_runtime_url.rstrip('/')}/v1/extensions/activate",
-            headers={**_headers(), "content-type": "application/json"},
-            json={"release_id": release_id, "manifest": manifest, "checksum": checksum},
-        )
-        response.raise_for_status()
-        return response.json()

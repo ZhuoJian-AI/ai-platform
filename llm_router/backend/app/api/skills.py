@@ -1,4 +1,4 @@
-"""Skill CRUD + test API（旧 definition 模型 dormant）+ 技能文件夹化存储 API。"""
+"""SkillFolder storage API plus one-release tombstones for old Definition Skills."""
 
 from uuid import UUID
 
@@ -17,7 +17,6 @@ from app.auth.admin_auth import (
 )
 from app.database import get_db
 from app.schemas.skill import (
-    SkillCreate,
     SkillFileCreate,
     SkillFileRead,
     SkillFileReadMeta,
@@ -25,19 +24,8 @@ from app.schemas.skill import (
     SkillFolderCreate,
     SkillFolderRead,
     SkillFolderUpdate,
-    SkillRead,
-    SkillTestRequest,
-    SkillUpdate,
 )
-from app.services.connector_service import get_endpoint
 from app.services.skill_scope_service import validate_scope_target
-from app.services.skill_service import (
-    create_skill,
-    get_skill,
-    list_skills,
-    soft_delete_skill,
-    update_skill,
-)
 from app.services.skill_store_service import (
     create_folder as create_skill_folder,
 )
@@ -68,7 +56,6 @@ from app.services.skill_store_service import (
 from app.services.skill_store_service import (
     upsert_file as upsert_skill_file,
 )
-from app.tools.executor import execute_endpoint
 
 router = APIRouter()
 _RETIRED_DEFINITION_SKILL = retired_api_dependency("旧 Definition Skill")
@@ -76,96 +63,40 @@ _RETIRED_DEFINITION_SKILL = retired_api_dependency("旧 Definition Skill")
 
 @router.post(
     "/organizations/{org_id}/skills",
-    response_model=SkillRead,
-    status_code=201,
+    status_code=410,
     dependencies=[_RETIRED_DEFINITION_SKILL],
 )
-async def create_skill_endpoint(
-    org_id: UUID, data: SkillCreate,
-    _: CurrentAdmin = Depends(require_org_access_write), db: AsyncSession = Depends(get_db),
-):
-    try:
-        return await create_skill(db, org_id, data)
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail=f"Slug '{data.slug}' already exists")
+async def retired_definition_skill_create(org_id: UUID):  # noqa: ARG001
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 @router.get(
     "/organizations/{org_id}/skills",
-    response_model=list[SkillRead],
+    status_code=410,
     dependencies=[_RETIRED_DEFINITION_SKILL],
 )
-async def list_skills_endpoint(
-    org_id: UUID, _: CurrentAdmin = Depends(require_org_access), db: AsyncSession = Depends(get_db),
-):
-    return await list_skills(db, org_id)
+async def retired_definition_skill_list(org_id: UUID):  # noqa: ARG001
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
-@router.get("/skills/{skill_id}", response_model=SkillRead, dependencies=[_RETIRED_DEFINITION_SKILL])
-async def get_skill_endpoint(
-    skill_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
-):
-    s = await get_skill(db, skill_id)
-    if not s:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    assert_org_access(auth, s.organization_id)
-    return s
+@router.get("/skills/{skill_id}", status_code=410, dependencies=[_RETIRED_DEFINITION_SKILL])
+async def retired_definition_skill_read(skill_id: UUID):  # noqa: ARG001
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
-@router.patch("/skills/{skill_id}", response_model=SkillRead, dependencies=[_RETIRED_DEFINITION_SKILL])
-async def update_skill_endpoint(
-    skill_id: UUID, data: SkillUpdate,
-    auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
-):
-    s = await get_skill(db, skill_id)
-    if not s:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    assert_org_write_access(auth, s.organization_id)
-    return await update_skill(db, s, data)
+@router.patch("/skills/{skill_id}", status_code=410, dependencies=[_RETIRED_DEFINITION_SKILL])
+async def retired_definition_skill_update(skill_id: UUID):  # noqa: ARG001
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
-@router.delete("/skills/{skill_id}", status_code=204, dependencies=[_RETIRED_DEFINITION_SKILL])
-async def delete_skill_endpoint(
-    skill_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
-):
-    s = await get_skill(db, skill_id)
-    if not s:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    assert_org_write_access(auth, s.organization_id)
-    await soft_delete_skill(db, s)
+@router.delete("/skills/{skill_id}", status_code=410, dependencies=[_RETIRED_DEFINITION_SKILL])
+async def retired_definition_skill_delete(skill_id: UUID):  # noqa: ARG001
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
-@router.post("/skills/{skill_id}/test", dependencies=[_RETIRED_DEFINITION_SKILL])
-async def test_skill_endpoint(
-    skill_id: UUID, data: SkillTestRequest,
-    auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
-):
-    """测试技能：取第一个绑定端点执行调用。"""
-    s = await get_skill(db, skill_id)
-    if not s:
-        raise HTTPException(status_code=404, detail="Skill not found")
-    assert_org_write_access(auth, s.organization_id)
-    if not s.bound_endpoint_ids:
-        raise HTTPException(status_code=400, detail="Skill has no bound endpoint")
-    ep_id = s.bound_endpoint_ids[0]
-    ep = await get_endpoint(db, UUID(ep_id))
-    if not ep:
-        raise HTTPException(status_code=404, detail="Bound endpoint not found")
-    from app.services.connector_service import get_connector
-    conn = await get_connector(db, ep.connector_id)
-    if not conn:
-        raise HTTPException(status_code=404, detail="Connector not found")
-    result = await execute_endpoint(
-        db, org_id=s.organization_id, connector=conn, endpoint=ep,
-        params=data.params, skill_id=s.id,
-    )
-    return {
-        "status_code": result.status_code,
-        "latency_ms": result.latency_ms,
-        "body": result.body,
-        "error": result.error,
-    }
+@router.post("/skills/{skill_id}/test", status_code=410, dependencies=[_RETIRED_DEFINITION_SKILL])
+async def retired_definition_skill_test(skill_id: UUID):  # noqa: ARG001
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 # ── 技能文件夹化存储（SkillFolder + SkillFile，节点作用域）──────────────

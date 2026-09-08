@@ -44,22 +44,12 @@ from app.database import get_db
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.department import Department
-from app.models.ontology import OntologyFile, OntologyFolder
 from app.models.organization import Organization
 from app.models.rag import RagCollection, RagDocument, RagFolder
 from app.models.skill import SkillFolder, SkillVersion
 from app.models.task import Task, TaskMessage
 from app.models.workspace import WorkspaceFileVersion, WorkspaceUploadSession
 from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
-from app.schemas.data_interface import DataInterfaceRead, DataSystemRead
-from app.schemas.ontology import (
-    OntologyFileCreate,
-    OntologyFileRead,
-    OntologyFileUpdate,
-    OntologyFolderCreate,
-    OntologyFolderRead,
-    OntologyFolderRename,
-)
 from app.schemas.rag import (
     RagChunkRead,
     RagCollectionCreate,
@@ -97,9 +87,6 @@ from app.schemas.workspace import (
     WorkspaceBulkDeleteRequest,
     WorkspaceBulkDeleteResult,
     WorkspaceDownloadTicketRead,
-    WorkspaceEditRoomStatusRead,
-    WorkspaceEditSessionClose,
-    WorkspaceEditSessionCreate,
     WorkspaceFallbackPreviewRead,
     WorkspaceFileCopyRequest,
     WorkspaceFileCreate,
@@ -142,7 +129,6 @@ from app.services import (
     subsystem_integration_service,
     task_service,
     workspace_governance_service,
-    workspace_office_edit_service,
     workspace_pdf_preview_service,
     workspace_permission_service,
     workspace_preview_session_service,
@@ -165,41 +151,6 @@ from app.services.agent_service import (
 )
 from app.services.agent_service import (
     validate_application_context as validate_agent_application_context,
-)
-from app.services.data_interface_service import (
-    get_system,
-    list_interfaces,
-    list_systems,
-)
-from app.services.ontology_store_service import (
-    create_folder as create_ontology_folder,
-)
-from app.services.ontology_store_service import (
-    get_file as get_ontology_file,
-)
-from app.services.ontology_store_service import (
-    get_folder as get_ontology_folder,
-)
-from app.services.ontology_store_service import (
-    list_files as list_ontology_files,
-)
-from app.services.ontology_store_service import (
-    list_folders as list_ontology_folders,
-)
-from app.services.ontology_store_service import (
-    rename_folder as rename_ontology_folder,
-)
-from app.services.ontology_store_service import (
-    soft_delete_file as soft_delete_ontology_file,
-)
-from app.services.ontology_store_service import (
-    soft_delete_folder as soft_delete_ontology_folder,
-)
-from app.services.ontology_store_service import (
-    update_file as update_ontology_file,
-)
-from app.services.ontology_store_service import (
-    upsert_file as upsert_ontology_file,
 )
 from app.services.skill_store_service import (
     create_folder as create_skill_folder,
@@ -239,8 +190,6 @@ from app.utils.workspace_presentation import clean_display_name, presentation_di
 router = APIRouter()
 _RETIRED_SKILLS_PACK = retired_api_dependency("MCP/OAuth Skill Pack 导出")
 _RETIRED_OFFICE_EDIT = retired_api_dependency("WebOffice 在线协作编辑")
-_RETIRED_DATA_INTERFACE = retired_api_dependency("Data Interface")
-_RETIRED_ONTOLOGY = retired_api_dependency("Ontology")
 _NON_STREAM_ACTIVE_TASKS: set[str] = set()
 
 _FILE_MENTION_RE = re.compile(
@@ -1718,152 +1667,41 @@ async def refresh_preview_session_ws_file_endpoint(
 
 @router.post(
     "/terminal/files/{file_id}/edit-session",
-    response_model=WorkspacePreviewSessionRead,
+    status_code=410,
     dependencies=[_RETIRED_OFFICE_EDIT],
 )
-async def edit_session_ws_file_endpoint(
-    file_id: UUID,
-    data: WorkspaceEditSessionCreate,
-    response: Response,
-    cu: CurrentUser = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Create an explicit paid WebOffice edit room after live role checks."""
-    response.headers["Cache-Control"] = "private, no-store"
-    assert_user_write(cu)
-    f = await workspace_service.get_file(db, file_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    ws = await workspace_service.get_workspace(db, f.workspace_id)
-    if ws is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    await workspace_permission_service.assert_can_read(db, ws, cu)
-    await workspace_permission_service.assert_can_update(db, ws, cu)
-    try:
-        result = await workspace_office_edit_service.create_edit_session(
-            db,
-            f,
-            actor_type="user",
-            actor_id=str(cu.id),
-            client_open_id=data.client_open_id,
-        )
-        await db.commit()
-        return WorkspacePreviewSessionRead(**result)
-    except OriginalPreviewError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except storage_gateway_service.StorageGatewayError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+async def retired_user_edit_session(file_id: UUID):  # noqa: ARG001
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 @router.post(
     "/terminal/files/{file_id}/edit-session/refresh",
-    response_model=WorkspacePreviewSessionRead,
+    status_code=410,
     dependencies=[_RETIRED_OFFICE_EDIT],
 )
-async def refresh_edit_session_ws_file_endpoint(
-    file_id: UUID,
-    data: WorkspacePreviewSessionRefresh,
-    response: Response,
-    cu: CurrentUser = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
-):
-    response.headers["Cache-Control"] = "private, no-store"
-    assert_user_write(cu)
-    f = await workspace_service.get_file(db, file_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    ws = await workspace_service.get_workspace(db, f.workspace_id)
-    if ws is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    await workspace_permission_service.assert_can_read(db, ws, cu)
-    await workspace_permission_service.assert_can_update(db, ws, cu)
-    if data.room_id is None:
-        raise HTTPException(status_code=422, detail="room_id is required for edit refresh")
-    try:
-        result = await workspace_office_edit_service.refresh_edit_session(
-            db,
-            f,
-            actor_type="user",
-            actor_id=str(cu.id),
-            access_token=data.access_token,
-            refresh_token=data.refresh_token,
-            refresh_context=data.refresh_context,
-            room_id=data.room_id,
-        )
-        await db.commit()
-        return WorkspacePreviewSessionRead(**result)
-    except OriginalPreviewError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except storage_gateway_service.StorageGatewayError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+async def retired_user_edit_session_refresh(file_id: UUID):  # noqa: ARG001
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 @router.get(
     "/terminal/files/{file_id}/edit-session/{room_id}",
-    response_model=WorkspaceEditRoomStatusRead,
+    status_code=410,
     dependencies=[_RETIRED_OFFICE_EDIT],
 )
-async def edit_session_status_ws_file_endpoint(
-    file_id: UUID,
-    room_id: UUID,
-    response: Response,
-    cu: CurrentUser = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
+async def retired_user_edit_session_status(
+    file_id: UUID,  # noqa: ARG001
+    room_id: UUID,  # noqa: ARG001
 ):
-    response.headers["Cache-Control"] = "private, no-store"
-    assert_user_write(cu)
-    f = await workspace_service.get_file(db, file_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    ws = await workspace_service.get_workspace(db, f.workspace_id)
-    if ws is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    await workspace_permission_service.assert_can_read(db, ws, cu)
-    await workspace_permission_service.assert_can_update(db, ws, cu)
-    room = await workspace_office_edit_service.get_edit_room(
-        db, f, room_id=room_id, actor_type="user", actor_id=str(cu.id),
-    )
-    if room is None:
-        raise HTTPException(status_code=404, detail="Edit session not found")
-    return WorkspaceEditRoomStatusRead(
-        **await workspace_office_edit_service.edit_room_status_payload(db, f, room)
-    )
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 @router.post(
     "/terminal/files/{file_id}/edit-session/close",
-    response_model=WorkspaceEditRoomStatusRead,
+    status_code=410,
     dependencies=[_RETIRED_OFFICE_EDIT],
 )
-async def close_edit_session_ws_file_endpoint(
-    file_id: UUID,
-    data: WorkspaceEditSessionClose,
-    response: Response,
-    cu: CurrentUser = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
-):
-    response.headers["Cache-Control"] = "private, no-store"
-    assert_user_write(cu)
-    f = await workspace_service.get_file(db, file_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    ws = await workspace_service.get_workspace(db, f.workspace_id)
-    if ws is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    await workspace_permission_service.assert_can_update(db, ws, cu)
-    room = await workspace_office_edit_service.close_edit_session(
-        db,
-        f,
-        actor_type="user",
-        actor_id=str(cu.id),
-        client_open_id=data.client_open_id,
-    )
-    if room is None:
-        raise HTTPException(status_code=404, detail="Edit session not found")
-    await db.commit()
-    return WorkspaceEditRoomStatusRead(
-        **await workspace_office_edit_service.edit_room_status_payload(db, f, room)
-    )
+async def retired_user_edit_session_close(file_id: UUID):  # noqa: ARG001
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 async def _fallback_preview_ws_file(
@@ -2697,19 +2535,8 @@ async def _get_visible_collection(db: AsyncSession, coll_id: UUID, cu: CurrentUs
     return coll
 
 
-async def _get_visible_system(db: AsyncSession, system_id: UUID, cu: CurrentUser):
-    """取数据系统并校验可见（同组织 + scope 命中用户有效集合）；不可见一律 404。"""
-    s = await get_system(db, system_id)
-    if s is None:
-        raise HTTPException(status_code=404, detail="Data system not found")
-    assert_user_org_access(cu, s.organization_id)
-    if not _scope_in_effective(cu, s.scope_type, s.scope_id):
-        raise HTTPException(status_code=404, detail="Data system not found")
-    return s
-
-
 def _assert_owner(
-    entity: RagCollection | RagDocument | RagFolder | SkillFolder | OntologyFolder | OntologyFile | Agent,
+    entity: RagCollection | RagDocument | RagFolder | SkillFolder | Agent,
     cu: CurrentUser,
 ) -> None:
     """断言当前用户为该资源的创建者；否则 403。
@@ -2773,34 +2600,21 @@ async def kb_nodes_endpoint(
     return nodes
 
 
-@router.get(
+@router.api_route(
     "/terminal/data-systems",
-    response_model=list[DataSystemRead],
-    dependencies=[_RETIRED_DATA_INTERFACE],
+    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    include_in_schema=False,
 )
-async def list_data_systems_endpoint(
-    scope_type: str = Query(..., description="organization/department/user"),
-    scope_id: str | None = Query(default=None),
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """列出选中 scope 下的数据系统（scope 必须在用户有效集合内）；终端只读。"""
-    if not _scope_in_effective(cu, scope_type, scope_id):
-        raise HTTPException(status_code=404, detail="Scope not accessible")
-    return await list_systems(db, cu.organization_id, scope_type=scope_type, scope_id=scope_id)
-
-
-@router.get(
-    "/terminal/data-systems/{system_id}/data-interfaces",
-    response_model=list[DataInterfaceRead],
-    dependencies=[_RETIRED_DATA_INTERFACE],
+@router.api_route(
+    "/terminal/data-systems/{path:path}",
+    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    include_in_schema=False,
 )
-async def list_data_interfaces_endpoint(
-    system_id: UUID,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """列出可见数据系统下的数据接口（输入/输出样例）；终端只读。"""
-    s = await _get_visible_system(db, system_id, cu)
-    return await list_interfaces(db, s.id)
+async def retired_terminal_data_interfaces(path: str = ""):
+    del path
+    from app.api.retirement import retired_response
+
+    return retired_response("Data Interface 已下线；业务数据请通过应用 Manifest Action 使用。")
 
 
 @router.get("/terminal/rag", response_model=list[RagCollectionRead])
@@ -3240,184 +3054,31 @@ async def delete_skill_file_endpoint(
 
 
 
-# ── 本体（OntologyFolder / OntologyFile）：用户 scope 内可见；删除/重命名/编辑仅限自己创建 ──
-
-
-async def _get_visible_ontology_folder(db: AsyncSession, folder_id: UUID, cu: CurrentUser) -> OntologyFolder:
-    """取本体文件夹并校验可见（同组织 + scope 命中用户有效集合）；不可见一律 404。"""
-    f = await get_ontology_folder(db, folder_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="Ontology folder not found")
-    assert_user_org_access(cu, f.organization_id)
-    if not _scope_in_effective(cu, f.scope_type, f.scope_id):
-        raise HTTPException(status_code=404, detail="Ontology folder not found")
-    return f
-
-
-async def _get_visible_ontology_file(db: AsyncSession, file_id: UUID, cu: CurrentUser) -> OntologyFile:
-    """取本体文件并校验可见（同组织 + scope 命中用户有效集合）；不可见一律 404。"""
-    f = await get_ontology_file(db, file_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="Ontology file not found")
-    assert_user_org_access(cu, f.organization_id)
-    if not _scope_in_effective(cu, f.scope_type, f.scope_id):
-        raise HTTPException(status_code=404, detail="Ontology file not found")
-    return f
-
-
-@router.get(
+# Ontology had duplicate storage and authorization semantics.  Keep one
+# compatibility release with explicit 410 responses, without loading its ORM or
+# CRUD implementation into the user runtime.
+@router.api_route(
     "/terminal/ontology-folders",
-    response_model=list[OntologyFolderRead],
-    dependencies=[_RETIRED_ONTOLOGY],
+    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    include_in_schema=False,
 )
-async def list_ontology_folders_endpoint(
-    scope_type: str = Query(..., description="organization/department/user"),
-    scope_id: str | None = Query(default=None),
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """列出选中 scope 下的本体文件夹（scope 必须在用户有效集合内）。"""
-    if not _scope_in_effective(cu, scope_type, scope_id):
-        raise HTTPException(status_code=404, detail="Scope not accessible")
-    return await list_ontology_folders(db, cu.organization_id, scope_type, scope_id)
-
-
-@router.post(
-    "/terminal/ontology-folders",
-    response_model=OntologyFolderRead,
-    status_code=201,
-    dependencies=[_RETIRED_ONTOLOGY],
+@router.api_route(
+    "/terminal/ontology-folders/{path:path}",
+    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    include_in_schema=False,
 )
-async def create_ontology_folder_endpoint(
-    data: OntologyFolderCreate,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """新建本体文件夹（created_by 记为当前用户）；scope 必须在用户有效集合内。"""
-    assert_user_write(cu)
-    if not _scope_in_effective(cu, data.scope_type, data.scope_id):
-        raise HTTPException(status_code=403, detail="无权在该作用域下新建本体文件夹")
-    f = await create_ontology_folder(
-        db, cu.organization_id, data.scope_type, data.scope_id, data.path, created_by=cu.id,
-    )
-    await db.commit()
-    await db.refresh(f)
-    return f
-
-
-@router.patch(
-    "/terminal/ontology-folders/{folder_id}",
-    response_model=OntologyFolderRead,
-    dependencies=[_RETIRED_ONTOLOGY],
-)
-async def rename_ontology_folder_endpoint(
-    folder_id: UUID, data: OntologyFolderRename,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """重命名本体文件夹（仅创建者）。"""
-    assert_user_write(cu)
-    f = await _get_visible_ontology_folder(db, folder_id, cu)
-    _assert_owner(f, cu)
-    f = await rename_ontology_folder(db, f, data.path)
-    await db.commit()
-    await db.refresh(f)
-    return f
-
-
-@router.delete(
-    "/terminal/ontology-folders/{folder_id}",
-    status_code=204,
-    dependencies=[_RETIRED_ONTOLOGY],
-)
-async def delete_ontology_folder_endpoint(
-    folder_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """删除本体文件夹及其下内容（仅创建者，级联子文件夹与文件）。"""
-    assert_user_write(cu)
-    f = await _get_visible_ontology_folder(db, folder_id, cu)
-    _assert_owner(f, cu)
-    await soft_delete_ontology_folder(db, f)
-    await db.commit()
-
-
-@router.get(
+@router.api_route(
     "/terminal/ontology-files",
-    response_model=list[OntologyFileRead],
-    dependencies=[_RETIRED_ONTOLOGY],
+    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    include_in_schema=False,
 )
-async def list_ontology_files_endpoint(
-    scope_type: str = Query(..., description="organization/department/user"),
-    scope_id: str | None = Query(default=None),
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """列出选中 scope 下的本体 Markdown 文件（含 content；scope 必须在用户有效集合内）。"""
-    if not _scope_in_effective(cu, scope_type, scope_id):
-        raise HTTPException(status_code=404, detail="Scope not accessible")
-    return await list_ontology_files(db, cu.organization_id, scope_type, scope_id)
-
-
-@router.post(
-    "/terminal/ontology-files",
-    response_model=OntologyFileRead,
-    status_code=201,
-    dependencies=[_RETIRED_ONTOLOGY],
+@router.api_route(
+    "/terminal/ontology-files/{path:path}",
+    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    include_in_schema=False,
 )
-async def upsert_ontology_file_endpoint(
-    data: OntologyFileCreate,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """导入 / 覆盖本体 Markdown 文件（created_by 记为当前用户）；scope 必须在用户有效集合内。"""
-    assert_user_write(cu)
-    if not _scope_in_effective(cu, data.scope_type, data.scope_id):
-        raise HTTPException(status_code=403, detail="无权在该作用域下导入本体")
-    f = await upsert_ontology_file(
-        db, cu.organization_id, data.scope_type, data.scope_id, data, created_by=cu.id,
-    )
-    await db.commit()
-    await db.refresh(f)
-    return f
+async def retired_terminal_ontology(path: str = ""):
+    del path
+    from app.api.retirement import retired_response
 
-
-@router.get(
-    "/terminal/ontology-files/{file_id}",
-    response_model=OntologyFileRead,
-    dependencies=[_RETIRED_ONTOLOGY],
-)
-async def get_ontology_file_endpoint(
-    file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """取本体文件内容（scope 可见即可读）。"""
-    return await _get_visible_ontology_file(db, file_id, cu)
-
-
-@router.patch(
-    "/terminal/ontology-files/{file_id}",
-    response_model=OntologyFileRead,
-    dependencies=[_RETIRED_ONTOLOGY],
-)
-async def update_ontology_file_endpoint(
-    file_id: UUID, data: OntologyFileUpdate,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """重命名 / 编辑本体文件内容（仅创建者）。"""
-    assert_user_write(cu)
-    f = await _get_visible_ontology_file(db, file_id, cu)
-    _assert_owner(f, cu)
-    f = await update_ontology_file(db, f, data)
-    await db.commit()
-    await db.refresh(f)
-    return f
-
-
-@router.delete(
-    "/terminal/ontology-files/{file_id}",
-    status_code=204,
-    dependencies=[_RETIRED_ONTOLOGY],
-)
-async def delete_ontology_file_endpoint(
-    file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """删除本体文件（仅创建者）。"""
-    assert_user_write(cu)
-    f = await _get_visible_ontology_file(db, file_id, cu)
-    _assert_owner(f, cu)
-    await soft_delete_ontology_file(db, f)
-    await db.commit()
+    return retired_response("Ontology 已下线；请使用知识库/RAG 与工作空间文件。")

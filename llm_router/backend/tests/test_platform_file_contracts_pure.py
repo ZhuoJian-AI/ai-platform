@@ -16,7 +16,6 @@ from app.agents import llm_client
 from app.agents.graph import nodes
 from app.api import terminal
 from app.auth.user_auth import current_user_for_user
-from app.config import settings
 from app.main import _redacted_validation_errors, conceal_stable_file_forbidden
 from app.models.workspace import WorkspaceFileVersion
 from app.schemas.workspace import (
@@ -25,7 +24,7 @@ from app.schemas.workspace import (
     WorkspaceFileRestoreRequest,
     WorkspaceUploadInitiate,
 )
-from app.services import platform_extension_catalog, workspace_governance_service, workspace_service
+from app.services import assistant_tool_catalog, workspace_governance_service, workspace_service
 from app.services.file_capability_registry import (
     FILE_TOOL_SCHEMAS,
     FileCapabilityRegistry,
@@ -42,7 +41,7 @@ def db_engine():
 
 
 def test_workspace_platform_catalog_exposes_all_canonical_atomic_tools():
-    group = next(item for item in platform_extension_catalog.SYSTEM_TOOL_GROUPS if item["slug"] == "workspace-files")
+    group = next(item for item in assistant_tool_catalog.SYSTEM_TOOL_GROUPS if item["slug"] == "workspace-files")
     assert {
         "workspace_list",
         "workspace_search",
@@ -209,7 +208,7 @@ def test_plain_text_mutation_rejects_known_binary_but_allows_code():
     workspace_service._assert_plain_text_update_supported(source_code)
 
 
-def test_office_edit_capability_is_server_owned_and_fail_closed(monkeypatch):
+def test_online_office_edit_capability_is_retired():
     file = SimpleNamespace(
         path="共享/明细.xlsx",
         content_ref="oss://projects/repo/assets/source.xlsx",
@@ -217,15 +216,8 @@ def test_office_edit_capability_is_server_owned_and_fail_closed(monkeypatch):
         size=1024,
         metadata_={"binary": True, "name": "明细.xlsx"},
     )
-    monkeypatch.setattr(settings, "workspace_weboffice_edit_enabled", True)
-    monkeypatch.setattr(settings, "workspace_object_storage_enabled", True)
-    monkeypatch.setattr(settings, "storage_gateway_url", "https://storage.example.test")
-    monkeypatch.setattr(settings, "storage_project_token", "project-token")
-    monkeypatch.setattr(settings, "workspace_office_event_callback_secret", "c" * 32)
-    assert workspace_service.office_edit_enabled(file, can_update=True)
-    assert not workspace_service.office_edit_enabled(file, can_update=False)
-    monkeypatch.setattr(settings, "workspace_office_event_callback_secret", "")
     assert not workspace_service.office_edit_enabled(file, can_update=True)
+    assert not workspace_service.office_edit_enabled(file, can_update=False)
 
 
 def test_terminal_delete_contract_requires_explicit_version_and_key():

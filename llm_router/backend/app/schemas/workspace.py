@@ -231,24 +231,6 @@ class WorkspacePreviewSessionRefresh(BaseModel):
     room_id: UUID | None = None
 
 
-class WorkspaceEditRoomStatusRead(BaseModel):
-    room_id: UUID
-    status: str
-    save_status: str
-    source_file_version_id: UUID | None = None
-    final_file_version_id: UUID | None = None
-    current_version_id: UUID | None = None
-    error: str | None = None
-
-
-class WorkspaceEditSessionCreate(BaseModel):
-    client_open_id: str = Field(..., min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
-
-
-class WorkspaceEditSessionClose(BaseModel):
-    client_open_id: str = Field(..., min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
-
-
 class WorkspaceFileRestoreRequest(BaseModel):
     """Explicit optimistic restore; the server never guesses a mutable base."""
 

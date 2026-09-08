@@ -79,9 +79,6 @@ class Settings(BaseSettings):
     # guard; this budget only prevents a genuinely looping agent from running
     # forever. Complex office tasks need more than the old hard-coded 8 steps.
     agent_max_steps: int = 24
-    extension_builder_url: str = "http://localhost:8040"
-    extension_builder_token: str = "extension-builder-dev-token-change-in-production"
-    extension_builder_timeout_seconds: int = 600
     extension_archive_max_bytes: int = 25 * 1024 * 1024
     extension_artifact_max_bytes: int = 100 * 1024 * 1024
     extension_catalog_community_url: str = "https://awesome-dsh-plugin.com/plugins.json"
@@ -89,23 +86,6 @@ class Settings(BaseSettings):
     extension_catalog_sync_interval_seconds: int = 24 * 60 * 60
     extension_catalog_sync_poll_seconds: int = 60 * 60
     subsystem_sync_poll_seconds: int = 30
-    # GitHub App-backed enterprise module repository publisher. The private
-    # key is held only by the central backend; tenant ECS instances receive
-    # repository-scoped, short-lived installation tokens.
-    github_module_publisher_enabled: bool = False
-    github_module_publisher_owner: str = "ZhuoJian-AI"
-    github_module_publisher_app_id: str = ""
-    github_module_publisher_installation_id: str = ""
-    github_module_publisher_private_key_b64: str = ""
-    github_module_publisher_timeout_seconds: int = 20
-    # Central Coolify control plane.  The bearer token never leaves this
-    # backend; tenant publish keys can only operate on their own deployment
-    # profile and deterministic repository/domain names.
-    coolify_module_deployer_enabled: bool = False
-    coolify_api_url: str = ""
-    coolify_api_token: str = ""
-    coolify_timeout_seconds: int = 30
-    module_saas_origin: str = "https://ai-platform.staging.zhuojianai.com"
     original_preview_enabled: bool = False
     # Native file preview is part of the staging-wide workspace experience;
     # keep the emergency deployment switch but no tenant allowlist.
@@ -142,13 +122,6 @@ class Settings(BaseSettings):
     workspace_proxy_upload_max_bytes: int = 1 * 1024 * 1024
     workspace_upload_session_ttl_seconds: int = 24 * 60 * 60
     workspace_weboffice_enabled: bool = False
-    # Human-triggered Office editing is a separate fail-closed feature.  It is
-    # never inferred from preview enablement: the Storage Gateway additionally
-    # verifies IMM/MNS configuration and OSS versioning before issuing a token.
-    workspace_weboffice_edit_enabled: bool = False
-    workspace_office_event_callback_secret: SecretStr = SecretStr("")
-    workspace_office_reconcile_poll_seconds: float = 1.0
-    workspace_office_reconcile_lease_seconds: int = 5 * 60
     workspace_weboffice_max_bytes: int = 200 * 1024 * 1024
     workspace_pdf_direct_preview_max_bytes: int = 20 * 1024 * 1024
     workspace_preview_job_poll_seconds: float = 1.0
@@ -171,40 +144,6 @@ class Settings(BaseSettings):
         # Tests and gradual configuration reloads may temporarily assign the
         # legacy plain-string representation.  Never expose it from repr/logs.
         return str(value or "").strip()
-
-    @property
-    def workspace_office_event_callback_secret_value(self) -> str:
-        value = self.workspace_office_event_callback_secret
-        if isinstance(value, SecretStr):
-            return value.get_secret_value().strip()
-        return str(value or "").strip()
-
-    @property
-    def workspace_weboffice_edit_configured(self) -> bool:
-        """Fail closed unless every Platform-side editing dependency exists."""
-        return bool(
-            self.workspace_weboffice_edit_enabled
-            and self.workspace_object_storage_configured
-            and len(self.workspace_office_event_callback_secret_value) >= 32
-        )
-
-    @property
-    def github_module_publisher_configured(self) -> bool:
-        return bool(
-            self.github_module_publisher_enabled
-            and self.github_module_publisher_owner.strip()
-            and self.github_module_publisher_app_id.strip()
-            and self.github_module_publisher_installation_id.strip()
-            and self.github_module_publisher_private_key_b64.strip()
-        )
-
-    @property
-    def coolify_module_deployer_configured(self) -> bool:
-        return bool(
-            self.coolify_module_deployer_enabled
-            and self.coolify_api_url.strip()
-            and self.coolify_api_token.strip()
-        )
 
     @staticmethod
     def _canonical_org_identity(value: str) -> str:

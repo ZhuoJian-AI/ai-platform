@@ -18,7 +18,6 @@ from app.agents.graph import nodes, run_registry
 from app.api import dsh_internal, terminal
 from app.config import settings
 from app.schemas.task import TaskApprovalDecision
-from app.services import platform_extension_catalog as catalog
 
 
 @pytest.fixture(autouse=True)
@@ -372,12 +371,6 @@ async def test_runtime_approval_policy_events_are_traced_like_other_policies(mon
     assert state["assistant_final"] == "已按你的要求放弃删除。"
 
 
-def test_user_approval_plugin_is_enabled_in_the_catalog_and_manifest():
-    row = next(item for item in catalog.catalog_items() if item["slug"] == "dsh-user-approval")
-    assert row["status"] == "enabled"
-    assert row["compatibility_warnings"] == []
-    assert "SSE" in row["description"] and "审批" in row["description"]
-    plugin = next(item for item in catalog.baseline_manifest()["plugins"] if item["slug"] == "dsh-user-approval")
-    assert plugin["enabled"] is True
-    assert "description" not in plugin  # release manifest keeps its shape
-    assert plugin["capabilities"] == ["approval"]
+def test_native_assistant_core_preserves_risky_tool_approval_metadata():
+    assert _spec("workspace_delete_file")["approval"] == "ask"
+    assert _spec("workspace_read_file").get("approval") is None

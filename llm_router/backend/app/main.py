@@ -57,18 +57,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from app.services.skill_runner_client import resume_pending_installs
         install_resume_task = asyncio.create_task(resume_pending_installs())
 
-    # PostgreSQL is the release fact source.  If DSH restarted independently,
-    # restore the last active immutable manifest after both services are up.
-    from app.services.platform_extension_service import sync_active_release_to_runtime
-    extension_sync_task = asyncio.create_task(sync_active_release_to_runtime())
     from app.services.subsystem_integration_service import run_subsystem_sync_scheduler
     subsystem_sync_task = asyncio.create_task(run_subsystem_sync_scheduler())
 
     yield
     if install_resume_task is not None and not install_resume_task.done():
         install_resume_task.cancel()
-    if not extension_sync_task.done():
-        extension_sync_task.cancel()
     if not subsystem_sync_task.done():
         subsystem_sync_task.cancel()
     logger.info("llm_router_stopping")

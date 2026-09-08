@@ -39,9 +39,6 @@ from app.schemas.workspace import (
     WorkspaceBulkDeleteResult,
     WorkspaceCreate,
     WorkspaceDownloadTicketRead,
-    WorkspaceEditRoomStatusRead,
-    WorkspaceEditSessionClose,
-    WorkspaceEditSessionCreate,
     WorkspaceFallbackPreviewRead,
     WorkspaceFileCreate,
     WorkspaceFileDeleteRequest,
@@ -70,7 +67,6 @@ from app.schemas.workspace import (
 from app.services import (
     storage_gateway_service,
     workspace_governance_service,
-    workspace_office_edit_service,
     workspace_pdf_preview_service,
     workspace_preview_session_service,
     workspace_service,
@@ -747,144 +743,41 @@ async def refresh_preview_session_endpoint(
 
 @router.post(
     "/files/{file_id}/edit-session",
-    response_model=WorkspacePreviewSessionRead,
+    status_code=410,
     dependencies=[_RETIRED_OFFICE_EDIT],
 )
-async def edit_session_endpoint(
-    file_id: UUID,
-    data: WorkspaceEditSessionCreate,
-    response: Response,
-    auth: CurrentAdmin = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    response.headers["Cache-Control"] = "private, no-store"
-    f = await get_file(db, file_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    ws = await get_workspace(db, f.workspace_id)
-    if ws is None:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    assert_org_write_access(auth, ws.organization_id)
-    try:
-        result = await workspace_office_edit_service.create_edit_session(
-            db,
-            f,
-            actor_type="admin",
-            actor_id=str(auth.id),
-            client_open_id=data.client_open_id,
-        )
-        await db.commit()
-        return WorkspacePreviewSessionRead(**result)
-    except OriginalPreviewError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except storage_gateway_service.StorageGatewayError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+async def retired_admin_edit_session(file_id: UUID):  # noqa: ARG001
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 @router.post(
     "/files/{file_id}/edit-session/refresh",
-    response_model=WorkspacePreviewSessionRead,
+    status_code=410,
     dependencies=[_RETIRED_OFFICE_EDIT],
 )
-async def refresh_edit_session_endpoint(
-    file_id: UUID,
-    data: WorkspacePreviewSessionRefresh,
-    response: Response,
-    auth: CurrentAdmin = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    response.headers["Cache-Control"] = "private, no-store"
-    f = await get_file(db, file_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    ws = await get_workspace(db, f.workspace_id)
-    if ws is None:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    assert_org_write_access(auth, ws.organization_id)
-    if data.room_id is None:
-        raise HTTPException(status_code=422, detail="room_id is required for edit refresh")
-    try:
-        result = await workspace_office_edit_service.refresh_edit_session(
-            db,
-            f,
-            actor_type="admin",
-            actor_id=str(auth.id),
-            access_token=data.access_token,
-            refresh_token=data.refresh_token,
-            refresh_context=data.refresh_context,
-            room_id=data.room_id,
-        )
-        await db.commit()
-        return WorkspacePreviewSessionRead(**result)
-    except OriginalPreviewError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except storage_gateway_service.StorageGatewayError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+async def retired_admin_edit_session_refresh(file_id: UUID):  # noqa: ARG001
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 @router.get(
     "/files/{file_id}/edit-session/{room_id}",
-    response_model=WorkspaceEditRoomStatusRead,
+    status_code=410,
     dependencies=[_RETIRED_OFFICE_EDIT],
 )
-async def edit_session_status_endpoint(
-    file_id: UUID,
-    room_id: UUID,
-    response: Response,
-    auth: CurrentAdmin = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+async def retired_admin_edit_session_status(
+    file_id: UUID,  # noqa: ARG001
+    room_id: UUID,  # noqa: ARG001
 ):
-    response.headers["Cache-Control"] = "private, no-store"
-    f = await get_file(db, file_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    ws = await get_workspace(db, f.workspace_id)
-    if ws is None:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    assert_org_write_access(auth, ws.organization_id)
-    room = await workspace_office_edit_service.get_edit_room(
-        db,
-        f,
-        room_id=room_id,
-        actor_type="admin",
-        actor_id=str(auth.id),
-    )
-    if room is None:
-        raise HTTPException(status_code=404, detail="Edit session not found")
-    return WorkspaceEditRoomStatusRead(**await workspace_office_edit_service.edit_room_status_payload(db, f, room))
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 @router.post(
     "/files/{file_id}/edit-session/close",
-    response_model=WorkspaceEditRoomStatusRead,
+    status_code=410,
     dependencies=[_RETIRED_OFFICE_EDIT],
 )
-async def close_edit_session_endpoint(
-    file_id: UUID,
-    data: WorkspaceEditSessionClose,
-    response: Response,
-    auth: CurrentAdmin = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    response.headers["Cache-Control"] = "private, no-store"
-    f = await get_file(db, file_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="File not found")
-    ws = await get_workspace(db, f.workspace_id)
-    if ws is None:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    assert_org_write_access(auth, ws.organization_id)
-    room = await workspace_office_edit_service.close_edit_session(
-        db,
-        f,
-        actor_type="admin",
-        actor_id=str(auth.id),
-        client_open_id=data.client_open_id,
-    )
-    if room is None:
-        raise HTTPException(status_code=404, detail="Edit session not found")
-    await db.commit()
-    return WorkspaceEditRoomStatusRead(**await workspace_office_edit_service.edit_room_status_payload(db, f, room))
+async def retired_admin_edit_session_close(file_id: UUID):  # noqa: ARG001
+    """Compatibility path; the dependency always returns Chinese 410."""
 
 
 async def _fallback_preview(

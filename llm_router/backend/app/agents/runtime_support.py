@@ -50,7 +50,6 @@ def general_initial_state(
         "skill_ids": list(config.get("skill_ids") or []),
         "invoked_skill_ids": [str(item["id"]) for item in invoked],
         "invoked_skills": invoked, "loaded_skills": [], "executed_skills": [],
-        "ontology_ids": list(config.get("ontology_ids") or []),
         "rag_collection_ids": list(config.get("rag_collection_ids") or []),
         "model_alias": config.get("model_alias") or "default",
         "exec_mode": config.get("exec_mode") or "craft",

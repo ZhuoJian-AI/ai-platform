@@ -10,7 +10,7 @@ import {
 import {
   PlusOutlined, SendOutlined, RobotOutlined, SettingOutlined, FileTextOutlined,
   LogoutOutlined, DatabaseOutlined, PartitionOutlined,
-  UnorderedListOutlined, BookOutlined, ApiOutlined,
+  UnorderedListOutlined, BookOutlined,
   FolderOpenOutlined, MoreOutlined, ThunderboltOutlined,
   AppstoreOutlined, CheckCircleOutlined,
   RightOutlined, DownOutlined,
@@ -106,14 +106,14 @@ function readApplicationNavPinPreference(userId?: string | null): boolean {
 }
 
 // ── 执行过程时间线 block 模型 ──────────────────────────────────────────
-type TraceCategory = 'rag' | 'ontology' | 'memory' | 'data_interface' | 'skill' | 'file' | 'policy';
+type TraceCategory = 'rag' | 'memory' | 'skill' | 'file' | 'policy';
 type Block =
   | { kind: 'phase'; index: number }
   | { kind: 'tool_call'; id: string; name: string; arguments: string;
       running: boolean; result?: { content: string; ok: boolean } }
   | { kind: 'text'; content: string }
   | { kind: 'trace'; category: TraceCategory; title: string; detail?: unknown }
-  | { kind: 'meta'; subtype: 'memory' | 'judge'; data: unknown }
+  | { kind: 'meta'; subtype: 'memory'; data: unknown }
   // 高风险工具用户审批：SSE approval_request 落成一块，approval_decided 补 outcome/decidedBy
   | ({ kind: 'approval' } & ApprovalCardData);
 
@@ -995,7 +995,7 @@ export default function Terminal() {
         break;
       }
       case 'trace': {
-        // 五类资源调用痕迹（rag/ontology/memory/data_interface）+ policy 策略痕迹；技能走 tool_call 不走此分支。
+        // 原生资源调用痕迹（RAG/记忆/文件）+ policy；Skill 走 tool_call。
         // policy 类 approval_requested/approval_decided 只作为轻量痕迹渲染，审批卡片本体由 approval_request 事件负责。
         const { category: _c, title: _t, ...rest } = evt as Record<string, unknown>;
         const category = (evt.category as TraceCategory) ?? 'rag';
@@ -1018,9 +1018,6 @@ export default function Terminal() {
         if (evt.status === 'failed') message.error((evt.error as string) || '图片处理失败');
         break;
       }
-      case 'judge':
-        updateTurn((bs) => [...bs, { kind: 'meta', subtype: 'judge', data: evt }]);
-        break;
       case 'error':
         if (/排队|queue.*(timeout|300)/i.test(String(evt.message ?? ''))) {
           setRuntimeStatus({ status: 'timeout' });
@@ -2315,10 +2312,6 @@ export default function Terminal() {
         getSpreadsheetPage={terminal.getWsFileSpreadsheetPage}
         loadDownloadTicket={terminal.getWsFileDownloadTicket}
         loadOriginalFile={terminal.downloadWsFile}
-        createEditSession={terminal.createWsFileEditSession}
-        refreshEditSession={terminal.refreshWsFileEditSession}
-        closeEditSession={terminal.closeWsFileEditSession}
-        getEditSessionStatus={terminal.getWsFileEditSessionStatus}
         externalVersionEvent={browserFileId ? fileEventsById[browserFileId] ?? null : null}
       />
 
@@ -3860,12 +3853,10 @@ function AssistantBubble({ msg, streaming, onLink, fileLinks, taskId }: { msg: C
               </div>
             );
           }
-          // meta（记忆沉淀 / 判官）
+          // meta（记忆沉淀）
           if (b.kind === 'meta') {
             const data = b.data as Record<string, unknown>;
-            const label = b.subtype === 'memory'
-              ? `记忆沉淀 · ${(data?.extracted as number) ?? 0} 条`
-              : `判官评分`;
+            const label = `记忆沉淀 · ${(data?.extracted as number) ?? 0} 条`;
             return (
               <div key={i} className="wb-meta">
                 <DatabaseOutlined /> {label}
@@ -4329,14 +4320,12 @@ function ToolCard({ b }: { b: Extract<Block, { kind: 'tool_call' }> }) {
   );
 }
 
-// ── 资源调用痕迹 chip（技能之外的五类：rag/ontology/memory/data_interface）───
+// ── 原生 Assistant Core 资源调用痕迹 ──────────────────────────────────
 // 与正文(text)和技能(ToolCard)都做区分：轻量单行 + 左侧主色竖条 + 类别图标，可展开看明细。
 
 const TRACE_META: Record<TraceCategory, { icon: ReactNode; color: string; label: string }> = {
   rag: { icon: <BookOutlined />, color: '#0ea5e9', label: '知识库' },
-  ontology: { icon: <PartitionOutlined />, color: '#8b5cf6', label: '本体' },
   memory: { icon: <DatabaseOutlined />, color: '#f59e0b', label: '记忆' },
-  data_interface: { icon: <ApiOutlined />, color: '#10b981', label: '数据接口' },
   file: { icon: <FileTextOutlined />, color: '#0ea5e9', label: '文件' },
   skill: { icon: <ThunderboltOutlined />, color: WB.primary, label: '技能' },
   policy: { icon: <SafetyOutlined />, color: '#f97316', label: '策略' },
@@ -4485,10 +4474,6 @@ function ResourcePanel({ taskConfig, resources, agent }: {
         <div><Tag color="blue">默认推荐 {agent?.skill_ids.length ?? 0} · 用户可用 {resources?.skills.length ?? 0}</Tag></div>
       </div>
       <div>
-        <Typography.Text type="secondary">本体</Typography.Text>
-        <div><Tag color="blue">按权限自动注入 {resources?.ontologies.length ?? 0}</Tag></div>
-      </div>
-      <div>
         <Typography.Text type="secondary">智能体固定 RAG</Typography.Text>
         <div><Tag color={agent?.rag_collection_ids.length ? 'blue' : 'default'}>
           {agent ? `固定绑定 ${agent.rag_collection_ids.length}` : '通用智能体不加载 RAG'}
@@ -4577,10 +4562,6 @@ function FilePanel({ workspaceId, workspaceName }: { workspaceId: string | null;
         getSpreadsheetPage={terminal.getWsFileSpreadsheetPage}
         loadDownloadTicket={terminal.getWsFileDownloadTicket}
         loadOriginalFile={terminal.downloadWsFile}
-        createEditSession={terminal.createWsFileEditSession}
-        refreshEditSession={terminal.refreshWsFileEditSession}
-        closeEditSession={terminal.closeWsFileEditSession}
-        getEditSessionStatus={terminal.getWsFileEditSessionStatus}
       />
     </div>
   );

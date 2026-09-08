@@ -21,7 +21,7 @@ GitHub App Source 选择“卓建-github”。当前应用使用手动部署；�
 `Deploy`，不要假定 push 会自动上线。
 
 域名表单选择 `https`，Domain 填 `ai-platform.staging.zhuojianai.com`，Port 填 `80`，
-Path 留空。不要给 PostgreSQL、Redis、Mock 或 backend 配置公网域名或宿主机端口。
+Path 留空。不要给 PostgreSQL、Redis 或 backend 配置公网域名或宿主机端口。
 
 ## 必填环境变量
 
@@ -38,8 +38,6 @@ Path 留空。不要给 PostgreSQL、Redis、Mock 或 backend 配置公网域名
 - `SECRET_KEY=<随机长字符串>`
 - `OAUTH_SIGNING_KEY=<独立的随机长字符串>`
 - `MASTER_ENCRYPTION_KEY=<Fernet key>`
-- `MES_API_KEY=<随机长字符串>`
-- `CRM_API_KEY=<随机长字符串>`
 - `CODE_SKILLS_ENABLED=true`
 - `SKILL_RUNNER_TOKEN=<随机长字符串>`
 - `DSH_RUNTIME_TOKEN=<随机长字符串>`
@@ -77,7 +75,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 验收要求：
 
-1. `postgres`、`redis`、`mock`、`skill-runner`、`dsh-runtime`、`extension-builder`、
+1. `postgres`、`redis`、`skill-runner`、`dsh-runtime`、`extension-builder`、
    `backend`、`workspace-parser`、`workspace-preview`、`office-edit-reconcile`、`storage-lifecycle`、
    `multimodal-worker`、`frontend` 均健康；
 2. `https://ai-platform.staging.zhuojianai.com/health` 返回 HTTP 200；
