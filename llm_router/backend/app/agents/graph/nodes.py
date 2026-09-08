@@ -617,7 +617,6 @@ async def _prepare_current_turn_images(state: AgentState, db, user) -> list[mult
                     ocr_text,
                     str(state["org_id"]),
                     state.get("department_id"),
-                    None,
                 )
                 # Redacting extracted text cannot redact pixels, so raw image transmission must stop.
                 if dlp.blocked or dlp.redacted_text is not None:

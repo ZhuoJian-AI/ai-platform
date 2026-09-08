@@ -1733,7 +1733,6 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     prompt,
                     str(state["org_id"]),
                     state.get("department_id"),
-                    None,
                 )
                 if dlp.blocked:
                     return json.dumps({"status": "error", "error": "生图提示词被安全策略拦截"}, ensure_ascii=False)
