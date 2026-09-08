@@ -416,14 +416,14 @@ async def _organization_tree(db_session):
     db_session.add(department)
     await db_session.flush()
     user = User(
-        organization_id=org.id, department_id=department.id, team_id=None,
+        organization_id=org.id, department_id=department.id,
         username=f"member-{uuid4().hex[:8]}", role="member", is_active=True,
     )
     db_session.add(user)
     await db_session.flush()
     current = CurrentUser(
         user=user, id=str(user.id), email=user.username, role=user.role,
-        organization_id=org.id, department_id=str(department.id), team_id=None,
+        organization_id=org.id, department_id=str(department.id),
     )
     return org, other, department, None, current
 

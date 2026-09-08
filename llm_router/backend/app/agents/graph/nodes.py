@@ -560,7 +560,6 @@ async def retrieve_rag(state: AgentState) -> dict:
                 UUID(state["org_id"]),
                 req,
                 department_id=state.get("department_id"),
-                team_id=None,
             )
             for h in hits:
                 merged.append(
@@ -893,7 +892,6 @@ async def _configure_visual_turn(
         UUID(state["org_id"]),
         state.get("model_alias", "default"),
         dept_id=state.get("department_id"),
-        team_id=None,
     )
     vision_enabled, _ = await multimodal_service.organization_feature_flags(db, UUID(state["org_id"]))
     direct = bool(
@@ -916,7 +914,6 @@ async def _configure_visual_turn(
                 request_id=f"vision-{uuid4().hex}",
                 organization_id=str(state["org_id"]),
                 department_id=state.get("department_id"),
-                team_id=None,
                 provider_id=str(provider.id),
                 event_type="vision_input",
                 direction="outbound",
@@ -945,7 +942,6 @@ async def _configure_visual_turn(
         db,
         UUID(state["org_id"]),
         dept_id=state.get("department_id"),
-        team_id=None,
     )
     if fallback is None:
         raise RuntimeError("当前组织未配置视觉模型；仍可使用 OCR 或 image_tool 处理图片")
@@ -973,7 +969,6 @@ async def _configure_visual_turn(
         provider_override=fallback.provider,
         model_override=fallback.model,
         dept_id=state.get("department_id"),
-        team_id=None,
     )
     description = (visual.content or "").strip()
     if not description:
@@ -983,7 +978,6 @@ async def _configure_visual_turn(
             request_id=f"vision-fallback-{uuid4().hex}",
             organization_id=str(state["org_id"]),
             department_id=state.get("department_id"),
-            team_id=None,
             provider_id=str(fallback.provider.id),
             event_type="vision_fallback",
             direction="outbound",
@@ -1864,7 +1858,6 @@ async def _build_tools(
                 db,
                 user.organization_id,
                 dept_id=user.department_id,
-                team_id=None,
             )
             is not None
         )
@@ -2537,7 +2530,6 @@ async def _execute_tool_call(
                     UUID(state["org_id"]),
                     RagRetrieveRequest(query=query, top_k=top_k),
                     department_id=state.get("department_id"),
-                    team_id=None,
                 )
                 for hit in hits:
                     merged.append(
@@ -3450,7 +3442,6 @@ async def extract_memory(state: AgentState) -> dict:
             [{"role": "user", "content": prompt}],
             system_prompt="你只输出 JSON。",
             dept_id=state.get("department_id"),
-            team_id=None,
         )
         parsed = _parse_json_lenient(result.content)
         raw = parsed.get("facts", []) if isinstance(parsed, dict) else []
@@ -3502,7 +3493,6 @@ async def write_run_log(state: AgentState) -> dict:
             UUID(state["org_id"]),
             state.get("model_alias", "default"),
             dept_id=state.get("department_id"),
-            team_id=None,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("audit_resolve_provider_failed", error=str(exc))
@@ -3513,7 +3503,6 @@ async def write_run_log(state: AgentState) -> dict:
         api_key_id=None,
         organization_id=str(state["org_id"]),
         department_id=str(state["department_id"]) if state.get("department_id") else None,
-        team_id=None,
         provider_id=provider_id,
         event_type="agent_request",
         direction="outbound",

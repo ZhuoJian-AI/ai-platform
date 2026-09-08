@@ -39,13 +39,11 @@ async def test_connector_and_data_interface_routes_are_absent(client: AsyncClien
 async def test_ontology_surface_is_retired(client: AsyncClient):
     org_id = await _make_org(client, "retired-ontology")
     response = await client.get(f"/api/v1/organizations/{org_id}/ontologies")
-    assert response.status_code == 410
-    assert "Ontology" in response.json()["detail"]["message"]
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_old_definition_skill_is_retired_without_affecting_skill_packages(client: AsyncClient):
     org_id = await _make_org(client, "retired-definition-skill")
     response = await client.get(f"/api/v1/organizations/{org_id}/skills")
-    assert response.status_code == 410
-    assert "旧 Definition Skill" in response.json()["detail"]["message"]
+    assert response.status_code == 404

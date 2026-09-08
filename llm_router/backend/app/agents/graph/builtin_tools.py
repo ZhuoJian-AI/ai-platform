@@ -1725,7 +1725,6 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     db,
                     UUID(state["org_id"]),
                     dept_id=state.get("department_id"),
-                    team_id=None,
                 )
                 if scoped is None:
                     return json.dumps({"status": "unavailable", "error": "当前组织未配置生图模型"}, ensure_ascii=False)
@@ -1759,7 +1758,6 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     db=db,
                     org_id=UUID(state["org_id"]),
                     dept_id=state.get("department_id"),
-                    team_id=None,
                 )
                 raw, width, height = multimodal_service.normalize_generated_png(result.raw)
                 requested = PurePosixPath(str(params.get("output_name") or "generated-image.png")).name
@@ -1800,7 +1798,6 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                         request_id=f"image-generation-{uuid4().hex}",
                         organization_id=str(state["org_id"]),
                         department_id=state.get("department_id"),
-                        team_id=None,
                         provider_id=result.provider_id,
                         event_type="image_generation",
                         direction="outbound",

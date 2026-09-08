@@ -64,5 +64,5 @@ api_router.include_router(subsystem_ai_router, tags=["subsystem-ai"])
 # 终端用户端（require_user 守卫，用户 JWT）
 api_router.include_router(terminal_router, tags=["terminal"])
 api_router.include_router(file_event_router, tags=["terminal-file-events"])
-# 长期记忆（管理端维护 org/dept/team 级长期记忆）
+# 长期记忆（管理端维护组织、部门、角色和员工级长期记忆）
 api_router.include_router(memory_router, tags=["memory"])
