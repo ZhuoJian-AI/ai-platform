@@ -2622,7 +2622,6 @@ async def ingest_kb_document_endpoint(
             data,
             created_by=cu.id,
             department_id=cu.department_id,
-            team_id=None,
         )
     except rag_service.EmbeddingError as exc:
         # service 已置 doc=failed + flush；commit 落库 failed 供排查，转 502
@@ -2658,7 +2657,6 @@ async def upload_kb_document_endpoint(
             folder_path=folder_path,
             created_by=cu.id,
             department_id=cu.department_id,
-            team_id=None,
         )
     except doc_parser.UnsupportedFileTypeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -2752,7 +2750,6 @@ async def reingest_kb_document_endpoint(
             coll.organization_id,
             data,
             department_id=cu.department_id,
-            team_id=None,
         )
     except rag_service.EmbeddingError as exc:
         # 回滚：恢复旧分块与原 doc，不留下 0 chunk 的 failed 行

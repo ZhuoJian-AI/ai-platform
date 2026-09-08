@@ -32,12 +32,11 @@ async def find_provider(
     model: str,
     preferred_type: str | None = None,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> LlmProvider | None:
     """根据路由策略找到支持指定模型的提供商。
 
     dept_id 取自调用方作用域（API Key 或智能体运行时 scope），用于按
-    部门>企业优先级筛选继承候选。team_id 仅保留调用兼容且被忽略。
+    部门>企业优先级筛选继承候选。
     """
     # 查找匹配的路由策略
     result = await db.execute(
@@ -50,12 +49,12 @@ async def find_provider(
 
     for policy in policies:
         if fnmatch.fnmatch(model, policy.model_pattern):
-            provider = await _select_provider(db, org_id, policy, model, preferred_type, dept_id, team_id)
+            provider = await _select_provider(db, org_id, policy, model, preferred_type, dept_id)
             if provider:
                 return provider
 
     # 如果没有匹配的策略，尝试直接查找支持该模型的提供商
-    return await _find_any_provider(db, org_id, model, preferred_type, dept_id, team_id)
+    return await _find_any_provider(db, org_id, model, preferred_type, dept_id)
 
 
 async def _select_provider(
@@ -65,11 +64,10 @@ async def _select_provider(
     model: str,
     preferred_type: str | None = None,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> LlmProvider | None:
     """按策略选择提供商。"""
-    # 获取策略配置的提供商（已按 团队>部门>组织 优先级排序）
-    providers = await _get_active_providers(db, org_id, policy.provider_ids, model, preferred_type, dept_id, team_id)
+    # 获取策略配置的提供商（已按 部门>组织 优先级排序）
+    providers = await _get_active_providers(db, org_id, policy.provider_ids, model, preferred_type, dept_id)
     if not providers:
         return None
 
@@ -90,7 +88,7 @@ async def _select_provider(
         return providers[0]
 
 
-def _scope_clause(dept_id: str | UUID | None, team_id: str | UUID | None):  # noqa: ARG001
+def _scope_clause(dept_id: str | UUID | None):
     """构造调用方作用域筛选条件：企业级 + 本部门。"""
     branches = [LlmProvider.scope_type == "organization"]
     if dept_id:
@@ -105,7 +103,6 @@ async def _get_active_providers(
     model: str,
     preferred_type: str | None = None,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> list[LlmProvider]:
     """获取活跃且支持指定模型的提供商列表（按部门>企业 + priority 降序）。"""
     result = await db.execute(
@@ -115,7 +112,7 @@ async def _get_active_providers(
             LlmProvider.is_active.is_(True),
             LlmProvider.deleted_at.is_(None),
             LlmProvider.health_status != "down",
-            _scope_clause(dept_id, team_id),
+            _scope_clause(dept_id),
         )
     )
     all_providers = list(result.scalars().all())
@@ -145,7 +142,6 @@ async def _find_any_provider(
     model: str,
     preferred_type: str | None = None,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> LlmProvider | None:
     """未匹配路由策略时，直接查找支持该模型的提供商（部门>企业级联回退）。"""
     result = await db.execute(
@@ -154,7 +150,7 @@ async def _find_any_provider(
             LlmProvider.is_active.is_(True),
             LlmProvider.deleted_at.is_(None),
             LlmProvider.health_status != "down",
-            _scope_clause(dept_id, team_id),
+            _scope_clause(dept_id),
         )
     )
     providers = list(result.scalars().all())

@@ -505,7 +505,6 @@ async def _process_specialist(db, job: MultimodalJob, directory: Path) -> dict:
         text_part,
         str(job.organization_id),
         current.department_id,
-        None,
     )
     if dlp.blocked:
         raise model_gateway.GatewayError("specialist_input_blocked")
@@ -550,7 +549,6 @@ async def _process_specialist(db, job: MultimodalJob, directory: Path) -> dict:
             response_content,
             str(job.organization_id),
             current.department_id,
-            None,
         )
         if response_dlp.blocked:
             raise model_gateway.GatewayError("specialist_output_blocked")

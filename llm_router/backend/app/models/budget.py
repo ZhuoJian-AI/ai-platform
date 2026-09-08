@@ -1,28 +1,11 @@
-"""Budget Usage ORM model — tracks spend per scope per billing period."""
+"""Append-only AI quota event ledger."""
 
-from datetime import UTC, date, datetime
-from decimal import Decimal
+from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, Date, DateTime, Index, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
-
-
-class BudgetUsage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    __tablename__ = "budget_usage"
-    __table_args__ = (UniqueConstraint("scope_type", "scope_id", "period_start", name="uq_budget_scope_period"),)
-
-    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)  # organization, department, team, api_key
-    scope_id: Mapped[str] = mapped_column(nullable=False)
-
-    period_start: Mapped[date] = mapped_column(Date, nullable=False)
-    period_end: Mapped[date] = mapped_column(Date, nullable=False)
-
-    total_cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False, default=Decimal("0"))
-    total_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    total_output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
-    request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+from app.models.base import Base, UUIDPrimaryKeyMixin
 
 
 class AiQuotaEvent(UUIDPrimaryKeyMixin, Base):
@@ -57,7 +40,6 @@ class AiQuotaEvent(UUIDPrimaryKeyMixin, Base):
     reservation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     organization_id: Mapped[str] = mapped_column(String(36), nullable=False)
     department_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    team_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     api_key_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     provider_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False)

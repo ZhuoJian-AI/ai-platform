@@ -23,7 +23,6 @@ class UserCreate(BaseModel):
     # 兼容旧客户端字段，但组织归属始终只能有一个部门。
     department_ids: list[UUID] = Field(default_factory=list, max_length=1)
     department_id: UUID | None = None
-    team_id: UUID | None = None
     is_active: bool = True
     password: str = Field(..., min_length=8, max_length=128)
     manager_scopes: list[ManagerScopeGrant] = Field(default_factory=list)
@@ -33,8 +32,6 @@ class UserCreate(BaseModel):
     def validate_single_department(self) -> "UserCreate":
         if self.manager_scopes:
             raise ValueError("部门 Skill 管理委派已停用；员工只能管理自己的个人 Skill")
-        if self.team_id is not None:
-            raise ValueError("Team 已停用，请使用部门归属和角色授权")
         legacy_department_id = self.department_ids[0] if self.department_ids else None
         if self.department_id and legacy_department_id and self.department_id != legacy_department_id:
             raise ValueError("department_id and department_ids must identify the same department")
@@ -50,7 +47,6 @@ class UserUpdate(BaseModel):
     role: Literal["member"] | None = None
     department_ids: list[UUID] | None = Field(None, max_length=1)
     department_id: UUID | None = None
-    team_id: UUID | None = None
     is_active: bool | None = None
     password: str | None = Field(None, min_length=8, max_length=128)
     manager_scopes: list[ManagerScopeGrant] | None = None
@@ -60,8 +56,6 @@ class UserUpdate(BaseModel):
     def validate_single_department(self) -> "UserUpdate":
         if self.manager_scopes:
             raise ValueError("部门 Skill 管理委派已停用；员工只能管理自己的个人 Skill")
-        if "team_id" in self.model_fields_set and self.team_id is not None:
-            raise ValueError("Team 已停用，请使用部门归属和角色授权")
         if "department_ids" not in self.model_fields_set or "department_id" not in self.model_fields_set:
             return self
         legacy_department_id = self.department_ids[0] if self.department_ids else None
@@ -101,7 +95,6 @@ class UserRead(BaseModel):
     role: str
     department_ids: list[UUID] = Field(default_factory=list)
     department_id: UUID | None = None
-    team_id: UUID | None = None
     is_active: bool
     must_change_password: bool = False
     manager_scopes: list[ManagerScopeGrant] = Field(default_factory=list)
@@ -113,14 +106,6 @@ class UserRead(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
-
-    @model_validator(mode="after")
-    def hide_retired_team(self) -> "UserRead":
-        # Compatibility field for stale clients. Runtime authorization never
-        # exposes a historical Team membership.
-        self.team_id = None
-        return self
-
 
 class UserLoginResponse(BaseModel):
     access_token: str

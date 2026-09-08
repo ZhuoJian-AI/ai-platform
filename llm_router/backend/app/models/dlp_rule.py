@@ -30,7 +30,7 @@ class DlpRule(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     pattern: Mapped[str] = mapped_column(Text, nullable=False)
 
     # 作用范围
-    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)  # organization, department, team
+    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)  # organization, department
     scope_id: Mapped[str | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

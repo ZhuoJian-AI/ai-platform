@@ -228,10 +228,7 @@ def is_workspace_visible(ws: Workspace, cu: CurrentUser) -> bool:
 
 
 async def list_api_keys_for_user(db: AsyncSession, cu: CurrentUser) -> list[ApiKey]:
-    """用户可访问的活跃 API Key（组织级 + 获权部门；未过期、未吊销）。
-
-    Team 级 Key 已停用，不再进入员工模型路由。
-    """
+    """用户可访问的活跃 API Key（组织级 + 获权部门；未过期、未吊销）。"""
     now = datetime.now(UTC)
     conds: list = [ApiKey.scope_type == "organization"]
     department_ids = department_scope_ids(cu)
@@ -263,7 +260,7 @@ async def list_available_models_for_user(
     keys = await list_api_keys_for_user(db, cu)
 
     providers = await multimodal_service.visible_providers(
-        db, cu.organization_id, dept_id=cu.department_id, team_id=None,
+        db, cu.organization_id, dept_id=cu.department_id,
     )
     organization = await db.get(Organization, cu.organization_id)
     allow_new_gateway = bool(
@@ -321,13 +318,13 @@ async def list_available_models_for_user(
 async def terminal_model_capabilities(db: AsyncSession, cu: CurrentUser, models: list[str]) -> dict:
     """Return additive multimodal metadata without changing the legacy models array."""
     capabilities = await multimodal_service.model_capabilities_for_scope(
-        db, cu.organization_id, models, dept_id=cu.department_id, team_id=None,
+        db, cu.organization_id, models, dept_id=cu.department_id,
     )
     fallback = await multimodal_service.resolve_vision_fallback(
-        db, cu.organization_id, dept_id=cu.department_id, team_id=None,
+        db, cu.organization_id, dept_id=cu.department_id,
     )
     image_generation = await multimodal_service.resolve_image_generation(
-        db, cu.organization_id, dept_id=cu.department_id, team_id=None,
+        db, cu.organization_id, dept_id=cu.department_id,
     )
     return {
         "capabilities": capabilities,

@@ -13,17 +13,19 @@ runtime（app/agents/graph/nodes.py:_build_tools）查找 ``skill.md`` 并解析
 用法:
     cd llm_router/backend
     python scripts/import_clawhub_skill.py --slug docx-cn --org 敏睿制造
-    # 可选: --scope-type organization --scope-id <dept/team/user id> --version 1.0.1
+    # 可选: --scope-type organization --scope-id <dept/user id> --version 1.0.1
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import json
 import logging
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from uuid import UUID
 
@@ -96,7 +98,6 @@ async def import_skill(
     version: str | None, dry_run: bool,
 ) -> None:
     selected_version, detail, owner, display_name = _resolve_version(slug, version)
-    skill = detail.get("skill", {})
     files = detail.get("version", {}).get("files", []) or []
     logger.info("clawhub_resolved", slug=slug, version=selected_version,
                 files=len(files), owner=owner, display_name=display_name)
@@ -107,7 +108,6 @@ async def import_skill(
         return
 
     # 下载整包 ZIP 并解包（比逐文件 /file 拉取更省、更稳）
-    import io, zipfile
     url = f"{CLAWHUB_BASE}/api/v1/download?slug={slug}"
     if selected_version:
         url += f"&version={selected_version}"
@@ -160,8 +160,8 @@ def main() -> None:
     ap.add_argument("--slug", required=True, help="ClawHub 技能 slug，如 docx-cn")
     ap.add_argument("--org", required=True, help="目标组织名称或 slug，如 敏睿制造")
     ap.add_argument("--scope-type", default="organization",
-                    choices=["organization", "department", "team", "user"])
-    ap.add_argument("--scope-id", default=None, help="部门/团队/用户 id（organization 作用域留空）")
+                    choices=["organization", "department", "user"])
+    ap.add_argument("--scope-id", default=None, help="部门/用户 id（organization 作用域留空）")
     ap.add_argument("--version", default=None, help="指定版本；缺省取 latest")
     ap.add_argument("--dry-run", action="store_true", help="只解析不写入")
     args = ap.parse_args()

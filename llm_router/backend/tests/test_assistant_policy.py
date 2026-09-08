@@ -372,7 +372,7 @@ def _patch_prepare_dependencies(monkeypatch, principal):
 
 @pytest.mark.asyncio
 async def test_craft_turn_offers_memory_tools_to_a_terminal_user(monkeypatch):
-    principal = SimpleNamespace(id="user-1", organization_id=uuid4(), department_id=None, team_id=None, role="member")
+    principal = SimpleNamespace(id="user-1", organization_id=uuid4(), department_id=None, role="member")
     _patch_prepare_dependencies(monkeypatch, principal)
 
     result = await nodes.prepare_assistant_turn(_craft_state())
@@ -391,7 +391,7 @@ async def test_craft_turn_offers_memory_tools_to_a_terminal_user(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ask_and_playground_turns_do_not_offer_memory_tools(monkeypatch):
-    principal = SimpleNamespace(id="user-1", organization_id=uuid4(), department_id=None, team_id=None, role="member")
+    principal = SimpleNamespace(id="user-1", organization_id=uuid4(), department_id=None, role="member")
     _patch_prepare_dependencies(monkeypatch, principal)
     ask = await nodes.prepare_assistant_turn(_craft_state(exec_mode="ask"))
     assert ask["tools"] == [] and "write_memory" not in ask["registry"]

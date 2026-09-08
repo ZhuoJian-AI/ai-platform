@@ -31,7 +31,7 @@ class RagCollection(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     chunk_overlap: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
 
-    # 作用范围：organization/department/team/user
+    # 作用范围：organization/department/role/user
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False, default="organization")
     scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # 创建者（终端用户 id）；admin 创建或历史数据为 None。终端据此判定「仅可操作自己创建的」。

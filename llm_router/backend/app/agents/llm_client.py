@@ -95,15 +95,14 @@ async def _resolve(
     *,
     for_embeddings: bool = False,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> tuple[LlmProvider, str]:
     """选 provider。model_alias 为真实模型 id（或 "default" 走组织默认路由）。返回 (provider, model)。
 
-    dept_id/team_id 取自智能体运行时作用域，用于按 团队>部门>组织 优先级筛选继承 provider。
+    dept_id 取自智能体运行时作用域，用于按 部门>组织 优先级筛选继承 provider。
     """
     model = model_alias
     preferred = "openai" if for_embeddings else None
-    provider = await find_provider(db, org_id, model, preferred_type=preferred, dept_id=dept_id, team_id=team_id)
+    provider = await find_provider(db, org_id, model, preferred_type=preferred, dept_id=dept_id)
     if provider is None:
         raise RuntimeError(f"no provider available for model '{model}' in org {org_id}")
     return provider, model
@@ -116,7 +115,6 @@ async def resolve_provider_model(
     *,
     for_embeddings: bool = False,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> tuple[str, str]:
     """公开封装：model_alias→(provider_id, model)。
 
@@ -129,7 +127,6 @@ async def resolve_provider_model(
         model_alias,
         for_embeddings=for_embeddings,
         dept_id=dept_id,
-        team_id=team_id,
     )
     return str(provider.id), actual_model
 
@@ -140,10 +137,9 @@ async def resolve_provider(
     model_alias: str,
     *,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> tuple[LlmProvider, str]:
     """Resolve a concrete provider once so a multimodal turn cannot switch protocols mid-loop."""
-    return await _resolve(db, org_id, model_alias, dept_id=dept_id, team_id=team_id)
+    return await _resolve(db, org_id, model_alias, dept_id=dept_id)
 
 
 def _auth_headers(provider: LlmProvider, api_key: str) -> dict[str, str]:
@@ -402,7 +398,6 @@ async def chat(
     tool_choice: str | None = None,
     disable_thinking: bool = False,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
     model_override: str | None = None,
 ) -> LlmResult:
@@ -410,7 +405,7 @@ async def chat(
     if provider_override is not None:
         provider, model = provider_override, (model_override or model_alias)
     else:
-        provider, model = await _resolve(db, org_id, model_alias, dept_id=dept_id, team_id=team_id)
+        provider, model = await _resolve(db, org_id, model_alias, dept_id=dept_id)
     api_key = await get_decrypted_api_key(provider)
     body = _build_chat_body(
         provider,
@@ -503,7 +498,6 @@ async def stream_chat(
     max_tokens: int | None = None,
     tools: list[dict] | None = None,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
     model_override: str | None = None,
 ) -> AsyncIterator[tuple[str, Any, Any]]:
@@ -516,7 +510,7 @@ async def stream_chat(
     if provider_override is not None:
         provider, model = provider_override, (model_override or model_alias)
     else:
-        provider, model = await _resolve(db, org_id, model_alias, dept_id=dept_id, team_id=team_id)
+        provider, model = await _resolve(db, org_id, model_alias, dept_id=dept_id)
     api_key = await get_decrypted_api_key(provider)
     body = _build_chat_body(provider, model, messages, system_prompt, temperature, max_tokens, tools, stream=True)
     is_anthropic = provider.provider_type == "anthropic"
@@ -711,7 +705,6 @@ async def embed_with_usage(
     texts: list[str],
     *,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
     model_override: str | None = None,
 ) -> tuple[list[list[float]], dict[str, int | None]]:
@@ -725,7 +718,6 @@ async def embed_with_usage(
             model,
             for_embeddings=True,
             dept_id=dept_id,
-            team_id=team_id,
         )
     if provider.provider_type == "anthropic":
         raise RuntimeError("Anthropic provider does not expose embeddings; configure an OpenAI-compatible provider")
@@ -756,7 +748,6 @@ async def embed(
     texts: list[str],
     *,
     dept_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
     model_override: str | None = None,
 ) -> list[list[float]]:
@@ -768,7 +759,6 @@ async def embed(
         model,
         texts,
         dept_id=dept_id,
-        team_id=team_id,
         provider_override=provider_override,
         model_override=model_override,
     )

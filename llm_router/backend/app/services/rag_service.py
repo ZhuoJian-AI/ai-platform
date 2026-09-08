@@ -340,7 +340,6 @@ async def ingest_document(
     created_by: str | None = None,
     *,
     department_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> RagDocument:
     """同步入库（终端 JSON 文本 / 既有文本粘贴路径）：写入源文档，分块并嵌入向量。
 
@@ -370,7 +369,6 @@ async def ingest_document(
         org_id,
         chunks,
         department_id=department_id,
-        team_id=None,
     )
     return doc
 
@@ -383,7 +381,6 @@ async def _chunk_and_embed(
     chunks: list[str],
     *,
     department_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
     on_progress: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> None:
     """删除旧分块 → 分批嵌入 → 写入 RagChunk → 置 ready/100。
@@ -405,7 +402,6 @@ async def _chunk_and_embed(
                 coll.embedding_model,
                 batch,
                 dept_id=department_id,
-                team_id=None,
             )
         except Exception as exc:  # noqa: BLE001 — 嵌入是入库契约的一部分，失败即 fail loud
             # 清理本批之前已 flush 的半成品 chunk，置 failed 供调用方 commit 落库排查
@@ -451,7 +447,6 @@ async def ingest_uploaded_file(
     folder_path: str = "",
     created_by: str | None = None,
     department_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> RagDocument:
     """上传文件入库：请求线程内同步解析抽取文本并落库，分块+嵌入交后台任务异步进行。
 
@@ -494,7 +489,6 @@ async def ingest_uploaded_file(
             coll_id,
             org_id_str,
             str(department_id) if department_id is not None else None,
-            None,
         )
     )
     return doc
@@ -529,7 +523,6 @@ async def _run_ingest_bg(
     coll_id: str,
     org_id: str,
     department_id: str | None = None,
-    team_id: str | None = None,
 ) -> None:
     """后台入库任务：自带 session，分阶段更新 status/progress。
 
@@ -573,7 +566,6 @@ async def _run_ingest_bg(
                 UUID(org_id),
                 chunks,
                 department_id=department_id,
-                team_id=None,
                 on_progress=_p,
             )
             await db.commit()
@@ -663,7 +655,6 @@ async def reingest_document(
     data: RagReingestRequest,
     *,
     department_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> RagDocument:
     """按分块重新入库：替换原分块并重新嵌入，保留同一文档 id。
 
@@ -701,7 +692,6 @@ async def reingest_document(
             coll.embedding_model,
             chunks,
             dept_id=department_id,
-            team_id=None,
         )
     except Exception as exc:  # noqa: BLE001
         raise EmbeddingError(str(exc)) from exc
@@ -967,7 +957,6 @@ async def retrieve(
     req: RagRetrieveRequest,
     *,
     department_id: str | UUID | None = None,
-    team_id: str | UUID | None = None,
 ) -> list[dict]:
     """检索 collection 命中。优先 pgvector 余弦检索；向量不可用或无命中时回退 CJK 关键词检索。
 
@@ -986,7 +975,6 @@ async def retrieve(
             coll.embedding_model,
             [req.query],
             dept_id=department_id,
-            team_id=None,
         )
         if qvecs:
             qvec = qvecs[0]

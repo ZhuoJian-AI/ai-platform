@@ -1,6 +1,6 @@
-"""Workspace lifecycle — keep each org/dept/team/user node paired with one same-name workspace.
+"""Workspace lifecycle — keep each org/dept/user node paired with one same-name workspace.
 
-严格按节点自动生成：每个组织 / 部门 / 团队 / 用户节点恰好对应一个同名工作空间，
+严格按节点自动生成：每个组织 / 部门 / 用户节点恰好对应一个同名工作空间，
 绑定键为 ``(organization_id, scope_type, scope_id)``。本服务在节点增删改时同步工作空间，
 并在管理端构建工作空间树时惰性补建缺失的工作空间。
 """
@@ -72,7 +72,7 @@ async def ensure_node_workspace(
     if ws is not None:
         restore(ws)
         ws.name = name
-        # slug 仅对组织 / 部门节点有意义（取节点 slug）；团队 / 用户工作空间 slug 为节点 id，不可变。
+        # slug 仅对组织 / 部门节点有意义（取节点 slug）；用户工作空间 slug 为节点 id，不可变。
         if scope_type in ("organization", "department") and slug and ws.slug != slug:
             ws.slug = slug
         await db.flush()
@@ -90,7 +90,7 @@ async def sync_node_workspace(
 ) -> None:
     """节点重命名时同步工作空间 name/slug；找不到绑定工作空间则不操作（下次建树会补建）。
 
-    slug 仅对组织 / 部门节点有意义（其工作空间 slug 取节点 slug）；团队 / 用户工作空间
+    slug 仅对组织 / 部门节点有意义（其工作空间 slug 取节点 slug）；用户工作空间
     slug 为节点 id，不可变，故不传。
     """
     ws = await get_bound_workspace(db, org_id, scope_type, scope_id)

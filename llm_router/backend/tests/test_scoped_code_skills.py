@@ -76,7 +76,6 @@ async def _hierarchy(db_session):
         username=f"member-{uuid4().hex[:8]}",
         role="member",
         department_id=department.id,
-        team_id=None,
         is_active=True,
     )
     db_session.add(user)
@@ -88,25 +87,19 @@ async def _hierarchy(db_session):
         role=user.role,
         organization_id=org.id,
         department_id=str(department.id),
-        team_id=None,
     )
-    return org, other_org, department, other_department, None, user, cu
+    return org, other_org, department, other_department, user, cu
 
 
 @pytest.mark.asyncio
-async def test_employee_manages_only_personal_skill_scope_and_team_scope_is_rejected(db_session):
-    org, other_org, department, other_department, _, user, cu = await _hierarchy(db_session)
+async def test_employee_manages_only_personal_skill_scope(db_session):
+    org, other_org, department, other_department, user, cu = await _hierarchy(db_session)
 
     scopes = await managed_scopes(db_session, cu)
     assert scopes == {("user", str(user.id))}
     with pytest.raises(HTTPException) as exc:
         await assert_user_can_manage_scope(db_session, cu, "department", department.id)
     assert exc.value.status_code == 403
-    assert all(scope_type != "team" for scope_type, _ in scopes)
-    with pytest.raises(HTTPException) as exc:
-        await assert_user_can_manage_scope(db_session, cu, "team", uuid4())
-    assert exc.value.status_code == 410
-
     with pytest.raises(HTTPException) as exc:
         await validate_scope_target(db_session, org.id, "department", other_department.id)
     assert exc.value.status_code == 422
@@ -141,7 +134,7 @@ async def test_employee_manages_only_personal_skill_scope_and_team_scope_is_reje
 
 @pytest.mark.asyncio
 async def test_prompt_skill_import_is_idempotent_versioned_and_bound_only(db_session):
-    org, _, department, _, _, user, cu = await _hierarchy(db_session)
+    org, _, department, _, user, cu = await _hierarchy(db_session)
     skill_v1 = b"""---
 name: Ningbo Bank Processor
 description: Process Ningbo bank statements
@@ -226,7 +219,7 @@ Always validate the input workbook before processing.
 
 @pytest.mark.asyncio
 async def test_agent_skill_folder_and_zip_are_equivalent_and_progressively_loaded(db_session, monkeypatch):
-    org, _, _, _, _, user, cu = await _hierarchy(db_session)
+    org, _, _, _, user, cu = await _hierarchy(db_session)
     skill_md = b"""---
 name: Workbook Cleaner
 description: Clean an uploaded workbook and create a normalized copy
@@ -458,7 +451,7 @@ def test_agent_skill_normalized_archive_respects_compressed_limit(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_executable_skill_output_is_ingested_into_workspace(db_session, monkeypatch):
-    org, _, department, _, _, user, cu = await _hierarchy(db_session)
+    org, _, department, _, user, cu = await _hierarchy(db_session)
     workspace = Workspace(
         organization_id=org.id,
         name="Personal workspace",
@@ -546,7 +539,7 @@ async def test_platform_file_tools_are_available_without_skills_and_persist_outp
     db_session,
     monkeypatch,
 ):
-    org, _, _, _, _, user, cu = await _hierarchy(db_session)
+    org, _, _, _, user, cu = await _hierarchy(db_session)
     workspace = Workspace(
         organization_id=org.id,
         name="Builtin tools workspace",
@@ -700,7 +693,7 @@ def test_enterprise_action_idempotency_is_scoped_to_the_current_run():
 
 @pytest.mark.asyncio
 async def test_web_tool_is_available_and_executable_without_workspace(db_session, monkeypatch):
-    _, _, _, _, _, _, cu = await _hierarchy(db_session)
+    _, _, _, _, _, cu = await _hierarchy(db_session)
     tools, registry = await _build_tools(db_session, [], None, user=cu)
     assert _AUTHENTICATED_BUILTIN_TOOLS <= {item["function"]["name"] for item in tools}
     assert registry == {}
@@ -730,7 +723,7 @@ async def test_web_tool_is_available_and_executable_without_workspace(db_session
 
 @pytest.mark.asyncio
 async def test_personal_skill_scope_does_not_change_with_department_membership(db_session):
-    _, _, department, _, _, user, cu = await _hierarchy(db_session)
+    _, _, department, _, user, cu = await _hierarchy(db_session)
     assert await managed_scopes(db_session, cu) == {("user", str(user.id))}
 
     user.department_id = None
@@ -741,7 +734,7 @@ async def test_personal_skill_scope_does_not_change_with_department_membership(d
 
 @pytest.mark.asyncio
 async def test_general_agent_keeps_rag_fixed_and_prioritizes_explicit_skill_catalog(db_session):
-    org, _, _, _, _, user, cu = await _hierarchy(db_session)
+    org, _, _, _, user, cu = await _hierarchy(db_session)
 
     async def import_prompt(name: str, description: str):
         content = f"""---

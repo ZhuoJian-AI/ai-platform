@@ -153,7 +153,6 @@ async def _model_turn(
         max_tokens=state.get("max_tokens"),
         tools=tools or None,
         dept_id=state.get("department_id"),
-        team_id=None,
         provider_override=prepared.get("provider_override"),
         model_override=prepared.get("model_override"),
     )
@@ -181,7 +180,6 @@ async def _model_turn(
             max_tokens=state.get("max_tokens"),
             tools=tools or None,
             dept_id=state.get("department_id"),
-            team_id=None,
             provider_override=prepared.get("provider_override"),
             model_override=prepared.get("model_override"),
         )

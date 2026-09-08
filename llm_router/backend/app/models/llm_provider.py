@@ -22,13 +22,10 @@ class LlmProvider(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     region: Mapped[str | None] = mapped_column(String(64), nullable=True)
     workspace_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    # 层级范围：organization / department / team（调用解析遵循 团队>部门>组织 优先级且继承）
+    # 层级范围：organization / department（调用解析遵循 部门>组织 优先级且继承）
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False, default="organization", index=True)
     department_id: Mapped[str | None] = mapped_column(
         ForeignKey("departments.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    team_id: Mapped[str | None] = mapped_column(
-        ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True
     )
 
     # 连接配置

@@ -51,16 +51,6 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
             raise ValueError("员工账号不能作为管理员账号使用")
 
     @property
-    def team_id(self) -> None:
-        """One-release compatibility field for the retired Team hierarchy."""
-        return None
-
-    @team_id.setter
-    def team_id(self, value: str | None) -> None:
-        if value is not None:
-            raise ValueError("Team 已停用，请使用部门归属和角色授权")
-
-    @property
     def roles(self) -> list[dict]:
         return [
             {

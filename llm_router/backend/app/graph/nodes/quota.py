@@ -30,7 +30,6 @@ async def reserve_quota(state: ProxyState) -> dict:
             deps["db"],
             auth.organization_id,
             department_id=auth.department_id,
-            team_id=None,
             api_key=auth.api_key,
             payload=body,
             max_output_tokens=max_output_tokens,

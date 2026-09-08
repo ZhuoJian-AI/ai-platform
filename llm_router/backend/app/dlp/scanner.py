@@ -11,7 +11,6 @@ async def collect_applicable_rules(
     db: AsyncSession,
     org_id: str,
     dept_id: str | None = None,
-    team_id: str | None = None,
     direction: str = "both",
 ) -> list[DlpRule]:
     """收集适用于当前请求的所有 DLP 规则。
@@ -39,10 +38,9 @@ async def scan_request(
     text: str,
     org_id: str,
     dept_id: str | None = None,
-    team_id: str | None = None,
 ) -> DLPResult:
     """扫描请求内容。"""
-    rules = await collect_applicable_rules(db, org_id, dept_id, None, direction="request")
+    rules = await collect_applicable_rules(db, org_id, dept_id, direction="request")
     if not rules:
         return DLPResult()
     engine = DLPEngine(rules=rules)
@@ -54,10 +52,9 @@ async def scan_response(
     text: str,
     org_id: str,
     dept_id: str | None = None,
-    team_id: str | None = None,
 ) -> DLPResult:
     """扫描响应内容。"""
-    rules = await collect_applicable_rules(db, org_id, dept_id, None, direction="response")
+    rules = await collect_applicable_rules(db, org_id, dept_id, direction="response")
     if not rules:
         return DLPResult()
     engine = DLPEngine(rules=rules)
