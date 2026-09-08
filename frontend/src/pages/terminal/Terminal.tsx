@@ -397,7 +397,7 @@ function tracesToBlocks(traces: Record<string, unknown>[]): Block[] {
   for (const t of traces) {
     const category = t.category as TraceCategory;
     const title = (t.title as string) || category;
-    // 所有真实工具轨迹都携带 name。平台文件工具使用 file 分类，Skill/连接器
+    // 所有真实工具轨迹都携带 name。平台文件工具使用 file 分类，Skill
     // 使用 skill 分类；二者都必须还原为 tool_call，才能从持久化 result 中恢复
     // 图片和文档交付物。仅按 skill 分类会让刷新后的文件输出退化成普通轨迹。
     if (t.name as string) {
@@ -827,7 +827,7 @@ export default function Terminal() {
     setSelectedAgentId(selectedTask?.config?.template_agent_id ?? null);
   }, [selectedTask?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 每次打开「任务资源配置」抽屉时，强制刷新工作空间/技能/RAG/本体 与模型清单，
+  // 每次打开「任务资源配置」抽屉时，强制刷新工作空间、技能、RAG 与模型清单，
   // 避免使用 react-query 缓存中的旧数据。
   useEffect(() => {
     if (cfgOpen) {
@@ -1297,18 +1297,6 @@ export default function Terminal() {
     if (selectedId) terminal.cancelTask(selectedId).catch(() => { /* 静默 */ });
   };
 
-  const exportSkillsPack = async () => {
-    const hide = message.loading('正在即时生成 skills 包…', 0);
-    try {
-      await terminal.exportSkillsPack();
-      message.success('skills 包已下载（鉴权已内嵌，解压即可给第三方智能体终端使用）');
-    } catch (e) {
-      message.error(`导出失败：${(e as Error).message}`);
-    } finally {
-      hide();
-    }
-  };
-
   const startTask = async () => {
     const readyAttachments = inputAttachments.filter((item) => item.status === 'ready' && item.file_id);
     if ((!input.trim() && !readyAttachments.length && !inputSkills.length && !inputFileRefs.length) || streaming) return;
@@ -1773,9 +1761,6 @@ export default function Terminal() {
                     <div style={{ marginBottom: 8, fontSize: 12, color: '#9ca3af' }}>
                       {user?.organization_name || user?.organization_slug || '企业用户'}
                     </div>
-                    <Button block icon={<DownloadOutlined />} onClick={exportSkillsPack} style={{ marginBottom: 8 }}>
-                      导出 Skills
-                    </Button>
                     <Button danger block icon={<LogoutOutlined />} onClick={logout}>退出登录</Button>
                   </div>
                 }
@@ -2202,7 +2187,6 @@ export default function Terminal() {
                     <div style={{ color: '#374151', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{userName}</div>
                     <div style={{ color: '#9ca3af', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{user?.organization_name || user?.organization_slug || '企业用户'}</div>
                   </div>
-                  <Tooltip title="导出 Skills"><Button type="text" aria-label="导出 Skills" icon={<DownloadOutlined />} onClick={exportSkillsPack} /></Tooltip>
                   <Tooltip title="退出登录"><Button type="text" danger aria-label="退出登录" icon={<LogoutOutlined />} onClick={logout} /></Tooltip>
                 </div>
               </div>

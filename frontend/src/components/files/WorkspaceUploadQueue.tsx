@@ -84,9 +84,6 @@ export function workspaceUploadErrorText(error: unknown): string {
   if (status === 409 && code === 'workspace_file_version_conflict') {
     return '原文件刚被其他人更新，未覆盖对方版本；请刷新后重新确认';
   }
-  if (status === 409 && code === 'workspace_file_active_edit_conflict') {
-    return '该文件正在 WebOffice 协同编辑，未覆盖活动编辑内容；请稍后再试';
-  }
   if (status === 409 && code === 'workspace_file_idempotency_conflict') {
     return '本次上传标识与先前操作冲突，未写入文件；请重新选择文件再试';
   }

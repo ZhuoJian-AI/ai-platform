@@ -90,7 +90,7 @@ body {
 }
 
 /* 「任务资源配置」抽屉：字体类型/大小/颜色与任务输入框下方的 chip 行
-   （技能·自动 / 本体·自动 / RAG知识库·自动 / 模型 / 工作空间）保持一致。
+   （技能·自动 / RAG知识库·自动 / 模型 / 工作空间）保持一致。
    chip 行样式 = font-family WB_FONT、font-size 12、color #4b5563。
    抽屉经 portal 渲染到 document.body，antd 组件自带 font-family 会覆盖父级继承，
    故用 !important 显式覆盖到具体文本组件上（不含 anticon 图标）。 */
@@ -462,7 +462,7 @@ body {
   gap: 6px;
 }
 
-/* 资源调用痕迹 chip（知识库/本体/记忆/数据接口；技能走 ToolCard）。
+/* 资源调用痕迹 chip（知识库/记忆/文件/策略；技能走 ToolCard）。
    与正文(text)和技能卡片都做区分：左侧主色竖条 + 淡底单行，可展开明细。 */
 .wb-trace {
   border-left: 3px solid #6366F1;

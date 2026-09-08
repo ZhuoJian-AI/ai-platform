@@ -228,24 +228,10 @@ function progressForAssistantEvent(event: Record<string, unknown>): AssistantPro
     const category = String(event.category ?? '');
     const labels: Record<string, string> = {
       memory: '正在读取与你相关的业务上下文',
-      data_interface: '已加载当前页面允许使用的业务接口',
       rag: '正在检索相关业务知识',
-      ontology: '正在理解业务对象之间的关系',
       policy: '正在校验本次操作权限',
       file: '正在处理任务所需的文件',
     };
-    if (category === 'data_interface') {
-      const detail = event.detail && typeof event.detail === 'object'
-        ? event.detail as Record<string, unknown>
-        : {};
-      const count = Number(event.interfaces ?? detail.interfaces);
-      if (Number.isFinite(count) && count === 0) {
-        // Manifest Actions are registered separately from legacy data interfaces.
-        // A zero legacy-interface count therefore is not proof that this page has no
-        // callable business capability.
-        return { key: `trace:${category}`, label: '正在核对当前页面允许使用的业务能力' };
-      }
-    }
     return labels[category] ? { key: `trace:${category}`, label: labels[category] } : null;
   }
   if (type === 'tool_call') {

@@ -201,8 +201,8 @@ try {
   );
   assert.doesNotMatch(
     applicationViewSource,
-    /当前页面没有可用于本次任务的业务接口/,
-    'zero legacy data interfaces must not contradict the availability of Manifest Actions',
+    /\b(?:data_interface|ontology)\b/,
+    'retired data-interface and ontology trace categories must not leak into the business assistant',
   );
 
   const terminalSource = await readFile(resolve('src/pages/terminal/Terminal.tsx'), 'utf8');

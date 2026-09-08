@@ -55,7 +55,7 @@ export default function TaskConfigDrawer({ open, onApply, resources, config, mod
       styles={{ body: { padding: '18px 20px', background: '#fafafa' } }}
     >
       <Typography.Text>
-        工作空间与模型在这里选择；系统提示词和固定 RAG 由所选智能体决定。Skill 可来自智能体默认推荐，也可在聊天中仅对当前轮明确调用；本体与长期记忆仍按你的权限自动装配。
+        工作空间与模型在这里选择；系统提示词和固定 RAG 由所选智能体决定。Skill 可来自智能体默认推荐，也可在聊天中仅对当前轮明确调用；长期记忆仍按你的权限自动装配。
       </Typography.Text>
 
       <Divider orientation="left">工作空间</Divider>

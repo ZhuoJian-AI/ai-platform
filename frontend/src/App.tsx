@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
-import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { Routes, Route, useLocation, useNavigate } from 'react-router-dom';
 import { Drawer, ConfigProvider, Avatar, Popover, Button } from 'antd';
 import {
   ApartmentOutlined, KeyOutlined, CloudServerOutlined,
@@ -45,6 +45,7 @@ import { BRAND_TITLES, useBrandTitle } from './branding/brand';
 import EnterpriseApplications from './pages/apps/EnterpriseApplications';
 import EnterpriseApplicationDetail from './pages/apps/EnterpriseApplicationDetail';
 import EnterpriseAccessControl from './pages/apps/EnterpriseAccessControl';
+import NotFoundPage from './pages/NotFoundPage';
 import { useMobileBackDismiss, useResponsiveLayout } from './hooks/useResponsiveLayout';
 
 interface MenuEntry {
@@ -395,7 +396,7 @@ function AppLayout() {
             {allRoutes.map((r) => (
               <Route key={r.path} path={r.path} element={r.element} />
             ))}
-            <Route path="/*" element={<Navigate to="/monitor/router" replace />} />
+            <Route path="/*" element={<NotFoundPage />} />
           </Routes>
         </main>
 
@@ -450,6 +451,8 @@ export default function App() {
         <Route path="/terminal/tasks/:taskId" element={
           <UserAuthProvider><UserRequireAuth><Terminal /></UserRequireAuth></UserAuthProvider>
         } />
+        <Route path="/:slug/terminal/*" element={<NotFoundPage />} />
+        <Route path="/terminal/*" element={<NotFoundPage />} />
         <Route path="/f/:fileId" element={
           <UserAuthProvider><FileDeepLinkPage /></UserAuthProvider>
         } />

@@ -39,7 +39,7 @@ const NODE_ICON: Record<string, ReactNode> = {
 const iconForKey = (key: string): ReactNode => NODE_ICON[key.split(':')[0]] ?? <FolderOutlined />;
 
 /** 技能（文件夹）管理：Finder 风。左：组织架构树（节点作用域）；右：技能列表（可展开看文件）。
- *  标准 Agent Skill 可通过文件夹或 ZIP 安装；旧版 Markdown/连接器 Skill 继续兼容。 */
+ *  标准 Agent Skill 可通过文件夹或 ZIP 安装。 */
 export default function Skills() {
   const qc = useQueryClient();
   const folderInputRef = useRef<HTMLInputElement>(null);

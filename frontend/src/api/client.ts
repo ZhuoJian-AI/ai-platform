@@ -245,7 +245,6 @@ export interface AuditLogEntry {
   api_key_id: string | null;
   organization_id: string;
   department_id: string | null;
-  team_id: string | null;
   provider_id: string | null;
   event_type: string;
   direction: string | null;
@@ -829,8 +828,6 @@ export interface WorkspaceFile {
   current_version_id?: string | null; previous_version_id?: string | null; current_version_no?: number | null;
   resolved_version_id?: string | null; resolved_version_no?: number | null; is_historical?: boolean;
   capabilities?: WorkspaceFileCapabilities; effective_capabilities?: WorkspaceFileCapabilities; internal_url?: string;
-  /** Server-side feature availability; absent/false must fail closed in the UI. */
-  office_edit_enabled?: boolean;
 }
 
 export interface WorkspaceFilePresentation {
@@ -849,7 +846,6 @@ export interface WorkspaceFileListItem {
   workspace_name?: string; workspace_slug?: string; canonical_path?: string;
   current_version_id?: string | null; current_version_no?: number | null;
   capabilities?: WorkspaceFileCapabilities; effective_capabilities?: WorkspaceFileCapabilities; internal_url?: string;
-  office_edit_enabled?: boolean;
 }
 
 export interface WorkspaceFilePage {
@@ -1466,7 +1462,7 @@ export const monitor = {
 };
 
 // ── Terminal User Portal (user JWT) ────────────────────────────────────
-// 终端用户 bearer 只保留在当前标签会话；长期 OAuth 复用依赖 HttpOnly cookie。
+// 终端用户 bearer 只保留在当前标签会话，不在浏览器持久化长期凭据。
 
 const USER_TOKEN_KEY = 'ai_infra_user_token';
 
@@ -2047,7 +2043,6 @@ export interface TaskConfig {
 export type EnterpriseApplicationPermission =
   | 'view' | 'ai_query' | 'ai_create' | 'ai_update' | 'ai_delete' | 'ai_approve' | 'export';
 export type EnterpriseApplicationScope = 'organization' | 'role' | 'department' | 'user';
-export type EnterpriseApplicationTarget = 'tool_endpoint' | 'data_interface' | 'skill_folder';
 export type EnterpriseApplicationOperation = 'query' | 'create' | 'update' | 'delete' | 'export' | 'approve';
 
 export interface EnterpriseApplicationModuleAccess {
@@ -2073,13 +2068,6 @@ export interface EnterpriseApplicationGrant {
   created_at: string; updated_at: string;
 }
 
-export interface EnterpriseApplicationToolBinding {
-  id: string; application_id: string; organization_id: string;
-  target_type: EnterpriseApplicationTarget; target_id: string;
-  operation: EnterpriseApplicationOperation; is_active: boolean;
-  created_at: string; updated_at: string;
-}
-
 export interface EnterpriseApplication {
   id: string; organization_id: string; name: string; slug: string;
   description: string | null; icon_url: string | null; entry_url: string;
@@ -2088,7 +2076,6 @@ export interface EnterpriseApplication {
   assistant_enabled: boolean; assistant_prompt: string | null;
   assistant_config: Record<string, unknown>; health_status: string;
   grants: EnterpriseApplicationGrant[];
-  tool_bindings: EnterpriseApplicationToolBinding[];
   created_at: string; updated_at: string;
 }
 
@@ -2253,21 +2240,6 @@ export interface EnterpriseApplicationEventRoute {
   is_active: boolean; created_at: string; updated_at: string;
 }
 
-export interface EnterpriseApplicationCapability {
-  binding_id: string;
-  target_type: EnterpriseApplicationTarget;
-  target_id: string;
-  operation: EnterpriseApplicationOperation;
-  name: string;
-  source_name: string;
-  description: string | null;
-  method: string | null;
-  path: string | null;
-  binding_active: boolean;
-  target_active: boolean;
-  health_status: string | null;
-}
-
 export interface EnterpriseApplicationRecentCall {
   id: number;
   capability_name: string;
@@ -2282,11 +2254,6 @@ export interface EnterpriseApplicationRecentCall {
 
 export interface EnterpriseApplicationOverview {
   application_id: string;
-  operation_counts: Record<EnterpriseApplicationOperation, number>;
-  active_capability_count: number;
-  direct_capability_count: number;
-  skill_binding_count: number;
-  capabilities: EnterpriseApplicationCapability[];
   recent_calls: EnterpriseApplicationRecentCall[];
 }
 
@@ -2314,12 +2281,6 @@ export const enterpriseApplications = {
     module_access?: Record<string, EnterpriseApplicationModuleAccess>;
   }>) => request<EnterpriseApplication>(`/api/v1/applications/${id}/grants`, {
     method: 'PUT', body: JSON.stringify({ grants }),
-  }),
-  replaceToolBindings: (id: string, bindings: Array<{
-    target_type: EnterpriseApplicationTarget; target_id: string;
-    operation: EnterpriseApplicationOperation; is_active: boolean;
-  }>) => request<EnterpriseApplication>(`/api/v1/applications/${id}/tool-bindings`, {
-    method: 'PUT', body: JSON.stringify({ bindings }),
   }),
   test: (id: string) => request<{ status: 'healthy' | 'unhealthy'; status_code: number | null; detail: string | null }>(
     `/api/v1/applications/${id}/test`, { method: 'POST' },
@@ -2541,35 +2502,6 @@ export const terminal = {
   activateSkillVersion: (versionId: string) =>
     userRequest<SkillVersion>(`/api/v1/terminal/skill-versions/${versionId}/activate`, { method: 'POST' }),
   memory: () => userRequest<TerminalMemoryItem[]>('/api/v1/terminal/memory'),
-  /** 即时生成归口用户 skills 包 zip 并下载（鉴权内嵌、即时轮换；无需在第三方端再输凭证）。 */
-  exportSkillsPack: async (): Promise<void> => {
-    const token = sessionStorage.getItem(USER_TOKEN_KEY);
-    const headers: Record<string, string> = {};
-    if (token) headers['Authorization'] = `Bearer ${token}`;
-    const resp = await fetch(`${BASE_URL}/api/v1/terminal/skills-pack/export`, { method: 'POST', headers });
-    if (resp.status === 401) {
-      sessionStorage.removeItem(USER_TOKEN_KEY);
-      localStorage.removeItem('ai_infra_user');
-      const m = window.location.pathname.match(/^\/([^/]+)\/terminal/);
-      const slug = m ? m[1] : null;
-      window.location.href = slug ? `/${slug}/terminal/login` : '/login';
-      throw new ApiError(401, 'Session expired');
-    }
-    if (!resp.ok) {
-      const body = await resp.json().catch(() => ({}));
-      throw new ApiError(resp.status, responseErrorMessage(body, resp.statusText), body);
-    }
-    const blob = await resp.blob();
-    if (!blob.size) return;
-    const disposition = resp.headers.get('content-disposition') || '';
-    const m = /filename="?([^"]+)"?/.exec(disposition);
-    const filename = m?.[1] || 'skills-pack.zip';
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-  },
   listTasks: (query?: string | { q?: string; applicationId?: string; limit?: number; offset?: number }) => {
     const values = typeof query === 'string' ? { q: query } : (query ?? {});
     const params = new URLSearchParams();
