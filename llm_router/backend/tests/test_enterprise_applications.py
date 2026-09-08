@@ -1135,7 +1135,7 @@ async def test_runtime_manifest_auto_activates_managed_access_and_preserves_admi
 async def test_runtime_new_resources_inherit_only_existing_ceiling_and_respect_denials(
     db_session,
 ):
-    org, _, _, _, _ = await _organization_tree(db_session)
+    org, _, _, _, current = await _organization_tree(db_session)
     role = Role(
         organization_id=org.id,
         name="订单维护",
@@ -1186,6 +1186,20 @@ async def test_runtime_new_resources_inherit_only_existing_ceiling_and_respect_d
             "pages": [{"pageKey": "orders.list", "actionKeys": ["orders.query"]}],
         }]
     }
+
+    builtins = await role_service.ensure_builtin_roles(db_session, org.id)
+    developer = builtins[role_service.BUILTIN_RUNTIME_DEVELOPER]
+    await role_service.replace_user_roles(db_session, current.user, [developer.id])
+    epoch_before_initial_sync = current.user.auth_epoch
+    await service.synchronize_runtime_grants(db_session, application, before, before)
+    await db_session.refresh(current.user)
+    assert current.user.auth_epoch == epoch_before_initial_sync + 1
+
+    epoch_after_initial_sync = current.user.auth_epoch
+    await service.synchronize_runtime_grants(db_session, application, before, before)
+    await db_session.refresh(current.user)
+    assert current.user.auth_epoch == epoch_after_initial_sync
+
     after = deepcopy(before)
     after["modules"][0]["actions"].extend([
         {"actionKey": "orders.assign", "operation": "update"},
