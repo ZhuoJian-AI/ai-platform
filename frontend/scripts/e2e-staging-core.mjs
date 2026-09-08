@@ -620,6 +620,24 @@ async function cleanupBusinessRun(page, state) {
   });
 }
 
+async function logoutFromUi(page, { endpoint, expectedPath, roleLabel }) {
+  const sidebar = page.locator('aside').first();
+  const avatar = sidebar.locator('.ant-avatar').last();
+  await avatar.waitFor({ state: 'visible', timeout: 30_000 });
+  await avatar.click();
+  const logoutButton = page.getByRole('button', { name: '退出登录', exact: true }).last();
+  await logoutButton.waitFor({ state: 'visible', timeout: 15_000 });
+  const [response] = await Promise.all([
+    page.waitForResponse((candidate) => (
+      candidate.request().method() === 'POST'
+      && new URL(candidate.url()).pathname === endpoint
+    ), { timeout: 30_000 }),
+    logoutButton.click(),
+  ]);
+  assert.equal(response.status(), 204, `${roleLabel}退出登录应返回 204，实际为 ${response.status()}`);
+  await page.waitForURL((url) => url.pathname === expectedPath, { timeout: 30_000 });
+}
+
 const browser = await chromium.launch({
   headless: process.env.E2E_HEADLESS !== '0',
   executablePath: browserExecutable || undefined,
@@ -670,6 +688,17 @@ try {
   assert.equal(cleanupResult.failures.length, 0, cleanupResult.failures.join('；'));
   employeeDiagnostics.assertClean('员工端');
   console.log(`E2E 测试记录清理：通过（对话 ${cleanupResult.tasksDeleted}，文件移入回收站 ${cleanupResult.filesTrashed}）`);
+  await logoutFromUi(employeePage, {
+    endpoint: '/api/v1/users/logout',
+    expectedPath: `/${orgSlug}/terminal/login`,
+    roleLabel: '员工',
+  });
+  await logoutFromUi(adminPage, {
+    endpoint: '/api/v1/auth/logout',
+    expectedPath: '/login',
+    roleLabel: '管理员',
+  });
+  console.log('E2E 双端退出登录与会话撤销：通过');
   console.log('E2E PASS：管理员与员工 staging 核心回归全部通过');
 } catch (error) {
   throw new Error(redact(error instanceof Error ? error.message : error));
