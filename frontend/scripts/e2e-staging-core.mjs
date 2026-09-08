@@ -621,11 +621,22 @@ async function cleanupBusinessRun(page, state) {
 }
 
 async function logoutFromUi(page, { endpoint, expectedPath, roleLabel }) {
-  const sidebar = page.locator('aside').first();
-  const avatar = sidebar.locator('.ant-avatar').last();
-  await avatar.waitFor({ state: 'visible', timeout: 30_000 });
-  await avatar.click();
-  const logoutButton = page.getByRole('button', { name: '退出登录', exact: true }).last();
+  const openDrawer = page.locator('.ant-drawer-open').last();
+  if (await openDrawer.count()) {
+    const closeButton = openDrawer.locator('.ant-drawer-close');
+    if (await closeButton.count()) await closeButton.click();
+    else await page.keyboard.press('Escape');
+    await openDrawer.waitFor({ state: 'hidden', timeout: 30_000 });
+  }
+  console.log(`E2E ${roleLabel}真实退出登录：开始`);
+  const logoutButton = page.locator(
+    'button[aria-label="退出登录"]:visible, button:has-text("退出登录"):visible',
+  ).last();
+  if (!await logoutButton.count()) {
+    const avatar = page.locator('aside:visible .ant-avatar:visible').last();
+    await avatar.waitFor({ state: 'visible', timeout: 30_000 });
+    await avatar.click();
+  }
   await logoutButton.waitFor({ state: 'visible', timeout: 15_000 });
   const [response] = await Promise.all([
     page.waitForResponse((candidate) => (
@@ -636,6 +647,7 @@ async function logoutFromUi(page, { endpoint, expectedPath, roleLabel }) {
   ]);
   assert.equal(response.status(), 204, `${roleLabel}退出登录应返回 204，实际为 ${response.status()}`);
   await page.waitForURL((url) => url.pathname === expectedPath, { timeout: 30_000 });
+  console.log(`E2E ${roleLabel}真实退出登录：通过`);
 }
 
 const browser = await chromium.launch({
