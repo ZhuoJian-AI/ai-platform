@@ -17,7 +17,7 @@
 
 ## 发布前验证
 
-- Backend 完整回归（清理监控前）：`522 passed, 15 skipped`。
+- Backend 完整回归（最终发布源码、隔离 PostgreSQL）：`532 passed, 15 skipped`。
 - Assistant Core 与监控真实 PostgreSQL 集成回归：`52 passed`。
 - Frontend 生产构建：通过。
 - 空数据库 Alembic：`0001 -> 0073 -> 0072 -> 0073` 通过，`0073` 仅修改 `agent_runs.assistant_engine` 的服务端默认值。
@@ -39,7 +39,9 @@
 
 ## 发布结果
 
-- Source commit/PR：待发布后补充。
-- Backend/Frontend 新旧 digest：待发布后补充。
+- Source commit/PR：PR `#62`，merge commit `a868c47641ba82bff4e9a5b08cd71bb458ee1994`。
+- 精确源码归档 SHA-256：`a1a8380f6e6e6e24ced2b1576fbb48ad3e993057a64bed9937ffdcaa7f1fb399`。
+- Backend：`sha256:da739de71b86fda0334495079adf2a42637513c115f150919fbee1946fd6b5db` → `sha256:fee95d62608e89ae863c7ea89acb27bff226d2389a93f9f78eca4f4495c34d34`。
+- Frontend：`sha256:9fb5353909085e25fb92ac12d90bcb9ea714ed9934b1655c14131383d3bcf4ec` → `sha256:5d75829aa09a39db2e046680161c394ecc9e64d53c72aa63d79a308ba22f2a6c`。
 - Coolify deployment UUID 与健康检查：待发布后补充。
 - 管理员、员工、个人助手、业务助手、Artifact 与自定义智能体浏览器验收：待发布后补充。
