@@ -10,12 +10,11 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  ApiError, connectors, dataInterfaces, enterpriseApplications, roles, skillStore,
+  ApiError, enterpriseApplications, roles,
   type EnterpriseApplication,
   type EnterpriseApplicationInput,
   type EnterpriseApplicationOperation,
   type EnterpriseApplicationPermission, type EnterpriseApplicationScope,
-  type EnterpriseApplicationTarget,
 } from '../../api/client';
 import OrgSelect from '../../components/OrgSelect';
 import ConfirmModal from '../../components/finder/ConfirmModal';
@@ -42,7 +41,7 @@ const OPERATION_OPTIONS: Array<{ value: EnterpriseApplicationOperation; label: s
   { value: 'export', label: '导出' },
 ];
 
-const TARGET_OPTIONS: Array<{ value: EnterpriseApplicationTarget; label: string }> = [
+const TARGET_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'tool_endpoint', label: '连接器端点' },
   { value: 'data_interface', label: '数据接口' },
   { value: 'skill_folder', label: 'Skill 文件夹' },
@@ -73,8 +72,6 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
   const [appForm] = Form.useForm();
   const [grantForm] = Form.useForm();
   const [assistantForm] = Form.useForm();
-  const [bindingForm] = Form.useForm();
-  const bindingTargetType = Form.useWatch('target_type', bindingForm) as EnterpriseApplicationTarget | undefined;
   const selectedGrantModuleKeys = (Form.useWatch('module_keys', grantForm) ?? []) as string[];
   const { treeData, nodeMap, isLoading: treeLoading } = useOrgTree();
   const { data: roleList = [], isLoading: rolesLoading } = useQuery({
@@ -87,31 +84,6 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
     queryKey: ['enterprise-applications', orgId],
     queryFn: () => orgId ? enterpriseApplications.list(orgId) : Promise.resolve([]),
     enabled: !!orgId,
-  });
-  const { data: bindingTargets = [] } = useQuery({
-    queryKey: ['enterprise-application-binding-targets', orgId],
-    enabled: !!orgId && section === 'assistant',
-    queryFn: async () => {
-      if (!orgId) return [];
-      const connectorList = await connectors.list(orgId);
-      const endpointGroups = await Promise.all(connectorList.map(async (connector) => ({
-        connector, endpoints: await connectors.listEndpoints(connector.id),
-      })));
-      const systems = await dataInterfaces.listSystems(orgId, { scope_type: 'organization', scope_id: null });
-      const interfaceGroups = await Promise.all(systems.map(async (system) => ({
-        system, interfaces: await dataInterfaces.listInterfaces(system.id),
-      })));
-      const folders = await skillStore.listFolders(orgId, { scope_type: 'organization', scope_id: null });
-      return [
-        ...endpointGroups.flatMap(({ connector, endpoints }) => endpoints.map((endpoint) => ({
-          type: 'tool_endpoint' as const, id: endpoint.id, label: `${connector.name} / ${endpoint.name}`,
-        }))),
-        ...interfaceGroups.flatMap(({ system, interfaces }) => interfaces.map((item) => ({
-          type: 'data_interface' as const, id: item.id, label: `${system.name} / ${item.name}`,
-        }))),
-        ...folders.map((folder) => ({ type: 'skill_folder' as const, id: folder.id, label: folder.name })),
-      ];
-    },
   });
   const { data: selectedIntegration } = useQuery({
     queryKey: ['enterprise-application-integration', selectedAppId],
@@ -313,30 +285,6 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
     });
   }, [selectedApp, section, assistantForm]);
 
-  const addBinding = useMutation({
-    mutationFn: (value: { target_type: EnterpriseApplicationTarget; target_id: string; operation: EnterpriseApplicationOperation }) => {
-      if (!selectedApp) throw new Error('请先选择应用');
-      const existing = selectedApp.tool_bindings.map((item) => ({
-        target_type: item.target_type, target_id: item.target_id,
-        operation: item.operation, is_active: item.is_active,
-      }));
-      return enterpriseApplications.replaceToolBindings(selectedApp.id, [...existing, { ...value, is_active: true }]);
-    },
-    onSuccess: () => { invalidate(); bindingForm.resetFields(); message.success('工具绑定已添加'); },
-    onError: (error) => message.error(errorText(error, '工具绑定失败，请确认资源属于当前企业')),
-  });
-
-  const removeBinding = (index: number) => {
-    if (!selectedApp) return;
-    const next = selectedApp.tool_bindings.filter((_, i) => i !== index).map((item) => ({
-      target_type: item.target_type, target_id: item.target_id,
-      operation: item.operation, is_active: item.is_active,
-    }));
-    enterpriseApplications.replaceToolBindings(selectedApp.id, next).then(() => {
-      invalidate(); message.success('工具绑定已移除');
-    }).catch((error) => message.error(errorText(error, '移除失败')));
-  };
-
   const titles = {
     applications: ['应用管理', <AppstoreOutlined key="icon" />],
     navigation: ['导航配置', <SettingOutlined key="icon" />],
@@ -441,18 +389,19 @@ export default function EnterpriseApplications({ section }: { section: Enterpris
           <Button type="primary" htmlType="submit">保存助手配置</Button>
         </Form>
       </Card>
-      <Card title="工具绑定" extra={<Typography.Text type="secondary">绑定后，即使从个人助手调用也执行同一应用权限检查</Typography.Text>}>
-        <Form form={bindingForm} layout="inline" onFinish={(values) => addBinding.mutate(values)} style={{ marginBottom: 16 }}>
-          <Form.Item name="target_type" rules={[{ required: true }]}><Select placeholder="资源类型" style={{ width: 150 }} options={TARGET_OPTIONS} onChange={() => bindingForm.setFieldValue('target_id', undefined)} /></Form.Item>
-          <Form.Item name="target_id" rules={[{ required: true }]}><Select showSearch optionFilterProp="label" placeholder={bindingTargetType ? '选择当前企业资源' : '请先选择资源类型'} disabled={!bindingTargetType} style={{ width: 330 }} options={bindingTargets.filter((item) => item.type === bindingTargetType).map((item) => ({ value: item.id, label: item.label }))} /></Form.Item>
-          <Form.Item name="operation" rules={[{ required: true }]}><Select placeholder="操作" style={{ width: 120 }} options={OPERATION_OPTIONS} /></Form.Item>
-          <Button type="primary" htmlType="submit" loading={addBinding.isPending}>添加绑定</Button>
-        </Form>
+      <Card title="旧工具绑定（只读迁移记录）" extra={<Typography.Text type="secondary">新业务助手仅使用 Manifest Action</Typography.Text>}>
+        <Alert
+          showIcon
+          type="warning"
+          style={{ marginBottom: 16 }}
+          message="旧连接器、数据接口和应用 Skill 绑定已停止新增与修改"
+          description="这里只保留历史记录用于无调用观察和迁移核对。确认 Manifest Action 已覆盖且连续七天没有旧端点调用后，系统才会删除这些记录。"
+        />
         <Table dataSource={selectedApp.tool_bindings} rowKey="id" pagination={false} columns={[
           { title: '类型', dataIndex: 'target_type', render: (value: string) => TARGET_OPTIONS.find((item) => item.value === value)?.label ?? value },
           { title: '资源 UUID', dataIndex: 'target_id' },
           { title: '操作', dataIndex: 'operation', render: (value: string) => <Tag>{OPERATION_OPTIONS.find((item) => item.value === value)?.label ?? value}</Tag> },
-          { title: '操作', width: 90, render: (_: unknown, __: unknown, index: number) => <Button size="small" danger onClick={() => removeBinding(index)}>移除</Button> },
+          { title: '状态', width: 120, render: (_: unknown, row) => <Tag color={row.is_active ? 'gold' : 'default'}>{row.is_active ? '迁移观察中' : '已停用'}</Tag> },
         ]} />
       </Card>
     </div>

@@ -1,88 +1,16 @@
-"""Agent test playground API — run an agent (stream/non-stream) + list runs."""
+"""Compatibility tombstones for the retired administrator playground."""
 
-from uuid import UUID
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.agents.dsh import run_agent, stream_agent
-from app.auth.admin_auth import (
-    CurrentAdmin,
-    assert_org_access,
-    assert_org_write_access,
-    require_admin,
-)
-from app.database import get_db
-from app.models.agent import Agent
-from app.models.agent_run import AgentRun
-from app.schemas.agent import AgentRunRead
+from app.api.retirement import retired_response
 
 router = APIRouter()
+_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
 
-class PlaygroundRequest(BaseModel):
-    message: str
-    session_id: str | None = None
-    stream: bool = False
-
-
-async def _load_agent_or_404(db: AsyncSession, agent_id: UUID) -> Agent:
-    from app.services.agent_service import get_agent
-    agent = await get_agent(db, agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    return agent
-
-
-@router.post("/agents/{agent_id}/playground")
-async def playground_endpoint(
-    agent_id: UUID,
-    data: PlaygroundRequest,
-    request: Request,
-    auth: CurrentAdmin = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    """测试广场：运行智能体。stream=true 返回 SSE，否则返回最终结果。"""
-    agent = await _load_agent_or_404(db, agent_id)
-    assert_org_write_access(auth, agent.organization_id)
-    if data.stream:
-        return await stream_agent(
-            agent_id=str(agent.id), org_id=str(agent.organization_id),
-            message=data.message, session_id=data.session_id,
-            db=db, request=request, admin=auth,
-        )
-    result = await run_agent(
-        agent_id=str(agent.id), org_id=str(agent.organization_id),
-        message=data.message, session_id=data.session_id,
-        db=db, request=request, admin=auth,
-    )
-    return result
-
-
-@router.get("/agents/{agent_id}/runs")
-async def list_runs_endpoint(
-    agent_id: UUID,
-    auth: CurrentAdmin = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
-    limit: int = Query(default=50, le=200),
-    offset: int = Query(default=0, ge=0),
-):
-    """列出智能体的执行记录（测试历史）。"""
-    agent = await _load_agent_or_404(db, agent_id)
-    assert_org_access(auth, agent.organization_id)
-    query = (
-        select(AgentRun)
-        .where(AgentRun.agent_id == agent_id)
-        .order_by(AgentRun.created_at.desc())
-        .offset(offset).limit(limit)
-    )
-    rows = (await db.execute(query)).scalars().all()
-    total = (await db.execute(
-        select(func.count()).select_from(AgentRun).where(AgentRun.agent_id == agent_id)
-    )).scalar() or 0
-    return {
-        "total": total, "offset": offset, "limit": limit,
-        "data": [AgentRunRead.model_validate(r).model_dump() for r in rows],
-    }
+@router.api_route("/agents/{agent_id}/playground", methods=_METHODS, include_in_schema=False)
+@router.api_route("/agents/{agent_id}/runs", methods=_METHODS, include_in_schema=False)
+async def retired_agent_playground(agent_id: str) -> JSONResponse:
+    del agent_id
+    return retired_response("管理员智能体测试广场已下线；请使用真实用户端到端验收。")

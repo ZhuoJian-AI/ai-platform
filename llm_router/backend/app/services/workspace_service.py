@@ -22,7 +22,6 @@ from app.models.department import Department
 from app.models.organization import Organization
 from app.models.user import User
 from app.models.workspace import (
-    OfficeEditRoom,
     Workspace,
     WorkspaceFile,
     WorkspaceFileEventOutbox,
@@ -87,13 +86,6 @@ _KNOWN_BINARY_MIMES = {
     "application/x-7z-compressed", "application/x-rar-compressed",
     "application/x-tar", "application/gzip", "application/octet-stream",
 }
-WEBOFFICE_EDITABLE_SUFFIXES = {
-    ".doc", ".docx", ".dot", ".wps", ".wpt", ".dotx", ".docm", ".dotm",
-    ".ppt", ".pptx", ".pptm", ".ppsx", ".ppsm", ".pps", ".potx", ".potm", ".dpt", ".dps",
-    ".et", ".xls", ".xlt", ".xlsx", ".xlsm", ".xltx", ".xltm",
-}
-
-
 class WorkspaceFileUploadError(ValueError):
     """工作空间原文件上传校验失败。"""
 
@@ -151,23 +143,9 @@ class WorkspaceFileVersionNotFound(ValueError):  # noqa: N818
 
 
 def office_edit_enabled(file, *, can_update: bool) -> bool:
-    """Return the effective server-owned WebOffice editing capability.
-
-    The role capability is necessary but never sufficient: the Platform flag,
-    authenticated Gateway configuration and callback verification secret must
-    all be present, and the concrete file must be a current OSS-backed Office
-    artifact within the configured size limit.
-    """
-    if not can_update or not settings.workspace_weboffice_edit_configured:
-        return False
-    metadata = getattr(file, "metadata_", None) or {}
-    filename = str(metadata.get("name") or getattr(file, "path", ""))
-    return bool(
-        PurePosixPath(filename).suffix.casefold() in WEBOFFICE_EDITABLE_SUFFIXES
-        and storage_gateway_service.is_object_ref(getattr(file, "content_ref", None))
-        and getattr(file, "current_version_id", None)
-        and 0 < int(getattr(file, "size", 0) or 0) <= settings.workspace_weboffice_max_bytes
-    )
+    """Compatibility field for clients built before online editing retired."""
+    del file, can_update
+    return False
 
 
 def raw_tool_file_kind(f: WorkspaceFile) -> str | None:
@@ -665,30 +643,12 @@ def storage_version_id(
     return str((file.metadata_ or {}).get("storage_version_id") or "") or None
 
 
-async def _active_office_room(
-    db: AsyncSession,
-    file_id: UUID | str,
-) -> OfficeEditRoom | None:
-    now = datetime.now(UTC)
-    return (await db.execute(select(OfficeEditRoom).where(
-        OfficeEditRoom.workspace_file_id == file_id,
-        OfficeEditRoom.status.in_(("open", "closing")),
-        OfficeEditRoom.expires_at > now,
-    ).order_by(OfficeEditRoom.created_at.desc()).limit(1))).scalar_one_or_none()
-
-
 async def assert_no_active_office_room(
     db: AsyncSession,
     file: WorkspaceFile,
 ) -> None:
-    """Protect an active collaborative OSS object from out-of-band writes."""
-    room = await _active_office_room(db, file.id)
-    if room is not None:
-        raise WorkspaceFileActiveEditConflict(
-            "文件正在 WebOffice 协同编辑，不能静默覆盖",
-            room_id=room.id,
-            current_version_id=file.current_version_id,
-        )
+    """Compatibility no-op after online collaborative editing was retired."""
+    del db, file
 
 
 async def enqueue_file_event(
@@ -2364,12 +2324,7 @@ async def build_workspace_tree(db: AsyncSession, org_ids: list[UUID]) -> list[di
         org_direct_users: list[dict] = []
         for u in users:
             uname = u.display_name or u.username
-            # 组织管理员（role='admin'）非终端用户，不持有工作空间：
-            # 节点照常展示（前端标「无工作空间」），但不创建/复活其工作空间。
-            if u.role == "admin":
-                uws = None
-            else:
-                uws = await ensure_node_workspace(db, org.id, "user", str(u.id), uname, str(u.id))
+            uws = await ensure_node_workspace(db, org.id, "user", str(u.id), uname, str(u.id))
             unode = _node("user", u.id, uname, uws, [])
             if u.department_id and u.department_id in dept_map:
                 users_by_dept.setdefault(u.department_id, []).append(unode)

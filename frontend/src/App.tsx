@@ -5,11 +5,10 @@ import {
   ApartmentOutlined, KeyOutlined, CloudServerOutlined,
   SafetyOutlined, TeamOutlined,
   LogoutOutlined, ToolOutlined, MonitorOutlined, RobotOutlined, UserOutlined,
-  FolderOpenOutlined, ExperimentOutlined, DatabaseOutlined, PartitionOutlined,
-  ApiOutlined, BarChartOutlined, QuestionCircleOutlined, ReadOutlined,
+  FolderOpenOutlined, DatabaseOutlined,
+  BarChartOutlined, QuestionCircleOutlined, ReadOutlined,
   MoreOutlined, PhoneOutlined,
   AudioOutlined,
-  AppstoreAddOutlined, DeploymentUnitOutlined, ShopOutlined, HistoryOutlined,
   AppstoreOutlined, LinkOutlined, SettingOutlined, RightOutlined, DownOutlined,
   MenuOutlined, CloseOutlined,
 } from '@ant-design/icons';
@@ -34,21 +33,15 @@ import RolesPage from './pages/org/Roles';
 import VoicesPage from './pages/org/Voices';
 import Workspaces from './pages/agent/Workspaces';
 import Agents from './pages/agent/Agents';
-import AgentPlayground from './pages/agent/AgentPlayground';
 import Rag from './pages/agent/Rag';
-import Judges from './pages/agent/Judges';
 import MemoryPage from './pages/agent/Memory';
-import Connectors from './pages/tools/Connectors';
-import DataInterfaces from './pages/tools/DataInterfaces';
 import Skills from './pages/tools/Skills';
-import OntologyPage from './pages/tools/Ontology';
 import MonitorOverview from './pages/monitor/MonitorOverview';
 import RouterMonitor from './pages/monitor/RouterMonitor';
 import AgentMonitor from './pages/monitor/AgentMonitor';
 import ToolMonitor from './pages/monitor/ToolMonitor';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from './branding/BrandLogoSlot';
 import { BRAND_TITLES, useBrandTitle } from './branding/brand';
-import PlatformExtensions from './pages/platform/PlatformExtensions';
 import EnterpriseApplications from './pages/apps/EnterpriseApplications';
 import EnterpriseApplicationDetail from './pages/apps/EnterpriseApplicationDetail';
 import EnterpriseAccessControl from './pages/apps/EnterpriseAccessControl';
@@ -131,51 +124,23 @@ const SUBSYSTEMS: Subsystem[] = [
     menu: [
       { path: '/agent/workspaces', label: '工作空间', icon: <FolderOpenOutlined /> },
       { path: '/agent/agents', label: '智能体', icon: <RobotOutlined /> },
-      // 以下两项为二期开发内容，暂时隐藏于二级菜单（路由保留以便后续启用）
-      { path: '/agent/playground', label: '测试广场', icon: <ExperimentOutlined />, hidden: true },
       { path: '/agent/rag', label: 'RAG知识库', icon: <DatabaseOutlined /> },
-      { path: '/agent/judges', label: 'Judge 模板', icon: <SafetyOutlined />, hidden: true },
       { path: '/agent/memory', label: '长期记忆', icon: <ReadOutlined /> },
     ],
     routes: [
       { path: '/agent/workspaces', element: <Workspaces /> },
       { path: '/agent/agents', element: <Agents /> },
-      { path: '/agent/playground', element: <AgentPlayground /> },
       { path: '/agent/rag', element: <Rag /> },
-      { path: '/agent/judges', element: <Judges /> },
       { path: '/agent/memory', element: <MemoryPage /> },
     ],
   },
   {
-    key: 'tool_connector', label: '工具连接器', icon: <ToolOutlined />, built: true,
+    key: 'tools', label: '工具与技能', icon: <ToolOutlined />, built: true,
     menu: [
-      { path: '/tools/connectors', label: '连接器', icon: <ApiOutlined /> },
-      { path: '/tools/data-interfaces', label: '数据接口', icon: <ApiOutlined /> },
       { path: '/tools/skills', label: '技能', icon: <ToolOutlined /> },
-      { path: '/tools/ontology', label: '本体', icon: <PartitionOutlined /> },
     ],
     routes: [
-      { path: '/tools/connectors', element: <Connectors /> },
-      { path: '/tools/data-interfaces', element: <DataInterfaces /> },
       { path: '/tools/skills', element: <Skills /> },
-      { path: '/tools/ontology', element: <OntologyPage /> },
-    ],
-  },
-  {
-    key: 'platform_extensions', label: '平台扩展', icon: <AppstoreAddOutlined />, built: true,
-    menu: [
-      { path: '/platform/extensions', label: '扩展总览', icon: <AppstoreAddOutlined />, superOnly: true },
-      { path: '/platform/extensions/runtime', label: 'Runtime 管理', icon: <DeploymentUnitOutlined />, superOnly: true },
-      { path: '/platform/extensions/tools', label: '系统工具', icon: <ToolOutlined />, superOnly: true },
-      { path: '/platform/extensions/catalog', label: '插件仓库', icon: <ShopOutlined />, superOnly: true },
-      { path: '/platform/extensions/releases', label: '发布与回滚', icon: <HistoryOutlined />, superOnly: true },
-    ],
-    routes: [
-      { path: '/platform/extensions', element: <PlatformExtensions section="overview" />, superOnly: true },
-      { path: '/platform/extensions/runtime', element: <PlatformExtensions section="runtime" />, superOnly: true },
-      { path: '/platform/extensions/tools', element: <PlatformExtensions section="tools" />, superOnly: true },
-      { path: '/platform/extensions/catalog', element: <PlatformExtensions section="catalog" />, superOnly: true },
-      { path: '/platform/extensions/releases', element: <PlatformExtensions section="releases" />, superOnly: true },
     ],
   },
   {

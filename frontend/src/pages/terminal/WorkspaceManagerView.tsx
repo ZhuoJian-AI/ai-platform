@@ -1063,10 +1063,6 @@ export default function WorkspaceManagerView({
         startSpreadsheetPreview={terminal.startWsFileSpreadsheetPreview}
         getSpreadsheetPreview={terminal.getWsFileSpreadsheetPreview}
         getSpreadsheetPage={terminal.getWsFileSpreadsheetPage}
-        createEditSession={terminal.createWsFileEditSession}
-        refreshEditSession={terminal.refreshWsFileEditSession}
-        closeEditSession={terminal.closeWsFileEditSession}
-        getEditSessionStatus={terminal.getWsFileEditSessionStatus}
         externalVersionEvent={browserFileId ? fileEventsById?.[browserFileId] ?? null : null}
       />
 

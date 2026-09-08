@@ -20,8 +20,10 @@ from app.services.agent_service import (
     create_agent,
     get_agent,
     list_agents,
+    merged_application_context,
     soft_delete_agent,
     update_agent,
+    validate_application_context,
 )
 from app.services.scope_service import assert_admin_bound_rags
 from app.services.skill_scope_service import assert_admin_bound_skills, validate_scope_target
@@ -37,6 +39,9 @@ async def create_agent_endpoint(
     await validate_scope_target(db, org_id, data.scope_type, data.scope_id)
     await assert_admin_bound_skills(db, org_id, data.skill_ids)
     await assert_admin_bound_rags(db, org_id, data.rag_collection_ids)
+    await validate_application_context(
+        db, org_id, data.application_id, data.module_key, data.page_key,
+    )
     try:
         return await create_agent(db, org_id, data)
     except IntegrityError:
@@ -80,6 +85,10 @@ async def update_agent_endpoint(
         await assert_admin_bound_rags(db, agent.organization_id, data.rag_collection_ids)
     if data.scope_type is not None:
         await validate_scope_target(db, agent.organization_id, data.scope_type, data.scope_id)
+    application_id, module_key, page_key = merged_application_context(agent, data)
+    await validate_application_context(
+        db, agent.organization_id, application_id, module_key, page_key,
+    )
     return await update_agent(db, agent, data)
 
 

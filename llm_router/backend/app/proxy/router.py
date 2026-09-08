@@ -1,8 +1,7 @@
 """Proxy Router — registers /v1/messages, /v1/chat/completions, /v1/models endpoints.
 
-请求处理流水线已迁移至 LangGraph StateGraph（见 :mod:`app.graph`）。本模块仅保留
-HTTP 入口：鉴权（FastAPI 依赖）→ 解析请求体 → 调用 ``run_proxy`` / ``stream_proxy``
-驱动图执行。原过程式流水线（权限/DLP/路由/上游/审计）现为图节点。
+HTTP 入口只负责鉴权和解析请求体，固定异步流水线负责权限、DLP、路由、配额、
+上游透传和审计。
 
 每个请求经图的节点流转：
 1. resolve_permissions（鉴权后加载作用域、级联权限、模型访问校验）
@@ -27,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.api_key_auth import AuthenticatedKey, authenticate_request
 from app.auth.permission_resolver import resolve_effective_permissions
 from app.database import get_db
-from app.graph import get_proxy_graph, run_proxy, stream_proxy
+from app.graph import run_proxy, stream_proxy
 from app.models.department import Department
 from app.models.llm_provider import LlmProvider
 from app.models.organization import Organization
@@ -51,10 +50,9 @@ async def anthropic_messages(
         return make_anthropic_error(400, "invalid_request_error", "Invalid JSON body")
 
     is_stream = bool(body.get("stream", False))
-    graph = get_proxy_graph()
     if is_stream:
-        return await stream_proxy(graph, request=request, auth=auth, db=db, body=body, protocol="anthropic")
-    return await run_proxy(graph, request=request, auth=auth, db=db, body=body, protocol="anthropic")
+        return await stream_proxy(request=request, auth=auth, db=db, body=body, protocol="anthropic")
+    return await run_proxy(request=request, auth=auth, db=db, body=body, protocol="anthropic")
 
 
 @proxy_router.post("/v1/chat/completions")
@@ -70,10 +68,9 @@ async def openai_chat_completions(
         return make_openai_error(400, "invalid_request_error", "Invalid JSON body")
 
     is_stream = bool(body.get("stream", False))
-    graph = get_proxy_graph()
     if is_stream:
-        return await stream_proxy(graph, request=request, auth=auth, db=db, body=body, protocol="openai")
-    return await run_proxy(graph, request=request, auth=auth, db=db, body=body, protocol="openai")
+        return await stream_proxy(request=request, auth=auth, db=db, body=body, protocol="openai")
+    return await run_proxy(request=request, auth=auth, db=db, body=body, protocol="openai")
 
 
 @proxy_router.get("/v1/models")

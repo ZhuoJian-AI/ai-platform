@@ -23,21 +23,6 @@ class Settings(BaseSettings):
     secret_key: str = "ai-infra-dev-secret-key-change-in-production"
     master_encryption_key: str = "zmE5st2H+zdf25a+oul6Ci8dEvLavTOdn+7j/ZH1Q1c="
 
-    # Public OAuth/MCP boundary.  Production must set both URLs to the same
-    # externally reachable HTTPS origin (for example https://infra.example.com).
-    # Access tokens are deliberately short lived; refresh tokens rotate on
-    # every use and have a separate absolute lifetime.
-    oauth_issuer: str = ""
-    oauth_public_base_url: str = ""
-    oauth_signing_key: SecretStr = SecretStr("")
-    oauth_access_token_minutes: int = 10
-    oauth_authorization_code_seconds: int = 300
-    oauth_refresh_token_days: int = 30
-    oauth_refresh_token_absolute_days: int = 90
-    oauth_dynamic_client_registration_enabled: bool = True
-    oauth_dynamic_client_ttl_days: int = 180
-    oauth_dynamic_client_limit_per_hour: int = 60
-    oauth_dynamic_client_max_active: int = 5000
     browser_allowed_origins: str = ""
     # Comma-separated networks of reverse proxies that are allowed to supply
     # X-Forwarded-For.  Keep empty outside a controlled proxy deployment.
@@ -71,7 +56,11 @@ class Settings(BaseSettings):
     storage_lifecycle_interval_seconds: int = 60 * 60
     storage_orphan_grace_days: int = 7
 
-    # Single coordinator runtime (Docker-internal only).
+    # Assistant Core coordinator.  ``native`` runs the platform-owned loop;
+    # ``dsh`` remains a temporary rollback engine during the migration window.
+    assistant_engine: str = "dsh"
+    assistant_native_canary_user_ids: str = ""
+    # Legacy DSH coordinator (Docker-internal only, removed after canary drain).
     dsh_runtime_url: str = "http://localhost:8030"
     dsh_runtime_token: str = "dsh-runtime-dev-token-change-in-production"
     dsh_runtime_timeout_seconds: int = 600
@@ -90,9 +79,6 @@ class Settings(BaseSettings):
     # guard; this budget only prevents a genuinely looping agent from running
     # forever. Complex office tasks need more than the old hard-coded 8 steps.
     agent_max_steps: int = 24
-    extension_builder_url: str = "http://localhost:8040"
-    extension_builder_token: str = "extension-builder-dev-token-change-in-production"
-    extension_builder_timeout_seconds: int = 600
     extension_archive_max_bytes: int = 25 * 1024 * 1024
     extension_artifact_max_bytes: int = 100 * 1024 * 1024
     extension_catalog_community_url: str = "https://awesome-dsh-plugin.com/plugins.json"
@@ -100,22 +86,9 @@ class Settings(BaseSettings):
     extension_catalog_sync_interval_seconds: int = 24 * 60 * 60
     extension_catalog_sync_poll_seconds: int = 60 * 60
     subsystem_sync_poll_seconds: int = 30
-    # GitHub App-backed enterprise module repository publisher. The private
-    # key is held only by the central backend; tenant ECS instances receive
-    # repository-scoped, short-lived installation tokens.
-    github_module_publisher_enabled: bool = False
-    github_module_publisher_owner: str = "ZhuoJian-AI"
-    github_module_publisher_app_id: str = ""
-    github_module_publisher_installation_id: str = ""
-    github_module_publisher_private_key_b64: str = ""
-    github_module_publisher_timeout_seconds: int = 20
-    # Central Coolify control plane.  The bearer token never leaves this
-    # backend; tenant publish keys can only operate on their own deployment
-    # profile and deterministic repository/domain names.
-    coolify_module_deployer_enabled: bool = False
-    coolify_api_url: str = ""
-    coolify_api_token: str = ""
-    coolify_timeout_seconds: int = 30
+    # Public origin embedded in ECS Runtime bootstrap metadata.  This belongs
+    # to the retained ECS Publisher contract, not the retired GitHub/Coolify
+    # module publisher.
     module_saas_origin: str = "https://ai-platform.staging.zhuojianai.com"
     original_preview_enabled: bool = False
     # Native file preview is part of the staging-wide workspace experience;
@@ -153,13 +126,6 @@ class Settings(BaseSettings):
     workspace_proxy_upload_max_bytes: int = 1 * 1024 * 1024
     workspace_upload_session_ttl_seconds: int = 24 * 60 * 60
     workspace_weboffice_enabled: bool = False
-    # Human-triggered Office editing is a separate fail-closed feature.  It is
-    # never inferred from preview enablement: the Storage Gateway additionally
-    # verifies IMM/MNS configuration and OSS versioning before issuing a token.
-    workspace_weboffice_edit_enabled: bool = False
-    workspace_office_event_callback_secret: SecretStr = SecretStr("")
-    workspace_office_reconcile_poll_seconds: float = 1.0
-    workspace_office_reconcile_lease_seconds: int = 5 * 60
     workspace_weboffice_max_bytes: int = 200 * 1024 * 1024
     workspace_pdf_direct_preview_max_bytes: int = 20 * 1024 * 1024
     workspace_preview_job_poll_seconds: float = 1.0
@@ -182,40 +148,6 @@ class Settings(BaseSettings):
         # Tests and gradual configuration reloads may temporarily assign the
         # legacy plain-string representation.  Never expose it from repr/logs.
         return str(value or "").strip()
-
-    @property
-    def workspace_office_event_callback_secret_value(self) -> str:
-        value = self.workspace_office_event_callback_secret
-        if isinstance(value, SecretStr):
-            return value.get_secret_value().strip()
-        return str(value or "").strip()
-
-    @property
-    def workspace_weboffice_edit_configured(self) -> bool:
-        """Fail closed unless every Platform-side editing dependency exists."""
-        return bool(
-            self.workspace_weboffice_edit_enabled
-            and self.workspace_object_storage_configured
-            and len(self.workspace_office_event_callback_secret_value) >= 32
-        )
-
-    @property
-    def github_module_publisher_configured(self) -> bool:
-        return bool(
-            self.github_module_publisher_enabled
-            and self.github_module_publisher_owner.strip()
-            and self.github_module_publisher_app_id.strip()
-            and self.github_module_publisher_installation_id.strip()
-            and self.github_module_publisher_private_key_b64.strip()
-        )
-
-    @property
-    def coolify_module_deployer_configured(self) -> bool:
-        return bool(
-            self.coolify_module_deployer_enabled
-            and self.coolify_api_url.strip()
-            and self.coolify_api_token.strip()
-        )
 
     @staticmethod
     def _canonical_org_identity(value: str) -> str:
@@ -333,29 +265,6 @@ class Settings(BaseSettings):
         if not self.proxy_base_url:
             return None
         return self.proxy_base_url.rstrip("/")
-
-    @property
-    def oauth_signing_key_value(self) -> str:
-        value = self.oauth_signing_key
-        if isinstance(value, SecretStr):
-            configured = value.get_secret_value().strip()
-        else:
-            configured = str(value or "").strip()
-        # A separate key is mandatory in production.  Development keeps a
-        # deterministic fallback so local onboarding and tests remain simple.
-        if configured:
-            return configured
-        return self.secret_key if self.is_development else ""
-
-    @property
-    def normalized_oauth_issuer(self) -> str:
-        value = (self.oauth_issuer or self.oauth_public_base_url).strip().rstrip("/")
-        return value
-
-    @property
-    def normalized_oauth_public_base_url(self) -> str:
-        value = (self.oauth_public_base_url or self.oauth_issuer).strip().rstrip("/")
-        return value
 
     @property
     def is_development(self) -> bool:

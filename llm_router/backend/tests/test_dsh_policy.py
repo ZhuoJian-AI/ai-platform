@@ -361,16 +361,12 @@ def _patch_prepare_dependencies(monkeypatch, principal):
     async def fake_visual(_state, _db, _user, _messages, prompt):
         return None, None, prompt
 
-    async def no_interfaces(_db, _user):
-        return []
-
     async def no_release(_db):
         return None
 
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": object(), "user": principal})
     monkeypatch.setattr(nodes, "_build_tools", fake_build_tools)
     monkeypatch.setattr(nodes, "_configure_visual_turn", fake_visual)
-    monkeypatch.setattr(nodes.scope_service, "list_data_interfaces_for_user", no_interfaces)
     monkeypatch.setattr(platform_tool_registry, "active_platform_tool_names", no_release)
 
 
@@ -414,7 +410,7 @@ class _FakeDb:
 
 @pytest.mark.asyncio
 async def test_execute_tool_call_dispatches_memory_tools_for_the_current_principal(monkeypatch):
-    from app.tools import capability_tools
+    from app.services import memory_service
 
     writes: list[tuple[str, str]] = []
 
@@ -427,8 +423,8 @@ async def test_execute_tool_call_dispatches_memory_tools_for_the_current_princip
 
     principal = SimpleNamespace(id="user-1", organization_id=uuid4())
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": _FakeDb(), "user": principal})
-    monkeypatch.setattr(capability_tools, "_write_memory", fake_write)
-    monkeypatch.setattr(capability_tools, "_read_memory", fake_read)
+    monkeypatch.setattr(memory_service, "append_memory_for_user", fake_write)
+    monkeypatch.setattr(memory_service, "render_memory_for_user", fake_read)
     registry = {
         "read_memory": {"kind": "memory", "operation": "read"},
         "write_memory": {"kind": "memory", "operation": "write"},

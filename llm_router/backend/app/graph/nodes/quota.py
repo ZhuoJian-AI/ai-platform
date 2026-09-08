@@ -1,4 +1,4 @@
-"""Reserve hierarchical AI quota before the graph contacts a provider."""
+"""Reserve hierarchical AI quota before the proxy contacts a provider."""
 
 from __future__ import annotations
 

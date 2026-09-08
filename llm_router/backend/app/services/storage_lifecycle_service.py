@@ -17,12 +17,10 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models.ontology import Ontology, OntologyFile, OntologyFolder
 from app.models.platform_extension import PlatformExtensionSource
 from app.models.rag import RagChunk, RagCollection, RagDocument, RagFolder
 from app.models.skill import SkillFile, SkillFolder, SkillVersion
 from app.models.workspace import (
-    OfficeEditRoom,
     Workspace,
     WorkspaceFile,
     WorkspaceFileEventOutbox,
@@ -59,23 +57,13 @@ def restore(*rows: Any) -> None:
 
 
 async def mark_workspace_deleted(db: AsyncSession, workspace: Workspace) -> datetime:
-    """Trash a workspace and explicitly invalidate every active edit room."""
+    """Trash a workspace and its live folders/files in one transaction."""
     now = datetime.now(UTC)
     deadline = retention_deadline(now)
     files = list((await db.execute(select(WorkspaceFile).where(
         WorkspaceFile.workspace_id == workspace.id,
         WorkspaceFile.deleted_at.is_(None),
     ).order_by(WorkspaceFile.id).with_for_update())).scalars().all())
-    if files:
-        rooms = list((await db.execute(select(OfficeEditRoom).where(
-            OfficeEditRoom.workspace_file_id.in_([file.id for file in files]),
-            OfficeEditRoom.status.in_(("open", "closing")),
-        ).with_for_update())).scalars().all())
-        for room in rooms:
-            room.status = "expired"
-            room.expires_at = now
-            room.closed_at = room.closed_at or now
-            room.last_error = "工作空间已删除，编辑会话已失效"
     folders = list((await db.execute(select(WorkspaceFolder).where(
         WorkspaceFolder.workspace_id == workspace.id,
         WorkspaceFolder.deleted_at.is_(None),
@@ -134,18 +122,11 @@ async def mark_rag_collection_deleted(db: AsyncSession, collection: RagCollectio
     return deadline
 
 
-async def mark_ontology_deleted(db: AsyncSession, ontology: Ontology) -> datetime:
-    mark_deleted(ontology)
-    await db.flush()
-    return ontology.purge_after
-
-
 async def backfill_missing_deadlines(db: AsyncSession) -> int:
     models = (
         Workspace, WorkspaceFile, WorkspaceFolder,
         SkillFolder, SkillFile,
         RagCollection, RagDocument, RagFolder,
-        Ontology, OntologyFolder, OntologyFile,
     )
     updated = 0
     for model in models:
@@ -324,29 +305,6 @@ async def _purge_rag(db: AsyncSession, now: datetime) -> int:
     return purged
 
 
-async def _purge_ontology(db: AsyncSession, now: datetime) -> int:
-    ontologies = list((await db.execute(select(Ontology).where(
-        Ontology.purge_after <= now, Ontology.deleted_at.is_not(None),
-    ).limit(50))).scalars().all())
-    files = list((await db.execute(select(OntologyFile).where(
-        OntologyFile.purge_after <= now, OntologyFile.deleted_at.is_not(None),
-    ).limit(100))).scalars().all())
-    for ontology in ontologies:
-        ontology.entities = []
-        ontology.relations = []
-        ontology.description = None
-        ontology.purge_after = None
-    for file in files:
-        file.content = None
-        file.size = 0
-        file.metadata_ = {"physically_purged_at": now.isoformat()}
-        file.purge_after = None
-    await db.execute(delete(OntologyFolder).where(
-        OntologyFolder.purge_after <= now, OntologyFolder.deleted_at.is_not(None),
-    ))
-    return len(ontologies) + len(files)
-
-
 async def expire_upload_sessions(db: AsyncSession, now: datetime | None = None) -> dict[str, int]:
     now = now or datetime.now(UTC)
     sessions = list((await db.execute(select(WorkspaceUploadSession).where(
@@ -440,7 +398,6 @@ async def run_cleanup(db: AsyncSession) -> dict[str, int]:
     skill_versions, skill_failures = await _purge_skill_versions(db, now)
     skill_folders = await _finalize_skill_folders(db, now)
     rag_items = await _purge_rag(db, now)
-    ontology_items = await _purge_ontology(db, now)
     migrated = await migrate_inline_skill_packages(db)
     outbox_result = await db.execute(delete(WorkspaceFileEventOutbox).where(
         WorkspaceFileEventOutbox.created_at < now - timedelta(days=7),
@@ -456,7 +413,6 @@ async def run_cleanup(db: AsyncSession) -> dict[str, int]:
         "skill_failures": skill_failures,
         "skill_folders": skill_folders,
         "rag_items": rag_items,
-        "ontology_items": ontology_items,
         "migrated_skill_versions": migrated["migrated"],
         "migration_failures": migrated["failed"],
         "expired_file_events": int(outbox_result.rowcount or 0),
@@ -467,7 +423,7 @@ async def overview(db: AsyncSession) -> dict[str, int]:
     now = datetime.now(UTC)
     governed: Iterable[type[Any]] = (
         Workspace, WorkspaceFile, WorkspaceFolder, SkillFolder, SkillFile,
-        RagCollection, RagDocument, RagFolder, Ontology, OntologyFolder, OntologyFile,
+        RagCollection, RagDocument, RagFolder,
     )
     pending = 0
     for model in governed:

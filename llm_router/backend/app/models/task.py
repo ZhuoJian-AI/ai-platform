@@ -27,13 +27,10 @@ class Task(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     department_id: Mapped[str | None] = mapped_column(
         ForeignKey("departments.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    team_id: Mapped[str | None] = mapped_column(
-        ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True
-    )
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     message: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    # 任务装配配置：{workspace_id, skill_ids[], ontology_ids[], rag_collection_ids[],
+    # 任务装配配置：{workspace_id, skill_ids[], rag_collection_ids[],
     #   model_alias}；空数组 = 该维度按用户权限自动匹配全集。
     #   长期记忆不在此配置：运行时按用户权限自动载入 4 级记忆全集。
     config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

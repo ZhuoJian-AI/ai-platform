@@ -40,8 +40,6 @@ class AgentState(TypedDict, total=False):
     system_prompt: str
     model_alias: str
     memory_config: dict
-    judge_config: dict
-    judge_template_id: str | None
     skill_ids: list[str]
     # 当前用户本轮可用的 Skill 精简目录；顺序为：明确调用、智能体默认、其他有权 Skill。
     skill_catalog: list[dict]
@@ -57,9 +55,7 @@ class AgentState(TypedDict, total=False):
     temperature: float | None
     max_tokens: int | None
     workspace_id: str | None
-    rag_collection_id: str | None
     # general 模式多资源装配（空数组 = 按用户权限自动匹配全集，由 load_config 解析填充）
-    ontology_ids: list[str]
     rag_collection_ids: list[str]
     # general 模式：当前轮明确调用的技能（结构化 UUID 优先，唯一 /slug 兼容）。
     referenced_skills: list[dict]
@@ -101,9 +97,6 @@ class AgentState(TypedDict, total=False):
     # Repeat-failure blocking now lives in the DSH tool pipeline (dsh_runtime/src/policies.ts);
     # the bridge only records whether this run persisted memory itself.
     _dsh_memory_written: bool  # 本轮模型已通过 write_memory 落库，extract_memory 跳过
-
-    # ── 判官 ──
-    judge_result: dict | None
 
     # ── 错误 ──
     error: str | None

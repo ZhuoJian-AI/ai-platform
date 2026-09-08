@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import or_, select
@@ -19,6 +20,9 @@ from app.models.memory import Memory
 from app.models.organization import Organization
 from app.models.user import User
 from app.schemas.memory import MemoryCreate, MemoryUpdate
+
+if TYPE_CHECKING:
+    from app.auth.user_auth import CurrentUser
 
 # 个人记忆 markdown 分节标题
 PROFILE_SECTION = "个人档案"
@@ -210,6 +214,47 @@ async def add_user_memory(
     mem.content = _append_fact(mem.content or "", content)
     await db.flush()
     return mem
+
+
+async def render_memory_for_user(db: AsyncSession, user: CurrentUser) -> str:
+    """Render the current employee's authorized long-term memory for assistants.
+
+    This is an internal Assistant Core capability.  Keeping it in the memory
+    service prevents the retained assistant runtime from depending on the
+    retired MCP/``StructuredTool`` adapter layer.
+    """
+
+    from app.services import scope_service
+
+    scopes = scope_service.effective_scope_set(user)
+    memories = await list_memory_for_user(
+        db,
+        UUID(str(user.organization_id)),
+        scopes,
+    )
+    if not memories:
+        return "（无长期记忆）"
+    return "\n\n".join(
+        f"[{memory.scope_type}{('/' + memory.category) if memory.category else ''}]\n"
+        f"{(memory.content or '').strip()}"
+        for memory in memories
+    )
+
+
+async def append_memory_for_user(
+    db: AsyncSession,
+    user: CurrentUser,
+    content: str,
+) -> str:
+    """Append one fact to the employee's personal memory."""
+
+    memory = await add_user_memory(
+        db,
+        UUID(str(user.organization_id)),
+        str(user.id),
+        content,
+    )
+    return f"ok: 已沉淀到个人记忆 {memory.id}"
 
 
 async def upsert_user_profile_memory(
@@ -412,14 +457,10 @@ async def build_memory_tree(db: AsyncSession, org_ids: list[UUID]) -> list[dict]
         org_direct_users: list[dict] = []
         for u in users:
             uname = u.display_name or u.username
-            if u.role == "admin":
-                # 组织管理员非终端用户，不持有个人记忆：节点展示但 memory=None。
-                umem = None
-            else:
-                dept_name = dept_map[u.department_id].name if u.department_id and u.department_id in dept_map else None
-                umem = await upsert_user_profile_memory(
-                    db, org.id, str(u.id), uname, org.name, dept_name,
-                )
+            dept_name = dept_map[u.department_id].name if u.department_id and u.department_id in dept_map else None
+            umem = await upsert_user_profile_memory(
+                db, org.id, str(u.id), uname, org.name, dept_name,
+            )
             unode = _mnode("user", u.id, uname, umem, [])
             if u.department_id and u.department_id in dept_map:
                 users_by_dept.setdefault(u.department_id, []).append(unode)

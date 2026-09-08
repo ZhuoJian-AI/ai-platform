@@ -13,12 +13,9 @@ import type {
   WorkspaceDownloadTicket, WorkspaceFallbackPreview, WorkspaceOriginalPreviewSource,
   WorkspacePdfPreviewInfo, WorkspacePreviewPreferredMode, WorkspacePreviewSession,
   WorkspaceSpreadsheetPage, WorkspaceSpreadsheetPreview, WorkspaceFile, WorkspaceFileCapabilities, WorkspaceFileEvent, WorkspaceFileVersion,
-  WorkspaceOfficeEditStatus,
 } from '../../api/client';
-import { WorkspaceEditSessionView } from '../../components/files/WorkspacePreviewSessionView';
 import { parseWorkspaceInternalUrl, workspaceFileLabel, workspaceInternalUrl } from '../../utils/workspaceFileLinks';
 import { parseCsvDocument, serializeCsvDocument, type CsvDocument } from '../../utils/csvDocument';
-import { workspaceOfficeEditOutcome } from '../../utils/workspaceOfficeEdit';
 // mammoth 仅在打开 .docx 时按需动态加载（见下方 useEffect），不进主包。
 
 /** WorkBuddy 配色（与 Terminal.tsx 保持一致）。 */
@@ -46,14 +43,6 @@ type Source = (
 ) & { file?: WorkspaceFile; versionId?: string };
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif']);
-// 与后端显式编辑会话白名单保持一致；不把仅能预览的 ODF 文件误标为“可编辑”。
-const OFFICE_EDIT_EXTS = new Set([
-  'doc', 'docx', 'dot', 'wps', 'wpt', 'dotx', 'docm', 'dotm',
-  'ppt', 'pptx', 'pptm', 'ppsx', 'ppsm', 'pps', 'potx', 'potm', 'dpt', 'dps',
-  'et', 'xls', 'xlt', 'xlsx', 'xlsm', 'xltx', 'xltm',
-]);
-const OFFICE_EDIT_MAX_BYTES = 200 * 1024 * 1024;
-
 function extOf(path: string): string {
   const i = path.lastIndexOf('.');
   return i >= 0 ? path.slice(i + 1).toLowerCase() : '';
@@ -283,10 +272,6 @@ export interface BrowserDrawerProps {
   startSpreadsheetPreview?: (fileId: string, versionId?: string) => Promise<WorkspaceSpreadsheetPreview>;
   getSpreadsheetPreview?: (fileId: string, versionId?: string) => Promise<WorkspaceSpreadsheetPreview>;
   getSpreadsheetPage?: (fileId: string, sheet: string, page: number, versionId?: string) => Promise<WorkspaceSpreadsheetPage>;
-  createEditSession?: (fileId: string, clientOpenId: string) => Promise<WorkspacePreviewSession>;
-  refreshEditSession?: (fileId: string, roomId: string, accessToken: string, refreshToken: string, refreshContext: string) => Promise<WorkspacePreviewSession>;
-  closeEditSession?: (fileId: string, clientOpenId: string) => Promise<WorkspaceOfficeEditStatus>;
-  getEditSessionStatus?: (fileId: string, roomId: string) => Promise<WorkspaceOfficeEditStatus>;
   listFileVersions?: (fileId: string) => Promise<WorkspaceFileVersion[]>;
   restoreFileVersion?: (fileId: string, versionId: string, options: {
     base_version_id: string; idempotency_key: string;
@@ -301,7 +286,7 @@ export default function BrowserDrawer({
   loadOriginalPreviewSource, loadPdfPreviewInfo, loadPdfPreviewPage, loadOriginalFile, loadDownloadTicket,
   loadPreviewSession, refreshPreviewSession, startFallbackPreview, getFallbackPreview,
   startSpreadsheetPreview, getSpreadsheetPreview, getSpreadsheetPage,
-  createEditSession, refreshEditSession, closeEditSession, getEditSessionStatus, listFileVersions, restoreFileVersion, onFileChanged, externalVersionEvent,
+  listFileVersions, restoreFileVersion, onFileChanged, externalVersionEvent,
 }: BrowserDrawerProps) {
   const [history, setHistory] = useState<Source[]>([]);
   const [index, setIndex] = useState(-1);
@@ -312,11 +297,6 @@ export default function BrowserDrawer({
   const [textDraft, setTextDraft] = useState('');
   const [originalText, setOriginalText] = useState('');
   const [savingText, setSavingText] = useState(false);
-  const [editingOffice, setEditingOffice] = useState(false);
-  const [officeSaveState, setOfficeSaveState] = useState<{
-    kind: 'editing' | 'reconciling' | 'saved' | 'unchanged' | 'failed';
-    label: string;
-  } | null>(null);
   const [csvMode, setCsvMode] = useState<'table' | 'text'>('table');
   const [csvDocument, setCsvDocument] = useState<CsvDocument | null>(null);
   const [csvSelection, setCsvSelection] = useState<{ anchor: [number, number]; focus: [number, number] } | null>(null);
@@ -339,13 +319,11 @@ export default function BrowserDrawer({
   const indexRef = useRef(-1);
   useEffect(() => { indexRef.current = index; }, [index]);
 
-  // 每次关闭预览后恢复为侧边抽屉，并真正卸载编辑会话。
+  // 每次关闭预览后恢复为侧边抽屉并清理本地文本草稿状态。
   useEffect(() => {
     if (!open) {
       setIsFullscreen(false);
       setEditingText(false);
-      setEditingOffice(false);
-      setOfficeSaveState(null);
     }
   }, [open]);
 
@@ -369,26 +347,19 @@ export default function BrowserDrawer({
   const currentExtension = currentPath ? extOf(currentPath) : '';
   const canEditText = canUpdateCurrent && !!saveTextFile
     && ['txt', 'md', 'markdown', 'json', 'csv'].includes(currentExtension);
-  const canEditOffice = canUpdateCurrent && current?.file?.office_edit_enabled === true
-    && !!createEditSession && !!refreshEditSession
-    && OFFICE_EDIT_EXTS.has(currentExtension)
-    && (current?.file?.size ?? Number.POSITIVE_INFINITY) <= OFFICE_EDIT_MAX_BYTES;
-
   useEffect(() => {
     setEditingText(false);
-    setEditingOffice(false);
     setTextDraft('');
     setOriginalText('');
     setCsvDocument(null);
     setCsvSelection(null);
-    setOfficeSaveState(null);
     saveAttemptRef.current = null;
     restoreAttemptRef.current = null;
   }, [currentFileId]);
 
   // 同一稳定 fileId 的当前版本可能被其他成员更新；空闲预览时轻量轮询并原位刷新。
   useEffect(() => {
-    if (!open || !currentFileId || current?.versionId || editingText || editingOffice || !loadFileById || !current?.file) return;
+    if (!open || !currentFileId || current?.versionId || editingText || !loadFileById || !current?.file) return;
     const displayedVersionId = current.file?.current_version_id;
     const displayedUpdatedAt = current.file?.updated_at;
     let disposed = false;
@@ -409,7 +380,7 @@ export default function BrowserDrawer({
     };
     const timer = window.setInterval(() => { void check(); }, 5000);
     return () => { disposed = true; window.clearInterval(timer); };
-  }, [current?.file?.current_version_id, current?.file?.updated_at, current?.versionId, currentFileId, editingOffice, editingText, loadFileById, onFileChanged, open]);
+  }, [current?.file?.current_version_id, current?.file?.updated_at, current?.versionId, currentFileId, editingText, loadFileById, onFileChanged, open]);
 
   useEffect(() => {
     setBinaryView('original');
@@ -535,7 +506,6 @@ export default function BrowserDrawer({
     let cancelled = false;
     if (open && (initialFileId || initialHref)) {
       setEditingText(false);
-      setEditingOffice(false);
       setTextDraft('');
       setOriginalText('');
       setHistory([]);
@@ -563,7 +533,6 @@ export default function BrowserDrawer({
   const moveHistory = (offset: -1 | 1) => {
     const move = () => {
       setEditingText(false);
-      setEditingOffice(false);
       setIndex((value) => value + offset);
       setRefreshKey((value) => value + 1);
     };
@@ -606,7 +575,7 @@ export default function BrowserDrawer({
     if (!open || externalVersionEvent.file_id !== currentFileId || current?.versionId) return;
     handledExternalEventRef.current = externalVersionEvent.id;
     // 本地文本草稿靠 base_version_id 在保存时提示冲突；Office 编辑会话由保存对账流程接管。
-    if (editingText || editingOffice) return;
+    if (editingText) return;
     // 即使 version_id 未变也要刷新：重命名、移动、删除和权限变化都可能保留同一版本号。
     void refresh();
     // refresh 读取当前稳定 file ID；事件只作为失效信号，不携带文件正文。
@@ -723,7 +692,6 @@ export default function BrowserDrawer({
   };
   const discardAndClose = () => {
     setEditingText(false);
-    setEditingOffice(false);
     setTextDraft('');
     setOriginalText('');
     onClose();
@@ -808,60 +776,6 @@ export default function BrowserDrawer({
         }
       },
     });
-  };
-
-  const finishOfficeEdit = async (result?: { roomId: string; status: WorkspaceOfficeEditStatus | null }) => {
-    setEditingOffice(false);
-    if (!currentFileId || !loadFileById) return;
-    const fileId = currentFileId;
-    const historyIndex = indexRef.current;
-    if (!result?.roomId || !getEditSessionStatus) {
-      setOfficeSaveState(result?.roomId ? { kind: 'reconciling', label: '保存对账中' } : null);
-      message.info('编辑已结束；平台仍在后台保存对账，请稍后刷新或查看版本历史');
-      return;
-    }
-    setOfficeSaveState({ kind: 'reconciling', label: '保存对账中' });
-    const hide = message.loading('编辑已结束，正在等待平台保存对账…', 0);
-    try {
-      let status = result.status;
-      for (let attempt = 0; attempt < 30; attempt += 1) {
-        if (!status || attempt > 0) status = await getEditSessionStatus(fileId, result.roomId);
-        const outcome = workspaceOfficeEditOutcome(status);
-        if (outcome.kind === 'saved') {
-          const file = await loadFileById(fileId);
-          const next = classifyFile(file);
-          setHistory((items) => {
-            const displayed = items[historyIndex];
-            if (!displayed || !('fileId' in displayed) || displayed.fileId !== fileId) return items;
-            const copy = [...items];
-            copy[historyIndex] = next;
-            return copy;
-          });
-          onFileChanged?.(file);
-          setOfficeSaveState({ kind: 'saved', label: `已保存 · ${outcome.finalFileVersionId.slice(0, 8)}` });
-          message.success(`本次编辑已保存为新版本（${outcome.finalFileVersionId.slice(0, 8)}）`);
-          return;
-        }
-        if (outcome.kind === 'unchanged') {
-          setOfficeSaveState({ kind: 'unchanged', label: '已结束 · 无新版本' });
-          message.info('编辑已结束，本次没有产生新的文件版本');
-          return;
-        }
-        if (outcome.kind === 'failed') {
-          setOfficeSaveState({ kind: 'failed', label: '保存失败' });
-          message.error(`本次编辑保存失败：${outcome.error}`);
-          return;
-        }
-        await new Promise((resolve) => window.setTimeout(resolve, 2000));
-      }
-      setOfficeSaveState({ kind: 'reconciling', label: '保存对账中' });
-      message.info('本次编辑仍在保存对账，可稍后刷新或查看版本历史');
-    } catch (error) {
-      setOfficeSaveState({ kind: 'failed', label: '状态查询失败' });
-      message.error((error as Error)?.message || '本次编辑保存状态查询失败，请稍后查看版本历史');
-    } finally {
-      hide();
-    }
   };
 
   const reparse = async () => {
@@ -1072,10 +986,6 @@ export default function BrowserDrawer({
           </Tooltip>
         </div>
         {canEditText && !editingText && navBtn(() => { void startTextEdit(); }, false, <EditOutlined />, currentExtension === 'csv' ? '以安全文本模式编辑 CSV' : '编辑文件')}
-        {canEditOffice && !editingOffice && navBtn(() => {
-          setOfficeSaveState({ kind: 'editing', label: '编辑中 · 自动保存' });
-          setEditingOffice(true);
-        }, false, <EditOutlined />, '协同编辑')}
         {editingText && navBtn(() => { void saveText(); }, savingText, <SaveOutlined />, '保存为新版本')}
         {!!currentFileId && !!listFileVersions && navBtn(() => { void openVersionHistory(); }, false, <HistoryOutlined />, '版本历史')}
         {navBtn(download, false, <DownloadOutlined />, '下载')}
@@ -1096,16 +1006,6 @@ export default function BrowserDrawer({
           {(current?.versionId ? current.file?.resolved_version_no : current?.file?.current_version_no) != null && (
             <Tag style={{ margin: 0 }}>版本 {current?.versionId ? current.file?.resolved_version_no : current?.file?.current_version_no}</Tag>
           )}
-          {officeSaveState && (
-            <Tag
-              color={officeSaveState.kind === 'saved' ? 'green'
-                : officeSaveState.kind === 'failed' ? 'red'
-                  : officeSaveState.kind === 'unchanged' ? 'default' : 'gold'}
-              style={{ margin: 0 }}
-            >
-              {officeSaveState.label}
-            </Tag>
-          )}
           <Tag color={currentCapabilities?.read ? 'green' : 'default'} style={{ margin: 0 }}>{currentCapabilities?.read ? '可查看' : '只读状态未知'}</Tag>
           {currentCapabilities?.update && <Tag color="blue" style={{ margin: 0 }}>可编辑</Tag>}
         </div>
@@ -1121,20 +1021,20 @@ export default function BrowserDrawer({
         {!current && !loading && (
           <div style={{ padding: 40 }}><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未指定地址" /></div>
         )}
-        {!editingText && !editingOffice && current?.kind === 'web' && (
+        {!editingText && current?.kind === 'web' && (
           <iframe key={refreshKey} src={current.url} title="web"
             style={{ width: '100%', height: '100%', border: 'none' }}
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox" />
         )}
-        {!editingText && !editingOffice && current?.kind === 'pdf' && (
+        {!editingText && current?.kind === 'pdf' && (
           <iframe key={refreshKey} src={current.url} title="pdf"
             style={{ width: '100%', height: '100%', border: 'none' }} />
         )}
-        {!editingText && !editingOffice && current?.kind === 'docx' && (
+        {!editingText && current?.kind === 'docx' && (
           <iframe key={refreshKey} src={gviewUrl(current.url)} title="docx"
             style={{ width: '100%', height: '100%', border: 'none' }} />
         )}
-        {!editingText && !editingOffice && current?.kind === 'docx-bin' && (
+        {!editingText && current?.kind === 'docx-bin' && (
           docxError ? (
             <div style={{ padding: 40, textAlign: 'center' }}>
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -1223,23 +1123,12 @@ export default function BrowserDrawer({
             </div>
           </div>
         )}
-        {editingOffice && currentFileId && createEditSession && refreshEditSession && (
-          <WorkspaceEditSessionView
-            key={`edit:${currentFileId}`}
-            fileId={currentFileId}
-            filename={currentPath || 'Office 文件'}
-            loadSession={(clientOpenId) => createEditSession(currentFileId, clientOpenId)}
-            refreshSession={(roomId, accessToken, refreshToken, refreshContext) => refreshEditSession(currentFileId, roomId, accessToken, refreshToken, refreshContext)}
-            closeSession={closeEditSession ? (clientOpenId) => closeEditSession(currentFileId, clientOpenId) : undefined}
-            onExit={(result) => { void finishOfficeEdit(result); }}
-          />
-        )}
-        {!editingText && !editingOffice && current?.kind === 'md' && (
+        {!editingText && current?.kind === 'md' && (
           <div className="wb-md" style={{ height: '100%', overflowY: 'auto', padding: '20px 24px' }}>
             <MdNav content={current.content} onLink={navigate} />
           </div>
         )}
-        {!editingText && !editingOffice && (current?.kind === 'parsed' || current?.kind === 'binary') && (
+        {!editingText && (current?.kind === 'parsed' || current?.kind === 'binary') && (
           <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
             <div style={{
               flex: '0 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -1295,7 +1184,7 @@ export default function BrowserDrawer({
             </div>
           </div>
         )}
-        {!editingText && !editingOffice && current?.kind === 'html-text' && (
+        {!editingText && current?.kind === 'html-text' && (
           <div style={{ height: '100%', overflowY: 'auto', padding: '12px 16px', background: '#fafafa' }}>
             <Alert
               type="info"
@@ -1311,7 +1200,7 @@ export default function BrowserDrawer({
             >{current.content}</pre>
           </div>
         )}
-        {!editingText && !editingOffice && current?.kind === 'image' && (
+        {!editingText && current?.kind === 'image' && (
           <div key={refreshKey} style={{
             height: '100%', overflow: 'auto', display: 'flex',
             alignItems: 'center', justifyContent: 'center',
@@ -1324,12 +1213,12 @@ export default function BrowserDrawer({
             />
           </div>
         )}
-        {!editingText && !editingOffice && current?.kind === 'text' && (
+        {!editingText && current?.kind === 'text' && (
           <div style={{ height: '100%', overflowY: 'auto', padding: '12px 16px', background: '#fafafa' }}>
             <pre className="wb-pre" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{current.content}</pre>
           </div>
         )}
-        {!editingText && !editingOffice && current?.kind === 'unsupported' && (
+        {!editingText && current?.kind === 'unsupported' && (
           <div style={{ padding: 40, textAlign: 'center' }}>
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
               description={<>

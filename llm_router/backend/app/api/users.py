@@ -35,7 +35,6 @@ from app.schemas.user import (
     UserUpdate,
 )
 from app.services import workspace_permission_service
-from app.services.oauth_service import revoke_user_refresh_tokens
 from app.services.organization_service import get_organization, get_organization_by_slug
 from app.services.user_service import (
     change_own_password,
@@ -131,7 +130,6 @@ async def logout_user_endpoint(
     if user is None:
         raise HTTPException(status_code=401, detail="User not found")
     user.auth_epoch += 1
-    await revoke_user_refresh_tokens(db, user.id)
     await db.flush()
     clear_cookie(response, user_session_cookie_name())
 

@@ -14,7 +14,6 @@ from starlette.responses import Response, StreamingResponse
 
 from app.agents.graph import run_registry
 from app.agents.graph.state import AgentState
-from app.auth.admin_auth import CurrentAdmin
 from app.auth.user_auth import CurrentUser
 from app.database import async_session_factory
 from app.models.agent_run import AgentRun, AgentRunEvent
@@ -26,15 +25,6 @@ _SSE_HEADERS = {
     "connection": "keep-alive",
     "x-accel-buffering": "no",
 }
-
-
-def initial_state(agent_id: str, org_id: str, message: str, session_id: str | None) -> AgentState:
-    return {
-        "mode": "agent", "agent_id": agent_id, "org_id": org_id,
-        "run_started_monotonic": time.monotonic(),
-        "session_id": session_id or f"sess-{uuid.uuid4()}", "request": message,
-        "messages": [], "steps": [], "usage": {"input_tokens": 0, "output_tokens": 0},
-    }
 
 
 def general_initial_state(
@@ -60,7 +50,6 @@ def general_initial_state(
         "skill_ids": list(config.get("skill_ids") or []),
         "invoked_skill_ids": [str(item["id"]) for item in invoked],
         "invoked_skills": invoked, "loaded_skills": [], "executed_skills": [],
-        "ontology_ids": list(config.get("ontology_ids") or []),
         "rag_collection_ids": list(config.get("rag_collection_ids") or []),
         "model_alias": config.get("model_alias") or "default",
         "exec_mode": config.get("exec_mode") or "craft",
@@ -89,10 +78,6 @@ def user_message_metadata(initial: AgentState) -> dict:
     if initial.get("page_context"):
         metadata["page_context"] = initial["page_context"]
     return metadata
-
-
-def admin_context(db: Any, request: Any, admin: CurrentAdmin) -> dict:
-    return {"db": db, "request": request, "admin": admin}
 
 
 def general_context(db: Any, request: Any, user: CurrentUser, task: Any) -> dict:

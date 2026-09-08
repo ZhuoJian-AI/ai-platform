@@ -1,4 +1,4 @@
-"""AgentRun ORM model — execution records for agent test playground & monitoring."""
+"""AgentRun ORM model — execution records for the unified Assistant Core."""
 
 import uuid
 
@@ -10,7 +10,7 @@ from app.models.base import Base, TimestampMixin
 
 
 class AgentRun(TimestampMixin, Base):
-    """单次智能体执行记录（测试广场 / 监控共用）。append-only，不软删。"""
+    """单次智能体执行记录（个人、业务和自定义助手共用）。append-only，不软删。"""
 
     __tablename__ = "agent_runs"
 
@@ -29,15 +29,14 @@ class AgentRun(TimestampMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     # 执行模式：craft（自主执行）/ ask（只读问答）/ plan（出方案不执行）。
-    # general 运行取自 task.config；agent 运行（测试广场）恒为 craft。监控台据此拆分通用三类。
+    # general 运行取自 task.config；自定义智能体运行恒为 craft。
     exec_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="craft")
+    # The server selects one engine before admission and persists it once.  The
+    # database default keeps rollback-compatible images honest: an old image
+    # cannot run the native core, so rows it inserts are necessarily DSH rows.
+    assistant_engine: Mapped[str] = mapped_column(String(16), nullable=False, default="dsh")
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     request: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    # 完整消息序列（含 user/assistant/tool），便于回放
-    messages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-    # 逐步执行轨迹（节点名、耗时、工具调用、RAG 命中等）
-    steps: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -45,9 +44,6 @@ class AgentRun(TimestampMixin, Base):
     # queued / running / success / error / cancelled / timeout / busy
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="running", index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # judge 评分结果（若启用判官节点）
-    judge_score: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-
     agent = relationship("Agent", back_populates="runs")
 
 

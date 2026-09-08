@@ -6,39 +6,12 @@ from logging.config import fileConfig
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+# Import the model package for its registration side effects.  Keeping an
+# explicit symbol list here made every compatibility-model retirement break
+# Alembic before a migration could even connect to PostgreSQL.
+import app.models  # noqa: F401
 from alembic import context
 from app.config import settings
-
-# 导入所有模型以确保 Base.metadata 包含所有表
-from app.models import (  # noqa: F401
-    Agent,
-    AgentMessage,
-    AgentRun,
-    ApiKey,
-    AuditLog,
-    BudgetUsage,
-    Department,
-    DlpRule,
-    JudgeTemplate,
-    LlmProvider,
-    Ontology,
-    Organization,
-    OrganizationSlugAlias,
-    RagChunk,
-    RagCollection,
-    RagDocument,
-    RoutingPolicy,
-    Skill,
-    Team,
-    ToolCallLog,
-    # 工具连接器
-    ToolConnector,
-    ToolEndpoint,
-    User,
-    # 智能体平台
-    Workspace,
-    WorkspaceFile,
-)
 from app.models.base import Base
 
 config = context.config

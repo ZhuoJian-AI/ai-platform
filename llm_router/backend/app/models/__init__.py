@@ -2,7 +2,6 @@
 
 from app.models.admin import Admin
 from app.models.agent import Agent
-from app.models.agent_memory import AgentMessage
 from app.models.agent_run import AgentRun, AgentRunEvent
 from app.models.api_key import ApiKey
 from app.models.audit_log import AuditLog
@@ -24,13 +23,9 @@ from app.models.enterprise_application import (
     EnterpriseApplicationSsoCode,
     EnterpriseApplicationToolBinding,
 )
-from app.models.judge import JudgeTemplate
 from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.models.memory import Memory
-from app.models.module_deployment import ModuleDeployment, ModuleDeploymentProfile
 from app.models.multimodal import MultimodalJob, VoiceAuthorizationRecord, VoiceProfile, VoiceProfileGrant
-from app.models.oauth import OAuthAuthorizationCode, OAuthClient, OAuthRefreshToken
-from app.models.ontology import Ontology, OntologyFile, OntologyFolder
 from app.models.organization import Organization, OrganizationSlugAlias
 from app.models.platform_extension import (
     PlatformExtensionCatalogEntry,
@@ -41,14 +36,12 @@ from app.models.platform_extension import (
 from app.models.rag import RagChunk, RagCollection, RagDocument, RagFolder
 from app.models.role import Role, RoleDataDepartment, RolePermission, UserRole
 from app.models.routing_policy import RoutingPolicy
-from app.models.skill import ScopeManagerAssignment, Skill, SkillExecution, SkillFile, SkillFolder, SkillVersion
+from app.models.skill import SkillExecution, SkillFile, SkillFolder, SkillVersion
 from app.models.task import Task, TaskFileRef, TaskMessage
 from app.models.team import Team
 from app.models.tool_call_log import ToolCallLog
-from app.models.user import User, user_department_memberships
+from app.models.user import User
 from app.models.workspace import (
-    OfficeEditRoom,
-    OfficeSaveEvent,
     Workspace,
     WorkspaceAuditEvent,
     WorkspaceFile,
@@ -68,7 +61,6 @@ __all__ = [
     "Department",
     "Team",
     "User",
-    "user_department_memberships",
     "ApiKey",
     "LlmProvider",
     "ModelDeployment",
@@ -99,8 +91,6 @@ __all__ = [
     "PlatformExtensionReleaseEvent",
     # 智能体平台
     "Workspace",
-    "OfficeEditRoom",
-    "OfficeSaveEvent",
     "WorkspaceFile",
     "WorkspaceFileMutation",
     "WorkspaceFolder",
@@ -113,39 +103,27 @@ __all__ = [
     "Agent",
     "AgentRun",
     "AgentRunEvent",
-    "AgentMessage",
     "RagCollection",
     "RagDocument",
     "RagFolder",
     "RagChunk",
-    "JudgeTemplate",
     # 工具连接器
     "ToolConnector",
     "ToolEndpoint",
     "DataSystem",
     "DataInterface",
-    "Skill",
     "SkillFolder",
     "SkillFile",
     "SkillVersion",
     "SkillExecution",
-    "ScopeManagerAssignment",
-    "Ontology",
-    "OntologyFolder",
-    "OntologyFile",
     "ToolCallLog",
     # 终端用户端
     "Task",
     "TaskFileRef",
     "TaskMessage",
     "Memory",
-    "ModuleDeployment",
-    "ModuleDeploymentProfile",
     "MultimodalJob",
     "VoiceProfile",
     "VoiceProfileGrant",
     "VoiceAuthorizationRecord",
-    "OAuthClient",
-    "OAuthAuthorizationCode",
-    "OAuthRefreshToken",
 ]
