@@ -206,6 +206,7 @@ try {
   );
 
   const terminalSource = await readFile(resolve('src/pages/terminal/Terminal.tsx'), 'utf8');
+  const terminalStreamSource = await readFile(resolve('src/pages/terminal/terminalConversationModel.ts'), 'utf8');
   const applicationAssistantSource = terminalSource.slice(terminalSource.indexOf('onAskAI={async'));
   assert.match(
     applicationAssistantSource,
@@ -229,7 +230,7 @@ try {
   );
   assert.match(applicationAssistantSource, /refreshRequired,/);
   assert.match(
-    terminalSource,
+    terminalStreamSource,
     /event\.type === 'final'[\s\S]*reader\.cancel\(\)/,
     'business assistant must stop waiting as soon as the terminal final event arrives',
   );
