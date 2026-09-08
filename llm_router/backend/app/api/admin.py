@@ -96,7 +96,6 @@ async def logout_endpoint(
         await db.flush()
     clear_cookie(response, admin_session_cookie_name())
     clear_cookie(response, admin_csrf_cookie_name(), httponly=False)
-    return response
 
 
 @router.get("/auth/org-info/{slug}", response_model=OrgInfoResponse)
