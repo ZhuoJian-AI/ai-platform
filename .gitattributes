@@ -1,1 +1,2 @@
 *.sh text eol=lf
+llm_router/backend/alembic/versions/0075_schema_baseline.sql text eol=lf
