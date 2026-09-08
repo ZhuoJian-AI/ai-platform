@@ -16,7 +16,7 @@ import {
 import ApprovalCard, { type ApprovalCardData } from '../../components/terminal/ApprovalCard';
 import { useMobileBackDismiss, useResponsiveLayout } from '../../hooks/useResponsiveLayout';
 import {
-  buildHostReadyMessage, buildRefreshMessage, isBridgeReady, parseBridgeContext,
+  buildHostReadyMessage, buildRefreshMessage, isBridgeReady, parseBridgeAiRun, parseBridgeContext,
   parseBridgeRefreshResult, type BridgeExpectation, type BridgeRefreshExpectation,
 } from '../../utils/subsystemBridge';
 
@@ -360,6 +360,8 @@ export default function EnterpriseApplicationView({
   const [frameLoaded, setFrameLoaded] = useState(false);
   const [frameSlow, setFrameSlow] = useState(false);
   const [bridgeContext, setBridgeContext] = useState<Record<string, unknown>>({});
+  const bridgeContextRef = useRef<Record<string, unknown>>({});
+  const specialistRunsRef = useRef(new Map<string, Promise<void>>());
   const frameRefs = useRef<[HTMLIFrameElement | null, HTMLIFrameElement | null]>([null, null]);
   const launchRequestRef = useRef(0);
   const frameSwapRef = useRef<Promise<void> | null>(null);
@@ -371,6 +373,10 @@ export default function EnterpriseApplicationView({
   const launch = frameSlots[activeFrameIndex];
   const [launchLoading, setLaunchLoading] = useState(true);
   const [launchError, setLaunchError] = useState<unknown>();
+
+  useEffect(() => {
+    bridgeContextRef.current = bridgeContext;
+  }, [bridgeContext]);
 
   useEffect(() => {
     for (const [index, frame] of frameRefs.current.entries()) {
@@ -812,7 +818,119 @@ export default function EnterpriseApplicationView({
         setFrameLoaded(true);
         setFrameSlow(false);
         setBridgeContext(parsed);
+        bridgeContextRef.current = parsed;
+        return;
       }
+      const aiRequest = parseBridgeAiRun(event.data, security.expectation);
+      if (!aiRequest) return;
+      const target = event.source as Window;
+      const respond = (payload: Record<string, unknown>) => {
+        if (target !== frameRefs.current[activeFrameIndex]?.contentWindow) return;
+        target.postMessage({
+          ...payload,
+          version: 1,
+          launch_nonce: security.expectation.launchNonce,
+          application_slug: security.expectation.applicationSlug,
+          module_key: aiRequest.moduleKey,
+          page_key: aiRequest.pageKey,
+          action_key: aiRequest.actionKey,
+          request_id: aiRequest.requestId,
+        }, security.origin);
+      };
+      const activeContext = bridgeContextRef.current;
+      if (
+        activeContext.module_key !== aiRequest.moduleKey
+        || activeContext.page_key !== aiRequest.pageKey
+        || !(launch.module_keys ?? []).includes(aiRequest.moduleKey)
+        || !(launch.page_keys ?? []).includes(aiRequest.pageKey)
+      ) {
+        respond({
+          type: 'zhuojian:ai-result',
+          status: 'failed',
+          error: { code: 'page_context_changed', messageZh: '当前页面已变化，请在目标页面重新发起 AI 操作', retryable: false },
+        });
+        return;
+      }
+      if (specialistRunsRef.current.has(aiRequest.requestId)) {
+        respond({ type: 'zhuojian:ai-progress', status: 'processing', message: '该请求正在处理中' });
+        return;
+      }
+      const operation = (async () => {
+        try {
+          const created = await terminal.createSubsystemAiRun({
+            applicationId: application.id,
+            moduleKey: aiRequest.moduleKey,
+            pageKey: aiRequest.pageKey,
+            actionKey: aiRequest.actionKey,
+            capability: aiRequest.capability,
+            instruction: aiRequest.instruction,
+            context: aiRequest.context,
+            textInput: aiRequest.textInput,
+            requestId: aiRequest.requestId,
+            files: aiRequest.files,
+          });
+          respond({
+            type: 'zhuojian:ai-accepted',
+            status: created.status,
+            run_id: created.run_id,
+          });
+          let previousStatus = '';
+          for (let attempt = 0; attempt < 900; attempt += 1) {
+            const run = await terminal.getSubsystemAiRun(created.run_id);
+            if (run.status !== previousStatus) {
+              previousStatus = run.status;
+              respond({
+                type: 'zhuojian:ai-progress',
+                status: run.status,
+                run_id: run.run_id,
+                message: run.status === 'queued' ? '专业 AI 任务已排队' : '专业 AI 正在处理',
+              });
+            }
+            if (run.status === 'succeeded') {
+              respond({
+                type: 'zhuojian:ai-result',
+                status: 'draft_ready',
+                run_id: run.run_id,
+                result: run.result,
+              });
+              return;
+            }
+            if (run.status === 'failed' || run.status === 'cancelled') {
+              respond({
+                type: 'zhuojian:ai-result',
+                status: run.status,
+                run_id: run.run_id,
+                error: run.error ?? {
+                  code: run.status,
+                  messageZh: run.status === 'cancelled' ? '专业 AI 任务已取消' : '专业 AI 处理失败',
+                  retryable: false,
+                },
+              });
+              return;
+            }
+            await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+          }
+          respond({
+            type: 'zhuojian:ai-result',
+            status: 'failed',
+            run_id: created.run_id,
+            error: { code: 'poll_timeout', messageZh: '专业 AI 处理时间过长，请稍后查看或重试', retryable: true },
+          });
+        } catch (error) {
+          respond({
+            type: 'zhuojian:ai-result',
+            status: 'failed',
+            error: {
+              code: error instanceof ApiError ? `http_${error.status}` : 'bridge_execution_failed',
+              messageZh: error instanceof Error ? error.message : '专业 AI 操作失败，请稍后重试',
+              retryable: !(error instanceof ApiError) || error.status >= 500,
+            },
+          });
+        } finally {
+          specialistRunsRef.current.delete(aiRequest.requestId);
+        }
+      })();
+      specialistRunsRef.current.set(aiRequest.requestId, operation);
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);

@@ -1,5 +1,9 @@
 const BRIDGE_MAX_BYTES = 16_384;
+const BRIDGE_AI_MAX_BYTES = 128 * 1024;
+const BRIDGE_AI_MAX_FILE_BYTES = 20 * 1024 * 1024;
+const BRIDGE_AI_MAX_FILES = 5;
 const BRIDGE_KEY_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/;
+const BRIDGE_REQUEST_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,119}$/;
 const BRIDGE_CONTEXT_KEYS = new Set([
   'type', 'version', 'launch_nonce', 'application_slug',
   'enterprise_key', 'route', 'module_key', 'module_name',
@@ -15,6 +19,11 @@ const BRIDGE_REFRESH_RESULT_KEYS = new Set([
   'type', 'version', 'launch_nonce', 'application_slug',
   'module_key', 'page_key', 'request_id', 'status', 'data_version', 'error',
 ]);
+const BRIDGE_AI_RUN_KEYS = new Set([
+  'type', 'version', 'launch_nonce', 'application_slug', 'module_key', 'page_key',
+  'action_key', 'request_id', 'capability', 'instruction', 'context', 'text_input', 'files',
+]);
+const BRIDGE_AI_FILE_KEYS = new Set(['name', 'mime_type', 'blob']);
 const BRIDGE_STRING_KEYS = new Set([
   'enterprise_key', 'application_slug', 'route', 'module_key', 'module_name',
   'page_key', 'page_name', 'entity_type', 'entity_id',
@@ -30,6 +39,26 @@ export interface BridgeRefreshExpectation extends BridgeExpectation {
   pageKey: string;
   requestId: string;
 }
+
+export type BridgeAiCapability =
+  | 'vision.ocr'
+  | 'vision.compare'
+  | 'vision.classify'
+  | 'speech.transcribe'
+  | 'text.extract'
+  | 'business.predict';
+
+export type BridgeAiRunRequest = {
+  moduleKey: string;
+  pageKey: string;
+  actionKey: string;
+  requestId: string;
+  capability: BridgeAiCapability;
+  instruction: string;
+  context: Record<string, unknown>;
+  textInput: string;
+  files: Array<{ name: string; mimeType: string; blob: Blob }>;
+};
 
 export type BridgeRefreshResult = {
   status: 'completed' | 'deferred' | 'failed';
@@ -50,6 +79,24 @@ function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: Set<string>): 
 function fitsEnvelope(value: Record<string, unknown>): boolean {
   try {
     return new TextEncoder().encode(JSON.stringify(value)).byteLength <= BRIDGE_MAX_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+function fitsAiEnvelope(value: Record<string, unknown>): boolean {
+  try {
+    const metadataOnly = {
+      ...value,
+      files: Array.isArray(value.files)
+        ? value.files.map((item) => isPlainObject(item) ? {
+          name: item.name,
+          mime_type: item.mime_type,
+          size: item.blob instanceof Blob ? item.blob.size : -1,
+        } : null)
+        : [],
+    };
+    return new TextEncoder().encode(JSON.stringify(metadataOnly)).byteLength <= BRIDGE_AI_MAX_BYTES;
   } catch {
     return false;
   }
@@ -205,5 +252,71 @@ export function parseBridgeRefreshResult(
     status: value.status as BridgeRefreshResult['status'],
     ...(dataVersion !== undefined && dataVersion !== null ? { dataVersion } : {}),
     ...(typeof error === 'string' && error ? { error } : {}),
+  };
+}
+
+
+export function parseBridgeAiRun(
+  value: unknown,
+  expected: BridgeExpectation,
+): BridgeAiRunRequest | null {
+  if (
+    !isPlainObject(value)
+    || !hasOnlyKeys(value, BRIDGE_AI_RUN_KEYS)
+    || !fitsAiEnvelope(value)
+    || value.type !== 'zhuojian:ai-run'
+    || value.version !== 1
+    || !hasExpectedIdentity(value, expected)
+  ) return null;
+  const moduleKey = typeof value.module_key === 'string' ? value.module_key : '';
+  const pageKey = typeof value.page_key === 'string' ? value.page_key : '';
+  const actionKey = typeof value.action_key === 'string' ? value.action_key : '';
+  const requestId = typeof value.request_id === 'string' ? value.request_id : '';
+  const capabilities = new Set<BridgeAiCapability>([
+    'vision.ocr', 'vision.compare', 'vision.classify',
+    'speech.transcribe', 'text.extract', 'business.predict',
+  ]);
+  if (
+    !BRIDGE_KEY_PATTERN.test(moduleKey)
+    || !BRIDGE_KEY_PATTERN.test(pageKey)
+    || !BRIDGE_KEY_PATTERN.test(actionKey)
+    || !BRIDGE_REQUEST_ID_PATTERN.test(requestId)
+    || typeof value.capability !== 'string'
+    || !capabilities.has(value.capability as BridgeAiCapability)
+  ) return null;
+  const instruction = value.instruction === undefined ? '' : value.instruction;
+  const textInput = value.text_input === undefined ? '' : value.text_input;
+  const context = value.context === undefined ? {} : value.context;
+  if (
+    typeof instruction !== 'string' || instruction.length > 4_000
+    || typeof textInput !== 'string' || textInput.length > 100_000
+    || !isPlainObject(context) || !isSafeBridgeValue(context)
+  ) return null;
+  const rawFiles = value.files === undefined ? [] : value.files;
+  if (!Array.isArray(rawFiles) || rawFiles.length > BRIDGE_AI_MAX_FILES) return null;
+  let totalBytes = 0;
+  const files: BridgeAiRunRequest['files'] = [];
+  for (const item of rawFiles) {
+    if (!isPlainObject(item) || !hasOnlyKeys(item, BRIDGE_AI_FILE_KEYS)) return null;
+    if (
+      typeof item.name !== 'string' || !item.name || item.name.length > 255
+      || /[\\/\u0000-\u001f\u007f]/.test(item.name)
+      || typeof item.mime_type !== 'string' || item.mime_type.length > 160
+      || !(item.blob instanceof Blob) || item.blob.size <= 0
+    ) return null;
+    totalBytes += item.blob.size;
+    if (totalBytes > BRIDGE_AI_MAX_FILE_BYTES) return null;
+    files.push({ name: item.name, mimeType: item.mime_type, blob: item.blob });
+  }
+  return {
+    moduleKey,
+    pageKey,
+    actionKey,
+    requestId,
+    capability: value.capability as BridgeAiCapability,
+    instruction,
+    context,
+    textInput,
+    files,
   };
 }

@@ -1193,6 +1193,7 @@ async def chat(
     team_id: str | UUID | None = None,
     provider_override: LlmProvider | None = None,
     model_override: str | None = None,
+    request_id: str | None = None,
 ) -> LlmResult:
     bounded_max = _bounded_max_tokens(max_tokens)
     reservation = await _reserve_gateway_quota(
@@ -1211,6 +1212,7 @@ async def chat(
         team_id=team_id,
         operation="chat",
         provider_id=getattr(provider_override, "id", None),
+        request_id=request_id,
     )
 
     async def invoke() -> LlmResult:

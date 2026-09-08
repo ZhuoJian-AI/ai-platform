@@ -296,6 +296,81 @@ def _normalize_ai_semantics(
     }
 
 
+PLATFORM_AI_CAPABILITIES = {
+    "vision.ocr",
+    "vision.compare",
+    "vision.classify",
+    "speech.transcribe",
+    "text.extract",
+    "business.predict",
+}
+PLATFORM_AI_INPUT_KINDS = {"image", "audio", "text", "json"}
+
+
+def _normalize_platform_ai_capability(
+    action_key: str,
+    value: object,
+    *,
+    contract_revision: str,
+    operation: str,
+    ai_enabled: bool,
+    result_schema: dict,
+) -> dict | None:
+    if value is None:
+        return None
+    if contract_revision != "2.5":
+        raise ValueError(
+            f"Action '{action_key}' platformAiCapability requires contractRevision 2.5"
+        )
+    if not isinstance(value, dict):
+        raise ValueError(f"Action '{action_key}' platformAiCapability must be an object")
+    allowed = {"type", "inputKinds", "humanConfirmation"}
+    if set(value) - allowed:
+        raise ValueError(f"Action '{action_key}' platformAiCapability contains unsupported fields")
+    capability = str(value.get("type") or "").strip()
+    input_kinds = value.get("inputKinds")
+    if capability not in PLATFORM_AI_CAPABILITIES:
+        raise ValueError(f"Action '{action_key}' declares an unsupported platform AI capability")
+    if (
+        not isinstance(input_kinds, list)
+        or not input_kinds
+        or len(input_kinds) > 4
+        or any(not isinstance(item, str) or item not in PLATFORM_AI_INPUT_KINDS for item in input_kinds)
+        or len(set(input_kinds)) != len(input_kinds)
+    ):
+        raise ValueError(f"Action '{action_key}' platform AI inputKinds are invalid")
+    if value.get("humanConfirmation") != "required":
+        raise ValueError(f"Action '{action_key}' platform AI output must require human confirmation")
+    if operation != "query" or not ai_enabled:
+        raise ValueError(f"Action '{action_key}' platform AI capability must be an AI-enabled query")
+    if (
+        result_schema.get("type") != "object"
+        or result_schema.get("additionalProperties") is not False
+        or not isinstance(result_schema.get("properties"), dict)
+        or not result_schema["properties"]
+    ):
+        raise ValueError(
+            f"Action '{action_key}' platform AI resultSchema must be a non-empty closed object"
+        )
+    expected_kind = {
+        "vision.ocr": "image",
+        "vision.compare": "image",
+        "vision.classify": "image",
+        "speech.transcribe": "audio",
+        "text.extract": "text",
+        "business.predict": "json",
+    }[capability]
+    if expected_kind not in input_kinds:
+        raise ValueError(
+            f"Action '{action_key}' platform AI inputKinds must include '{expected_kind}'"
+        )
+    return {
+        "type": capability,
+        "inputKinds": list(input_kinds),
+        "humanConfirmation": "required",
+    }
+
+
 def _validate_manifest_payload(
     payload: object,
     *,
@@ -419,6 +494,15 @@ def _validate_manifest_payload(
             if operation not in {"query", "create", "update", "delete", "export", "approve"}:
                 raise ValueError(f"Action '{action_key}' has an unsupported operation")
             action_keys.add(action_key)
+            result_schema = action.get("resultSchema") if isinstance(action.get("resultSchema"), dict) else {}
+            platform_ai_capability = _normalize_platform_ai_capability(
+                action_key,
+                action.get("platformAiCapability"),
+                contract_revision=contract_revision,
+                operation=operation,
+                ai_enabled=bool(action.get("aiEnabled", False)),
+                result_schema=result_schema,
+            )
             normalized_actions.append({
                 **action,
                 "actionKey": action_key,
@@ -431,7 +515,12 @@ def _validate_manifest_payload(
                 "requiresConfirmation": operation in {"delete", "approve"}
                 or bool(action.get("requiresConfirmation", False)),
                 "inputSchema": action.get("inputSchema") if isinstance(action.get("inputSchema"), dict) else {},
-                "resultSchema": action.get("resultSchema") if isinstance(action.get("resultSchema"), dict) else {},
+                "resultSchema": result_schema,
+                **(
+                    {"platformAiCapability": platform_ai_capability}
+                    if platform_ai_capability is not None
+                    else {}
+                ),
             })
         normalized_pages: list[dict] = []
         pages = module.get("pages") if isinstance(module.get("pages"), list) else []

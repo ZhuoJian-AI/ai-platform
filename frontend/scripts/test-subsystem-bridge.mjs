@@ -14,7 +14,7 @@ try {
   await writeFile(modulePath, compiled.code, 'utf8');
   const {
     buildHostReadyMessage, buildRefreshMessage, isBridgeReady,
-    parseBridgeContext, parseBridgeRefreshResult,
+    parseBridgeAiRun, parseBridgeContext, parseBridgeRefreshResult,
   } = await import(`${pathToFileURL(modulePath).href}?v=${Date.now()}`);
 
   const expected = { applicationSlug: 'sample-review', launchNonce: 'launch-0123456789abcdef' };
@@ -106,6 +106,29 @@ try {
     request_id: 'other-request', status: 'completed',
   }, refreshExpected), null, 'refresh results must be bound to the request');
 
+  const aiRun = parseBridgeAiRun({
+    type: 'zhuojian:ai-run', version: 1, application_slug: 'sample-review',
+    launch_nonce: expected.launchNonce, module_key: 'sample_review',
+    page_key: 'sample_review.list', action_key: 'sample_review.ocr',
+    request_id: 'ai-request-01234567', capability: 'vision.ocr',
+    instruction: '识别图片中的手写意见', context: { record_id: 'SR-1' },
+    files: [{ name: 'review.png', mime_type: 'image/png', blob: new Blob(['png']) }],
+  }, expected);
+  assert.equal(aiRun?.capability, 'vision.ocr');
+  assert.equal(aiRun?.files[0].name, 'review.png');
+  assert.equal(parseBridgeAiRun({
+    type: 'zhuojian:ai-run', version: 1, application_slug: 'sample-review',
+    launch_nonce: 'stale', module_key: 'sample_review', page_key: 'sample_review.list',
+    action_key: 'sample_review.ocr', request_id: 'ai-request-01234567',
+    capability: 'vision.ocr', context: {}, files: [],
+  }, expected), null, 'specialist AI requests must be bound to the active launch');
+  assert.equal(parseBridgeAiRun({
+    type: 'zhuojian:ai-run', version: 1, application_slug: 'sample-review',
+    launch_nonce: expected.launchNonce, module_key: 'sample_review', page_key: 'sample_review.list',
+    action_key: 'sample_review.ocr', request_id: 'short', capability: 'vision.ocr',
+    context: {}, files: [],
+  }, expected), null, 'specialist AI request ids must be safe and replay-stable');
+
   const applicationViewSource = await readFile(
     resolve('src/pages/terminal/EnterpriseApplicationView.tsx'),
     'utf8',
@@ -156,6 +179,9 @@ try {
   );
   assert.match(applicationViewSource, /buildRefreshMessage\(refreshExpectation\)/);
   assert.match(applicationViewSource, /parseBridgeRefreshResult\(event\.data, refreshExpectation\)/);
+  assert.match(applicationViewSource, /parseBridgeAiRun\(event\.data, security\.expectation\)/);
+  assert.match(applicationViewSource, /terminal\.createSubsystemAiRun\(/);
+  assert.match(applicationViewSource, /activeContext\.page_key !== aiRequest\.pageKey/);
   assert.match(applicationViewSource, /enterprise-app-view__frame--standby/);
   assert.match(applicationViewSource, /setActiveFrameIndex\(nextIndex\)/);
   assert.match(
