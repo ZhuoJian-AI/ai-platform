@@ -5,6 +5,22 @@ from typing import Any
 
 from fastapi import Depends, HTTPException
 from fastapi.params import Depends as DependsParam
+from fastapi.responses import JSONResponse
+
+
+def retired_response(message: str) -> JSONResponse:
+    """Return the stable response shape used by compatibility tombstones."""
+
+    return JSONResponse(
+        status_code=410,
+        content={
+            "detail": {
+                "code": "feature_retired",
+                "message": message,
+                "retryable": False,
+            }
+        },
+    )
 
 
 def retired_api_dependency(feature_name: str) -> DependsParam:

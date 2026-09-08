@@ -126,10 +126,7 @@ _browser_origins = [
 ]
 if settings.is_development:
     _browser_origins.extend(["http://localhost:3000", "http://localhost:5173"])
-for _public_origin in (
-    settings.normalized_oauth_public_base_url,
-    settings.normalized_proxy_base_url or "",
-):
+for _public_origin in (settings.normalized_proxy_base_url or "",):
     if _public_origin and _public_origin not in _browser_origins:
         _browser_origins.append(_public_origin)
 app.add_middleware(

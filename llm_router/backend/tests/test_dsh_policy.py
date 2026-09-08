@@ -414,7 +414,7 @@ class _FakeDb:
 
 @pytest.mark.asyncio
 async def test_execute_tool_call_dispatches_memory_tools_for_the_current_principal(monkeypatch):
-    from app.tools import capability_tools
+    from app.services import memory_service
 
     writes: list[tuple[str, str]] = []
 
@@ -427,8 +427,8 @@ async def test_execute_tool_call_dispatches_memory_tools_for_the_current_princip
 
     principal = SimpleNamespace(id="user-1", organization_id=uuid4())
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": _FakeDb(), "user": principal})
-    monkeypatch.setattr(capability_tools, "_write_memory", fake_write)
-    monkeypatch.setattr(capability_tools, "_read_memory", fake_read)
+    monkeypatch.setattr(memory_service, "append_memory_for_user", fake_write)
+    monkeypatch.setattr(memory_service, "render_memory_for_user", fake_read)
     registry = {
         "read_memory": {"kind": "memory", "operation": "read"},
         "write_memory": {"kind": "memory", "operation": "write"},

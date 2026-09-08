@@ -83,12 +83,8 @@ async def test_judge_crud(client: AsyncClient):
         json={"name": "准确性判官", "slug": "accuracy",
               "criteria": [{"dimension": "准确性", "weight": 1.0}]},
     )
-    assert r.status_code == 201
-    jid = r.json()["id"]
-    assert r.json()["criteria"][0]["dimension"] == "准确性"
-
-    g = await client.get(f"/api/v1/judges/{jid}")
-    assert g.status_code == 200
+    assert r.status_code == 410
+    assert "Judge 模板已下线" in r.json()["detail"]["message"]
 
 
 # ── RAG collection + ingest（embedding 无 provider 时明确失败）──

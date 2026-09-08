@@ -2364,12 +2364,7 @@ async def build_workspace_tree(db: AsyncSession, org_ids: list[UUID]) -> list[di
         org_direct_users: list[dict] = []
         for u in users:
             uname = u.display_name or u.username
-            # 组织管理员（role='admin'）非终端用户，不持有工作空间：
-            # 节点照常展示（前端标「无工作空间」），但不创建/复活其工作空间。
-            if u.role == "admin":
-                uws = None
-            else:
-                uws = await ensure_node_workspace(db, org.id, "user", str(u.id), uname, str(u.id))
+            uws = await ensure_node_workspace(db, org.id, "user", str(u.id), uname, str(u.id))
             unode = _node("user", u.id, uname, uws, [])
             if u.department_id and u.department_id in dept_map:
                 users_by_dept.setdefault(u.department_id, []).append(unode)

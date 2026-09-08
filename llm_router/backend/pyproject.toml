@@ -30,11 +30,6 @@ dependencies = [
     "bcrypt>=4.2.0",
     "pyjwt>=2.10.0",
     "email-validator>=2.2.0",
-    # StructuredTool 仍服务于平台固定工具与用户 Skill Runner。
-    "langchain-core>=0.3.0",
-    # MCP server —— 把归口用户 scope 内五项能力暴露给第三方智能体终端（/mcp）。
-    # StructuredTool 共享层（capability_tools）对内喂 LangGraph runtime、对外经 MCP 暴露。
-    "mcp>=1.2.0,<2.0.0",
     # 智能体平台：pgvector 向量检索（SQLAlchemy Vector 类型）
     "pgvector>=0.3.6",
     # embedding 余弦相似度计算

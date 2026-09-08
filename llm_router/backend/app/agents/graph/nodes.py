@@ -2800,13 +2800,11 @@ async def load_config(state: AgentState) -> dict:
         "system_prompt": agent.system_prompt,
         "model_alias": agent.model_alias,
         "memory_config": agent.memory_config or {},
-        "judge_config": agent.judge_config or {},
-        "judge_template_id": str(agent.judge_template_id) if agent.judge_template_id else None,
         "skill_ids": list(agent.skill_ids or []),
         "temperature": agent.temperature,
         "max_tokens": agent.max_tokens,
         "workspace_id": str(agent.workspace_id) if agent.workspace_id else None,
-        "rag_collection_id": str(agent.rag_collection_id) if agent.rag_collection_id else None,
+        "rag_collection_ids": list(agent.rag_collection_ids or []),
         "messages": messages,
         "steps": [],
         "usage": {"input_tokens": 0, "output_tokens": 0},
@@ -3055,8 +3053,6 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
         "system_prompt": base_prompt,
         "model_alias": state.get("model_alias") or "default",
         "memory_config": {"enabled": True},
-        "judge_config": {},
-        "judge_template_id": None,
         "skill_ids": skill_ids,
         "skill_catalog": skill_catalog,
         "default_skills": default_skills,
@@ -3093,19 +3089,13 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
 async def retrieve_rag(state: AgentState) -> dict:
     """检索 RAG 命中注入 rag_context。
 
-    general 模式遍历多个 ``rag_collection_ids`` 合并 top-k；agent 模式维持单 ``rag_collection_id``。
+    所有助手模式均遍历多个 ``rag_collection_ids`` 合并 top-k。
     """
     deps = get_deps()
     db = deps["db"]
     from app.models.rag import RagCollection
 
-    coll_ids: list[str] = []
-    if state.get("mode") == "general":
-        coll_ids = list(state.get("rag_collection_ids") or [])
-    else:
-        single = state.get("rag_collection_id")
-        if single:
-            coll_ids = [single]
+    coll_ids = list(state.get("rag_collection_ids") or [])
     if not coll_ids:
         return {}
 
@@ -3172,35 +3162,14 @@ async def retrieve_rag(state: AgentState) -> dict:
 async def load_memory(state: AgentState) -> dict:
     """载入记忆前置到 messages。
 
-    agent 模式：按 session 加载最近 N 条 ``AgentMessage`` 历史。
-    general 模式：① 按 task 加载 ``TaskMessage`` 对话历史前置；② 按用户权限聚合 4 级 ``Memory``
+    ① 按 task 加载 ``TaskMessage`` 对话历史前置；② 按用户权限聚合 4 级 ``Memory``
     长期记忆填入 ``memory_context``，由 DSH context contribution 注入。
     """
     deps = get_deps()
     db = deps["db"]
     from sqlalchemy import select
 
-    if state.get("mode") == "general":
-        return await _load_memory_general(state, deps, db, select)
-
-    # ── agent 模式 ──
-    mem_cfg = state.get("memory_config") or {}
-    if not mem_cfg.get("enabled", False):
-        return {}
-    from app.models.agent_memory import AgentMessage
-
-    limit = int(mem_cfg.get("max_messages", 10))
-    rows = await db.execute(
-        select(AgentMessage)
-        .where(AgentMessage.agent_id == UUID(state["agent_id"]), AgentMessage.session_id == state["session_id"])
-        .order_by(AgentMessage.created_at.desc())
-        .limit(limit)
-    )
-    history = list(rows.scalars().all())
-    history.reverse()
-    current = state.get("messages", [])
-    past = [{"role": m.role, "content": m.content} for m in history if m.role in ("user", "assistant")]
-    return {"messages": past + current}
+    return await _load_memory_general(state, deps, db, select)
 
 
 async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
@@ -5581,7 +5550,7 @@ def dsh_tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -
 
 
 def _memory_tool_defs() -> list[dict]:
-    """read_memory / write_memory for the DSH turn; schemas mirror ``app.mcp.server``."""
+    """read_memory / write_memory for the current Assistant Core turn."""
     return [
         {
             "type": "function",
@@ -5612,8 +5581,8 @@ def _memory_tool_defs() -> list[dict]:
 
 
 async def _execute_memory_tool(state: AgentState, entry: dict, params: dict) -> tuple[str, bool]:
-    """Serve read_memory / write_memory with the same scope rules as the MCP capability tools."""
-    from app.tools import capability_tools
+    """Serve read_memory / write_memory through the retained memory service."""
+    from app.services import memory_service
 
     deps = get_deps()
     db = deps["db"]
@@ -5635,11 +5604,11 @@ async def _execute_memory_tool(state: AgentState, entry: dict, params: dict) -> 
                     }
                 ), False
             async with db.begin_nested():
-                result = await capability_tools._write_memory(db, principal, content)
+                result = await memory_service.append_memory_for_user(db, principal, content)
             # extract_memory skips its LLM pass when the run already persisted facts itself.
             state["_dsh_memory_written"] = True
             return json.dumps({"status": "success", "result": result}, ensure_ascii=False), True
-        memory = await capability_tools._read_memory(db, principal)
+        memory = await memory_service.render_memory_for_user(db, principal)
         return json.dumps({"status": "success", "memory": memory}, ensure_ascii=False), True
     except Exception as exc:  # noqa: BLE001
         logger.warning("memory_tool_failed", operation=operation, error=str(exc))
@@ -5845,8 +5814,6 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
             business_envelope=state.get("business_turn_envelope") or {},
         )
         rag_ids = list(state.get("rag_collection_ids") or [])
-        if state.get("rag_collection_id") and str(state["rag_collection_id"]) not in rag_ids:
-            rag_ids.append(str(state["rag_collection_id"]))
         from app.services.platform_tool_registry import active_platform_tool_names
 
         active_platform_names = await active_platform_tool_names(db)
@@ -5921,8 +5888,7 @@ async def prepare_dsh_turn(state: AgentState) -> dict:
 async def save_memory(state: AgentState) -> dict:
     """持久化本轮对话消息。
 
-    agent 模式：写入 ``AgentMessage``（session 级）。
-    general 模式：写入 ``TaskMessage``（任务线程级）。长期记忆沉淀由后续 ``extract_memory`` 节点完成。
+    写入 ``TaskMessage``（任务线程级）。长期记忆沉淀由后续 ``extract_memory`` 节点完成。
     """
     deps = get_deps()
     db = deps["db"]
@@ -6059,23 +6025,6 @@ async def save_memory(state: AgentState) -> dict:
             })
         return {}
 
-    # ── agent 模式 ──
-    mem_cfg = state.get("memory_config") or {}
-    if not mem_cfg.get("enabled", False):
-        return {}
-    from app.models.agent_memory import AgentMessage
-
-    agent_id = UUID(state["agent_id"])
-    session_id = state["session_id"]
-    db.add_all(
-        [
-            AgentMessage(agent_id=agent_id, session_id=session_id, role="user", content=state.get("request", "")),
-            AgentMessage(
-                agent_id=agent_id, session_id=session_id, role="assistant", content=state.get("assistant_final", "")
-            ),
-        ]
-    )
-    await db.flush()
     return {}
 
 
@@ -6192,67 +6141,11 @@ async def extract_memory(state: AgentState) -> dict:
     }
 
 
-# ── judge ──────────────────────────────────────────────────────────────
-
-
-async def judge(state: AgentState) -> dict:
-    """若启用判官，按 JudgeTemplate criteria 让 LLM 打分。general 模式默认不启用。"""
-    # Ask / Plan 模式不产出可判定的执行结果 → 跳过判官。
-    if state.get("exec_mode") in ("ask", "plan"):
-        return {}
-    jcfg = state.get("judge_config") or {}
-    jt_id = state.get("judge_template_id")
-    if not (jcfg.get("enabled") or jt_id):
-        return {}
-    deps = get_deps()
-    db = deps["db"]
-    criteria: list = []
-    rubric: str | None = None
-    if jt_id:
-        from app.models.judge import JudgeTemplate
-
-        jt = await db.get(JudgeTemplate, UUID(jt_id))
-        if jt:
-            criteria = list(jt.criteria or [])
-            rubric = jt.scoring_rubric
-    criteria = list(jcfg.get("criteria_overrides", [])) or criteria
-    if not criteria:
-        return {}
-
-    prompt = (
-        f"你是评审判官。请按以下维度对智能体回复打分（0-100），"
-        f'返回 JSON {{"scores":{{...}},"total":number,"comment":"..."}}。\n'
-        f"维度：{json.dumps(criteria, ensure_ascii=False)}\n"
-        f"评分细则：{rubric or '(无)'}\n"
-        f"用户问题：{state.get('request', '')}\n"
-        f"智能体回复：{state.get('assistant_final', '')}\n"
-    )
-    parsed: dict
-    try:
-        result = await llm_client.chat(
-            db,
-            UUID(state["org_id"]),
-            state.get("model_alias", "default"),
-            [{"role": "user", "content": prompt}],
-            system_prompt="你是一个严格的评审判官，只输出 JSON。",
-            dept_id=state.get("department_id"),
-            team_id=None,
-        )
-        try:
-            parsed = json.loads(result.content)
-        except json.JSONDecodeError:
-            parsed = {"raw": result.content}
-    except Exception as exc:  # noqa: BLE001
-        parsed = {"error": str(exc)}
-    _emit({"type": "judge", "result": parsed})
-    return {"judge_result": parsed, "steps": [*state.get("steps", []), {"step": "judge", "result": parsed}]}
-
-
 # ── write_run_log ──────────────────────────────────────────────────────
 
 
 async def write_run_log(state: AgentState) -> dict:
-    """收口：更新 AgentRun（messages/steps/usage/status/judge）+ 写审计日志。agent/general 共用。"""
+    """收口：更新 AgentRun 元数据与用量；消息和步骤由事件表恢复。"""
     deps = get_deps()
     db = deps["db"]
     run_id = state.get("run_id")
@@ -6264,11 +6157,8 @@ async def write_run_log(state: AgentState) -> dict:
     if run_id is not None:
         run = await db.get(AgentRun, run_id)
         if run is not None:
-            run.messages = state.get("messages", [])
-            run.steps = state.get("steps", [])
             run.input_tokens = in_tok
             run.output_tokens = out_tok
-            run.judge_score = state.get("judge_result")
             run.error = state.get("error")
             run.status = "error" if state.get("error") else "success"
             run.latency_ms = latency_ms

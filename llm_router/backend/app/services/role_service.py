@@ -319,9 +319,9 @@ async def ensure_legacy_user_role(db: AsyncSession, user: User) -> None:
     if user.role_assignments:
         return
     builtins = await ensure_builtin_roles(db, user.organization_id)
-    selected = builtins[BUILTIN_ADMIN if user.role == "admin" else BUILTIN_MEMBER]
-    # This is a compatibility projection of the user's existing legacy role,
-    # not an administrator changing authorization after token issuance.
+    selected = builtins[BUILTIN_MEMBER]
+    # Compatibility repair for a pre-RBAC employee; administrators live in
+    # the independent Admin model and are never inferred from an employee row.
     await replace_user_roles(db, user, [selected.id], invalidate_tokens=False)
 
 

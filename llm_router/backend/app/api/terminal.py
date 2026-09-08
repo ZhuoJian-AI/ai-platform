@@ -138,7 +138,6 @@ from app.services import (
     rag_service,
     scope_service,
     skill_scope_service,
-    skills_pack_service,
     storage_gateway_service,
     subsystem_integration_service,
     task_service,
@@ -592,22 +591,10 @@ async def effective_access_endpoint(
 
 @router.post("/terminal/skills-pack/export", dependencies=[_RETIRED_SKILLS_PACK])
 async def export_skills_pack_endpoint(
-    request: Request,
-    cu: CurrentUser = Depends(require_user),
-    db: AsyncSession = Depends(get_db),
 ):
-    """即时生成归口用户 skills 包 zip 并下载。
+    """Compatibility endpoint; the route dependency always returns 410."""
 
-    包内只有当前企业的 MCP OAuth URL，不包含任何 bearer 或供应商密钥。
-    第三方终端首次连接时由用户在平台登录页用自己的员工账号授权。
-    """
-    zip_bytes, filename = await skills_pack_service.build_skills_pack_zip(db, cu, request)
-    await db.commit()
-    return Response(
-        content=zip_bytes,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    raise HTTPException(status_code=410, detail="MCP/OAuth Skill Pack 已下线")
 
 
 @router.get("/terminal/workspace-files")

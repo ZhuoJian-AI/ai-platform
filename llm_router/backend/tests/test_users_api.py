@@ -92,16 +92,20 @@ async def test_user_belongs_to_one_department(client: AsyncClient):
             "password": "test-pass-123",
             "role": "member",
             "department_id": finance_id,
-            "manager_scopes": [
-                {"scope_type": "department", "scope_id": finance_id},
-            ],
         },
     )
     assert created.status_code == 201
     data = created.json()
     assert data["department_id"] == finance_id
     assert data["department_ids"] == [finance_id]
-    assert [item["scope_id"] for item in data["manager_scopes"]] == [finance_id]
+    assert data["manager_scopes"] == []
+
+    retired_delegation = await client.patch(
+        f"/api/v1/users/{data['id']}",
+        json={"manager_scopes": [{"scope_type": "department", "scope_id": finance_id}]},
+    )
+    assert retired_delegation.status_code == 422
+    assert "部门 Skill 管理委派已停用" in str(retired_delegation.json())
 
     user_id = data["id"]
     updated = await client.patch(
@@ -109,13 +113,12 @@ async def test_user_belongs_to_one_department(client: AsyncClient):
         json={
             "department_ids": [sales_id],
             "department_id": sales_id,
-            "manager_scopes": [{"scope_type": "department", "scope_id": sales_id}],
         },
     )
     assert updated.status_code == 200
     assert updated.json()["department_id"] == sales_id
     assert updated.json()["department_ids"] == [sales_id]
-    assert [item["scope_id"] for item in updated.json()["manager_scopes"]] == [sales_id]
+    assert updated.json()["manager_scopes"] == []
 
     mismatched = await client.patch(
         f"/api/v1/users/{user_id}",
@@ -209,10 +212,10 @@ async def test_list_update_delete_user(client: AsyncClient):
     # update
     upd = await client.patch(
         f"/api/v1/users/{user_id}",
-        json={"role": "admin", "display_name": "Carol"},
+        json={"display_name": "Carol"},
     )
     assert upd.status_code == 200
-    assert upd.json()["role"] == "admin"
+    assert upd.json()["role"] == "member"
     assert upd.json()["display_name"] == "Carol"
 
     # delete

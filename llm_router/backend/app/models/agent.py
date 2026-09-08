@@ -31,26 +31,15 @@ class Agent(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     # 真实模型 id（如 glm-5.2 / claude-sonnet-4），或 "default" 走组织默认路由。
     model_alias: Mapped[str] = mapped_column(String(255), nullable=False, default="default")
 
-    # workflow 定义：节点序列/编排（JSON）。当前 v1 为线性步骤列表，后续可扩展为 DAG。
-    workflow: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     # 记忆配置：{"max_messages": int, "summarize": bool, ...}
     memory_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    # 判官配置覆盖：{"enabled": bool, "criteria_overrides": {...}}；配合 judge_template_id
-    judge_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     workspace_id: Mapped[str | None] = mapped_column(
         ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    rag_collection_id: Mapped[str | None] = mapped_column(
-        ForeignKey("rag_collections.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    # 绑定的 RAG 集合 ID 列表（复数，供终端 general 模式继承；与 skill_ids 同范式）。
-    # 旧单 FK rag_collection_id 仍供管理端测试广场（agent 模式）单 RAG 使用。
+    # 绑定的 RAG 集合 ID 列表（复数，与 skill_ids 同范式）。
     rag_collection_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-    judge_template_id: Mapped[str | None] = mapped_column(
-        ForeignKey("judge_templates.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    # 绑定的技能 ID 列表（Skill.id）
+    # 绑定的技能 ID 列表（SkillFolder.id）。
     skill_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
     # 可选的企业应用页面上下文。仅保存 Manifest 中的稳定标识；运行时仍需按

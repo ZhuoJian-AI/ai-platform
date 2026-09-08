@@ -33,11 +33,6 @@ class AgentRun(TimestampMixin, Base):
     exec_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="craft")
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     request: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    # 完整消息序列（含 user/assistant/tool），便于回放
-    messages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-    # 逐步执行轨迹（节点名、耗时、工具调用、RAG 命中等）
-    steps: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -45,9 +40,6 @@ class AgentRun(TimestampMixin, Base):
     # queued / running / success / error / cancelled / timeout / busy
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="running", index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # judge 评分结果（若启用判官节点）
-    judge_score: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-
     agent = relationship("Agent", back_populates="runs")
 
 

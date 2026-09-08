@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -12,9 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.department import Department
 from app.models.role import Role
-from app.models.skill import ScopeManagerAssignment, SkillFile, SkillFolder, SkillVersion
+from app.models.skill import SkillFile, SkillFolder, SkillVersion
 from app.models.user import User
-from app.schemas.user import ManagerScopeGrant
 
 if TYPE_CHECKING:
     from app.auth.user_auth import CurrentUser
@@ -88,48 +86,15 @@ async def validate_user_departments(
         raise HTTPException(status_code=410, detail="Team 已停用，请使用部门归属和角色授权")
 
 
-async def replace_manager_grants(
-    db: AsyncSession, user: User, grants: list[ManagerScopeGrant], created_by_admin_id: int | None = None,
-) -> None:
-    if user.role == "admin" or not user.is_active or user.deleted_at is not None:
-        if grants:
-            raise HTTPException(status_code=422, detail="Only active terminal members can be scope managers")
-    normalized: set[tuple[str, str]] = set()
-    for grant in grants:
-        sid = await validate_scope_target(db, user.organization_id, grant.scope_type, grant.scope_id)
-        if grant.scope_type == "department" and sid not in _user_department_ids(user):
-            raise HTTPException(status_code=422, detail="Department manager must belong to that department")
-        normalized.add((grant.scope_type, sid or ""))
-
-    rows = list((await db.execute(select(ScopeManagerAssignment).where(
-        ScopeManagerAssignment.user_id == user.id,
-    ))).scalars().all())
-    current = {(row.scope_type, row.scope_id): row for row in rows}
-    now = datetime.now(UTC)
-    for key, row in current.items():
-        row.deleted_at = None if key in normalized else now
-    for scope_type, sid in normalized - current.keys():
-        db.add(ScopeManagerAssignment(
-            organization_id=user.organization_id,
-            user_id=user.id,
-            scope_type=scope_type,
-            scope_id=sid,
-            created_by_admin_id=created_by_admin_id,
-        ))
-    await db.flush()
-    await db.refresh(user, attribute_names=["manager_assignments"])
-
-
 async def managed_scopes(db: AsyncSession, cu: CurrentUser) -> set[tuple[str, str | None]]:
-    rows = list((await db.execute(select(ScopeManagerAssignment).where(
-        ScopeManagerAssignment.user_id == UUID(str(cu.id)),
-        ScopeManagerAssignment.organization_id == cu.organization_id,
-        ScopeManagerAssignment.deleted_at.is_(None),
-    ))).scalars().all())
-    scopes: set[tuple[str, str | None]] = {("user", str(cu.id))}
-    for row in rows:
-        scopes.add((row.scope_type, row.scope_id))
-    return scopes
+    """Return the only scope an employee may manage: their personal Skill scope.
+
+    Organization, role and department Skill packages remain administrator-managed.
+    ``db`` stays in the signature for one compatibility release so existing API
+    callers do not need a parallel code path.
+    """
+    del db
+    return {("user", str(cu.id))}
 
 
 async def assert_user_can_manage_scope(

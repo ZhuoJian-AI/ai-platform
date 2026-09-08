@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from sqlalchemy import BigInteger, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKeyMixin
 
@@ -33,6 +33,3 @@ class Team(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     budget_cap_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # 每月平台 AI 操作准入次数；失败不退，NULL = 依次继承部门→组织
     budget_cap_credits: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-
-    # 关系
-    department = relationship("Department", back_populates="teams")

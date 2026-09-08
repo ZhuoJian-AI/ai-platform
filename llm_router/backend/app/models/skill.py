@@ -9,7 +9,6 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
-    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -144,26 +143,6 @@ class SkillVersion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_executable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     install_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
     install_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-
-class ScopeManagerAssignment(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
-    """Department/team management grant; deliberately separate from User.role."""
-
-    __tablename__ = "scope_manager_assignments"
-    __table_args__ = (
-        CheckConstraint("scope_type = 'department'", name="ck_scope_manager_type"),
-        UniqueConstraint("user_id", "scope_type", "scope_id", name="uq_scope_manager_assignment"),
-    )
-
-    organization_id: Mapped[str] = mapped_column(
-        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
-    scope_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    created_by_admin_id: Mapped[int | None] = mapped_column(
-        ForeignKey("admins.id", ondelete="SET NULL"), nullable=True
-    )
 
 
 class SkillExecution(TimestampMixin, Base):

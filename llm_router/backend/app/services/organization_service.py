@@ -4,20 +4,17 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import noload
 
 from app.models.department import Department
 from app.models.organization import Organization, OrganizationSlugAlias
-from app.models.team import Team
 from app.schemas.organization import (
     DepartmentCreate,
     DepartmentUpdate,
     OrganizationCreate,
     OrganizationUpdate,
-    TeamCreate,
-    TeamUpdate,
 )
 from app.services.memory_lifecycle import (
     ensure_node_memory,
@@ -117,7 +114,6 @@ async def soft_delete_organization(db: AsyncSession, org: Organization) -> None:
         EnterpriseApplicationIntegration,
     )
     from app.models.llm_provider import LlmProvider, ModelDeployment
-    from app.models.oauth import OAuthAuthorizationCode, OAuthRefreshToken
     from app.models.user import User
 
     now = datetime.now(UTC)
@@ -177,26 +173,9 @@ async def soft_delete_organization(db: AsyncSession, org: Organization) -> None:
         .where(EcsModuleRelease.organization_id == org.id)
         .values(status="failed", last_error="Organization has been deleted")
     )
-    await db.execute(
-        update(OAuthAuthorizationCode)
-        .where(
-            OAuthAuthorizationCode.organization_id == org.id,
-            OAuthAuthorizationCode.consumed_at.is_(None),
-        )
-        .values(consumed_at=now)
-    )
-    await db.execute(
-        update(OAuthRefreshToken)
-        .where(
-            OAuthRefreshToken.organization_id == org.id,
-            OAuthRefreshToken.revoked_at.is_(None),
-        )
-        .values(revoked_at=now)
-    )
     await soft_delete_node_workspace(db, org.id, "organization", None)
     await soft_delete_node_memory(db, org.id, "organization", None)
     await db.flush()
-
 
 async def get_default_organization(db: AsyncSession) -> Organization | None:
     """返回当前平台默认组织（未软删除）。无则返回 None。"""
@@ -273,16 +252,6 @@ async def get_dept_name_by_id(db: AsyncSession, dept_id) -> str | None:
         select(Department.name).where(
             Department.id == dept_id, Department.deleted_at.is_(None)
         )
-    )
-    return result.scalar_one_or_none()
-
-
-async def get_team_name_by_id(db: AsyncSession, team_id) -> str | None:
-    """按 id 取团队名（未软删除）；不存在/为空时返回 None。仅取标量列。"""
-    if team_id is None:
-        return None
-    result = await db.execute(
-        select(Team.name).where(Team.id == team_id, Team.deleted_at.is_(None))
     )
     return result.scalar_one_or_none()
 
@@ -414,22 +383,13 @@ async def soft_delete_department(db: AsyncSession, dept: Department) -> None:
 
     from app.models.enterprise_application import EnterpriseApplicationGrant
     from app.models.role import RoleDataDepartment
-    from app.models.user import User, user_department_memberships
+    from app.models.user import User
 
-    member_ids = select(user_department_memberships.c.user_id).where(
-        user_department_memberships.c.department_id == dept.id
-    )
     active_user_count = int((await db.execute(
         select(func.count()).select_from(User).where(
             User.organization_id == dept.organization_id,
             User.deleted_at.is_(None),
-            or_(User.department_id == dept.id, User.id.in_(member_ids)),
-        )
-    )).scalar_one())
-    active_team_count = int((await db.execute(
-        select(func.count()).select_from(Team).where(
-            Team.department_id == dept.id,
-            Team.deleted_at.is_(None),
+            User.department_id == dept.id,
         )
     )).scalar_one())
     active_child_count = int((await db.execute(
@@ -438,12 +398,10 @@ async def soft_delete_department(db: AsyncSession, dept: Department) -> None:
             Department.deleted_at.is_(None),
         )
     )).scalar_one())
-    if active_user_count or active_team_count or active_child_count:
+    if active_user_count or active_child_count:
         dependencies = []
         if active_user_count:
             dependencies.append(f"{active_user_count} 名员工")
-        if active_team_count:
-            dependencies.append(f"{active_team_count} 个团队")
         if active_child_count:
             dependencies.append(f"{active_child_count} 个下级部门")
         raise HTTPException(
@@ -470,24 +428,3 @@ async def soft_delete_department(db: AsyncSession, dept: Department) -> None:
     await soft_delete_node_memory(db, dept.organization_id, "department", str(dept.id))
     await db.flush()
 
-
-# ── Team ────────────────────────────────────────────────────────────────
-
-async def create_team(db: AsyncSession, dept_id: UUID, org_id: UUID, data: TeamCreate) -> Team:
-    raise HTTPException(status_code=410, detail="Team 已停用，请使用部门和角色")
-
-
-async def list_teams(db: AsyncSession, dept_id: UUID) -> list[Team]:
-    raise HTTPException(status_code=410, detail="Team 已停用，请使用部门和角色")
-
-
-async def get_team(db: AsyncSession, team_id: UUID) -> Team | None:
-    raise HTTPException(status_code=410, detail="Team 已停用，请使用部门和角色")
-
-
-async def update_team(db: AsyncSession, team: Team, data: TeamUpdate) -> Team:
-    raise HTTPException(status_code=410, detail="Team 已停用，请使用部门和角色")
-
-
-async def soft_delete_team(db: AsyncSession, team: Team) -> None:
-    raise HTTPException(status_code=410, detail="Team 已停用，请使用部门和角色")

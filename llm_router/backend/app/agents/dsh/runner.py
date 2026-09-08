@@ -28,11 +28,9 @@ from app.agents.graph.nodes import (
     write_run_log,
 )
 from app.agents.runtime_support import (
-    admin_context,
     finalize_bg_error,
     general_context,
     general_initial_state,
-    initial_state,
     persist_run_events,
     sse_replay_and_tail,
     user_message_metadata,
@@ -977,121 +975,6 @@ async def _persist_early_failure_reply(state: dict, task: Any, exc: Exception) -
         await db.commit()
     state["assistant_message_id"] = str(message_id)
     return str(message_id)
-
-
-async def _run_playground(
-    state: dict,
-    deps: dict,
-    *,
-    handle: run_registry.RunHandle | None = None,
-) -> dict:
-    start = time.monotonic()
-    staged: list[dict] = []
-    run_token = ""
-
-    def writer(raw: str) -> None:
-        _publish(handle, staged, json.loads(raw))
-
-    try:
-        prepared, run_token = await _prepare(
-            state,
-            deps,
-            lambda raw: staged.append(json.loads(raw)),
-            handle=handle,
-            staged=staged,
-        )
-        try:
-            await _admitted_run(
-                state,
-                deps,
-                prepared,
-                run_token,
-                handle,
-                staged,
-                str(state.get("user_id") or "platform-admin"),
-            )
-            await _finish(state, deps, writer)
-            _publish(handle, staged, {"type": "done", "usage": state.get("usage") or {}})
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("dsh_playground_failed", error=str(exc), exc_info=True)
-            _publish_failure_reply(handle, staged, state, exc)
-            await _finish_failed_run(state, deps, exc, writer)
-            _publish(handle, staged, {"type": "done", "usage": state.get("usage") or {}})
-    finally:
-        if run_token:
-            registry.revoke(run_token)
-    result = {
-        "session_id": state["session_id"],
-        "assistant": state.get("assistant_final", ""),
-        "steps": state.get("steps", []),
-        "usage": state.get("usage", {}),
-        "error": state.get("error"),
-        "run_id": state.get("run_id"),
-        "latency_ms": int((time.monotonic() - start) * 1000),
-    }
-    if handle is not None:
-        run_registry.mark_done(
-            handle,
-            json.dumps({"type": "final", **result}, ensure_ascii=False),
-            error=str(result.get("error") or "") or None,
-        )
-    return result
-
-
-async def run_agent(
-    *,
-    agent_id: str,
-    org_id: str,
-    message: str,
-    session_id: str | None,
-    db: Any,
-    request: Any,
-    admin: Any,
-) -> dict:
-    """Run the management playground through the same single DSH coordinator."""
-    state = initial_state(agent_id, org_id, message, session_id)
-    return await _run_playground(state, admin_context(db, request, admin))
-
-
-async def stream_agent(
-    *,
-    agent_id: str,
-    org_id: str,
-    message: str,
-    session_id: str | None,
-    db: Any,
-    request: Any,
-    admin: Any,
-) -> Response:
-    """Stream real DSH deltas/tool events in the management playground."""
-
-    async def body():
-        handle = run_registry.RunHandle(task_id=f"playground:{uuid.uuid4()}")
-        state = initial_state(agent_id, org_id, message, session_id)
-
-        async def execute() -> None:
-            try:
-                await _run_playground(state, admin_context(db, request, admin), handle=handle)
-            except Exception as exc:  # noqa: BLE001
-                error = json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False)
-                run_registry.publish(handle, error)
-                run_registry.mark_done(handle, None, error=str(exc))
-
-        task = asyncio.create_task(
-            execute(),
-            name=f"dsh_playground:{agent_id}",
-        )
-        try:
-            async for payload in sse_replay_and_tail(handle):
-                yield payload
-        except Exception as exc:  # noqa: BLE001
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
-        finally:
-            if not task.done():
-                task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
-    return StreamingResponse(body(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 async def run_general_agent(

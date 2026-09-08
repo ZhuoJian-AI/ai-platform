@@ -23,14 +23,12 @@ from app.models.rag import RagCollection
 from app.models.skill import SkillFolder, SkillVersion
 from app.models.user import User
 from app.models.workspace import Workspace
-from app.schemas.user import ManagerScopeGrant
 from app.services import platform_tool_registry, skill_import_service, workspace_service
 from app.services.scope_service import assert_bound_rags_visible
 from app.services.skill_scope_service import (
     assert_bound_skills_visible,
     assert_user_can_manage_scope,
     managed_scopes,
-    replace_manager_grants,
     validate_scope_target,
 )
 
@@ -96,18 +94,14 @@ async def _hierarchy(db_session):
 
 
 @pytest.mark.asyncio
-async def test_department_manager_has_department_scope_and_team_scope_is_rejected(db_session):
+async def test_employee_manages_only_personal_skill_scope_and_team_scope_is_rejected(db_session):
     org, other_org, department, other_department, _, user, cu = await _hierarchy(db_session)
-    await replace_manager_grants(
-        db_session,
-        user,
-        [
-            ManagerScopeGrant(scope_type="department", scope_id=department.id),
-        ],
-    )
 
     scopes = await managed_scopes(db_session, cu)
-    assert ("department", str(department.id)) in scopes
+    assert scopes == {("user", str(user.id))}
+    with pytest.raises(HTTPException) as exc:
+        await assert_user_can_manage_scope(db_session, cu, "department", department.id)
+    assert exc.value.status_code == 403
     assert all(scope_type != "team" for scope_type, _ in scopes)
     with pytest.raises(HTTPException) as exc:
         await assert_user_can_manage_scope(db_session, cu, "team", uuid4())
@@ -735,8 +729,8 @@ async def test_web_tool_is_available_and_executable_without_workspace(db_session
 
 
 @pytest.mark.asyncio
-async def test_business_application_turn_excludes_global_external_tools(db_session, monkeypatch):
-    """应用助手只拿契约 Action；普通聊天仍可使用平台启用的外部扩展工具。"""
+async def test_retired_external_tools_are_not_injected_into_any_assistant(db_session, monkeypatch):
+    """外部扩展退役后，个人助手和应用助手都不得再注入其工具。"""
     _, _, _, _, _, _, cu = await _hierarchy(db_session)
 
     external_tool = {
@@ -751,7 +745,7 @@ async def test_business_application_turn_excludes_global_external_tools(db_sessi
     monkeypatch.setattr(platform_tool_registry, "active_external_tool_defs", external_defs)
 
     normal_tools, _ = await _build_tools(db_session, [], None, user=cu)
-    assert "legacy_production_query" in {item["function"]["name"] for item in normal_tools}
+    assert "legacy_production_query" not in {item["function"]["name"] for item in normal_tools}
 
     application_tools, _ = await _build_tools(
         db_session,
@@ -764,26 +758,18 @@ async def test_business_application_turn_excludes_global_external_tools(db_sessi
     application_tool_names = {item["function"]["name"] for item in application_tools}
     assert "legacy_production_query" not in application_tool_names
     assert application_tool_names.isdisjoint(_AUTHENTICATED_BUILTIN_TOOLS)
-    external_defs.assert_awaited_once()
+    external_defs.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_manager_grant_is_revoked_when_membership_no_longer_matches(db_session):
+async def test_personal_skill_scope_does_not_change_with_department_membership(db_session):
     _, _, department, _, _, user, cu = await _hierarchy(db_session)
-    await replace_manager_grants(
-        db_session,
-        user,
-        [
-            ManagerScopeGrant(scope_type="department", scope_id=department.id),
-        ],
-    )
-    assert ("department", str(department.id)) in await managed_scopes(db_session, cu)
+    assert await managed_scopes(db_session, cu) == {("user", str(user.id))}
 
     user.department_id = None
-    await replace_manager_grants(db_session, user, [])
     await db_session.flush()
     cu.department_id = None
-    assert ("department", str(department.id)) not in await managed_scopes(db_session, cu)
+    assert await managed_scopes(db_session, cu) == {("user", str(user.id))}
 
 
 @pytest.mark.asyncio

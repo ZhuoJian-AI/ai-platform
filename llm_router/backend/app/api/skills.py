@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.retirement import retired_api_dependency
 from app.auth.admin_auth import (
     CurrentAdmin,
     assert_org_access,
@@ -70,9 +71,15 @@ from app.services.skill_store_service import (
 from app.tools.executor import execute_endpoint
 
 router = APIRouter()
+_RETIRED_DEFINITION_SKILL = retired_api_dependency("旧 Definition Skill")
 
 
-@router.post("/organizations/{org_id}/skills", response_model=SkillRead, status_code=201)
+@router.post(
+    "/organizations/{org_id}/skills",
+    response_model=SkillRead,
+    status_code=201,
+    dependencies=[_RETIRED_DEFINITION_SKILL],
+)
 async def create_skill_endpoint(
     org_id: UUID, data: SkillCreate,
     _: CurrentAdmin = Depends(require_org_access_write), db: AsyncSession = Depends(get_db),
@@ -84,14 +91,18 @@ async def create_skill_endpoint(
         raise HTTPException(status_code=409, detail=f"Slug '{data.slug}' already exists")
 
 
-@router.get("/organizations/{org_id}/skills", response_model=list[SkillRead])
+@router.get(
+    "/organizations/{org_id}/skills",
+    response_model=list[SkillRead],
+    dependencies=[_RETIRED_DEFINITION_SKILL],
+)
 async def list_skills_endpoint(
     org_id: UUID, _: CurrentAdmin = Depends(require_org_access), db: AsyncSession = Depends(get_db),
 ):
     return await list_skills(db, org_id)
 
 
-@router.get("/skills/{skill_id}", response_model=SkillRead)
+@router.get("/skills/{skill_id}", response_model=SkillRead, dependencies=[_RETIRED_DEFINITION_SKILL])
 async def get_skill_endpoint(
     skill_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
@@ -102,7 +113,7 @@ async def get_skill_endpoint(
     return s
 
 
-@router.patch("/skills/{skill_id}", response_model=SkillRead)
+@router.patch("/skills/{skill_id}", response_model=SkillRead, dependencies=[_RETIRED_DEFINITION_SKILL])
 async def update_skill_endpoint(
     skill_id: UUID, data: SkillUpdate,
     auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
@@ -114,7 +125,7 @@ async def update_skill_endpoint(
     return await update_skill(db, s, data)
 
 
-@router.delete("/skills/{skill_id}", status_code=204)
+@router.delete("/skills/{skill_id}", status_code=204, dependencies=[_RETIRED_DEFINITION_SKILL])
 async def delete_skill_endpoint(
     skill_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
@@ -125,7 +136,7 @@ async def delete_skill_endpoint(
     await soft_delete_skill(db, s)
 
 
-@router.post("/skills/{skill_id}/test")
+@router.post("/skills/{skill_id}/test", dependencies=[_RETIRED_DEFINITION_SKILL])
 async def test_skill_endpoint(
     skill_id: UUID, data: SkillTestRequest,
     auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
