@@ -1,12 +1,5 @@
 # Active tasks
 
-## CONTRACT-MIGRATION-0075-20260909 — 退役 Schema contract 迁移与真实 PostgreSQL 回归 (@codex-contract-migration-0075)
-
-- 以 `0074_user_role_compat` 为前置，新增无 `CASCADE`、带超时和前置条件的 `0075` contract 迁移。
-- 清理已退出运行时的表、字段及 Team Schema；保留全部 `AgentRunEvent`、配额和审计历史。
-- 使用隔离 PostgreSQL 覆盖 `0073 → 0074 → 0075`、代表性历史数据迁移和不可逆 downgrade 行为。
-- 不修改运行时代码、前端、Skill、部署文件或既有迁移。
-
 ## PLATFORM-SLIM-E2E-20260909 — 鉴权回归修复、遗留链路物理清理与双端全量验收 (@codex-platform-slim-e2e)
 
 - 修复升级数据库中 `users.role NOT NULL` 导致的新建员工回归，并精确区分用户名冲突与其他数据库错误。

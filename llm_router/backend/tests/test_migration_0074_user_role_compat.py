@@ -1,7 +1,8 @@
-"""Real-PostgreSQL regression coverage for the 0073 -> 0074 user compatibility fix."""
+"""Real PostgreSQL coverage for the 0073 -> 0075 migration sequence."""
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -77,10 +78,24 @@ def _ephemeral_database_url(base: URL, database: str) -> str:
 
 
 def _run_alembic(database_url: str, revision: str) -> None:
+    completed = _invoke_alembic(database_url, "upgrade", revision)
+    if completed.returncode != 0:
+        pytest.fail(
+            f"Alembic upgrade {revision} 失败。\n"
+            f"stdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}"
+        )
+
+
+def _invoke_alembic(
+    database_url: str,
+    operation: str,
+    revision: str,
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.update({"APP_ENV": "test", "DATABASE_URL": database_url})
-    completed = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", revision],
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", operation, revision],
         cwd=BACKEND_DIR,
         env=env,
         check=False,
@@ -88,12 +103,6 @@ def _run_alembic(database_url: str, revision: str) -> None:
         text=True,
         timeout=180,
     )
-    if completed.returncode != 0:
-        pytest.fail(
-            f"Alembic upgrade {revision} 失败。\n"
-            f"stdout:\n{completed.stdout}\n"
-            f"stderr:\n{completed.stderr}"
-        )
 
 
 @pytest_asyncio.fixture
@@ -330,3 +339,383 @@ async def test_0073_to_0074_supports_employee_crud_and_precise_unique_diagnostic
     finally:
         await connection.close()
         await engine.dispose()
+
+
+RETIRED_TABLES = {
+    "agent_messages",
+    "budget_usage",
+    "data_interfaces",
+    "data_systems",
+    "enterprise_application_tool_bindings",
+    "judge_templates",
+    "module_deployment_profiles",
+    "module_deployments",
+    "oauth_authorization_codes",
+    "oauth_clients",
+    "oauth_refresh_tokens",
+    "office_edit_rooms",
+    "office_save_events",
+    "ontologies",
+    "ontology_files",
+    "ontology_folders",
+    "platform_extension_catalog_entries",
+    "platform_extension_release_events",
+    "platform_extension_releases",
+    "platform_extension_sources",
+    "scope_manager_assignments",
+    "skills",
+    "teams",
+    "tool_call_logs",
+    "tool_connectors",
+    "tool_endpoints",
+    "user_department_memberships",
+}
+
+
+@pytest.mark.asyncio
+async def test_0073_to_0075_empty_database_contract(
+    migration_database_url: str,
+) -> None:
+    _run_alembic(migration_database_url, "0073_native_assistant_default")
+    _run_alembic(migration_database_url, "0074_user_role_compat")
+    _run_alembic(migration_database_url, "0075_retired_schema_contract")
+
+    raw_url = make_url(migration_database_url)
+    connect_kwargs = _asyncpg_connect_kwargs(raw_url, database=raw_url.database or "")
+    connection = await asyncpg.connect(**connect_kwargs, timeout=5)
+    try:
+        assert await connection.fetchval("SELECT version_num FROM alembic_version") == (
+            "0075_retired_schema_contract"
+        )
+        remaining_retired = await connection.fetch(
+            """
+            SELECT tablename
+            FROM pg_tables
+            WHERE schemaname = 'public' AND tablename = ANY($1::text[])
+            ORDER BY tablename
+            """,
+            sorted(RETIRED_TABLES),
+        )
+        assert remaining_retired == []
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_0075_contract_preserves_history_and_fails_closed(
+    migration_database_url: str,
+) -> None:
+    _run_alembic(migration_database_url, "0073_native_assistant_default")
+    _run_alembic(migration_database_url, "0074_user_role_compat")
+    raw_url = make_url(migration_database_url)
+    connect_kwargs = _asyncpg_connect_kwargs(raw_url, database=raw_url.database or "")
+
+    organization_id = uuid4()
+    department_id = uuid4()
+    team_id = uuid4()
+    api_key_id = uuid4()
+    provider_id = uuid4()
+    workspace_id = uuid4()
+    agent_id = uuid4()
+    event_id = uuid4()
+    quota_org_event_id = uuid4()
+    quota_team_event_id = uuid4()
+
+    connection = await asyncpg.connect(**connect_kwargs, timeout=5)
+    try:
+        await connection.execute(
+            """
+            INSERT INTO organizations (id, name, slug, settings)
+            VALUES ($1, '0075 迁移企业', $2, '{}'::jsonb)
+            """,
+            organization_id,
+            f"contract-{uuid4().hex[:8]}",
+        )
+        await connection.execute(
+            """
+            INSERT INTO departments (id, organization_id, name, slug, settings)
+            VALUES ($1, $2, '生产部', $3, '{}'::jsonb)
+            """,
+            department_id,
+            organization_id,
+            f"production-{uuid4().hex[:8]}",
+        )
+        await connection.execute(
+            """
+            INSERT INTO teams (
+                id, organization_id, department_id, name, slug, settings, deleted_at
+            ) VALUES ($1, $2, $3, '历史 Team', $4, '{}'::jsonb, CURRENT_TIMESTAMP)
+            """,
+            team_id,
+            organization_id,
+            department_id,
+            f"legacy-{uuid4().hex[:8]}",
+        )
+        await connection.execute(
+            """
+            INSERT INTO api_keys (
+                id, key_prefix, key_hash, key_name, scope_type, organization_id,
+                team_id, allowed_models, is_active, revoked_at
+            ) VALUES ($1, 'e2e0075', $2, '历史 Team Key', 'team', $3, $4,
+                      '[]'::jsonb, false, CURRENT_TIMESTAMP)
+            """,
+            api_key_id,
+            uuid4().hex,
+            organization_id,
+            team_id,
+        )
+        await connection.execute(
+            """
+            INSERT INTO llm_providers (
+                id, organization_id, name, provider_type, base_url,
+                api_key_encrypted, api_key_version, is_active, priority, weight,
+                timeout_seconds, max_retries, supported_models, health_status,
+                config, scope_type, team_id, vendor
+            ) VALUES (
+                $1, $2, '历史 Team Provider', 'openai', 'https://invalid.test',
+                'archived', 1, false, 0, 1, 30, 0, '[]'::jsonb, 'unknown',
+                '{}'::jsonb, 'team', $3, 'custom'
+            )
+            """,
+            provider_id,
+            organization_id,
+            team_id,
+        )
+        await connection.execute(
+            """
+            INSERT INTO workspaces (
+                id, organization_id, name, slug, storage_backend, root_path,
+                config, is_active, deleted_at, scope_type, scope_id
+            ) VALUES (
+                $1, $2, '历史 Team 空间', $3, 'local', '', '{}'::jsonb,
+                false, CURRENT_TIMESTAMP, 'team', $4
+            )
+            """,
+            workspace_id,
+            organization_id,
+            f"legacy-workspace-{uuid4().hex[:8]}",
+            str(team_id),
+        )
+        await connection.execute(
+            """
+            INSERT INTO audit_logs (
+                request_id, organization_id, team_id, event_type,
+                dlp_violations, metadata
+            ) VALUES ('contract-audit', $1, $2, 'model_call', '[]'::jsonb, '{}'::jsonb)
+            """,
+            str(organization_id),
+            str(team_id),
+        )
+        for event_row_id, scope_type, scope_id in (
+            (quota_org_event_id, "organization", str(organization_id)),
+            (quota_team_event_id, "team", str(team_id)),
+        ):
+            await connection.execute(
+                """
+                INSERT INTO ai_quota_events (
+                    id, reservation_id, organization_id, department_id, team_id,
+                    scope_type, scope_id, event_type, operation,
+                    reserved_tokens, reserved_credits
+                ) VALUES (
+                    $1, 'contract-reservation', $2, $3, $4, $5, $6,
+                    'reserved', 'chat', 10, 1
+                )
+                """,
+                event_row_id,
+                str(organization_id),
+                str(department_id),
+                str(team_id),
+                scope_type,
+                scope_id,
+            )
+        await connection.execute(
+            """
+            INSERT INTO agents (
+                id, organization_id, name, slug, system_prompt, model_alias,
+                workflow, memory_config, judge_config, skill_ids,
+                rag_collection_ids, scope_type
+            ) VALUES (
+                $1, $2, '迁移智能体', $3, '', 'default', '[]'::jsonb,
+                '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, '[]'::jsonb, 'organization'
+            )
+            """,
+            agent_id,
+            organization_id,
+            f"agent-{uuid4().hex[:8]}",
+        )
+        native_run_id = await connection.fetchval(
+            """
+            INSERT INTO agent_runs (
+                organization_id, agent_id, session_id, request, messages, steps,
+                judge_score, status, exec_mode, assistant_engine
+            ) VALUES (
+                $1, $2, 'native-session', '测试', '[{"role":"user"}]'::jsonb,
+                '[{"step":1}]'::jsonb, '{"score":1}'::jsonb,
+                'success', 'craft', 'native'
+            ) RETURNING id
+            """,
+            organization_id,
+            agent_id,
+        )
+        blocked_run_id = await connection.fetchval(
+            """
+            INSERT INTO agent_runs (
+                organization_id, agent_id, session_id, status, exec_mode, assistant_engine
+            ) VALUES ($1, $2, 'blocked-session', 'running', 'craft', 'dsh')
+            RETURNING id
+            """,
+            organization_id,
+            agent_id,
+        )
+        await connection.execute(
+            """
+            INSERT INTO agent_run_events (id, run_id, seq, payload)
+            VALUES ($1, $2, 1, '{"type":"done"}'::jsonb)
+            """,
+            event_id,
+            native_run_id,
+        )
+    finally:
+        await connection.close()
+
+    blocked = _invoke_alembic(
+        migration_database_url,
+        "upgrade",
+        "0075_retired_schema_contract",
+    )
+    assert blocked.returncode != 0
+    assert "DSH runs are still active" in f"{blocked.stdout}\n{blocked.stderr}"
+
+    connection = await asyncpg.connect(**connect_kwargs, timeout=5)
+    try:
+        assert await connection.fetchval("SELECT version_num FROM alembic_version") == (
+            "0074_user_role_compat"
+        )
+        await connection.execute(
+            "UPDATE agent_runs SET status = 'cancelled' WHERE id = $1",
+            blocked_run_id,
+        )
+    finally:
+        await connection.close()
+
+    _run_alembic(migration_database_url, "0075_retired_schema_contract")
+    connection = await asyncpg.connect(**connect_kwargs, timeout=5)
+    try:
+        assert await connection.fetchval("SELECT version_num FROM alembic_version") == (
+            "0075_retired_schema_contract"
+        )
+        remaining_retired = await connection.fetch(
+            """
+            SELECT tablename
+            FROM pg_tables
+            WHERE schemaname = 'public' AND tablename = ANY($1::text[])
+            ORDER BY tablename
+            """,
+            sorted(RETIRED_TABLES),
+        )
+        assert remaining_retired == []
+        assert await connection.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND column_name = 'team_id'
+            """
+        ) == 0
+        for table_name, column_name in (
+            ("users", "role"),
+            ("agents", "workflow"),
+            ("agents", "judge_config"),
+            ("agents", "judge_template_id"),
+            ("agents", "rag_collection_id"),
+            ("agent_runs", "messages"),
+            ("agent_runs", "steps"),
+            ("agent_runs", "judge_score"),
+            ("agent_runs", "assistant_engine"),
+        ):
+            assert not await connection.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
+                )
+                """,
+                table_name,
+                column_name,
+            )
+
+        migrated_key = await connection.fetchrow(
+            "SELECT scope_type, department_id, is_active FROM api_keys WHERE id = $1",
+            api_key_id,
+        )
+        assert migrated_key == ("department", department_id, False)
+        migrated_provider = await connection.fetchrow(
+            "SELECT scope_type, department_id, is_active FROM llm_providers WHERE id = $1",
+            provider_id,
+        )
+        assert migrated_provider == ("department", department_id, False)
+        migrated_workspace = await connection.fetchrow(
+            "SELECT scope_type, scope_id, is_active, deleted_at FROM workspaces WHERE id = $1",
+            workspace_id,
+        )
+        assert migrated_workspace["scope_type"] == "legacy_team"
+        assert migrated_workspace["scope_id"] == str(team_id)
+        assert migrated_workspace["is_active"] is False
+        assert migrated_workspace["deleted_at"] is not None
+
+        audit_row = await connection.fetchrow(
+            "SELECT metadata FROM audit_logs WHERE request_id = 'contract-audit'"
+        )
+        audit_metadata = json.loads(audit_row["metadata"])
+        assert audit_metadata["legacy_team_id"] == str(team_id)
+        quota_rows = await connection.fetch(
+            """
+            SELECT id, scope_type, scope_id
+            FROM ai_quota_events
+            WHERE reservation_id = 'contract-reservation'
+            ORDER BY scope_type
+            """
+        )
+        assert {(row["id"], row["scope_type"], row["scope_id"]) for row in quota_rows} == {
+            (quota_org_event_id, "organization", str(organization_id)),
+            (quota_team_event_id, "legacy_team", str(team_id)),
+        }
+        with pytest.raises(asyncpg.RaiseError, match="append-only"):
+            await connection.execute(
+                "UPDATE ai_quota_events SET reserved_tokens = 11 WHERE id = $1",
+                quota_org_event_id,
+            )
+
+        assert await connection.fetchval(
+            "SELECT COUNT(*) FROM agent_runs WHERE id = ANY($1::bigint[])",
+            [native_run_id, blocked_run_id],
+        ) == 2
+        stored_event = await connection.fetchrow(
+            "SELECT run_id, seq, payload FROM agent_run_events WHERE id = $1",
+            event_id,
+        )
+        assert stored_event["run_id"] == native_run_id
+        assert stored_event["seq"] == 1
+        assert json.loads(stored_event["payload"]) == {"type": "done"}
+        rollup_definition = await connection.fetchval(
+            "SELECT definition FROM pg_matviews WHERE matviewname = 'ai_quota_monthly_rollups'"
+        )
+        assert "team_id" not in rollup_definition
+        assert "team_key" not in rollup_definition
+    finally:
+        await connection.close()
+
+    refused_downgrade = _invoke_alembic(
+        migration_database_url,
+        "downgrade",
+        "0074_user_role_compat",
+    )
+    assert refused_downgrade.returncode != 0
+    assert "不可逆" in f"{refused_downgrade.stdout}\n{refused_downgrade.stderr}"
+
+    connection = await asyncpg.connect(**connect_kwargs, timeout=5)
+    try:
+        assert await connection.fetchval("SELECT version_num FROM alembic_version") == (
+            "0075_retired_schema_contract"
+        )
+    finally:
+        await connection.close()
