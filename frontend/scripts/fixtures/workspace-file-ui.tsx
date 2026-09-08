@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import OfficeFilePreview from '../../src/components/files/OfficeFilePreview';
 import { FinderPromptModal } from '../../src/components/finder/primitives';
 import BrowserDrawer, { type Source } from '../../src/pages/terminal/BrowserDrawer';
-import type { WorkspaceFile, WorkspacePreviewSession } from '../../src/api/client';
+import type { WorkspaceFile } from '../../src/api/client';
 
 const now = new Date().toISOString();
 
@@ -68,34 +68,6 @@ function DraftHarness() {
   );
 }
 
-function OfficeEditHarness({ enabled }: { enabled: boolean }) {
-  const [editSessionCalls, setEditSessionCalls] = useState(0);
-  const file = workspaceFile('演示文稿.pptx', {
-    size: 1024,
-    metadata: { binary: true, mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' },
-    extracted_text: '# AI 解析内容',
-    office_edit_enabled: enabled,
-  });
-  const createEditSession = async (): Promise<WorkspacePreviewSession> => {
-    setEditSessionCalls((value) => value + 1);
-    throw new Error('测试在创建调用后停止，不连接外部 WebOffice SDK');
-  };
-  return (
-    <>
-      <div data-testid="edit-session-calls">{editSessionCalls}</div>
-      <BrowserDrawer
-        open
-        initialFileId={file.id}
-        onClose={() => undefined}
-        resolveHref={unsupported}
-        loadFileById={async () => file}
-        createEditSession={createEditSession}
-        refreshEditSession={async () => { throw new Error('unexpected edit refresh'); }}
-      />
-    </>
-  );
-}
-
 function HtmlSecurityHarness() {
   const file = workspaceFile('untrusted.html', {
     content: '<script>localStorage.setItem("workspace-html-script", "executed")</script>\n<img src="x" onerror="localStorage.setItem(\'workspace-html-onerror\', \'executed\')">',
@@ -130,12 +102,8 @@ const element = selectedCase === 'ime'
   ? <ImeHarness />
   : selectedCase === 'draft'
     ? <DraftHarness />
-    : selectedCase === 'office-edit'
-      ? <OfficeEditHarness enabled />
-      : selectedCase === 'office-edit-disabled'
-        ? <OfficeEditHarness enabled={false} />
-        : selectedCase === 'html-security'
-          ? <HtmlSecurityHarness />
+    : selectedCase === 'html-security'
+      ? <HtmlSecurityHarness />
       : <SpreadsheetHarness />;
 
 createRoot(document.getElementById('root')!).render(element);

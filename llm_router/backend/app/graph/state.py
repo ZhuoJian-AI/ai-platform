@@ -1,8 +1,8 @@
-"""ProxyState —— LangGraph 代理流水线的可序列化状态 schema。
+"""公开模型 API 固定代理流水线的请求状态 schema。
 
 所有字段必须可序列化（str/int/bool/dict/list/bytes/None），因为状态会在每个
 super-step 后被 checkpointer 存储。**非序列化运行时句柄**（db session、FastAPI
-Request、AuthenticatedKey）绝不放入 state，而是通过 LangGraph ``context`` 注入
+Request、AuthenticatedKey）绝不放入 state，而是通过请求级 ``ContextVar`` 注入
 （见 :mod:`app.graph.context`）。**密钥绝不入 state**：上游 API Key 在 proxy
 节点内按 ``provider_id`` 从 db 解密、就地使用。
 """

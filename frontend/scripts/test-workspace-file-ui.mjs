@@ -79,23 +79,6 @@ try {
   await page.getByRole('button', { name: '退出全屏预览' }).click();
   assert.equal(await draft.inputValue(), '尚未保存的中文草稿');
 
-  // A user's update permission alone is insufficient when the server-side
-  // WebOffice feature is unavailable: do not render a button that must fail.
-  await page.goto(`${origin}/scripts/fixtures/workspace-file-ui.html?case=office-edit-disabled`);
-  assert.equal(await page.getByRole('button', { name: '协同编辑' }).count(), 0);
-  assert.equal(await page.getByTestId('edit-session-calls').textContent(), '0');
-
-  // Preview/AI mode changes do not create a WebOffice edit room. Only the
-  // explicit edit button may call createEditSession when the server advertises
-  // availability and the role has update permission.
-  await page.goto(`${origin}/scripts/fixtures/workspace-file-ui.html?case=office-edit`);
-  await page.getByText('AI 解析内容', { exact: true }).click();
-  assert.equal(await page.getByTestId('edit-session-calls').textContent(), '0');
-  await page.getByText('原文件预览', { exact: true }).click();
-  assert.equal(await page.getByTestId('edit-session-calls').textContent(), '0');
-  await page.getByRole('button', { name: '协同编辑' }).click();
-  await page.getByTestId('edit-session-calls').getByText('1').waitFor();
-
   // Workspace HTML is untrusted. It must render as escaped text, must not get
   // an executable/new-tab path, and inline/event-handler JavaScript must stay inert.
   await page.goto(`${origin}/scripts/fixtures/workspace-file-ui.html?case=html-security`);

@@ -212,7 +212,6 @@ async def _transcribe(db, job: MultimodalJob, directory: Path) -> dict:
         language=str(job.params.get("language") or "auto"),
         model_alias=str(job.params.get("model") or "default"),
         dept_id=job.department_id,
-        team_id=None,
         request_id=job.request_id,
     )
     for index, result in enumerate(results):
@@ -265,7 +264,6 @@ async def _synthesize(db, job: MultimodalJob, directory: Path) -> dict:
         clone_format=clone_format,
         model_alias=str(job.params.get("model") or "default"),
         dept_id=job.department_id,
-        team_id=None,
         request_id=job.request_id,
     )
     raw = result["audio"]

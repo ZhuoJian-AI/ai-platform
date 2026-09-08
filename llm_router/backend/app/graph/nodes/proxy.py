@@ -6,8 +6,7 @@ token），Claude Code 与 OpenAI SDK 兼容性零回归。
 
 - **非流式**：adapter 返回 ``Response``，节点提取 body / 状态 / content-type / usage。
 - **流式**：adapter 返回 ``StreamingResponse``，节点消费其 ``body_iterator``，逐 chunk
-  经 ``get_runtime().stream_writer`` 下发（消费方通过 ``astream(stream_mode="custom")``
-  实时取得），同时 ``_StreamUsageTracker`` 累积 token 用量。adapter 自身处理上游错误
+  经请求级流式写入器下发，同时 ``_StreamUsageTracker`` 累积 token 用量。adapter 自身处理上游错误
   （在流内发送错误 SSE 事件），节点仅透传，不重写协议。
 
 上游调用本身不设置 ``state.error``（错误响应透传给客户端，与原代码一致）；
@@ -88,7 +87,7 @@ async def proxy_upstream(state: ProxyState) -> dict:
         try:
             async for chunk in upstream:
                 tracker.feed(chunk)
-                writer(chunk)
+                await writer(chunk)
             completed = True
         finally:
             await settle_ai_quota(

@@ -53,19 +53,6 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return resp.json();
 }
 
-async function requestText(path: string, options?: RequestInit): Promise<string> {
-  const headers: Record<string, string> = {};
-  const resp = await adminFetch(`${BASE_URL}${path}`, { ...options, headers: { ...headers, ...(options?.headers as Record<string, string> | undefined) } });
-  if (resp.status === 401) {
-    throw new ApiError(401, 'Session expired');
-  }
-  if (!resp.ok) {
-    const body = await resp.json().catch(() => ({}));
-    throw new ApiError(resp.status, responseErrorMessage(body, resp.statusText), body);
-  }
-  return resp.text();
-}
-
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -898,7 +885,7 @@ export interface WorkspaceDownloadTicket {
 }
 
 export interface WorkspacePreviewSession {
-  mode: 'edit' | 'weboffice' | 'pdfjs' | 'browser_office' | 'text' | 'spreadsheet_preview' | 'native' | 'blob' | 'fallback' | 'download_only';
+  mode: 'weboffice' | 'pdfjs' | 'browser_office' | 'text' | 'spreadsheet_preview' | 'native' | 'blob' | 'fallback' | 'download_only';
   filename: string;
   mime_type: string;
   size: number;
@@ -915,18 +902,6 @@ export interface WorkspacePreviewSession {
   strict_range: boolean;
   file_id?: string | null;
   source_version_id?: string | null;
-  room_id?: string | null;
-  save_status?: string | null;
-}
-
-export interface WorkspaceOfficeEditStatus {
-  room_id: string;
-  status: string;
-  save_status?: string | null;
-  source_file_version_id?: string | null;
-  final_file_version_id: string | null;
-  current_version_id: string | null;
-  error: string | null;
 }
 
 export interface WorkspaceFallbackPreview {
@@ -1079,20 +1054,6 @@ export const workspaces = {
     request<WorkspacePreviewSession>(`/api/v1/files/${id}/preview-session/refresh`, {
       method: 'POST', body: JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, refresh_context: refreshContext }),
     }),
-  createFileEditSession: (id: string, clientOpenId: string) =>
-    request<WorkspacePreviewSession>(`/api/v1/files/${id}/edit-session`, {
-      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId }),
-    }),
-  refreshFileEditSession: (id: string, roomId: string, accessToken: string, refreshToken: string, refreshContext: string) =>
-    request<WorkspacePreviewSession>(`/api/v1/files/${id}/edit-session/refresh`, {
-      method: 'POST', body: JSON.stringify({ room_id: roomId, access_token: accessToken, refresh_token: refreshToken, refresh_context: refreshContext }),
-    }),
-  closeFileEditSession: (id: string, clientOpenId: string) =>
-    request<WorkspaceOfficeEditStatus>(`/api/v1/files/${id}/edit-session/close`, {
-      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId }),
-    }),
-  getFileEditSessionStatus: (id: string, roomId: string) =>
-    request<WorkspaceOfficeEditStatus>(`/api/v1/files/${id}/edit-session/${roomId}`),
   startFileFallbackPreview: (id: string, versionId?: string) =>
     request<WorkspaceFallbackPreview>(withWorkspaceVersion(`/api/v1/files/${id}/fallback-preview`, versionId), { method: 'POST' }),
   getFileFallbackPreview: (id: string, versionId?: string) =>
@@ -1150,10 +1111,10 @@ export const workspaces = {
 export interface Agent {
   id: string; organization_id: string; scope_type: string; scope_id: string | null; created_by: string | null;
   name: string; slug: string; description: string | null;
-  system_prompt: string; model_alias: string; workflow: unknown[];
-  memory_config: Record<string, unknown>; judge_config: Record<string, unknown>;
-  workspace_id: string | null; rag_collection_id: string | null; rag_collection_ids: string[];
-  judge_template_id: string | null; skill_ids: string[];
+  system_prompt: string; model_alias: string;
+  memory_config: Record<string, unknown>;
+  workspace_id: string | null; rag_collection_ids: string[]; skill_ids: string[];
+  application_id: string | null; module_key: string | null; page_key: string | null;
   temperature: number | null; max_tokens: number | null;
   is_active: boolean; version: number; created_at: string; updated_at: string;
 }
@@ -1309,24 +1270,6 @@ export const rag = {
     request<{ query: string; hits: RagChunkHit[] }>(`/api/v1/rag/${collId}/retrieve`, {
       method: 'POST', body: JSON.stringify({ query, top_k: topK }),
     }),
-};
-
-// ── Agent Platform: Judge Templates ────────────────────────────────────
-
-export interface JudgeTemplate {
-  id: string; organization_id: string; name: string; slug: string; description: string | null;
-  criteria: unknown[]; scoring_rubric: string | null; is_active: boolean;
-  created_at: string; updated_at: string;
-}
-
-export const judges = {
-  list: (orgId: string) => request<JudgeTemplate[]>(`/api/v1/organizations/${orgId}/judges`),
-  get: (id: string) => request<JudgeTemplate>(`/api/v1/judges/${id}`),
-  create: (orgId: string, data: Partial<JudgeTemplate>) =>
-    request<JudgeTemplate>(`/api/v1/organizations/${orgId}/judges`, { method: 'POST', body: JSON.stringify(data) }),
-  update: (id: string, data: Partial<JudgeTemplate>) =>
-    request<JudgeTemplate>(`/api/v1/judges/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  delete: (id: string) => request<void>(`/api/v1/judges/${id}`, { method: 'DELETE' }),
 };
 
 // ── Tool Connector: Connectors ────────────────────────────────────────
@@ -1550,62 +1493,6 @@ export const skillStore = {
     request<SkillVersion>(`/api/v1/skill-versions/${versionId}/activate`, { method: 'POST' }),
 };
 
-// ── Tool Connector: Ontology ───────────────────────────────────────────
-
-export interface Ontology {
-  id: string; organization_id: string; name: string; slug: string; description: string | null;
-  entities: unknown[]; relations: unknown[]; version: number; is_active: boolean;
-  created_at: string; updated_at: string;
-}
-
-export const ontologies = {
-  list: (orgId: string) => request<Ontology[]>(`/api/v1/organizations/${orgId}/ontologies`),
-  get: (id: string) => request<Ontology>(`/api/v1/ontologies/${id}`),
-  create: (orgId: string, data: Partial<Ontology>) =>
-    request<Ontology>(`/api/v1/organizations/${orgId}/ontologies`, { method: 'POST', body: JSON.stringify(data) }),
-  update: (id: string, data: Partial<Ontology>) =>
-    request<Ontology>(`/api/v1/ontologies/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  delete: (id: string) => request<void>(`/api/v1/ontologies/${id}`, { method: 'DELETE' }),
-  validate: (id: string) =>
-    request<{ ok: boolean; errors: string[] }>(`/api/v1/ontologies/${id}/validate`, { method: 'POST' }),
-};
-
-// ── Tool Connector: Ontology Store（Markdown 文件 + 文件夹，节点作用域）──
-
-export interface OntologyFolder {
-  id: string; organization_id: string; scope_type: string; scope_id: string | null;
-  path: string; created_by: string | null; created_at: string; updated_at: string;
-}
-
-export interface OntologyFile {
-  id: string; organization_id: string; scope_type: string; scope_id: string | null;
-  path: string; size: number; content_hash: string | null; content: string | null;
-  metadata: Record<string, unknown>; created_by: string | null; created_at: string; updated_at: string;
-}
-
-/** /terminal/resources 返回的本体文件轻量摘要。 */
-export interface OntologyFileSummary {
-  id: string; name: string; path: string;
-}
-
-export const ontologyStore = {
-  listFolders: (orgId: string, scope: ScopeRef) =>
-    request<OntologyFolder[]>(`/api/v1/organizations/${orgId}/ontology-folders?scope_type=${scope.scope_type}&scope_id=${scope.scope_id ?? ''}`),
-  createFolder: (orgId: string, data: { path: string; scope_type: string; scope_id: string | null }) =>
-    request<OntologyFolder>(`/api/v1/organizations/${orgId}/ontology-folders`, { method: 'POST', body: JSON.stringify(data) }),
-  renameFolder: (id: string, path: string) =>
-    request<OntologyFolder>(`/api/v1/ontology-folders/${id}`, { method: 'PATCH', body: JSON.stringify({ path }) }),
-  deleteFolder: (id: string) => request<void>(`/api/v1/ontology-folders/${id}`, { method: 'DELETE' }),
-  listFiles: (orgId: string, scope: ScopeRef) =>
-    request<OntologyFile[]>(`/api/v1/organizations/${orgId}/ontology-files?scope_type=${scope.scope_type}&scope_id=${scope.scope_id ?? ''}`),
-  upsertFile: (orgId: string, data: { path: string; content: string; metadata?: Record<string, unknown>; scope_type: string; scope_id: string | null }) =>
-    request<OntologyFile>(`/api/v1/organizations/${orgId}/ontology-files`, { method: 'POST', body: JSON.stringify(data) }),
-  getFile: (id: string) => request<OntologyFile>(`/api/v1/ontology-files/${id}`),
-  updateFile: (id: string, data: { path?: string; content?: string; metadata?: Record<string, unknown> }) =>
-    request<OntologyFile>(`/api/v1/ontology-files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteFile: (id: string) => request<void>(`/api/v1/ontology-files/${id}`, { method: 'DELETE' }),
-};
-
 // ── Tool Connector: Data Interfaces (独立数据结构) ──────────────────────
 
 export interface DataSystem {
@@ -1678,7 +1565,6 @@ export interface ToolMetrics {
     connectors: { total: number; active: number; inactive: number; by_health: Record<string, number> };
     data_interfaces: { systems_total: number; interfaces_total: number; active: number; inactive: number };
     skills: { folders_total: number; files_total: number };
-    ontology: { folders_total: number; files_total: number };
   };
 }
 
@@ -1741,7 +1627,6 @@ export interface TerminalUser {
 export interface TerminalResources {
   workspaces: Workspace[];
   skills: SkillFolderSummary[];
-  ontologies: OntologyFileSummary[];
   rags: RagCollection[];
   /** 用户默认装配：默认工作空间（个人）+ 默认模型（最近一次使用）。 */
   defaults?: { workspace_id: string | null; model_alias: string | null };
@@ -2839,20 +2724,6 @@ export const terminal = {
     userRequest<WorkspacePreviewSession>(`/api/v1/terminal/files/${id}/preview-session/refresh`, {
       method: 'POST', body: JSON.stringify({ access_token: accessToken, refresh_token: refreshToken, refresh_context: refreshContext }),
     }),
-  createWsFileEditSession: (id: string, clientOpenId: string) =>
-    userRequest<WorkspacePreviewSession>(`/api/v1/terminal/files/${id}/edit-session`, {
-      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId }),
-    }),
-  refreshWsFileEditSession: (id: string, roomId: string, accessToken: string, refreshToken: string, refreshContext: string) =>
-    userRequest<WorkspacePreviewSession>(`/api/v1/terminal/files/${id}/edit-session/refresh`, {
-      method: 'POST', body: JSON.stringify({ room_id: roomId, access_token: accessToken, refresh_token: refreshToken, refresh_context: refreshContext }),
-    }),
-  closeWsFileEditSession: (id: string, clientOpenId: string) =>
-    userRequest<WorkspaceOfficeEditStatus>(`/api/v1/terminal/files/${id}/edit-session/close`, {
-      method: 'POST', body: JSON.stringify({ client_open_id: clientOpenId }),
-    }),
-  getWsFileEditSessionStatus: (id: string, roomId: string) =>
-    userRequest<WorkspaceOfficeEditStatus>(`/api/v1/terminal/files/${id}/edit-session/${roomId}`),
   startWsFileFallbackPreview: (id: string, versionId?: string) =>
     userRequest<WorkspaceFallbackPreview>(withWorkspaceVersion(`/api/v1/terminal/files/${id}/fallback-preview`, versionId), { method: 'POST' }),
   getWsFileFallbackPreview: (id: string, versionId?: string) =>
@@ -3008,40 +2879,6 @@ export const terminal = {
   reingestDoc: (docId: string, data: { chunks: string[] | null; source?: string; title?: string | null }) =>
     userRequest<RagDocument>(`/api/v1/terminal/rag/documents/${docId}/reingest`, { method: 'POST', body: JSON.stringify(data) }),
 
-  // ── 数据接口：终端用户 scope 内可见，只读 + 查看输入输出样例 ──
-  listDataSystems: (scope: { scope_type: string; scope_id?: string | null }) => {
-    const qs = new URLSearchParams({ scope_type: scope.scope_type });
-    if (scope.scope_id) qs.set('scope_id', scope.scope_id);
-    return userRequest<DataSystem[]>(`/api/v1/terminal/data-systems?${qs.toString()}`);
-  },
-  listDataInterfaces: (systemId: string) =>
-    userRequest<DataInterface[]>(`/api/v1/terminal/data-systems/${systemId}/data-interfaces`),
-
-  // ── 本体（Markdown 文件 + 文件夹）：终端用户 scope 内可见；删除/重命名/编辑仅限自己创建 ──
-  /** 左栏 scope 单链（与 kb-nodes 同源，资源无关）。 */
-  ontologyNodes: () => userRequest<KbNode[]>('/api/v1/terminal/kb-nodes'),
-  listOntologyFolders: (scope: { scope_type: string; scope_id?: string | null }) => {
-    const qs = new URLSearchParams({ scope_type: scope.scope_type });
-    if (scope.scope_id) qs.set('scope_id', scope.scope_id);
-    return userRequest<OntologyFolder[]>(`/api/v1/terminal/ontology-folders?${qs.toString()}`);
-  },
-  createOntologyFolder: (data: { path: string; scope_type: string; scope_id: string | null }) =>
-    userRequest<OntologyFolder>('/api/v1/terminal/ontology-folders', { method: 'POST', body: JSON.stringify(data) }),
-  renameOntologyFolder: (id: string, path: string) =>
-    userRequest<OntologyFolder>(`/api/v1/terminal/ontology-folders/${id}`, { method: 'PATCH', body: JSON.stringify({ path }) }),
-  deleteOntologyFolder: (id: string) => userRequest<void>(`/api/v1/terminal/ontology-folders/${id}`, { method: 'DELETE' }),
-  listOntologyFiles: (scope: { scope_type: string; scope_id?: string | null }) => {
-    const qs = new URLSearchParams({ scope_type: scope.scope_type });
-    if (scope.scope_id) qs.set('scope_id', scope.scope_id);
-    return userRequest<OntologyFile[]>(`/api/v1/terminal/ontology-files?${qs.toString()}`);
-  },
-  upsertOntologyFile: (data: { path: string; content: string; metadata?: Record<string, unknown>; scope_type: string; scope_id: string | null }) =>
-    userRequest<OntologyFile>('/api/v1/terminal/ontology-files', { method: 'POST', body: JSON.stringify(data) }),
-  getOntologyFile: (id: string) => userRequest<OntologyFile>(`/api/v1/terminal/ontology-files/${id}`),
-  updateOntologyFile: (id: string, data: { path?: string; content?: string; metadata?: Record<string, unknown> }) =>
-    userRequest<OntologyFile>(`/api/v1/terminal/ontology-files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteOntologyFile: (id: string) => userRequest<void>(`/api/v1/terminal/ontology-files/${id}`, { method: 'DELETE' }),
-
   // ── 技能（SkillFolder + SkillFile）：终端用户 scope 内可见；删除/重命名/补传仅限自己创建 ──
   /** 左栏 scope 单链（与 kb-nodes 同源，资源无关）。 */
   skillNodes: () => userRequest<KbNode[]>('/api/v1/terminal/kb-nodes'),
@@ -3111,123 +2948,6 @@ export const memory = {
   delete: (id: string) => request<void>(`/api/v1/memory/${id}`, { method: 'DELETE' }),
 };
 
-// ── 平台扩展中心（仅 super_admin）────────────────────────────────────
-
-export type PlatformExtensionKind = 'runtime_plugin' | 'system_tool' | 'library' | 'adapter_required' | 'incompatible';
-
-export interface PlatformExtensionCatalogItem {
-  id: string | null;
-  slug: string;
-  name: string;
-  version: string;
-  description: string;
-  kind: PlatformExtensionKind;
-  source: 'core' | 'official' | 'community' | 'reviewed' | 'external';
-  status: string;
-  removable: boolean;
-  capabilities: string[];
-  compatibility_warnings: string[];
-  layer: string;
-  operation: 'add' | 'replace';
-  trust_level: string;
-  runtime_requirements: Record<string, unknown>;
-  compatibility_status: string;
-  compatibility_reasons: string[];
-  repository: string | null;
-  homepage: string | null;
-  package_name: string | null;
-  available_versions: string[];
-  category: string;
-  metadata: Record<string, any>;
-  lifecycle_status: string;
-  installed: boolean;
-  installed_version: string | null;
-  active_source_id: string | null;
-  latest_source_id: string | null;
-}
-
-export interface PlatformExtensionCatalogPage {
-  items: PlatformExtensionCatalogItem[];
-  page: number;
-  page_size: number;
-  total: number;
-  counts: Record<'compatible' | 'adapter' | 'all' | 'installed', number>;
-  sync: Record<string, any>;
-}
-
-export interface PlatformExtensionSource {
-  id: string;
-  source_type: string;
-  locator: string;
-  requested_version: string | null;
-  resolved_version: string | null;
-  commit_sha: string | null;
-  artifact_ref: string | null;
-  artifact_sha256: string | null;
-  manifest: Record<string, any>;
-  build_report: Record<string, any>;
-  compatibility: Record<string, any>;
-  status: string;
-  review_status: string;
-  error: string | null;
-  imported_by_admin_id: number;
-  approved_by_admin_id: number | null;
-  approved_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface PlatformExtensionRelease {
-  id: string;
-  version_no: number;
-  name: string;
-  manifest: Record<string, any>;
-  checksum: string;
-  status: string;
-  is_active: boolean;
-  base_release_id: string | null;
-  created_by_admin_id: number;
-  published_by_admin_id: number | null;
-  activated_at: string | null;
-  validation_report: Record<string, any>;
-  error: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface PlatformExtensionEvent {
-  id: number;
-  source_id: string | null;
-  release_id: string | null;
-  actor_admin_id: number | null;
-  event_type: string;
-  status: string;
-  details: Record<string, any>;
-  created_at: string;
-}
-
-export interface PlatformSystemToolExecution {
-  run_id: number;
-  organization_id: string;
-  task_id: string | null;
-  user_id: string | null;
-  exec_mode: string;
-  run_status: string;
-  tool_name: string;
-  ok: boolean;
-  result_preview: string;
-  created_at: string;
-}
-
-export interface PlatformExtensionOverview {
-  active_release: PlatformExtensionRelease | null;
-  runtime_health: Record<string, any>;
-  source_counts: Record<string, number>;
-  release_counts: Record<string, number>;
-  core_plugins: PlatformExtensionCatalogItem[];
-  system_tools: PlatformExtensionCatalogItem[];
-}
-
 export interface StorageLifecycleOverview {
   pending_items: number;
   overdue_items: number;
@@ -3240,81 +2960,4 @@ export interface StorageLifecycleOverview {
 export const storageLifecycle = {
   overview: () => request<StorageLifecycleOverview>('/api/v1/platform/storage-lifecycle/overview'),
   retry: () => request<Record<string, number>>('/api/v1/platform/storage-lifecycle/retry', { method: 'POST' }),
-};
-
-export const platformExtensions = {
-  overview: () => request<PlatformExtensionOverview>('/api/v1/platform/extensions/overview'),
-  catalog: (params: { q?: string; source?: string; layer?: string; compatibility?: string; offset?: number; limit?: number } = {}) => {
-    const qs = new URLSearchParams();
-    Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== '') qs.set(key, String(value)); });
-    return request<PlatformExtensionCatalogItem[]>(`/api/v1/platform/extensions/catalog${qs.size ? `?${qs}` : ''}`);
-  },
-  catalogPage: (params: { q?: string; source?: string; layer?: string; state?: string; page?: number; page_size?: number } = {}) => {
-    const qs = new URLSearchParams();
-    Object.entries(params).forEach(([key, value]) => { if (value !== undefined && value !== '') qs.set(key, String(value)); });
-    return request<PlatformExtensionCatalogPage>(`/api/v1/platform/extensions/catalog/page${qs.size ? `?${qs}` : ''}`);
-  },
-  syncCatalog: () => request<Record<string, any>>('/api/v1/platform/extensions/catalog/sync', { method: 'POST' }),
-  catalogDetail: (id: string) => request<PlatformExtensionCatalogItem>(`/api/v1/platform/extensions/catalog/${id}`),
-  importCatalog: (id: string, data: { source?: 'npm' | 'github'; version?: string; ref?: string }) => request<PlatformExtensionSource>(
-    `/api/v1/platform/extensions/catalog/${id}/import`, { method: 'POST', body: JSON.stringify(data) },
-  ),
-  adaptationBrief: (id: string) => requestText(`/api/v1/platform/extensions/catalog/${id}/adaptation-brief`, { method: 'POST' }),
-  sources: () => request<PlatformExtensionSource[]>('/api/v1/platform/extensions/sources'),
-  source: (id: string) => request<PlatformExtensionSource>(`/api/v1/platform/extensions/sources/${id}`),
-  importNpm: (packageName: string, version: string) => request<PlatformExtensionSource>(
-    '/api/v1/platform/extensions/import/npm',
-    { method: 'POST', body: JSON.stringify({ package: packageName, version }) },
-  ),
-  importGithub: (repository: string, ref: string) => request<PlatformExtensionSource>(
-    '/api/v1/platform/extensions/import/github',
-    { method: 'POST', body: JSON.stringify({ repository, ref }) },
-  ),
-  importArchive: (archive: File) => {
-    const data = new FormData();
-    data.append('archive', archive);
-    return request<PlatformExtensionSource>('/api/v1/platform/extensions/import/archive', { method: 'POST', body: data });
-  },
-  retrySource: (id: string) => request<PlatformExtensionSource>(
-    `/api/v1/platform/extensions/sources/${id}/retry`, { method: 'POST' },
-  ),
-  approveSource: (id: string, approved: boolean, note?: string) => request<PlatformExtensionSource>(
-    `/api/v1/platform/extensions/sources/${id}/approve`,
-    { method: 'POST', body: JSON.stringify({ approved, note: note || null }) },
-  ),
-  sourceAdaptationPackage: (id: string) => requestText(
-    `/api/v1/platform/extensions/sources/${id}/adaptation-package`,
-  ),
-  testSystemTool: (id: string, config: Record<string, unknown>, disabledOrganizationIds: string[] = []) =>
-    request<PlatformExtensionRelease>(`/api/v1/platform/extensions/sources/${id}/test`, {
-      method: 'POST', body: JSON.stringify({ config, disabled_organization_ids: disabledOrganizationIds }),
-    }),
-  installSystemTool: (id: string, config: Record<string, unknown>, disabledOrganizationIds: string[] = []) =>
-    request<PlatformExtensionRelease>(`/api/v1/platform/extensions/sources/${id}/install`, {
-      method: 'POST', body: JSON.stringify({ config, disabled_organization_ids: disabledOrganizationIds }),
-    }),
-  disableSystemTool: (id: string) => request<PlatformExtensionRelease>(
-    `/api/v1/platform/extensions/sources/${id}/disable`, { method: 'POST' },
-  ),
-  rollbackSystemTool: (id: string) => request<PlatformExtensionRelease>(
-    `/api/v1/platform/extensions/sources/${id}/rollback`, { method: 'POST' },
-  ),
-  systemToolExecutions: (id: string, limit = 100) => request<PlatformSystemToolExecution[]>(
-    `/api/v1/platform/extensions/sources/${id}/executions?limit=${limit}`,
-  ),
-  releases: () => request<PlatformExtensionRelease[]>('/api/v1/platform/extensions/releases'),
-  createRelease: (name: string, sourceIds: string[], config: Record<string, unknown> = {}) =>
-    request<PlatformExtensionRelease>('/api/v1/platform/extensions/releases', {
-      method: 'POST', body: JSON.stringify({ name, source_ids: sourceIds, config }),
-    }),
-  validateRelease: (id: string) => request<PlatformExtensionRelease>(
-    `/api/v1/platform/extensions/releases/${id}/validate`, { method: 'POST' },
-  ),
-  publishRelease: (id: string) => request<PlatformExtensionRelease>(
-    `/api/v1/platform/extensions/releases/${id}/publish`, { method: 'POST' },
-  ),
-  rollbackRelease: (id: string) => request<PlatformExtensionRelease>(
-    `/api/v1/platform/extensions/releases/${id}/rollback`, { method: 'POST' },
-  ),
-  events: () => request<PlatformExtensionEvent[]>('/api/v1/platform/extensions/events'),
 };

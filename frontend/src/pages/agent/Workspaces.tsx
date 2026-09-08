@@ -999,10 +999,6 @@ export default function Workspaces() {
         startSpreadsheetPreview={workspaces.startFileSpreadsheetPreview}
         getSpreadsheetPreview={workspaces.getFileSpreadsheetPreview}
         getSpreadsheetPage={workspaces.getFileSpreadsheetPage}
-        createEditSession={workspaces.createFileEditSession}
-        refreshEditSession={workspaces.refreshFileEditSession}
-        closeEditSession={workspaces.closeFileEditSession}
-        getEditSessionStatus={workspaces.getFileEditSessionStatus}
         listFileVersions={workspaces.listFileVersions}
         restoreFileVersion={workspaces.restoreFileVersion}
         onFileChanged={() => {

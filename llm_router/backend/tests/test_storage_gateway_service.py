@@ -10,10 +10,13 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
-from app.models.workspace import OfficeSaveEvent
 from app.services import storage_gateway_service as storage
-from app.services import workspace_office_edit_service as office_edit
 from app.services import workspace_service
+
+# Kept only until the compatibility test file is split; every use is guarded by
+# an unconditional skip because the online editing implementation was removed.
+OfficeSaveEvent = None
+office_edit = None
 
 
 @asynccontextmanager
@@ -46,6 +49,7 @@ async def _async_true() -> bool:
     return True
 
 
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 def test_office_save_source_user_id_accepts_uuid_length():
     assert OfficeSaveEvent.__table__.c.source_user_id.type.length >= 64
 
@@ -127,6 +131,7 @@ def _save_event(*, imm_version: str = "", event_time: str = "") -> SimpleNamespa
     return SimpleNamespace(imm_version=imm_version, event_time=event_time)
 
 
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 def test_office_save_order_prefers_comparable_numeric_imm_version():
     assert office_edit._save_event_order(
         _save_event(imm_version="11", event_time="2026-09-03T10:00:00Z"),
@@ -137,6 +142,7 @@ def test_office_save_order_prefers_comparable_numeric_imm_version():
     ) == -1
 
 
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 def test_office_save_order_uses_timestamp_only_when_versions_are_not_comparable():
     assert office_edit._save_event_order(
         _save_event(event_time="2026-09-03T11:00:00Z"),
@@ -148,6 +154,7 @@ def test_office_save_order_uses_timestamp_only_when_versions_are_not_comparable(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 async def test_closed_office_room_remains_callback_provenance(monkeypatch):
     """A delayed save can match an exact recent room after its 5m active grace."""
     file_id = "c52e1167-f8de-4e03-bfef-9e3045cf8c60"
@@ -224,6 +231,7 @@ async def test_closed_office_room_remains_callback_provenance(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 async def test_refreshed_active_room_older_than_24h_remains_callback_provenance(monkeypatch):
     file_id = "c52e1167-f8de-4e03-bfef-9e3045cf8c60"
     room = SimpleNamespace(
@@ -278,6 +286,7 @@ async def test_refreshed_active_room_older_than_24h_remains_callback_provenance(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 async def test_duplicate_save_callback_insert_race_returns_unique_winner(monkeypatch):
     file_id = "c52e1167-f8de-4e03-bfef-9e3045cf8c60"
     room_id = "22f1af6b-4d98-42d2-bd44-b7347be292a3"
@@ -335,6 +344,7 @@ async def test_duplicate_save_callback_insert_race_returns_unique_winner(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 async def test_save_event_room_id_cannot_be_rebound_to_newer_matching_room(monkeypatch):
     file_id = "c52e1167-f8de-4e03-bfef-9e3045cf8c60"
     requested_room_id = "22f1af6b-4d98-42d2-bd44-b7347be292a3"
@@ -379,6 +389,7 @@ async def test_save_event_room_id_cannot_be_rebound_to_newer_matching_room(monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 async def test_edit_session_binds_room_before_gateway_and_uses_renewable_lease(monkeypatch):
     _configure_office_edit(monkeypatch)
     office_edit._token_cache.clear()
@@ -449,6 +460,7 @@ async def test_edit_session_binds_room_before_gateway_and_uses_renewable_lease(m
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 async def test_edit_session_gateway_failure_marks_room_non_blocking(monkeypatch):
     _configure_office_edit(monkeypatch)
     office_edit._token_cache.clear()
@@ -495,6 +507,7 @@ async def test_edit_session_gateway_failure_marks_room_non_blocking(monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 async def test_refresh_edit_session_requires_exact_room_and_renews_lease(monkeypatch):
     _configure_office_edit(monkeypatch)
     file = SimpleNamespace(
@@ -571,6 +584,7 @@ def _unversioned_save_fixture(*, external_current: bool = False):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 async def test_unversioned_office_save_reconciles_by_unique_ref_and_crc(monkeypatch):
     file, room, event = _unversioned_save_fixture()
 
@@ -623,6 +637,7 @@ async def test_unversioned_office_save_reconciles_by_unique_ref_and_crc(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 async def test_office_save_cannot_coalesce_after_external_file_advance(monkeypatch):
     file, room, event = _unversioned_save_fixture(external_current=True)
 
@@ -663,6 +678,7 @@ async def test_office_save_cannot_coalesce_after_external_file_advance(monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 async def test_office_save_rechecks_live_actor_permission_before_materializing(monkeypatch):
     file, room, event = _unversioned_save_fixture()
 
@@ -689,6 +705,7 @@ async def test_office_save_rechecks_live_actor_permission_before_materializing(m
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 async def test_office_reconcile_worker_parks_when_feature_is_disabled(monkeypatch):
     from app.workers import office_edit_reconcile
 
@@ -705,6 +722,7 @@ async def test_office_reconcile_worker_parks_when_feature_is_disabled(monkeypatc
         await office_edit_reconcile.run_forever()
 
 
+@pytest.mark.skip(reason="WebOffice 在线协作编辑已下线")
 def test_office_callback_accepts_gateway_128_character_ordering_fields():
     from pydantic import ValidationError
 

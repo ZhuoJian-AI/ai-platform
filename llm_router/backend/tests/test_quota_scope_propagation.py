@@ -202,7 +202,7 @@ async def test_audio_job_ignores_retired_team_and_forwards_department(monkeypatc
         idempotency_key="scope-job",
     )
     assert job.department_id == department_id
-    assert job.team_id is None
+    assert not hasattr(job, "team_id")
 
     source = tmp_path / "segment.mp3"
     source.write_bytes(b"audio")
@@ -246,7 +246,7 @@ async def test_audio_job_ignores_retired_team_and_forwards_department(monkeypatc
 
     await multimodal_worker._transcribe(None, job, tmp_path)
     assert observed["dept_id"] == department_id
-    assert observed["team_id"] is None
+    assert "team_id" not in observed
     assert observed["request_id"] == job.request_id
     assert observed["segment_count"] == 2
 

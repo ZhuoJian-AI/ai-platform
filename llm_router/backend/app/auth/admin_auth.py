@@ -73,10 +73,7 @@ def _browser_allowed_origins(request: Request) -> set[str]:
         for value in settings.browser_allowed_origins.split(",")
         if value.strip()
     }
-    for value in (
-        settings.normalized_oauth_public_base_url,
-        settings.normalized_proxy_base_url or "",
-    ):
+    for value in (settings.normalized_proxy_base_url or "",):
         if value:
             configured.add(value.rstrip("/"))
     if settings.is_development:

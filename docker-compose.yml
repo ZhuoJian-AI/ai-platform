@@ -38,22 +38,6 @@ services:
     networks:
       - data_plane
 
-  # 业务系统 Mock 网关（MES / CRM / …）——为平台演示提供可调用的数据接口。
-  # 启动：docker compose up -d mock；本机访问 http://localhost:8010
-  mock:
-    build: ./mock
-    container_name: ai_infra_mock
-    ports:
-      - "8010:8010"
-    environment:
-      MES_API_KEY: ${MES_API_KEY:-mes-mock-demo-key}
-      CRM_API_KEY: ${CRM_API_KEY:-crm-mock-demo-key}
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8010/health').status==200 else 1)"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   skill-runner:
     build: ./skill_runner
     container_name: ai_infra_skill_runner
@@ -69,8 +53,6 @@ services:
       REDIS_PASSWORD: ""
       SECRET_KEY: ""
       MASTER_ENCRYPTION_KEY: ""
-      CRM_API_KEY: ""
-      MES_API_KEY: ""
       DSH_RUNTIME_TOKEN: ""
       EXTENSION_BUILDER_TOKEN: ""
       SKILL_CACHE_ROOT: /cache
@@ -103,6 +85,7 @@ services:
       timeout: 5s
       retries: 12
     restart: unless-stopped
+    init: true
     networks:
       - default
     deploy:

@@ -19,10 +19,6 @@ def admin_csrf_cookie_name() -> str:
     return "ai_infra_admin_csrf"
 
 
-def oauth_csrf_cookie_name() -> str:
-    return "ai_infra_oauth_csrf" if settings.is_development else "__Host-ai-infra-oauth-csrf"
-
-
 def set_session_cookie(response: Response, name: str, token: str, *, max_age: int) -> None:
     response.set_cookie(
         name,

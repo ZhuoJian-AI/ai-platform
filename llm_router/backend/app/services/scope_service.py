@@ -1,10 +1,10 @@
 """Scope service — resolve a terminal user's effective resource scope.
 
-资源（Skill / 本体 / RagCollection / Workspace）按 ``scope_type`` + ``scope_id`` 分级：
+资源（Skill / RagCollection / Workspace）按 ``scope_type`` + ``scope_id`` 分级：
 organization（全组织，scope_id 为 None）/ department / user / role。一个资源对用户可见当且仅当
 其落在用户的有效 scope 集合内：企业级 + 用户所属部门 + 用户所绑定角色 + 用户本人。
 
-「自动匹配全部」= 用户有效 scope 集合内的资源并集（终端在 skills/ontology/rag 未指定时由
+「自动匹配全部」= 用户有效 scope 集合内的资源并集（终端在 skills/rag 未指定时由
 运行时调用本服务解析为全集）。
 """
 
@@ -16,15 +16,12 @@ from uuid import UUID
 from fastapi import HTTPException
 from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.auth.user_auth import CurrentUser
 from app.config import settings
 from app.models.agent import Agent
 from app.models.api_key import ApiKey
-from app.models.data_interface import DataInterface, DataSystem
 from app.models.department import Department
-from app.models.ontology import OntologyFile
 from app.models.organization import Organization
 from app.models.rag import RagCollection
 from app.models.skill import SkillFile, SkillFolder
@@ -101,19 +98,6 @@ async def list_skills_for_user(db: AsyncSession, cu: CurrentUser) -> list[SkillF
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def list_ontologies_for_user(db: AsyncSession, cu: CurrentUser) -> list[OntologyFile]:
-    """用户可见的本体 Markdown 文件（组织级 + 用户部门/角色/个人命中）。
-
-    本体已文件化：返回 OntologyFile（无 is_active 维度，文件即启用）。
-    """
-    stmt = select(OntologyFile).where(
-        OntologyFile.organization_id == cu.organization_id,
-        OntologyFile.deleted_at.is_(None),
-        scope_filter(OntologyFile, cu),
-    )
-    return list((await db.execute(stmt)).scalars().all())
-
-
 async def list_rags_for_user(db: AsyncSession, cu: CurrentUser) -> list[RagCollection]:
     stmt = select(RagCollection).where(
         RagCollection.organization_id == cu.organization_id,
@@ -178,28 +162,6 @@ async def assert_admin_bound_rags(
             raise HTTPException(status_code=403, detail="RAG collection belongs to another organization")
         ordered.append(collection)
     return ordered
-
-
-async def list_data_interfaces_for_user(db: AsyncSession, cu: CurrentUser) -> list[DataInterface]:
-    """用户可见的活跃数据接口（企业、部门、角色和个人范围取并集）。
-
-    数据接口为管理端目录（params/response schema），运行时仅注入上下文 + 留痕，不真正执行。
-    预加载 ``system`` 关系以取系统名，避免逐条懒加载产生 N+1。
-    """
-    stmt = (
-        select(DataInterface)
-        .join(DataSystem, DataInterface.data_system_id == DataSystem.id)
-        .options(selectinload(DataInterface.system))
-        .where(
-            DataSystem.organization_id == cu.organization_id,
-            DataSystem.deleted_at.is_(None),
-            DataSystem.is_active.is_(True),
-            DataInterface.deleted_at.is_(None),
-            DataInterface.is_active.is_(True),
-            scope_filter(DataSystem, cu),
-        )
-    )
-    return list((await db.execute(stmt)).scalars().all())
 
 
 async def list_workspaces_for_user(db: AsyncSession, cu: CurrentUser) -> list[Workspace]:

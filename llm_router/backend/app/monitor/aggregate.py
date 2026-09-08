@@ -17,7 +17,6 @@ from app.models.audit_log import AuditLog
 from app.models.connector import ToolConnector, ToolEndpoint
 from app.models.data_interface import DataInterface, DataSystem
 from app.models.llm_provider import LlmProvider
-from app.models.ontology import OntologyFile, OntologyFolder
 from app.models.skill import SkillFile, SkillFolder
 from app.models.tool_call_log import ToolCallLog
 
@@ -178,34 +177,49 @@ async def agent_metrics(
 async def _component_usage(
     db: AsyncSession, org_id: str, start: datetime, end: datetime,
 ) -> dict:
-    """按 agent_runs.steps 聚合三大组件（工作空间 / RAG / 长期记忆）用量。
+    """Aggregate workspace, RAG and memory usage from durable run events.
 
-    steps 是节点逐步轨迹 JSONB：rag 步含 hits/collections，memory 步含 facts/history，
-    extract_memory 步含 facts，tool 步含 name/ok。工作空间经内置工具 workspace_* 触发。
+    ``AgentRun.steps`` was a duplicate runtime snapshot and is no longer
+    written. ``AgentRunEvent`` is the single replay and monitoring source.
     """
     from sqlalchemy import text
     sql = text("""
-        WITH rs AS (
-            SELECT id, steps FROM agent_runs
-            WHERE organization_id = :org AND created_at >= :s AND created_at < :e
-        ), elems AS (
-            SELECT rs.id, je.elem
-            FROM rs, jsonb_array_elements(COALESCE(rs.steps, '[]'::jsonb)) AS je(elem)
+        WITH elems AS (
+            SELECT r.id, e.payload AS elem
+            FROM agent_runs AS r
+            JOIN agent_run_events AS e ON e.run_id = r.id
+            WHERE r.organization_id = :org AND r.created_at >= :s AND r.created_at < :e
         )
         SELECT
             count(DISTINCT CASE
-                WHEN elem->>'step' = 'tool' AND (elem->>'name') LIKE 'workspace_%' THEN id
+                WHEN elem->>'type' = 'tool_result' AND (elem->>'name') LIKE 'workspace_%' THEN id
             END) AS workspace_runs,
             count(*) FILTER (
-                WHERE elem->>'step' = 'tool' AND (elem->>'name') LIKE 'workspace_%'
+                WHERE elem->>'type' = 'tool_result' AND (elem->>'name') LIKE 'workspace_%'
             ) AS workspace_ops,
-            count(DISTINCT CASE WHEN elem->>'step' = 'rag' THEN id END) AS rag_runs,
-            coalesce(sum((elem->>'hits')::int) FILTER (WHERE elem->>'step' = 'rag'), 0) AS rag_hits,
-            count(DISTINCT CASE WHEN elem->>'step' = 'memory' THEN id END) AS memory_load_runs,
-            coalesce(sum((elem->>'facts')::int) FILTER (WHERE elem->>'step' = 'memory'), 0)
+            count(DISTINCT CASE
+                WHEN elem->>'type' = 'trace' AND elem->>'category' = 'rag' THEN id
+            END) AS rag_runs,
+            coalesce(sum((elem->>'hits')::int) FILTER (
+                WHERE elem->>'type' = 'trace' AND elem->>'category' = 'rag'
+            ), 0) AS rag_hits,
+            count(DISTINCT CASE
+                WHEN elem->>'type' = 'trace' AND elem->>'category' = 'memory'
+                    AND elem->>'subtype' = 'load' THEN id
+            END) AS memory_load_runs,
+            coalesce(sum((elem->>'facts')::int) FILTER (
+                WHERE elem->>'type' = 'trace' AND elem->>'category' = 'memory'
+                    AND elem->>'subtype' = 'load'
+            ), 0)
                 AS memory_facts_loaded,
-            count(DISTINCT CASE WHEN elem->>'step' = 'extract_memory' THEN id END) AS memory_extract_runs,
-            coalesce(sum((elem->>'facts')::int) FILTER (WHERE elem->>'step' = 'extract_memory'), 0)
+            count(DISTINCT CASE
+                WHEN elem->>'type' = 'trace' AND elem->>'category' = 'memory'
+                    AND elem->>'subtype' = 'extract' THEN id
+            END) AS memory_extract_runs,
+            coalesce(sum((elem->>'facts')::int) FILTER (
+                WHERE elem->>'type' = 'trace' AND elem->>'category' = 'memory'
+                    AND elem->>'subtype' = 'extract'
+            ), 0)
                 AS memory_facts_saved
         FROM elems
     """)
@@ -364,7 +378,7 @@ async def _tool_by_endpoint(db: AsyncSession, base: list) -> list[dict]:
 
 
 async def _tool_inventory(db: AsyncSession, org_id: UUID) -> dict:
-    """四组件资源盘点（全量，不按时间窗口）：连接器 / 数据接口 / 技能 / 本体。"""
+    """Legacy migration inventory plus retained SkillFolder inventory."""
     org = str(org_id)
     soft = ToolConnector.deleted_at.is_(None)
     conn_total = (await db.execute(
@@ -403,15 +417,6 @@ async def _tool_inventory(db: AsyncSession, org_id: UUID) -> dict:
         .where(SkillFolder.organization_id == org, SkillFile.deleted_at.is_(None))
     )).scalar() or 0
 
-    of_total = (await db.execute(
-        select(func.count()).select_from(OntologyFolder)
-        .where(OntologyFolder.organization_id == org, OntologyFolder.deleted_at.is_(None))
-    )).scalar() or 0
-    ofile_total = (await db.execute(
-        select(func.count()).select_from(OntologyFile)
-        .where(OntologyFile.organization_id == org, OntologyFile.deleted_at.is_(None))
-    )).scalar() or 0
-
     return {
         "connectors": {
             "total": int(conn_total),
@@ -426,7 +431,6 @@ async def _tool_inventory(db: AsyncSession, org_id: UUID) -> dict:
             "inactive": di_total - di_active,
         },
         "skills": {"folders_total": int(sf_total), "files_total": int(sfile_total)},
-        "ontology": {"folders_total": int(of_total), "files_total": int(ofile_total)},
     }
 
 

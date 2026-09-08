@@ -9,7 +9,6 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.models.admin import Admin
-from app.models.ontology import Ontology, OntologyFile
 from app.models.organization import Organization
 from app.models.rag import RagChunk, RagCollection, RagDocument
 from app.models.skill import SkillFile, SkillFolder, SkillVersion
@@ -359,7 +358,7 @@ async def test_expired_skill_content_is_removed_after_package_purge(db_session):
 
 
 @pytest.mark.asyncio
-async def test_rag_ontology_and_upload_session_are_physically_cleaned(
+async def test_rag_and_upload_session_are_physically_cleaned(
     db_session, monkeypatch,
 ):
     organization = await _organization(db_session, "content-purge")
@@ -373,25 +372,7 @@ async def test_rag_ontology_and_upload_session_are_physically_cleaned(
         deleted_at=datetime.now(UTC) - timedelta(days=31),
         purge_after=datetime.now(UTC) - timedelta(days=1),
     )
-    ontology = Ontology(
-        organization_id=organization.id,
-        name="Expired Ontology",
-        slug="expired-ontology",
-        entities=[{"secret": "remove"}],
-        relations=[{"secret": "remove"}],
-        deleted_at=datetime.now(UTC) - timedelta(days=31),
-        purge_after=datetime.now(UTC) - timedelta(days=1),
-    )
-    ontology_file = OntologyFile(
-        organization_id=organization.id,
-        scope_type="organization",
-        path="private.md",
-        content="remove me",
-        size=9,
-        deleted_at=datetime.now(UTC) - timedelta(days=31),
-        purge_after=datetime.now(UTC) - timedelta(days=1),
-    )
-    db_session.add_all([admin, collection, ontology, ontology_file])
+    db_session.add_all([admin, collection])
     await db_session.flush()
     document = RagDocument(
         collection_id=collection.id,
@@ -426,12 +407,9 @@ async def test_rag_ontology_and_upload_session_are_physically_cleaned(
     )
 
     assert await storage_lifecycle_service._purge_rag(db_session, datetime.now(UTC)) == 1
-    assert await storage_lifecycle_service._purge_ontology(db_session, datetime.now(UTC)) == 2
     assert await storage_lifecycle_service.expire_upload_sessions(db_session) == {"expired": 1, "failed": 0}
     assert document.content == "" and document.status == "purged"
     assert (await db_session.execute(select(RagChunk))).scalars().all() == []
-    assert ontology.entities == [] and ontology.relations == []
-    assert ontology_file.content is None and ontology_file.size == 0
     assert session.status == "expired" and session.content_ref is None
     assert deleted_refs == ["oss://temporary/expired.bin"]
 

@@ -46,5 +46,4 @@ class Department(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
 
     # 关系
     organization = relationship("Organization", back_populates="departments")
-    teams = relationship("Team", back_populates="department", lazy="selectin")
     parent = relationship("Department", remote_side="Department.id", lazy="selectin")

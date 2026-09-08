@@ -10,6 +10,8 @@ from app.schemas.role import EffectiveDataScopeRead, RoleSummary
 
 
 class ManagerScopeGrant(BaseModel):
+    """Deprecated compatibility shape; delegated Skill management is retired."""
+
     scope_type: Literal["department"]
     scope_id: UUID
 
@@ -17,7 +19,7 @@ class ManagerScopeGrant(BaseModel):
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=1, max_length=320)
     display_name: str | None = Field(None, max_length=255)
-    role: Literal["admin", "member"] = "member"
+    role: Literal["member"] = "member"
     # 兼容旧客户端字段，但组织归属始终只能有一个部门。
     department_ids: list[UUID] = Field(default_factory=list, max_length=1)
     department_id: UUID | None = None
@@ -29,6 +31,8 @@ class UserCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_single_department(self) -> "UserCreate":
+        if self.manager_scopes:
+            raise ValueError("部门 Skill 管理委派已停用；员工只能管理自己的个人 Skill")
         if self.team_id is not None:
             raise ValueError("Team 已停用，请使用部门归属和角色授权")
         legacy_department_id = self.department_ids[0] if self.department_ids else None
@@ -43,7 +47,7 @@ class UserCreate(BaseModel):
 class UserUpdate(BaseModel):
     username: str | None = Field(None, min_length=1, max_length=320)
     display_name: str | None = Field(None, max_length=255)
-    role: Literal["admin", "member"] | None = None
+    role: Literal["member"] | None = None
     department_ids: list[UUID] | None = Field(None, max_length=1)
     department_id: UUID | None = None
     team_id: UUID | None = None
@@ -54,6 +58,8 @@ class UserUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validate_single_department(self) -> "UserUpdate":
+        if self.manager_scopes:
+            raise ValueError("部门 Skill 管理委派已停用；员工只能管理自己的个人 Skill")
         if "team_id" in self.model_fields_set and self.team_id is not None:
             raise ValueError("Team 已停用，请使用部门归属和角色授权")
         if "department_ids" not in self.model_fields_set or "department_id" not in self.model_fields_set:

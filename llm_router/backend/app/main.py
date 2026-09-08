@@ -16,14 +16,9 @@ from app.api.oauth import well_known_router
 from app.api.router import api_router
 from app.config import settings
 from app.database import async_session_factory
-from app.mcp.server import mcp, organization_mcp_app
 from app.proxy.router import proxy_router
 
 logger = structlog.get_logger()
-
-# 实例化 MCP ASGI 子应用（同时惰性创建 session_manager，供 lifespan 启动 task group）。
-_organization_mcp_asgi = organization_mcp_app()
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -53,12 +48,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 新建组织时由 organization_service.create_organization 自动播种为组织级规则，
     # 组织管理员可启停；存量组织由迁移 0030 一次性回填。
 
-    # 预热 LangGraph 代理流水线单例图（编译 + 首次实例化）
-    from app.graph import get_proxy_graph
-
-    get_proxy_graph()
-    logger.info("proxy_graph_ready")
-
     # 智能体协调由独立 DSH Runtime 承担；本进程只保留平台能力与授权边界。
     logger.info("agent_runtime", coordinator="dsh")
 
@@ -68,25 +57,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from app.services.skill_runner_client import resume_pending_installs
         install_resume_task = asyncio.create_task(resume_pending_installs())
 
-    # PostgreSQL is the release fact source.  If DSH restarted independently,
-    # restore the last active immutable manifest after both services are up.
-    from app.services.platform_extension_service import sync_active_release_to_runtime
-    extension_sync_task = asyncio.create_task(sync_active_release_to_runtime())
-    from app.services.platform_extension_discovery import run_catalog_sync_scheduler
-    catalog_sync_task = asyncio.create_task(run_catalog_sync_scheduler())
     from app.services.subsystem_integration_service import run_subsystem_sync_scheduler
     subsystem_sync_task = asyncio.create_task(run_subsystem_sync_scheduler())
 
-    # 启动 MCP session manager task group（FastAPI app.mount 不跑子应用 lifespan，
-    # 故在此显式启动；否则 streamable_http 握手报 "Task group is not initialized"）。
-    async with mcp.session_manager.run():
-        yield
+    yield
     if install_resume_task is not None and not install_resume_task.done():
         install_resume_task.cancel()
-    if not extension_sync_task.done():
-        extension_sync_task.cancel()
-    if not catalog_sync_task.done():
-        catalog_sync_task.cancel()
     if not subsystem_sync_task.done():
         subsystem_sync_task.cancel()
     logger.info("llm_router_stopping")
@@ -144,10 +120,7 @@ _browser_origins = [
 ]
 if settings.is_development:
     _browser_origins.extend(["http://localhost:3000", "http://localhost:5173"])
-for _public_origin in (
-    settings.normalized_oauth_public_base_url,
-    settings.normalized_proxy_base_url or "",
-):
+for _public_origin in (settings.normalized_proxy_base_url or "",):
     if _public_origin and _public_origin not in _browser_origins:
         _browser_origins.append(_public_origin)
 app.add_middleware(
@@ -165,9 +138,30 @@ app.include_router(well_known_router)
 # LLM 代理路由 — 这是最核心的部分
 app.include_router(proxy_router)
 
-# Organization-specific OAuth resource. Generic API-key MCP access is not
-# mounted: employee role changes must revoke personal-AI access immediately.
-app.mount("/mcp/organizations", _organization_mcp_asgi)
+@app.api_route(
+    "/mcp",
+    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    include_in_schema=False,
+)
+@app.api_route(
+    "/mcp/{path:path}",
+    methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    include_in_schema=False,
+)
+async def retired_mcp_endpoint(path: str = "") -> JSONResponse:
+    """Keep one compatibility release with an explicit retirement response."""
+
+    del path
+    return JSONResponse(
+        status_code=410,
+        content={
+            "detail": {
+                "code": "feature_retired",
+                "message": "MCP/OAuth Skill Pack 已下线；请使用平台内置助手与用户上传 Skill。",
+                "retryable": False,
+            }
+        },
+    )
 
 
 @app.get("/health")

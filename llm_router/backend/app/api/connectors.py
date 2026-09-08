@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.retirement import retired_api_dependency
 from app.auth.admin_auth import (
     CurrentAdmin,
     assert_org_access,
@@ -50,6 +51,7 @@ from app.tools.openapi_loader import fetch_openapi_document, parse_openapi_docum
 from app.tools.spec_parser import parse_spec
 
 router = APIRouter()
+_RETIRED_CONNECTOR_WRITE = retired_api_dependency("Connector 配置与旧 Endpoint 执行")
 
 
 async def _get_connector_or_404(db: AsyncSession, conn_id: UUID) -> ToolConnector:
@@ -61,7 +63,12 @@ async def _get_connector_or_404(db: AsyncSession, conn_id: UUID) -> ToolConnecto
 
 # ── Connector ──
 
-@router.post("/organizations/{org_id}/connectors", response_model=ToolConnectorRead, status_code=201)
+@router.post(
+    "/organizations/{org_id}/connectors",
+    response_model=ToolConnectorRead,
+    status_code=201,
+    dependencies=[_RETIRED_CONNECTOR_WRITE],
+)
 async def create_connector_endpoint(
     org_id: UUID, data: ToolConnectorCreate,
     _: CurrentAdmin = Depends(require_org_access_write), db: AsyncSession = Depends(get_db),
@@ -89,7 +96,11 @@ async def get_connector_endpoint(
     return conn
 
 
-@router.patch("/connectors/{conn_id}", response_model=ToolConnectorRead)
+@router.patch(
+    "/connectors/{conn_id}",
+    response_model=ToolConnectorRead,
+    dependencies=[_RETIRED_CONNECTOR_WRITE],
+)
 async def update_connector_endpoint(
     conn_id: UUID, data: ToolConnectorUpdate,
     auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
@@ -99,7 +110,11 @@ async def update_connector_endpoint(
     return await update_connector(db, conn, data)
 
 
-@router.delete("/connectors/{conn_id}", status_code=204)
+@router.delete(
+    "/connectors/{conn_id}",
+    status_code=204,
+    dependencies=[_RETIRED_CONNECTOR_WRITE],
+)
 async def delete_connector_endpoint(
     conn_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
@@ -113,6 +128,7 @@ async def delete_connector_endpoint(
 @router.post(
     "/organizations/{org_id}/connectors/inspect-spec",
     response_model=OpenApiInspectRead,
+    dependencies=[_RETIRED_CONNECTOR_WRITE],
 )
 async def inspect_openapi_spec_endpoint(
     org_id: UUID,
@@ -140,7 +156,11 @@ async def inspect_openapi_spec_endpoint(
         endpoints=endpoints,
     )
 
-@router.post("/connectors/{conn_id}/import-spec", response_model=list[ToolEndpointRead])
+@router.post(
+    "/connectors/{conn_id}/import-spec",
+    response_model=list[ToolEndpointRead],
+    dependencies=[_RETIRED_CONNECTOR_WRITE],
+)
 async def import_spec_endpoint(
     conn_id: UUID,
     auth: CurrentAdmin = Depends(require_admin),
@@ -157,6 +177,7 @@ async def import_spec_endpoint(
     "/connectors/{conn_id}/publish-skill",
     response_model=SkillFolderRead,
     status_code=201,
+    dependencies=[_RETIRED_CONNECTOR_WRITE],
 )
 async def publish_connector_skill_endpoint(
     conn_id: UUID,
@@ -243,7 +264,12 @@ async def list_endpoints_endpoint(
     return await list_endpoints(db, conn_id)
 
 
-@router.post("/connectors/{conn_id}/endpoints", response_model=ToolEndpointRead, status_code=201)
+@router.post(
+    "/connectors/{conn_id}/endpoints",
+    response_model=ToolEndpointRead,
+    status_code=201,
+    dependencies=[_RETIRED_CONNECTOR_WRITE],
+)
 async def create_endpoint_endpoint(
     conn_id: UUID, data: ToolEndpointCreate,
     auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
@@ -253,7 +279,11 @@ async def create_endpoint_endpoint(
     return await create_endpoint(db, conn, data)
 
 
-@router.patch("/endpoints/{ep_id}", response_model=ToolEndpointRead)
+@router.patch(
+    "/endpoints/{ep_id}",
+    response_model=ToolEndpointRead,
+    dependencies=[_RETIRED_CONNECTOR_WRITE],
+)
 async def update_endpoint_endpoint(
     ep_id: UUID, data: ToolEndpointUpdate,
     auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
@@ -266,7 +296,11 @@ async def update_endpoint_endpoint(
     return await update_endpoint(db, ep, data)
 
 
-@router.delete("/endpoints/{ep_id}", status_code=204)
+@router.delete(
+    "/endpoints/{ep_id}",
+    status_code=204,
+    dependencies=[_RETIRED_CONNECTOR_WRITE],
+)
 async def delete_endpoint_endpoint(
     ep_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
@@ -280,7 +314,7 @@ async def delete_endpoint_endpoint(
 
 # ── Endpoint test (playground) ──
 
-@router.post("/endpoints/{ep_id}/test")
+@router.post("/endpoints/{ep_id}/test", dependencies=[_RETIRED_CONNECTOR_WRITE])
 async def test_endpoint_endpoint(
     ep_id: UUID, data: EndpointTestRequest,
     auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),

@@ -5,14 +5,14 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import jwt
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import hash_password, verify_password
 from app.config import settings
 from app.models.enterprise_application import EnterpriseApplicationGrant
 from app.models.organization import Organization
-from app.models.user import User, user_department_memberships
+from app.models.user import User
 from app.schemas.user import UserCreate, UserLoginResponse, UserRead, UserUpdate
 from app.services.memory_lifecycle import soft_delete_node_memory
 from app.services.memory_service import consolidate_user_memory, upsert_user_profile_memory
@@ -20,17 +20,8 @@ from app.services.organization_service import (
     get_dept_name_by_id,
     get_org_name_slug_by_id,
 )
-from app.services.role_service import (
-    BUILTIN_ADMIN,
-    BUILTIN_MEMBER,
-    ensure_builtin_roles,
-    replace_user_roles,
-)
-from app.services.skill_scope_service import (
-    replace_manager_grants,
-    validate_user_departments,
-    validate_user_membership,
-)
+from app.services.role_service import BUILTIN_MEMBER, ensure_builtin_roles, replace_user_roles
+from app.services.skill_scope_service import validate_user_departments, validate_user_membership
 from app.services.workspace_lifecycle import (
     ensure_node_workspace,
     soft_delete_node_workspace,
@@ -80,35 +71,13 @@ def _normalize_department_ids(
     return [selected] if selected else []
 
 
-async def _replace_user_departments(
-    db: AsyncSession,
-    user: User,
-    department_ids: list[UUID],
-) -> None:
-    await db.execute(
-        delete(user_department_memberships).where(
-            user_department_memberships.c.user_id == user.id,
-        )
-    )
-    if department_ids:
-        await db.execute(
-            insert(user_department_memberships),
-            [
-                {"user_id": user.id, "department_id": department_id}
-                for department_id in department_ids
-            ],
-        )
-    await db.flush()
-    await db.refresh(user, attribute_names=["departments"])
-
-
 def _create_user_access_token(user: User) -> str:
     """生成组织用户 JWT access token（type=user 以区别于管理员 token）。"""
     now = datetime.now(UTC)
     payload: dict[str, Any] = {
         "sub": str(user.id),
         "username": user.username,
-        "role": user.role,
+        "role": "member",
         "org": str(user.organization_id),
         "type": "user",
         "auth_epoch": user.auth_epoch,
@@ -171,10 +140,8 @@ async def create_user(
         organization_id=org_id,
         username=data.username,
         display_name=data.display_name,
-        role=data.role,
         is_active=data.is_active,
         department_id=primary_department_id,
-        team_id=None,
         password_hash=hash_password(data.password),
         must_change_password=True,
     )
@@ -183,15 +150,10 @@ async def create_user(
     builtins = await ensure_builtin_roles(db, org_id)
     selected_role_ids = data.role_ids
     if selected_role_ids is None:
-        selected_role_ids = [builtins[BUILTIN_ADMIN if data.role == "admin" else BUILTIN_MEMBER].id]
+        selected_role_ids = [builtins[BUILTIN_MEMBER].id]
     await replace_user_roles(db, user, selected_role_ids)
-    await _replace_user_departments(db, user, department_ids)
-    await replace_manager_grants(db, user, data.manager_scopes, created_by_admin_id)
-    # 组织管理员（role='admin'）非终端用户：不持有工作空间，也不沉淀个人档案记忆。
-    if user.role != "admin":
-        await ensure_node_workspace(db, org_id, "user", str(user.id), _user_ws_name(user), str(user.id))
-        # 为终端用户创建个人档案记忆（姓名/组织/部门/团队默认存入）
-        await _sync_user_profile_memory(db, user)
+    await ensure_node_workspace(db, org_id, "user", str(user.id), _user_ws_name(user), str(user.id))
+    await _sync_user_profile_memory(db, user)
     return user
 
 
@@ -215,9 +177,6 @@ async def update_user(
     values = data.model_dump(exclude_unset=True)
     # password 不是列，需单独哈希处理
     password = values.pop("password", None)
-    requested_manager_scopes = (
-        data.manager_scopes if "manager_scopes" in data.model_fields_set else None
-    )
     values.pop("manager_scopes", None)
     requested_role_ids = values.pop("role_ids", None)
     department_ids_were_set = "department_ids" in data.model_fields_set
@@ -248,8 +207,7 @@ async def update_user(
     next_team_id = None
     await validate_user_departments(db, user.organization_id, next_department_ids, next_team_id)
     await validate_user_membership(db, user.organization_id, next_department_id, next_team_id)
-    role_changed = "role" in values
-    prev_role = user.role
+    values.pop("role", None)
     for field, value in values.items():
         setattr(user, field, value)
     if password is not None:
@@ -259,62 +217,19 @@ async def update_user(
     await db.refresh(user)
     if requested_role_ids is not None:
         await replace_user_roles(db, user, requested_role_ids)
-    elif role_changed:
-        builtins = await ensure_builtin_roles(db, user.organization_id)
-        selected = builtins[BUILTIN_ADMIN if user.role == "admin" else BUILTIN_MEMBER]
-        await replace_user_roles(db, user, [selected.id])
-    if department_ids_were_set or primary_department_was_set:
-        await _replace_user_departments(db, user, next_department_ids)
-
-    if requested_manager_scopes is not None:
-        await replace_manager_grants(db, user, requested_manager_scopes, created_by_admin_id)
-    elif role_changed or department_ids_were_set or {"department_id", "is_active"} & values.keys():
-        # 调岗/停用/角色变化时只保留仍与新成员关系一致的授权。
-        surviving = []
-        for grant in user.manager_assignments or []:
-            if grant.deleted_at is not None:
-                continue
-            if grant.scope_type == "department" and grant.scope_id in set(user.department_ids):
-                surviving.append({"scope_type": "department", "scope_id": grant.scope_id})
-        from app.schemas.user import ManagerScopeGrant
-        await replace_manager_grants(
-            db, user, [ManagerScopeGrant(**item) for item in surviving], created_by_admin_id,
-        )
-
-    is_admin = user.role == "admin"
-    # 工作空间：组织管理员不持有。角色变更时按新角色补建/移除；仅普通用户重命名时同步。
-    if role_changed:
-        if is_admin:
-            await soft_delete_node_workspace(db, user.organization_id, "user", str(user.id))
-            # 降为组织管理员：同步软删其个人记忆
-            await soft_delete_node_memory(db, user.organization_id, "user", str(user.id))
-        else:
-            await ensure_node_workspace(
-                db, user.organization_id, "user", str(user.id), _user_ws_name(user), str(user.id)
-            )
-    elif not is_admin and (data.username is not None or data.display_name is not None):
+    if data.username is not None or data.display_name is not None:
         await sync_node_workspace(db, user.organization_id, "user", str(user.id), _user_ws_name(user))
 
-    # 个人档案记忆：仅终端用户（非管理员）。姓名/部门变更，或由管理员降为普通用户时同步。
-    if not is_admin and (
-        {"display_name", "department_id"} & values.keys()
-        or department_ids_were_set
-        or (role_changed and prev_role == "admin")
-    ):
+    if {"display_name", "department_id"} & values.keys() or department_ids_were_set:
         await _sync_user_profile_memory(db, user)
     auth_affecting = bool(
         password is not None
         or requested_role_ids is not None
-        or requested_manager_scopes is not None
-        or role_changed
         or department_ids_were_set
         or {"department_id", "is_active"} & values.keys()
     )
     if auth_affecting:
         user.auth_epoch += 1
-        from app.services.oauth_service import revoke_user_refresh_tokens
-
-        await revoke_user_refresh_tokens(db, user.id)
         await db.flush()
         # ``updated_at`` is populated by the database on UPDATE.  A flush
         # expires that attribute, so returning the ORM object immediately
@@ -329,9 +244,6 @@ async def reset_password(db: AsyncSession, user: User, password: str) -> User:
     user.password_hash = hash_password(password)
     user.must_change_password = True
     user.auth_epoch += 1
-    from app.services.oauth_service import revoke_user_refresh_tokens
-
-    await revoke_user_refresh_tokens(db, user.id)
     await db.flush()
     await db.refresh(user)
     return user
@@ -376,9 +288,6 @@ async def change_own_password(
     user.password_hash = hash_password(new_password)
     user.must_change_password = False
     user.auth_epoch += 1
-    from app.services.oauth_service import revoke_user_refresh_tokens
-
-    await revoke_user_refresh_tokens(db, user.id)
     await db.flush()
     await db.refresh(user)
     return UserLoginResponse(
@@ -393,9 +302,6 @@ async def soft_delete_user(db: AsyncSession, user: User) -> None:
     # 登录名只要求在职员工唯一。软删记录保留 UUID 后缀供审计，同时释放原登录名。
     user.username = _archived_username(user.username, user.id)
     user.auth_epoch += 1
-    from app.services.oauth_service import revoke_user_refresh_tokens
-
-    await revoke_user_refresh_tokens(db, user.id)
     user.deleted_at = deleted_at
     await db.execute(
         update(EnterpriseApplicationGrant)
@@ -407,9 +313,6 @@ async def soft_delete_user(db: AsyncSession, user: User) -> None:
         )
         .values(deleted_at=deleted_at)
     )
-    await replace_manager_grants(db, user, [])
-    # 组织管理员本就不持有工作空间/个人记忆，跳过；仅普通用户软删其绑定工作空间与个人记忆。
-    if user.role != "admin":
-        await soft_delete_node_workspace(db, user.organization_id, "user", str(user.id))
-        await soft_delete_node_memory(db, user.organization_id, "user", str(user.id))
+    await soft_delete_node_workspace(db, user.organization_id, "user", str(user.id))
+    await soft_delete_node_memory(db, user.organization_id, "user", str(user.id))
     await db.flush()
