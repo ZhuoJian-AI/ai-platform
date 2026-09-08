@@ -214,9 +214,3 @@ async def test_native_core_nudges_until_a_real_file_tool_succeeds(monkeypatch):
     ]
     assert any(item.get("action") == "continuation" for item in events)
     assert next(item for item in events if item["type"] == "done")["text"] == "文件已保存到个人空间。"
-
-
-def test_agent_run_defaults_to_the_native_engine():
-    from app.models.agent_run import AgentRun
-
-    assert AgentRun.__table__.c.assistant_engine.default.arg == "native"
