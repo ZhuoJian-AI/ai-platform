@@ -438,3 +438,34 @@
   .tab-guidance { align-items: flex-start; flex-direction: column; gap: 10px; }
   .workspace-bulk-actions { width: 100%; justify-content: space-between; }
 }
+
+@media (max-width: 768px), (max-width: 900px) and (max-height: 500px) {
+  .workspace-permission-table {
+    min-width: 620px;
+  }
+
+  .workspace-permission-table th:first-child,
+  .workspace-permission-table td:first-child,
+  .permission-matrix th:first-child,
+  .permission-matrix td:first-child {
+    position: sticky;
+    z-index: 3;
+    left: 0;
+    box-shadow: 5px 0 10px rgba(15, 23, 42, .06);
+  }
+
+  .workspace-permission-table td:first-child,
+  .permission-matrix td:first-child {
+    background: #fff;
+  }
+
+  .workspace-bulk-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .permission-table-scroll,
+  .workspace-permission-table-scroll {
+    overscroll-behavior-inline: contain;
+  }
+}

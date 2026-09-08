@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Badge, Button, Card, Drawer, Empty, Input, Popconfirm, Result, Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Badge, Button, Card, Drawer, Dropdown, Empty, Input, Popconfirm, Result, Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import {
   AppstoreOutlined, CheckCircleFilled, CloseCircleFilled, DeleteOutlined, DownloadOutlined, ExportOutlined, EyeOutlined, FileTextOutlined,
   FullscreenExitOutlined, FullscreenOutlined, LoadingOutlined, ReloadOutlined,
-  HistoryOutlined, RobotOutlined, SendOutlined, UploadOutlined,
+  HistoryOutlined, MoreOutlined, PlusOutlined, RobotOutlined, SendOutlined, UploadOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -14,6 +14,7 @@ import {
   type TerminalApprovalDecidedBy, type TerminalApprovalOutcome,
 } from '../../api/client';
 import ApprovalCard, { type ApprovalCardData } from '../../components/terminal/ApprovalCard';
+import { useMobileBackDismiss, useResponsiveLayout } from '../../hooks/useResponsiveLayout';
 import {
   buildHostReadyMessage, buildRefreshMessage, isBridgeReady, parseBridgeContext,
   parseBridgeRefreshResult, type BridgeExpectation, type BridgeRefreshExpectation,
@@ -341,6 +342,7 @@ export default function EnterpriseApplicationView({
   onOpenArtifact: (fileId: string, versionId: string | null) => void;
 }) {
   const queryClient = useQueryClient();
+  const { isMobile, isCompact } = useResponsiveLayout();
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [assistantRunning, setAssistantRunning] = useState(false);
@@ -369,6 +371,17 @@ export default function EnterpriseApplicationView({
   const launch = frameSlots[activeFrameIndex];
   const [launchLoading, setLaunchLoading] = useState(true);
   const [launchError, setLaunchError] = useState<unknown>();
+
+  useEffect(() => {
+    for (const [index, frame] of frameRefs.current.entries()) {
+      if (!frame) continue;
+      const blocked = index !== activeFrameIndex || (isMobile && assistantOpen);
+      if (blocked) frame.setAttribute('inert', '');
+      else frame.removeAttribute('inert');
+    }
+  }, [activeFrameIndex, assistantOpen, frameSlots, isMobile]);
+
+  const closeAssistant = useMobileBackDismiss(assistantOpen, isMobile, setAssistantOpen, 'business-assistant');
   const { data: restoredBusinessTask } = useQuery({
     queryKey: ['terminal-business-task', businessTaskId],
     queryFn: () => terminal.getTask(businessTaskId!, application.id),
@@ -987,17 +1000,18 @@ export default function EnterpriseApplicationView({
         <Tooltip title="打开平台导航">
           <Button aria-label="打开平台导航" icon={<AppstoreOutlined />} onClick={onOpenNavigation} />
         </Tooltip>
-        <div style={{ width: 30, height: 30, borderRadius: 9, background: '#eef2ff', color: '#6366f1', display: 'grid', placeItems: 'center', overflow: 'hidden' }}>
+        <div className="enterprise-app-view__icon" style={{ width: 30, height: 30, borderRadius: 9, background: '#eef2ff', color: '#6366f1', display: 'grid', placeItems: 'center', overflow: 'hidden' }}>
           {application.icon_url ? <img src={application.icon_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : application.name.slice(0, 1)}
         </div>
         <div className="enterprise-app-view__identity">
-          <Typography.Text strong>{activeModule?.name || application.name}</Typography.Text>
+          <Typography.Text strong title={activeModule?.name || application.name}>{activeModule?.name || application.name}</Typography.Text>
           <div>{activeModule ? `${application.name} · 原生子模块` : (application.description || '企业业务应用')}</div>
         </div>
         <Tag color={activeModule ? 'geekblue' : 'blue'} style={{ marginLeft: 4 }}>
           {activeModule ? '原生聚合' : (launch.display_mode === 'embedded' ? (immersive ? '完全沉浸' : '沉浸内嵌') : '独立应用')}
         </Tag>
         {(launch.modules ?? []).length > 1 && <Select
+          className="enterprise-app-view__module-select"
           size="small"
           value={launch.module_key ?? moduleKey ?? undefined}
           style={{ minWidth: 140 }}
@@ -1005,18 +1019,39 @@ export default function EnterpriseApplicationView({
           onChange={onModuleChange}
           aria-label="选择子模块"
         />}
-        <div style={{ flex: 1 }} />
-        {launch.display_mode === 'embedded' && <Tooltip title="重新加载模块"><Button icon={<ReloadOutlined />} onClick={() => void refreshFrame()} /></Tooltip>}
-        {launch.display_mode === 'embedded' && (
-          <Tooltip title={immersive ? '显示平台导航轨' : '隐藏平台导航轨'}>
-            <Button
-              aria-label={immersive ? '退出完全沉浸' : '进入完全沉浸'}
-              icon={immersive ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
-              onClick={onToggleImmersive}
-            ><span className="enterprise-app-view__action-label">{immersive ? '退出沉浸' : '完全沉浸'}</span></Button>
-          </Tooltip>
-        )}
-        <Button icon={<ExportOutlined />} onClick={() => void openFreshLaunch()}><span className="enterprise-app-view__action-label">备用打开</span></Button>
+        <div className="enterprise-app-view__header-spacer" />
+        {!isMobile && <div className="enterprise-app-view__actions">
+          {launch.display_mode === 'embedded' && <Tooltip title="重新加载模块"><Button aria-label="重新加载模块" icon={<ReloadOutlined />} onClick={() => void refreshFrame()} /></Tooltip>}
+          {launch.display_mode === 'embedded' && (
+            <Tooltip title={immersive ? '显示平台导航轨' : '隐藏平台导航轨'}>
+              <Button
+                aria-label={immersive ? '退出完全沉浸' : '进入完全沉浸'}
+                icon={immersive ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
+                onClick={onToggleImmersive}
+              ><span className="enterprise-app-view__action-label">{immersive ? '退出沉浸' : '完全沉浸'}</span></Button>
+            </Tooltip>
+          )}
+          <Button icon={<ExportOutlined />} onClick={() => void openFreshLaunch()}><span className="enterprise-app-view__action-label">备用打开</span></Button>
+        </div>}
+        {isMobile && <Dropdown
+          trigger={['click']}
+          menu={{
+            items: [
+              ...(launch.display_mode === 'embedded' ? [
+                { key: 'reload', label: '重新加载模块', icon: <ReloadOutlined /> },
+                { key: 'immersive', label: immersive ? '退出完全沉浸' : '进入完全沉浸', icon: immersive ? <FullscreenExitOutlined /> : <FullscreenOutlined /> },
+              ] : []),
+              { key: 'external', label: '备用打开', icon: <ExportOutlined /> },
+            ],
+            onClick: ({ key }) => {
+              if (key === 'reload') void refreshFrame();
+              else if (key === 'immersive') onToggleImmersive();
+              else if (key === 'external') void openFreshLaunch();
+            },
+          }}
+        >
+          <Button className="enterprise-app-view__more" aria-label="更多应用操作" icon={<MoreOutlined />} />
+        </Dropdown>}
         {application.assistant_enabled && <Badge count={pendingConfirmations.length} size="small"><Button type="primary" icon={<RobotOutlined />} onClick={() => setAssistantOpen(true)}><span className="enterprise-app-view__action-label">业务小助手</span></Button></Badge>}
       </div>
 
@@ -1032,8 +1067,8 @@ export default function EnterpriseApplicationView({
               sandbox="allow-downloads allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
               allow="camera 'none'; microphone 'none'; geolocation 'none'; payment 'none'; usb 'none'; serial 'none'; clipboard-read 'none'; clipboard-write 'none'; fullscreen"
               referrerPolicy="origin"
-              aria-hidden={slotIndex !== activeFrameIndex}
-              tabIndex={slotIndex === activeFrameIndex ? 0 : -1}
+              aria-hidden={slotIndex !== activeFrameIndex || (isMobile && assistantOpen)}
+              tabIndex={slotIndex === activeFrameIndex && !(isMobile && assistantOpen) ? 0 : -1}
               className={`enterprise-app-view__frame ${slotIndex === activeFrameIndex ? 'enterprise-app-view__frame--active' : 'enterprise-app-view__frame--standby'}`}
             />
           ) : null)}
@@ -1044,10 +1079,10 @@ export default function EnterpriseApplicationView({
       )}
 
       <Drawer
-        title={<Space><RobotOutlined style={{ color: '#6366f1' }} />{application.name} · 业务小助手</Space>}
-        extra={<Space>
-          <Button size="small" icon={<HistoryOutlined />} disabled={conversationLocked} onClick={() => setHistoryOpen((value) => !value)}>历史对话</Button>
-          <Button size="small" loading={creatingConversation} disabled={conversationLocked} onClick={async () => {
+        title={<Space className="business-assistant-drawer__title"><RobotOutlined style={{ color: '#6366f1' }} /><span>{application.name} · 业务小助手</span></Space>}
+        extra={<Space className="business-assistant-drawer__header-actions">
+          <Button size="small" icon={<HistoryOutlined />} aria-label="历史对话" disabled={conversationLocked} onClick={() => setHistoryOpen((value) => !value)}><span className="business-assistant-drawer__header-label">历史对话</span></Button>
+          <Button size="small" icon={<PlusOutlined />} aria-label="新建对话" loading={creatingConversation} disabled={conversationLocked} onClick={async () => {
             setCreatingConversation(true);
             try {
               await onNewConversation();
@@ -1060,9 +1095,13 @@ export default function EnterpriseApplicationView({
             } finally {
               setCreatingConversation(false);
             }
-          }}>新建对话</Button>
+          }}><span className="business-assistant-drawer__header-label">新建对话</span></Button>
         </Space>}
-        open={assistantOpen} onClose={() => setAssistantOpen(false)} width={420}
+        open={assistantOpen}
+        onClose={closeAssistant}
+        width={isMobile ? '100%' : (isCompact ? 460 : 420)}
+        rootClassName="business-assistant-drawer responsive-fullscreen-drawer"
+        styles={{ body: { padding: isMobile ? '12px 12px calc(12px + env(safe-area-inset-bottom))' : undefined } }}
       >
         {historyOpen && <Card size="small" title="当前应用的历史对话" style={{ marginBottom: 16 }}>
           {businessTasks.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无历史对话" /> : (
@@ -1309,8 +1348,10 @@ export default function EnterpriseApplicationView({
           message="这段对话仍在执行，暂时不能切换或继续发送。刷新页面后会保留已有记录。"
           style={{ marginBottom: 12 }}
         />}
-        <Input.TextArea value={prompt} disabled={conversationLocked} onChange={(event) => setPrompt(event.target.value)} rows={6} placeholder="描述你要查询或执行的业务任务…" onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); void submit(); } }} />
-        <Button type="primary" block icon={<SendOutlined />} loading={assistantRunning} disabled={conversationLocked || !prompt.trim()} onClick={() => void submit()} style={{ marginTop: 12 }}>在当前页面执行</Button>
+        <div className="business-assistant-drawer__composer">
+          <Input.TextArea value={prompt} disabled={conversationLocked} onChange={(event) => setPrompt(event.target.value)} autoSize={{ minRows: 3, maxRows: 6 }} placeholder="描述你要查询或执行的业务任务…" onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); void submit(); } }} />
+          <Button type="primary" block icon={<SendOutlined />} loading={assistantRunning} disabled={conversationLocked || !prompt.trim()} onClick={() => void submit()} style={{ marginTop: 10 }}>在当前页面执行</Button>
+        </div>
       </Drawer>
     </div>
   );
