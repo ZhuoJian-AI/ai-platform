@@ -1,8 +1,4 @@
-"""Shared agent persistence helpers retained by the DSH runtime.
-
-The public coordinator lives in :mod:`app.agents.dsh`; this package no longer
-exports a second LangGraph runtime.
-"""
+"""Shared Assistant Core state, capability assembly and persistence helpers."""
 
 from app.agents.graph import run_registry
 

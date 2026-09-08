@@ -56,19 +56,10 @@ class Settings(BaseSettings):
     storage_lifecycle_interval_seconds: int = 60 * 60
     storage_orphan_grace_days: int = 7
 
-    # Assistant Core coordinator.  ``native`` runs the platform-owned loop;
-    # ``dsh`` remains a temporary rollback engine during the migration window.
-    assistant_engine: str = "dsh"
-    assistant_native_canary_user_ids: str = ""
-    # Legacy DSH coordinator (Docker-internal only, removed after canary drain).
-    dsh_runtime_url: str = "http://localhost:8030"
-    dsh_runtime_token: str = "dsh-runtime-dev-token-change-in-production"
-    dsh_runtime_timeout_seconds: int = 600
-    # Risky tools (hard deletes, mutating enterprise actions, high-risk / side-effect extension
-    # tools) carry ``ToolSpec.approval="ask"`` so the runtime pauses the call until the terminal
-    # user decides. False emits no ``approval`` field at all.
-    dsh_tool_approval_enabled: bool = True
-    # Redis-backed DSH admission control shared by all Backend replicas.
+    # Risky tools carry ``approval="ask"`` so the native core pauses until the
+    # terminal user decides. False omits the approval gate entirely.
+    assistant_tool_approval_enabled: bool = True
+    # Redis-backed Assistant Core admission control shared by all Backend replicas.
     agent_global_concurrency: int = 12
     agent_user_concurrency: int = 2
     agent_queue_max: int = 100
@@ -79,12 +70,6 @@ class Settings(BaseSettings):
     # guard; this budget only prevents a genuinely looping agent from running
     # forever. Complex office tasks need more than the old hard-coded 8 steps.
     agent_max_steps: int = 24
-    extension_archive_max_bytes: int = 25 * 1024 * 1024
-    extension_artifact_max_bytes: int = 100 * 1024 * 1024
-    extension_catalog_community_url: str = "https://awesome-dsh-plugin.com/plugins.json"
-    extension_catalog_sync_timeout_seconds: int = 90
-    extension_catalog_sync_interval_seconds: int = 24 * 60 * 60
-    extension_catalog_sync_poll_seconds: int = 60 * 60
     subsystem_sync_poll_seconds: int = 30
     # Public origin embedded in ECS Runtime bootstrap metadata.  This belongs
     # to the retained ECS Publisher contract, not the retired GitHub/Coolify

@@ -26,7 +26,7 @@ Run frontend contract checks with the relevant `npm run test:*` script.
 
 - `llm_router/backend/app/`: shared FastAPI backend, authentication, permissions, model routing, agents, workspaces and integrations.
 - `frontend/src/`: React/TypeScript administrator and employee interfaces.
-- `skill_runner/`, `dsh_runtime/`, `extension_builder/`: isolated execution services.
+- `skill_runner/`: isolated execution service for user-uploaded Skills and trusted file tools.
 - `docker-compose.coolify.yml`: Registry-first staging deployment manifest.
 - `llm_router/backend/alembic/versions/`: the single database migration chain.
 

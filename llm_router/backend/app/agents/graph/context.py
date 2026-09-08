@@ -1,8 +1,4 @@
-"""Context-local non-serializable platform dependencies for DSH callbacks.
-
-The DSH service never receives database sessions or user credentials.  Its short-lived
-run token resolves here to the Python-side DB/auth context and event writer.
-"""
+"""Context-local non-serializable dependencies for one Assistant Core run."""
 
 from __future__ import annotations
 
@@ -21,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class AgentContext(TypedDict):
-    """每次 DSH run/工具回调注入的运行时依赖。
+    """每次 Assistant Core run 注入的运行时依赖。
 
     admin 用于管理端 playground（agent 模式）；user + task 用于终端通用智能体（general 模式）。
     二者按调用场景择一注入，故均 NotRequired。
@@ -42,9 +38,8 @@ _local_writer: ContextVar[Any | None] = ContextVar("agent_local_writer", default
 def bind_runtime(deps: AgentContext, writer: Any | None = None) -> Iterator[None]:
     """Bind dependencies for platform capability preparation and callbacks.
 
-    DSH is now the coordinator, while the existing Python capability catalog remains the
-    implementation boundary.  Context variables let those capability functions keep one
-    dependency API without importing DSH or receiving database handles over HTTP.
+    The Python capability catalog remains the implementation boundary. Context variables
+    let capability functions keep one stable dependency API without global mutable state.
     """
     deps_token = _local_deps.set(deps)
     writer_token = _local_writer.set(writer)
@@ -56,16 +51,16 @@ def bind_runtime(deps: AgentContext, writer: Any | None = None) -> Iterator[None
 
 
 def get_deps() -> AgentContext:
-    """取得当前 DSH 运行对应的平台依赖。"""
+    """取得当前 Assistant Core 运行对应的平台依赖。"""
     local = _local_deps.get()
     if local is not None:
         return local
-    raise RuntimeError("agent platform capabilities require a bound DSH runtime context")
+    raise RuntimeError("agent platform capabilities require a bound Assistant Core context")
 
 
 def get_stream_writer() -> Any:
-    """取得当前 DSH 运行的兼容事件写入器。"""
+    """取得当前 Assistant Core 运行的事件写入器。"""
     local = _local_writer.get()
     if local is not None:
         return local
-    raise RuntimeError("agent platform capabilities require a bound DSH event writer")
+    raise RuntimeError("agent platform capabilities require a bound Assistant Core event writer")

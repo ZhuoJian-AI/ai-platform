@@ -1,8 +1,8 @@
-"""AI Platform agent capabilities used by the single DSH coordinator.
+"""AI Platform capabilities used by the native Assistant Core.
 
 This module owns configuration loading, authorized tool discovery/execution, memory,
-evaluation and audit persistence.  It intentionally contains no model/tool loop; DSH
-owns step scheduling, observations and termination.
+evaluation and audit persistence. It intentionally contains no model/tool loop; the
+native core owns step scheduling, observations and termination.
 
 两种模式（state["mode"]）：
 - ``agent``：管理端测试广场，load_config 读预配置 ``Agent`` 行（单 RAG / session 记忆）。
@@ -85,12 +85,12 @@ logger = structlog.get_logger()
 RUNNER_INLINE_FILE_BYTES = 10 * 1024 * 1024
 RUNNER_MAX_FILE_BYTES = 100 * 1024 * 1024
 
-# ── DSH ToolSpec 元数据（运行时按此执行工具截止、并行安全与输出上限）──────
-DSH_TOOL_TIMEOUT_READ_MS = 60_000
-DSH_TOOL_TIMEOUT_DEFAULT_MS = 120_000
-DSH_TOOL_TIMEOUT_LONG_MS = 300_000
+# ── Assistant Core 工具元数据（截止时间、并行安全与输出上限）──────
+ASSISTANT_TOOL_TIMEOUT_READ_MS = 60_000
+ASSISTANT_TOOL_TIMEOUT_DEFAULT_MS = 120_000
+ASSISTANT_TOOL_TIMEOUT_LONG_MS = 300_000
 # The model must receive full tool output (audit H2); this cap only stops runaway payloads.
-DSH_TOOL_MAX_MODEL_CHARS = 60_000
+ASSISTANT_TOOL_MAX_MODEL_CHARS = 60_000
 MEMORY_TOOL_NAMES = {"read_memory", "write_memory"}
 MEMORY_WRITE_MAX_CHARS = 2000
 
@@ -2976,7 +2976,7 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
                 if row["id"] not in explicit_ids:
                     referenced_skills.append({**row, "activation": "slash"})
         # 解析用户消息中 @<file_id> 引用的工作空间文件（精确 UUID，避免误命中邮件等）。
-        # DSH turn preparation injects these authorized file references into model context.
+        # Turn preparation injects these authorized file references into model context.
         seen_fids: set[str] = set()
         for raw_fid in state.get("referenced_file_ids") or []:
             fid = str(raw_fid)
@@ -3162,7 +3162,7 @@ async def load_memory(state: AgentState) -> dict:
     """载入记忆前置到 messages。
 
     ① 按 task 加载 ``TaskMessage`` 对话历史前置；② 按用户权限聚合 4 级 ``Memory``
-    长期记忆填入 ``memory_context``，由 DSH context contribution 注入。
+    长期记忆填入 ``memory_context``，由 Assistant Core 注入。
     """
     deps = get_deps()
     db = deps["db"]
@@ -3333,7 +3333,7 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
     }
 
 
-# ── DSH platform capability assembly ───────────────────────────────────
+# ── Assistant Core platform capability assembly ───────────────────────
 
 
 async def _prepare_current_turn_images(state: AgentState, db, user) -> list[multimodal_service.PreparedImage]:
@@ -5084,7 +5084,7 @@ async def _execute_tool_call(
 ) -> tuple[dict, str, bool]:
     """执行单个 tool_call，返回 (tool 消息, 结果预览, 是否成功)。
 
-    不负责 emit——由 DSH runner 在调用前后下发 tool_call/tool_result 事件。
+    不负责 emit——由 Assistant Core runner 在调用前后下发 tool_call/tool_result 事件。
     """
     deps = get_deps()
     db = deps["db"]
@@ -5109,7 +5109,7 @@ async def _execute_tool_call(
     # 内置工作空间文件工具
     if name in BUILTIN_TOOL_NAMES | LEGACY_BUILTIN_TOOL_NAMES:
         # This key is server-owned and invisible to the model.  Replaying one
-        # DSH call therefore cannot duplicate a write even when the model
+        # A repeated model call therefore cannot duplicate a write even when the model
         # invents a new client idempotency key.
         params = dict(params)
         params["_mutation_key"] = server_mutation_key
@@ -5417,9 +5417,9 @@ def _workspace_access_prompt(access: dict, intent: dict) -> str:
     )
 
 
-# ── DSH ToolSpec 装配 ────────────────────────────────────────────────────
+# ── Assistant Core 工具装配 ─────────────────────────────────────────────
 
-_DSH_READ_ONLY_TOOL_NAMES = {
+_ASSISTANT_READ_ONLY_TOOL_NAMES = {
     "workspace_list",
     "workspace_search",
     "workspace_get_file",
@@ -5437,8 +5437,8 @@ _DSH_READ_ONLY_TOOL_NAMES = {
     "pdf_inspect",
     "text_inspect",
 }
-_DSH_READ_ONLY_REGISTRY_KINDS = {"prompt", "load_skill", "read_skill_resource", "rag_search"}
-_DSH_LONG_RUNNING_TOOL_NAMES = {
+_ASSISTANT_READ_ONLY_REGISTRY_KINDS = {"prompt", "load_skill", "read_skill_resource", "rag_search"}
+_ASSISTANT_LONG_RUNNING_TOOL_NAMES = {
     "run_skill_script",
     "web_tool",
     "image_generation_tool",
@@ -5447,42 +5447,43 @@ _DSH_LONG_RUNNING_TOOL_NAMES = {
     "presentation_convert",
     "pdf_convert",
 }
-_DSH_LONG_RUNNING_REGISTRY_KINDS = {
+_ASSISTANT_LONG_RUNNING_REGISTRY_KINDS = {
     "code",
     "run_skill_script",
     "enterprise_action",
     "enterprise_export_file",
 }
-_DSH_SKILL_REGISTRY_KINDS = {"code", "prompt", "load_skill", "read_skill_resource", "run_skill_script"}
-# ``ToolSpec.approval="ask"``: the runtime parks these calls until the terminal user decides
-# (bridge: POST /internal/dsh/approval/request).  Hard deletes by name; mutating enterprise
-# actions by manifest operation; connector / extension tools by their declared risk flags.
-_DSH_APPROVAL_TOOL_NAMES = {"workspace_delete_file", "workspace_delete_folder"}
-_DSH_APPROVAL_RISK_LEVELS = {"high", "critical"}
-_DSH_APPROVAL_ENTERPRISE_OPERATIONS = {"create", "update", "delete", "approve"}
-_DSH_APPROVAL_CONNECTOR_METHODS = {"DELETE"}
+_ASSISTANT_SKILL_REGISTRY_KINDS = {"code", "prompt", "load_skill", "read_skill_resource", "run_skill_script"}
+# Tools with ``approval="ask"`` are parked by the native core until the terminal user decides.
+_ASSISTANT_APPROVAL_TOOL_NAMES = {"workspace_delete_file", "workspace_delete_folder"}
+_ASSISTANT_APPROVAL_RISK_LEVELS = {"high", "critical"}
+_ASSISTANT_APPROVAL_ENTERPRISE_OPERATIONS = {"create", "update", "delete", "approve"}
+_ASSISTANT_APPROVAL_CONNECTOR_METHODS = {"DELETE"}
 
 
-def _dsh_tool_requires_approval(name: str, entry: dict | None) -> bool:
+def _assistant_tool_requires_approval(name: str, entry: dict | None) -> bool:
     """Whether one call of this tool must wait for an explicit user decision before executing."""
-    if name in _DSH_APPROVAL_TOOL_NAMES:
+    if name in _ASSISTANT_APPROVAL_TOOL_NAMES:
         return True
     if not entry:
         return False
     kind = str(entry.get("kind") or "")
-    if name in _DSH_READ_ONLY_TOOL_NAMES or kind in _DSH_READ_ONLY_REGISTRY_KINDS:
+    if name in _ASSISTANT_READ_ONLY_TOOL_NAMES or kind in _ASSISTANT_READ_ONLY_REGISTRY_KINDS:
         return False
-    if str(entry.get("risk_level") or "").lower() in _DSH_APPROVAL_RISK_LEVELS or bool(entry.get("side_effects")):
+    if str(entry.get("risk_level") or "").lower() in _ASSISTANT_APPROVAL_RISK_LEVELS or bool(entry.get("side_effects")):
         return True
     if kind == "enterprise_action":
         action = entry.get("action")
         operation = str(getattr(action, "operation", "") or "").lower()
-        return bool(getattr(action, "requires_confirmation", False)) or operation in _DSH_APPROVAL_ENTERPRISE_OPERATIONS
+        return (
+            bool(getattr(action, "requires_confirmation", False))
+            or operation in _ASSISTANT_APPROVAL_ENTERPRISE_OPERATIONS
+        )
     endpoint = entry.get("endpoint")
-    return str(getattr(endpoint, "method", "") or "").upper() in _DSH_APPROVAL_CONNECTOR_METHODS
+    return str(getattr(endpoint, "method", "") or "").upper() in _ASSISTANT_APPROVAL_CONNECTOR_METHODS
 
 
-def _dsh_tool_kind(name: str, entry: dict | None) -> str:
+def _assistant_tool_kind(name: str, entry: dict | None) -> str:
     kind = str((entry or {}).get("kind") or "")
     if name.startswith("workspace_"):
         return "workspace_file"
@@ -5490,7 +5491,7 @@ def _dsh_tool_kind(name: str, entry: dict | None) -> str:
         return "web"
     if name in PLATFORM_TOOL_NAMES or name in LEGACY_BUILTIN_TOOL_NAMES or name == "image_generation_tool":
         return "platform_tool"
-    if kind in _DSH_SKILL_REGISTRY_KINDS:
+    if kind in _ASSISTANT_SKILL_REGISTRY_KINDS:
         return "skill"
     if kind == "rag_search":
         return "rag"
@@ -5498,33 +5499,34 @@ def _dsh_tool_kind(name: str, entry: dict | None) -> str:
         return kind
     if entry is not None and entry.get("endpoint") is not None:
         return "connector"
-    # Approved Node extension tools (platform_tool_registry) execute inside the runtime itself.
+    # Unknown registry kinds remain identifiable in traces, but no retired external
+    # extension definition is injected into a run.
     return "external_tool"
 
 
-def _dsh_tool_metadata(name: str, entry: dict | None) -> dict:
+def _assistant_tool_metadata(name: str, entry: dict | None) -> dict:
     """timeout / parallel-safety / output cap / approval gate the runtime enforces for one tool."""
     kind = str((entry or {}).get("kind") or "")
-    read_only = name in _DSH_READ_ONLY_TOOL_NAMES or kind in _DSH_READ_ONLY_REGISTRY_KINDS
-    if name in _DSH_LONG_RUNNING_TOOL_NAMES or kind in _DSH_LONG_RUNNING_REGISTRY_KINDS:
-        timeout_ms = DSH_TOOL_TIMEOUT_LONG_MS
+    read_only = name in _ASSISTANT_READ_ONLY_TOOL_NAMES or kind in _ASSISTANT_READ_ONLY_REGISTRY_KINDS
+    if name in _ASSISTANT_LONG_RUNNING_TOOL_NAMES or kind in _ASSISTANT_LONG_RUNNING_REGISTRY_KINDS:
+        timeout_ms = ASSISTANT_TOOL_TIMEOUT_LONG_MS
     elif read_only:
-        timeout_ms = DSH_TOOL_TIMEOUT_READ_MS
+        timeout_ms = ASSISTANT_TOOL_TIMEOUT_READ_MS
     else:
-        timeout_ms = DSH_TOOL_TIMEOUT_DEFAULT_MS
+        timeout_ms = ASSISTANT_TOOL_TIMEOUT_DEFAULT_MS
     metadata = {
-        "kind": _dsh_tool_kind(name, entry),
+        "kind": _assistant_tool_kind(name, entry),
         "timeout_ms": timeout_ms,
         "concurrency_safe": read_only,
-        "max_model_chars": DSH_TOOL_MAX_MODEL_CHARS,
+        "max_model_chars": ASSISTANT_TOOL_MAX_MODEL_CHARS,
     }
-    if settings.dsh_tool_approval_enabled and _dsh_tool_requires_approval(name, entry):
+    if settings.assistant_tool_approval_enabled and _assistant_tool_requires_approval(name, entry):
         metadata["approval"] = "ask"
     return metadata
 
 
-def dsh_tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -> list[dict]:
-    """OpenAI function tools → DSH ToolSpecs, tagged with the metadata the runtime enforces."""
+def assistant_tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -> list[dict]:
+    """Add execution metadata to the authorized tools for one Assistant Core run."""
     registry = registry or {}
     specs: list[dict] = []
     for tool in tools:
@@ -5542,7 +5544,7 @@ def dsh_tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -
                 "name": name,
                 "description": str(function.get("description") or ""),
                 "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
-                **_dsh_tool_metadata(name, entry),
+                **_assistant_tool_metadata(name, entry),
             }
         )
     return specs
@@ -5605,7 +5607,7 @@ async def _execute_memory_tool(state: AgentState, entry: dict, params: dict) -> 
             async with db.begin_nested():
                 result = await memory_service.append_memory_for_user(db, principal, content)
             # extract_memory skips its LLM pass when the run already persisted facts itself.
-            state["_dsh_memory_written"] = True
+            state["_assistant_memory_written"] = True
             return json.dumps({"status": "success", "result": result}, ensure_ascii=False), True
         memory = await memory_service.render_memory_for_user(db, principal)
         return json.dumps({"status": "success", "memory": memory}, ensure_ascii=False), True
@@ -5614,11 +5616,11 @@ async def _execute_memory_tool(state: AgentState, entry: dict, params: dict) -> 
         return json.dumps({"status": "error", "error": f"memory {operation} failed"}), False
 
 
-async def prepare_dsh_turn(state: AgentState) -> dict:
-    """Assemble the authorized prompt and tool catalog for the DSH coordinator.
+async def prepare_assistant_turn(state: AgentState) -> dict:
+    """Assemble the authorized prompt and tool catalog for the native coordinator.
 
     Python remains the capability and authorization boundary.  This function deliberately
-    performs no model loop and no eager RAG retrieval: DSH receives ``rag_search`` like any
+    performs no model loop and no eager RAG retrieval: the core receives ``rag_search`` like any
     other scoped platform tool and decides when it is needed.
     """
     deps = get_deps()
@@ -6075,7 +6077,7 @@ async def extract_memory(state: AgentState) -> dict:
     org_id = state.get("org_id")
     if not user_id or not org_id:
         return {}
-    if state.get("_dsh_memory_written"):
+    if state.get("_assistant_memory_written"):
         # The model already persisted its facts through write_memory this run; a second
         # LLM extraction pass would only duplicate them and cost a model call.
         trace = {

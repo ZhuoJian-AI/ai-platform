@@ -7,7 +7,6 @@ import json
 import pytest
 
 from app.agents.core import native
-from app.agents.dsh import runner
 
 ORG_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -217,10 +216,7 @@ async def test_native_core_nudges_until_a_real_file_tool_succeeds(monkeypatch):
     assert next(item for item in events if item["type"] == "done")["text"] == "文件已保存到个人空间。"
 
 
-def test_engine_choice_is_server_owned_and_canary_scoped(monkeypatch):
-    monkeypatch.setattr(runner.settings, "assistant_engine", "dsh")
-    monkeypatch.setattr(runner.settings, "assistant_native_canary_user_ids", "u-1,u-2")
-    assert runner._assistant_engine_for_run("u-1") == "native"
-    assert runner._assistant_engine_for_run("u-3") == "dsh"
-    monkeypatch.setattr(runner.settings, "assistant_engine", "native")
-    assert runner._assistant_engine_for_run("any-user") == "native"
+def test_agent_run_defaults_to_the_native_engine():
+    from app.models.agent_run import AgentRun
+
+    assert AgentRun.__table__.c.assistant_engine.default.arg == "native"

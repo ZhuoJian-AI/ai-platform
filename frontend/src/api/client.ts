@@ -1272,84 +1272,7 @@ export const rag = {
     }),
 };
 
-// ── Tool Connector: Connectors ────────────────────────────────────────
-
-export interface ToolConnector {
-  id: string; organization_id: string; name: string; slug: string; description: string | null;
-  type: string; base_url: string; auth_type: string; spec: Record<string, unknown>;
-  is_active: boolean; health_status: string; created_at: string; updated_at: string;
-}
-
-export interface ToolEndpoint {
-  id: string; connector_id: string; name: string; method: string; path: string;
-  description: string | null; params_schema: Record<string, unknown>;
-  response_schema: Record<string, unknown>; is_active: boolean;
-  created_at: string; updated_at: string;
-}
-
-export interface ToolTestResult {
-  status_code: number | null; latency_ms: number; body: unknown; error: string | null;
-}
-
-export interface OpenApiPreviewEndpoint {
-  name: string; method: string; path: string; description: string;
-  params_schema: Record<string, unknown>; response_schema: Record<string, unknown>;
-}
-
-export interface OpenApiInspection {
-  title: string | null; version: string | null; spec: Record<string, unknown>;
-  endpoints: OpenApiPreviewEndpoint[];
-}
-
-export const connectors = {
-  list: (orgId: string) => request<ToolConnector[]>(`/api/v1/organizations/${orgId}/connectors`),
-  get: (id: string) => request<ToolConnector>(`/api/v1/connectors/${id}`),
-  create: (orgId: string, data: Partial<ToolConnector> & { auth_config?: Record<string, unknown> }) =>
-    request<ToolConnector>(`/api/v1/organizations/${orgId}/connectors`, { method: 'POST', body: JSON.stringify(data) }),
-  update: (id: string, data: Partial<ToolConnector> & { auth_config?: Record<string, unknown> }) =>
-    request<ToolConnector>(`/api/v1/connectors/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  delete: (id: string) => request<void>(`/api/v1/connectors/${id}`, { method: 'DELETE' }),
-  inspectSpec: (orgId: string, data: { url?: string; content?: string }) =>
-    request<OpenApiInspection>(`/api/v1/organizations/${orgId}/connectors/inspect-spec`, {
-      method: 'POST', body: JSON.stringify(data),
-    }),
-  importSpec: (id: string) => request<ToolEndpoint[]>(`/api/v1/connectors/${id}/import-spec`, { method: 'POST' }),
-  publishSkill: (id: string, data: { name: string; slug: string; description?: string; endpoint_ids: string[] }) =>
-    request<SkillFolder>(`/api/v1/connectors/${id}/publish-skill`, {
-      method: 'POST', body: JSON.stringify(data),
-    }),
-  listEndpoints: (id: string) => request<ToolEndpoint[]>(`/api/v1/connectors/${id}/endpoints`),
-  createEndpoint: (connId: string, data: Partial<ToolEndpoint>) =>
-    request<ToolEndpoint>(`/api/v1/connectors/${connId}/endpoints`, { method: 'POST', body: JSON.stringify(data) }),
-  updateEndpoint: (id: string, data: Partial<ToolEndpoint>) =>
-    request<ToolEndpoint>(`/api/v1/endpoints/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteEndpoint: (id: string) => request<void>(`/api/v1/endpoints/${id}`, { method: 'DELETE' }),
-  testEndpoint: (id: string, params: Record<string, unknown>) =>
-    request<ToolTestResult>(`/api/v1/endpoints/${id}/test`, { method: 'POST', body: JSON.stringify({ params }) }),
-};
-
-// ── Tool Connector: Skills ─────────────────────────────────────────────
-
-export interface Skill {
-  id: string; organization_id: string; name: string; slug: string; description: string | null;
-  definition: Record<string, unknown>; bound_endpoint_ids: string[];
-  param_mapping: Record<string, unknown>; is_active: boolean;
-  created_at: string; updated_at: string;
-}
-
-export const skills = {
-  list: (orgId: string) => request<Skill[]>(`/api/v1/organizations/${orgId}/skills`),
-  get: (id: string) => request<Skill>(`/api/v1/skills/${id}`),
-  create: (orgId: string, data: Partial<Skill>) =>
-    request<Skill>(`/api/v1/organizations/${orgId}/skills`, { method: 'POST', body: JSON.stringify(data) }),
-  update: (id: string, data: Partial<Skill>) =>
-    request<Skill>(`/api/v1/skills/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  delete: (id: string) => request<void>(`/api/v1/skills/${id}`, { method: 'DELETE' }),
-  test: (id: string, params: Record<string, unknown>) =>
-    request<ToolTestResult>(`/api/v1/skills/${id}/test`, { method: 'POST', body: JSON.stringify({ params }) }),
-};
-
-// ── Tool Connector: Skill Store（文件夹化，节点作用域）─────────────────
+// ── Skill Store（文件夹化，节点作用域）───────────────────────────────
 
 export interface SkillFolder {
   id: string; organization_id: string; scope_type: string; scope_id: string | null;
@@ -1493,35 +1416,7 @@ export const skillStore = {
     request<SkillVersion>(`/api/v1/skill-versions/${versionId}/activate`, { method: 'POST' }),
 };
 
-// ── Tool Connector: Data Interfaces (独立数据结构) ──────────────────────
-
-export interface DataSystem {
-  id: string; organization_id: string; scope_type: string; scope_id: string | null;
-  name: string; description: string | null; is_active: boolean;
-  created_at: string; updated_at: string;
-}
-
-export interface DataInterface {
-  id: string; data_system_id: string; name: string; method: string | null; path: string | null;
-  description: string | null; params_schema: Record<string, unknown>;
-  response_schema: Record<string, unknown>; is_active: boolean;
-  created_at: string; updated_at: string;
-}
-
 export interface ScopeRef { scope_type: string; scope_id: string | null }
-
-export const dataInterfaces = {
-  listSystems: (orgId: string, scope: ScopeRef) =>
-    request<DataSystem[]>(`/api/v1/organizations/${orgId}/data-systems?scope_type=${scope.scope_type}&scope_id=${scope.scope_id ?? ''}`),
-  getSystem: (id: string) => request<DataSystem>(`/api/v1/data-systems/${id}`),
-  updateSystem: (id: string, data: Partial<DataSystem>) =>
-    request<DataSystem>(`/api/v1/data-systems/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  listInterfaces: (systemId: string) =>
-    request<DataInterface[]>(`/api/v1/data-systems/${systemId}/data-interfaces`),
-  getInterface: (id: string) => request<DataInterface>(`/api/v1/data-interfaces/${id}`),
-  updateInterface: (id: string, data: Partial<DataInterface>) =>
-    request<DataInterface>(`/api/v1/data-interfaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-};
 
 // ── App Monitor ────────────────────────────────────────────────────────
 
@@ -1548,22 +1443,15 @@ export interface AgentMetrics {
 
 export interface ToolMetrics {
   calls: number; success_count: number; error_count: number; error_rate: number; avg_latency_ms: number;
-  by_connector: {
-    connector_id: string | null; connector_name: string; type: string | null; is_active: boolean | null;
-    health_status: string; calls: number; error_count: number; error_rate: number; avg_latency_ms: number;
-    last_called_at: string | null;
-  }[];
   by_skill: {
     skill_id: string; skill_name: string; scope_type: string | null; scope_id: string | null;
     calls: number; error_count: number; error_rate: number; avg_latency_ms: number;
   }[];
-  by_endpoint: {
-    endpoint_id: string; endpoint_name: string; connector_name: string; method: string | null; path: string | null;
-    calls: number; error_count: number; error_rate: number; avg_latency_ms: number;
+  by_action: {
+    action_id: string; action_key: string; action_name: string; module_key: string | null;
+    operation: string | null; calls: number; error_count: number; error_rate: number; avg_latency_ms: number;
   }[];
   inventory: {
-    connectors: { total: number; active: number; inactive: number; by_health: Record<string, number> };
-    data_interfaces: { systems_total: number; interfaces_total: number; active: number; inactive: number };
     skills: { folders_total: number; files_total: number };
   };
 }
@@ -2659,7 +2547,7 @@ export const terminal = {
       `/api/v1/terminal/tasks/${id}/run`,
       { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null, invoked_skill_ids, application_id: application_id ?? null, page_context, target_workspace_id: target_workspace_id ?? null, client_request_id: client_request_id ?? crypto.randomUUID(), ...buildTaskRunFilePayload(attachment_file_ids, file_refs_v1) }) },
     ),
-  /** 流式执行：返回原始 Response，由调用方解析 SSE（仿 AgentPlayground）。
+  /** 流式执行：返回原始 Response，由调用方解析持久化 SSE 事件。
    *  template_agent_id 逐次覆盖（不落库）：undefined=沿用 task.config；null=通用；UUID=该次用此智能体。 */
   runTaskStream: (
     id: string, message: string, signal: AbortSignal,

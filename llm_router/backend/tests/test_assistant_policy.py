@@ -1,4 +1,4 @@
-"""DB-free contracts for the runtime-owned DSH policies (Phase A: completion / tool metadata / memory)."""
+"""DB-free contracts for native Assistant Core policies and tool metadata."""
 
 import json
 from contextlib import asynccontextmanager
@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.agents.dsh import runner
+from app.agents.core import runner
 from app.agents.graph import nodes, run_registry
 from app.agents.runtime_support import sse_replay_and_tail
 from app.services import platform_tool_registry
@@ -61,7 +61,7 @@ def test_completion_policy_lists_executable_skill_tools_from_the_registry():
     state = {
         "exec_mode": "craft",
         "request": "你好",
-        "_dsh_tool_registry": {
+        "_assistant_tool_registry": {
             "bank_flow": {"kind": "code"},
             "run_skill_script": {"kind": "run_skill_script"},
             "load_skill": {"kind": "load_skill"},
@@ -78,12 +78,12 @@ def test_completion_policy_lists_executable_skill_tools_from_the_registry():
     assert {"workspace_write_file", "document_tool", "image_generation_tool"} <= set(tools)
 
 
-# ── policy events from the runtime ───────────────────────────────────────
+# ── policy events from the native runtime ───────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_policy_continuation_retracts_the_half_answer_streamed_so_far(monkeypatch):
-    async def stream_run(_request):
+    async def stream_run(_request, **_kwargs):
         yield {"type": "text_delta", "delta": "我先加载技能"}
         yield {"type": "text_delta", "delta": "，稍等。"}
         yield {"type": "policy", "action": "continuation", "nudge": 1}
@@ -103,12 +103,12 @@ async def test_policy_continuation_retracts_the_half_answer_streamed_so_far(monk
         yield {"type": "text_delta", "delta": "处理完成，文件已生成。"}
         yield {"type": "done", "text": "处理完成，文件已生成。", "steps": 2, "tool_calls": 1}
 
-    monkeypatch.setattr(runner.client, "stream_run", stream_run)
+    monkeypatch.setattr(runner.native_core, "stream_run", stream_run)
     handle = run_registry.RunHandle(task_id="task-policy-continuation")
     state = {"run_id": 7, "request": "请生成一份 Excel 表格", "messages": [], "steps": [], "exec_mode": "craft"}
     staged: list[dict] = []
 
-    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", handle, staged)
+    await runner._consume_native(state, {"system_prompt": "", "tools": []}, "run-token", handle, staged, {})
 
     retracts = [event for event in staged if event.get("type") == "text_retract"]
     assert retracts == [{"type": "text_retract", "chars": len("我先加载技能，稍等。")}]
@@ -125,7 +125,7 @@ async def test_policy_continuation_retracts_the_half_answer_streamed_so_far(monk
 
 @pytest.mark.asyncio
 async def test_policy_blocks_and_timeouts_are_recorded_without_retracting_text(monkeypatch):
-    async def stream_run(_request):
+    async def stream_run(_request, **_kwargs):
         yield {"type": "text_delta", "delta": "尝试读取。"}
         yield {
             "type": "policy",
@@ -136,11 +136,11 @@ async def test_policy_blocks_and_timeouts_are_recorded_without_retracting_text(m
         yield {"type": "policy", "action": "tool_timeout", "tool": "run_skill_script", "detail": "300000ms"}
         yield {"type": "done", "text": "尝试读取。脚本超时，已如实说明。", "steps": 3, "tool_calls": 2}
 
-    monkeypatch.setattr(runner.client, "stream_run", stream_run)
+    monkeypatch.setattr(runner.native_core, "stream_run", stream_run)
     state = {"run_id": 8, "request": "跑一下脚本", "messages": [], "steps": [], "traces": []}
     staged: list[dict] = []
 
-    await runner._consume_dsh(state, {"system_prompt": "", "tools": []}, "run-token", None, staged)
+    await runner._consume_native(state, {"system_prompt": "", "tools": []}, "run-token", None, staged, {})
 
     policy_steps = [step for step in state["steps"] if step.get("step") == "policy"]
     assert policy_steps == [
@@ -166,19 +166,20 @@ async def test_policy_blocks_and_timeouts_are_recorded_without_retracting_text(m
 async def test_runtime_cancel_surfaces_as_a_stopped_run_not_a_generic_failure(monkeypatch):
     """运行时取消以 error(code=CANCELLED) 收口（不再发 done）；公开文案不能是「暂时无法完成」。"""
 
-    async def stream_run(_request):
+    async def stream_run(_request, **_kwargs):
         yield {"type": "status", "status": "cancelled"}
         yield {"type": "error", "message": "cancelled", "code": "CANCELLED"}
 
-    monkeypatch.setattr(runner.client, "stream_run", stream_run)
+    monkeypatch.setattr(runner.native_core, "stream_run", stream_run)
 
-    with pytest.raises(runner.DshRunError) as raised:
-        await runner._consume_dsh(
+    with pytest.raises(runner.AssistantRunError) as raised:
+        await runner._consume_native(
             {"run_id": 9, "request": "停一下", "messages": [], "steps": []},
             {"system_prompt": "", "tools": []},
             "run-token",
             None,
             [],
+            {},
         )
 
     assert raised.value.code == "CANCELLED"
@@ -190,7 +191,8 @@ async def test_runtime_cancel_surfaces_as_a_stopped_run_not_a_generic_failure(mo
 
 def test_builtin_tool_specs_carry_runtime_metadata():
     specs = {
-        spec["name"]: spec for spec in nodes.dsh_tool_specs(nodes._builtin_tool_defs(include_image_generation=True), {})
+        spec["name"]: spec
+        for spec in nodes.assistant_tool_specs(nodes._builtin_tool_defs(include_image_generation=True), {})
     }
 
     assert specs  # sanity
@@ -205,35 +207,35 @@ def test_builtin_tool_specs_carry_runtime_metadata():
     }
     for spec in specs.values():
         assert required_keys <= set(spec)
-        assert spec["max_model_chars"] == nodes.DSH_TOOL_MAX_MODEL_CHARS
+        assert spec["max_model_chars"] == nodes.ASSISTANT_TOOL_MAX_MODEL_CHARS
         assert spec["max_model_chars"] > 4000  # H2: never the trace preview limit
     for name in ("workspace_read_file", "workspace_search", "workspace_list_files", "workspace_get_file"):
         assert specs[name]["concurrency_safe"] is True
-        assert specs[name]["timeout_ms"] == nodes.DSH_TOOL_TIMEOUT_READ_MS
+        assert specs[name]["timeout_ms"] == nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS
         assert specs[name]["kind"] == "workspace_file"
     for name in ("workspace_write_file", "workspace_move_file", "workspace_delete_file", "workspace_create_file"):
         assert specs[name]["concurrency_safe"] is False
-        assert specs[name]["timeout_ms"] == nodes.DSH_TOOL_TIMEOUT_DEFAULT_MS
+        assert specs[name]["timeout_ms"] == nodes.ASSISTANT_TOOL_TIMEOUT_DEFAULT_MS
     office_tools = (*sorted(nodes.STRICT_FILE_TOOL_NAMES), "image_tool", "archive_tool")
     for name in office_tools:
         assert specs[name]["kind"] == "platform_tool"
         is_inspect = name.endswith("_inspect")
         assert specs[name]["concurrency_safe"] is is_inspect
         expected_timeout = (
-            nodes.DSH_TOOL_TIMEOUT_READ_MS
+            nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS
             if is_inspect
             else (
-                nodes.DSH_TOOL_TIMEOUT_LONG_MS
-                if name in nodes._DSH_LONG_RUNNING_TOOL_NAMES
-                else nodes.DSH_TOOL_TIMEOUT_DEFAULT_MS
+                nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS
+                if name in nodes._ASSISTANT_LONG_RUNNING_TOOL_NAMES
+                else nodes.ASSISTANT_TOOL_TIMEOUT_DEFAULT_MS
             )
         )
         assert specs[name]["timeout_ms"] == expected_timeout
     assert specs["web_tool"]["kind"] == "web"
     assert specs["web_tool"]["concurrency_safe"] is True
-    assert specs["web_tool"]["timeout_ms"] == nodes.DSH_TOOL_TIMEOUT_LONG_MS
+    assert specs["web_tool"]["timeout_ms"] == nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS
     assert specs["image_generation_tool"]["concurrency_safe"] is False
-    assert specs["image_generation_tool"]["timeout_ms"] == nodes.DSH_TOOL_TIMEOUT_LONG_MS
+    assert specs["image_generation_tool"]["timeout_ms"] == nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS
 
 
 def test_registry_backed_tool_specs_are_classified_by_kind():
@@ -261,24 +263,24 @@ def test_registry_backed_tool_specs_are_classified_by_kind():
         for name in [*registry, "node_ext_lookup"]
     ]
 
-    specs = {spec["name"]: spec for spec in nodes.dsh_tool_specs(tools, registry)}
+    specs = {spec["name"]: spec for spec in nodes.assistant_tool_specs(tools, registry)}
 
     def check(name, kind, timeout_ms, concurrency_safe):
         assert specs[name]["kind"] == kind, name
         assert specs[name]["timeout_ms"] == timeout_ms, name
         assert specs[name]["concurrency_safe"] is concurrency_safe, name
 
-    check("run_skill_script", "skill", nodes.DSH_TOOL_TIMEOUT_LONG_MS, False)
-    check("bank_flow", "skill", nodes.DSH_TOOL_TIMEOUT_LONG_MS, False)
-    check("load_skill", "skill", nodes.DSH_TOOL_TIMEOUT_READ_MS, True)
-    check("read_skill_resource", "skill", nodes.DSH_TOOL_TIMEOUT_READ_MS, True)
-    check("load_bank_flow", "skill", nodes.DSH_TOOL_TIMEOUT_READ_MS, True)
-    check("rag_search", "rag", nodes.DSH_TOOL_TIMEOUT_READ_MS, True)
-    check("erp__query_stock_1234abcd", "connector", nodes.DSH_TOOL_TIMEOUT_DEFAULT_MS, False)
-    check("crm_create_order", "enterprise_action", nodes.DSH_TOOL_TIMEOUT_LONG_MS, False)
-    check("read_memory", "memory", nodes.DSH_TOOL_TIMEOUT_READ_MS, True)
-    check("write_memory", "memory", nodes.DSH_TOOL_TIMEOUT_DEFAULT_MS, False)
-    check("node_ext_lookup", "external_tool", nodes.DSH_TOOL_TIMEOUT_DEFAULT_MS, False)
+    check("run_skill_script", "skill", nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS, False)
+    check("bank_flow", "skill", nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS, False)
+    check("load_skill", "skill", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
+    check("read_skill_resource", "skill", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
+    check("load_bank_flow", "skill", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
+    check("rag_search", "rag", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
+    check("erp__query_stock_1234abcd", "connector", nodes.ASSISTANT_TOOL_TIMEOUT_DEFAULT_MS, False)
+    check("crm_create_order", "enterprise_action", nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS, False)
+    check("read_memory", "memory", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
+    check("write_memory", "memory", nodes.ASSISTANT_TOOL_TIMEOUT_DEFAULT_MS, False)
+    check("node_ext_lookup", "external_tool", nodes.ASSISTANT_TOOL_TIMEOUT_DEFAULT_MS, False)
 
 
 def test_runner_tool_specs_delegate_to_the_shared_assembly():
@@ -293,7 +295,7 @@ def test_runner_tool_specs_delegate_to_the_shared_assembly():
         }
     ]
     specs = runner._tool_specs(tools, {})
-    assert specs == nodes.dsh_tool_specs(tools, {})
+    assert specs == nodes.assistant_tool_specs(tools, {})
     assert specs[0]["input_schema"] == {"type": "object"}
     assert specs[0]["concurrency_safe"] is True
 
@@ -375,7 +377,7 @@ async def test_craft_turn_offers_memory_tools_to_a_terminal_user(monkeypatch):
     principal = SimpleNamespace(id="user-1", organization_id=uuid4(), department_id=None, team_id=None, role="member")
     _patch_prepare_dependencies(monkeypatch, principal)
 
-    result = await nodes.prepare_dsh_turn(_craft_state())
+    result = await nodes.prepare_assistant_turn(_craft_state())
 
     names = [tool["function"]["name"] for tool in result["tools"]]
     assert "read_memory" in names and "write_memory" in names
@@ -383,7 +385,7 @@ async def test_craft_turn_offers_memory_tools_to_a_terminal_user(monkeypatch):
     assert result["registry"]["write_memory"] == {"kind": "memory", "operation": "write"}
     write_def = next(tool["function"] for tool in result["tools"] if tool["function"]["name"] == "write_memory")
     assert write_def["parameters"]["required"] == ["content"]
-    specs = {spec["name"]: spec for spec in nodes.dsh_tool_specs(result["tools"], result["registry"])}
+    specs = {spec["name"]: spec for spec in nodes.assistant_tool_specs(result["tools"], result["registry"])}
     assert specs["read_memory"]["concurrency_safe"] is True
     assert specs["write_memory"]["concurrency_safe"] is False
     assert specs["write_memory"]["kind"] == "memory"
@@ -393,11 +395,11 @@ async def test_craft_turn_offers_memory_tools_to_a_terminal_user(monkeypatch):
 async def test_ask_and_playground_turns_do_not_offer_memory_tools(monkeypatch):
     principal = SimpleNamespace(id="user-1", organization_id=uuid4(), department_id=None, team_id=None, role="member")
     _patch_prepare_dependencies(monkeypatch, principal)
-    ask = await nodes.prepare_dsh_turn(_craft_state(exec_mode="ask"))
+    ask = await nodes.prepare_assistant_turn(_craft_state(exec_mode="ask"))
     assert ask["tools"] == [] and "write_memory" not in ask["registry"]
 
     _patch_prepare_dependencies(monkeypatch, None)  # admin playground: no terminal principal
-    playground = await nodes.prepare_dsh_turn(_craft_state(mode="agent", user_id=None))
+    playground = await nodes.prepare_assistant_turn(_craft_state(mode="agent", user_id=None))
     names = [tool["function"]["name"] for tool in playground["tools"]]
     assert "write_memory" not in names and "read_memory" not in names
 
@@ -440,7 +442,7 @@ async def test_execute_tool_call_dispatches_memory_tools_for_the_current_princip
     assert writes == [("user-1", "供应商 A → 账期 → 60 天")]
     assert json.loads(message["content"])["status"] == "success"
     assert preview == message["content"]
-    assert state["_dsh_memory_written"] is True
+    assert state["_assistant_memory_written"] is True
 
     message, _preview, ok = await nodes._execute_tool_call(
         state,
@@ -485,7 +487,7 @@ async def test_extract_memory_skips_the_llm_pass_when_the_run_already_wrote_memo
         "exec_mode": "craft",
         "user_id": "user-1",
         "org_id": str(uuid4()),
-        "_dsh_memory_written": True,
+        "_assistant_memory_written": True,
         "steps": [{"step": "llm_final"}],
         "traces": [],
     }

@@ -48,8 +48,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 新建组织时由 organization_service.create_organization 自动播种为组织级规则，
     # 组织管理员可启停；存量组织由迁移 0030 一次性回填。
 
-    # 智能体协调由独立 DSH Runtime 承担；本进程只保留平台能力与授权边界。
-    logger.info("agent_runtime", coordinator="dsh")
+    logger.info("agent_runtime", coordinator="native-assistant-core")
 
     # Retry interrupted executable Skill dependency installs after restart.
     install_resume_task = None

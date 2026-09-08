@@ -1,4 +1,4 @@
-"""Redis-backed admission control for DSH agent runs.
+"""Redis-backed admission control for Assistant Core runs.
 
 PostgreSQL remains the run-history source of truth. Redis owns only short-lived
 queue and lease state so every Backend replica observes the same limits.

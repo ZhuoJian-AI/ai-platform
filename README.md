@@ -22,7 +22,7 @@
 └─ 业务小助手：Bridge 上下文 + 当前页面获权 Manifest Action
 ```
 
-平台正在用原生协调器替换历史 DSH Runtime。过渡期间每次运行在开始时固定选择 `native` 或 `dsh`，不会在运行中切换。旧 Connector 工具绑定只读保留至连续七天无调用；新业务助手不再注入 Connector、Data Interface、Ontology 或外部扩展。
+所有新运行均由平台原生 Assistant Core 执行。历史 DSH Runtime 和外部扩展构建服务已退出部署；旧 Connector 工具绑定只读保留至连续七天无调用，新业务助手不再注入 Connector、Data Interface、Ontology 或外部扩展。
 
 ## 本地开发
 

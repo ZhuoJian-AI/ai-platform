@@ -18,7 +18,6 @@ from app.api.connectors import router as connector_router
 from app.api.data_interfaces import router as data_interface_router
 from app.api.departments import router as dept_router
 from app.api.dlp_rules import router as dlp_router
-from app.api.dsh_internal import router as dsh_internal_router
 from app.api.ecs_publisher import router as ecs_publisher_router
 from app.api.enterprise_applications import router as enterprise_application_router
 from app.api.file_events import router as file_event_router
@@ -54,8 +53,6 @@ api_router.include_router(storage_lifecycle_router, tags=["storage-lifecycle"])
 api_router.include_router(enterprise_application_router, tags=["enterprise-applications"])
 api_router.include_router(module_publisher_router, tags=["module-publisher"])
 api_router.include_router(ecs_publisher_router, tags=["ecs-publisher"])
-# Docker-internal DSH callbacks use a dedicated service token, never user/admin JWTs.
-api_router.include_router(dsh_internal_router, tags=["internal-dsh"])
 # Storage Gateway save notifications use an independent HMAC boundary.  This
 # route is intentionally registered before user/admin JWT protected routes.
 api_router.include_router(office_edit_router, tags=["internal-weboffice"])

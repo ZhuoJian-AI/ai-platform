@@ -1,4 +1,4 @@
-"""Focused lifecycle tests for Redis-backed DSH admission control."""
+"""Focused lifecycle tests for Redis-backed Assistant Core admission control."""
 
 from __future__ import annotations
 

@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import runtime_support
-from app.agents.dsh import runner as dsh_runner
+from app.agents.core import runner
 from app.agents.graph import nodes
 from app.api import terminal as terminal_api
 from app.auth.user_auth import CurrentUser
@@ -263,7 +263,7 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
     monkeypatch.setattr(nodes, "_configure_visual_turn", fake_visual)
 
     file_id = str(selected.id)
-    result = await nodes.prepare_dsh_turn(
+    result = await nodes.prepare_assistant_turn(
         {
             "mode": "general",
             "org_id": str(org.id),
@@ -354,7 +354,7 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
     monkeypatch.setattr(nodes, "_configure_visual_turn", fake_visual)
 
     file_id = str(selected.id)
-    result = await nodes.prepare_dsh_turn(
+    result = await nodes.prepare_assistant_turn(
         {
             "mode": "general",
             "org_id": str(org.id),
@@ -380,27 +380,28 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
 
 
 @pytest.mark.asyncio
-async def test_dsh_runtime_retracts_unverified_tool_success(
+async def test_assistant_core_retracts_unverified_tool_success(
     monkeypatch: pytest.MonkeyPatch,
 ):
     fake_id = str(uuid4())
 
-    async def fake_stream_run(_payload):
+    async def fake_stream_run(_payload, **_kwargs):
         yield {
             "type": "text_delta",
             "delta": f"已真实调用 image_tool，执行成功，file_id={fake_id}",
         }
         yield {"type": "done"}
 
-    monkeypatch.setattr(dsh_runner.client, "stream_run", fake_stream_run)
+    monkeypatch.setattr(runner.native_core, "stream_run", fake_stream_run)
     state = {"run_id": 1, "request": "请处理附件", "steps": [], "messages": []}
     staged: list[dict] = []
-    await dsh_runner._consume_dsh(
+    await runner._consume_native(
         state,
         {"system_prompt": "测试", "tools": [], "memory_context": None},
         "run-token",
         None,
         staged,
+        {},
     )
 
     assert fake_id not in state["assistant_final"]

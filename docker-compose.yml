@@ -53,6 +53,7 @@ services:
       REDIS_PASSWORD: ""
       SECRET_KEY: ""
       MASTER_ENCRYPTION_KEY: ""
+      # Retired deployment variables may still exist in a developer shell.
       DSH_RUNTIME_TOKEN: ""
       EXTENSION_BUILDER_TOKEN: ""
       SKILL_CACHE_ROOT: /cache
@@ -92,59 +93,10 @@ services:
       resources:
         limits: { cpus: "1.50", memory: 3G, pids: 512 }
 
-  dsh-runtime:
-    build: ./dsh_runtime
-    container_name: ai_infra_dsh_runtime
-    environment:
-      DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:-dsh-runtime-local-dev-token}
-      AI_PLATFORM_BACKEND_URL: http://backend:8000
-      PORT: "8030"
-      EXTENSION_CACHE_ROOT: /extensions
-      DSH_RUNTIME_HARD_CONCURRENCY: ${DSH_RUNTIME_HARD_CONCURRENCY:-14}
-    volumes:
-      - extensioncache:/extensions
-    expose:
-      - "8030"
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8030/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits: { cpus: "1.00", memory: 1536M }
-
-  extension-builder:
-    build: ./extension_builder
-    container_name: ai_infra_extension_builder
-    environment:
-      EXTENSION_BUILDER_TOKEN: ${EXTENSION_BUILDER_TOKEN:-extension-builder-local-dev-token}
-      AI_PLATFORM_BACKEND_URL: http://backend:8000
-      PORT: "8040"
-    ports:
-      - "127.0.0.1:8040:8040"
-    read_only: true
-    tmpfs:
-      - /tmp:size=536870912,mode=1777
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8040/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "1.00"
-          memory: 1G
-          pids: 256
-
 volumes:
   pgdata:
   redisdata:
   skillcache:
-  extensioncache:
 
 networks:
   # Only trusted data services and the backend/workers may join this bridge.

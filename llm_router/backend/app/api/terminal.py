@@ -1,7 +1,7 @@
 """Terminal API — 组织终端用户端（通用智能体AgileBuddy）。
 
 全部由 ``require_user`` 守卫；任务仅属主可访问；工作空间文件读写受 scope 可见性约束。
-通用智能体由唯一的内部 DSH Runtime 协调；平台继续执行授权后的业务工具。
+通用智能体由平台原生 Assistant Core 协调并执行授权后的业务工具。
 """
 
 import asyncio
@@ -28,8 +28,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents.dsh import registry as dsh_registry
-from app.agents.dsh import run_general_agent, stream_general_agent
+from app.agents.core import approval_registry
+from app.agents.core.runner import run_general_agent, stream_general_agent
 from app.agents.graph import run_registry
 from app.agents.runtime_support import stream_persisted_run
 from app.api.retirement import retired_api_dependency
@@ -1221,7 +1221,7 @@ async def cancel_task_endpoint(
     cu: CurrentUser = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """取消运行中的 run：registry.cancel 触发后台 asyncio.Task.cancel → astream 抛 CancelledError → runner 标 error。"""
+    """取消运行中的 run：run registry 触发后台任务取消并由协调器收口状态。"""
     task = await _get_owned_task(db, task_id, cu)
     cancelled = run_registry.cancel(str(task.id))
     return {"cancelled": cancelled}
@@ -1243,10 +1243,10 @@ async def decide_task_approval_endpoint(
     task = await _get_owned_task(db, task_id, cu)
     assert_user_write(cu)
     try:
-        outcome = dsh_registry.decide_approval(str(task.id), approval_id, data.decision)
-    except dsh_registry.ApprovalNotFoundError:
+        outcome = approval_registry.decide_approval(str(task.id), approval_id, data.decision)
+    except approval_registry.ApprovalNotFoundError:
         raise HTTPException(status_code=404, detail="Approval not found or expired") from None
-    except dsh_registry.ApprovalAlreadyDecidedError:
+    except approval_registry.ApprovalAlreadyDecidedError:
         raise HTTPException(status_code=409, detail="Approval already decided") from None
     return {"outcome": outcome}
 

@@ -77,6 +77,8 @@ services:
       REDIS_PASSWORD: ""
       SECRET_KEY: ""
       MASTER_ENCRYPTION_KEY: ""
+      # Keep retired service secrets explicitly blank until Coolify project
+      # variables are removed after the seven-day rollback window.
       DSH_RUNTIME_TOKEN: ""
       EXTENSION_BUILDER_TOKEN: ""
       STORAGE_GATEWAY_URL: ""
@@ -116,55 +118,6 @@ services:
       resources:
         limits: { cpus: "1.50", memory: 3G, pids: 512 }
 
-  dsh-runtime:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-dsh-runtime-app@sha256:00c5ffab0c00a45c9462845b21d1d40841895512d478568f792ac81a365891c0
-    environment:
-      DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
-      AI_PLATFORM_BACKEND_URL: http://backend:8000
-      PORT: "8030"
-      EXTENSION_CACHE_ROOT: /extensions
-      DSH_RUNTIME_HARD_CONCURRENCY: "${DSH_RUNTIME_HARD_CONCURRENCY:-14}"
-    expose:
-      - "8030"
-    volumes:
-      - extension_cache:/extensions
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8030/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 10s
-    restart: unless-stopped
-    init: true
-    logging: *default-logging
-    deploy:
-      resources:
-        limits: { cpus: "1.00", memory: 1536M }
-
-  extension-builder:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-extension-builder-app@sha256:972fe834170b6bcdb47add9caa48e1847793caae2e37c473804b948c9beb0910
-    environment:
-      EXTENSION_BUILDER_TOKEN: ${EXTENSION_BUILDER_TOKEN:?}
-      AI_PLATFORM_BACKEND_URL: http://backend:8000
-      PORT: "8040"
-    expose:
-      - "8040"
-    read_only: true
-    tmpfs:
-      - /tmp:size=536870912,mode=1777
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8040/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 10s
-    restart: unless-stopped
-    init: true
-    logging: *default-logging
-    deploy:
-      resources:
-        limits: { cpus: "1.00", memory: 1G, pids: 256 }
-
   backend:
     image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:da739de71b86fda0334495079adf2a42637513c115f150919fbee1946fd6b5db
     environment:
@@ -185,11 +138,6 @@ services:
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
       SKILL_RUNNER_TIMEOUT_SECONDS: "${SKILL_RUNNER_TIMEOUT_SECONDS:-120}"
       SKILL_RUNNER_QUEUE_WAIT_SECONDS: "${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}"
-      ASSISTANT_ENGINE: "${ASSISTANT_ENGINE:-dsh}"
-      ASSISTANT_NATIVE_CANARY_USER_IDS: "${ASSISTANT_NATIVE_CANARY_USER_IDS:-}"
-      DSH_RUNTIME_URL: http://dsh-runtime:8030
-      DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:?}
-      DSH_RUNTIME_TIMEOUT_SECONDS: "${DSH_RUNTIME_TIMEOUT_SECONDS:-600}"
       AGENT_GLOBAL_CONCURRENCY: "${AGENT_GLOBAL_CONCURRENCY:-12}"
       AGENT_USER_CONCURRENCY: "${AGENT_USER_CONCURRENCY:-2}"
       AGENT_QUEUE_MAX: "${AGENT_QUEUE_MAX:-100}"
@@ -197,9 +145,6 @@ services:
       AGENT_LEASE_SECONDS: "${AGENT_LEASE_SECONDS:-60}"
       AGENT_HEARTBEAT_SECONDS: "${AGENT_HEARTBEAT_SECONDS:-15}"
       AGENT_MAX_STEPS: "${AGENT_MAX_STEPS:-24}"
-      EXTENSION_BUILDER_URL: http://extension-builder:8040
-      EXTENSION_BUILDER_TOKEN: ${EXTENSION_BUILDER_TOKEN:?}
-      EXTENSION_BUILDER_TIMEOUT_SECONDS: "${EXTENSION_BUILDER_TIMEOUT_SECONDS:-600}"
       ORIGINAL_PREVIEW_ENABLED: "${ORIGINAL_PREVIEW_ENABLED:-true}"
       ORIGINAL_PREVIEW_ORG_ALLOWLIST: "${ORIGINAL_PREVIEW_ORG_ALLOWLIST:-}"
       MULTIMODAL_VISION_ENABLED: "${MULTIMODAL_VISION_ENABLED:-true}"
@@ -248,10 +193,6 @@ services:
       redis:
         condition: service_healthy
       skill-runner:
-        condition: service_healthy
-      dsh-runtime:
-        condition: service_healthy
-      extension-builder:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
@@ -508,7 +449,6 @@ volumes:
   postgres_data:
   redis_data:
   skill_cache:
-  extension_cache:
 
 networks:
   # PostgreSQL and Redis are invisible to executable Skills.  Backend and the
