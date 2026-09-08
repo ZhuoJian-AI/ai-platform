@@ -1,5 +1,11 @@
 # Active tasks
 
+## SUBSYSTEM-AI-20260909 — 子系统受控专业 AI 能力与嵌入式验收 (@codex-subsystem-ai)
+
+- 在原生 Assistant Core 上提供组织、员工、应用、页面和 Action 绑定的专业 AI 能力，不恢复 DSH 或已退役扩展链。
+- 支持 OCR、语音转写、图像比较/分类、结构化抽取和业务预测的异步运行、可信结果、人工确认与撤权。
+- 完成后端、前端和真实员工嵌入式验收，并按 Registry-first 发布 SaaS；不修改任何业务子系统服务器。
+
 ## PLATFORM-SIMPLIFY-20260908 — 原生 Assistant Core 与冗余链路清理 (@codex-platform-simplification)
 
 - 从 DSH 迁移个人助手、业务助手和自定义智能体，保留 Task、AgentRunEvent、Artifact 与工作空间能力。
