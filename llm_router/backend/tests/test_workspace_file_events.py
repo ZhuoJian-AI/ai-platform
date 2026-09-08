@@ -18,11 +18,13 @@ def db_engine():
 class _Context:
     def __init__(self, db):
         self.db = db
+        self.exited = False
 
     async def __aenter__(self):
         return self.db
 
     async def __aexit__(self, *_args):
+        self.exited = True
         return None
 
 
@@ -91,7 +93,8 @@ async def test_filtered_tail_advances_client_with_cursor_only_frame(monkeypatch)
             return workspace
 
     db = EventDb()
-    monkeypatch.setattr(file_events, "async_session_factory", lambda: _Context(db))
+    context = _Context(db)
+    monkeypatch.setattr(file_events, "async_session_factory", lambda: context)
     monkeypatch.setattr(
         file_events,
         "current_user_for_user",
@@ -110,6 +113,7 @@ async def test_filtered_tail_advances_client_with_cursor_only_frame(monkeypatch)
     second = await anext(iterator)
     assert second == 'id: 11\nevent: cursor\ndata: {"cursor":11}\n\n'
     assert "workspace_id" not in second
+    assert context.exited is True
     await iterator.aclose()
 
 

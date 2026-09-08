@@ -6,6 +6,7 @@ import asyncio
 import json
 from uuid import UUID
 
+from anyio import CancelScope
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
@@ -69,51 +70,61 @@ async def stream_file_events(
         idle_ticks = 0
         while not await request.is_disconnected():
             delivered = False
-            async with async_session_factory() as db:
-                live_user = (await db.execute(select(User).where(
-                    User.id == UUID(str(cu.id)),
-                    User.deleted_at.is_(None),
-                    User.is_active.is_(True),
-                ))).scalar_one_or_none()
-                if live_user is None:
-                    return
-                live_principal = await current_user_for_user(db, live_user)
-                rows = list((await db.execute(
-                    select(WorkspaceFileEventOutbox)
-                    .where(
-                        WorkspaceFileEventOutbox.organization_id == cu.organization_id,
-                        WorkspaceFileEventOutbox.id > cursor,
-                    )
-                    .order_by(WorkspaceFileEventOutbox.id)
-                    .limit(100)
-                )).scalars())
-                workspace_cache: dict[str, bool] = {}
-                for row in rows:
-                    cursor = max(cursor, int(row.id))
-                    key = str(row.workspace_id)
-                    allowed = workspace_cache.get(key)
-                    if allowed is None:
-                        workspace = await db.get(Workspace, row.workspace_id)
-                        allowed = bool(
-                            workspace is not None
-                            and (
-                                await workspace_permission_service.capabilities(
-                                    db, workspace, live_principal,
-                                )
-                            )["read"]
+            frames: list[str] = []
+            # Client navigation cancels the SSE response task.  Finish this
+            # short database batch and return its connection before yielding
+            # any network frame, otherwise cancellation can strand an
+            # asyncpg connection until garbage collection.
+            with CancelScope(shield=True):
+                async with async_session_factory() as db:
+                    live_user = (await db.execute(select(User).where(
+                        User.id == UUID(str(cu.id)),
+                        User.deleted_at.is_(None),
+                        User.is_active.is_(True),
+                    ))).scalar_one_or_none()
+                    if live_user is None:
+                        return
+                    live_principal = await current_user_for_user(db, live_user)
+                    rows = list((await db.execute(
+                        select(WorkspaceFileEventOutbox)
+                        .where(
+                            WorkspaceFileEventOutbox.organization_id == cu.organization_id,
+                            WorkspaceFileEventOutbox.id > cursor,
                         )
-                        workspace_cache[key] = allowed
-                    if not allowed:
-                        continue
-                    delivered = True
-                    emitted_cursor = int(row.id)
-                    yield f"id: {row.id}\nevent: workspace-file\ndata: {_event_payload(row)}\n\n"
-                if cursor > emitted_cursor:
-                    emitted_cursor = cursor
-                    yield (
-                        f"id: {cursor}\nevent: cursor\n"
-                        f"data: {json.dumps({'cursor': cursor}, separators=(',', ':'))}\n\n"
-                    )
+                        .order_by(WorkspaceFileEventOutbox.id)
+                        .limit(100)
+                    )).scalars())
+                    workspace_cache: dict[str, bool] = {}
+                    for row in rows:
+                        cursor = max(cursor, int(row.id))
+                        key = str(row.workspace_id)
+                        allowed = workspace_cache.get(key)
+                        if allowed is None:
+                            workspace = await db.get(Workspace, row.workspace_id)
+                            allowed = bool(
+                                workspace is not None
+                                and (
+                                    await workspace_permission_service.capabilities(
+                                        db, workspace, live_principal,
+                                    )
+                                )["read"]
+                            )
+                            workspace_cache[key] = allowed
+                        if not allowed:
+                            continue
+                        delivered = True
+                        emitted_cursor = int(row.id)
+                        frames.append(
+                            f"id: {row.id}\nevent: workspace-file\ndata: {_event_payload(row)}\n\n"
+                        )
+                    if cursor > emitted_cursor:
+                        emitted_cursor = cursor
+                        frames.append(
+                            f"id: {cursor}\nevent: cursor\n"
+                            f"data: {json.dumps({'cursor': cursor}, separators=(',', ':'))}\n\n"
+                        )
+            for frame in frames:
+                yield frame
             if delivered:
                 idle_ticks = 0
                 continue
