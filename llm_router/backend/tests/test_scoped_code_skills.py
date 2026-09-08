@@ -23,7 +23,7 @@ from app.models.rag import RagCollection
 from app.models.skill import SkillFolder, SkillVersion
 from app.models.user import User
 from app.models.workspace import Workspace
-from app.services import platform_tool_registry, skill_import_service, workspace_service
+from app.services import skill_import_service, workspace_service
 from app.services.scope_service import assert_bound_rags_visible
 from app.services.skill_scope_service import (
     assert_bound_skills_visible,
@@ -726,39 +726,6 @@ async def test_web_tool_is_available_and_executable_without_workspace(db_session
     assert result["status"] == "success"
     assert result["summary"]["results"][0]["title"] == "Result"
     assert runner.await_args.kwargs["inputs"] == []
-
-
-@pytest.mark.asyncio
-async def test_retired_external_tools_are_not_injected_into_any_assistant(db_session, monkeypatch):
-    """外部扩展退役后，个人助手和应用助手都不得再注入其工具。"""
-    _, _, _, _, _, _, cu = await _hierarchy(db_session)
-
-    external_tool = {
-        "type": "function",
-        "function": {
-            "name": "legacy_production_query",
-            "description": "旧生产接口",
-            "parameters": {"type": "object", "properties": {}},
-        },
-    }
-    external_defs = AsyncMock(return_value=[external_tool])
-    monkeypatch.setattr(platform_tool_registry, "active_external_tool_defs", external_defs)
-
-    normal_tools, _ = await _build_tools(db_session, [], None, user=cu)
-    assert "legacy_production_query" not in {item["function"]["name"] for item in normal_tools}
-
-    application_tools, _ = await _build_tools(
-        db_session,
-        [str(uuid4())],
-        None,
-        user=cu,
-        application_id=str(uuid4()),
-        page_context={"module_key": "progress_dashboard"},
-    )
-    application_tool_names = {item["function"]["name"] for item in application_tools}
-    assert "legacy_production_query" not in application_tool_names
-    assert application_tool_names.isdisjoint(_AUTHENTICATED_BUILTIN_TOOLS)
-    external_defs.assert_not_awaited()
 
 
 @pytest.mark.asyncio

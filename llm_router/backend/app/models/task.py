@@ -1,7 +1,7 @@
 """Task & TaskMessage ORM models — 终端用户的通用智能体任务线程。
 
 一个 Task = 用户在终端创建的一次任务/对话线程，携带按任务装配的资源配置（workspace /
-skills / ontology / rag）。TaskMessage 为线程内逐轮消息（user/assistant/tool），
+skills / rag）。TaskMessage 为线程内逐轮消息（user/assistant/tool），
 供 ``load_memory`` 载入本任务对话历史、前端渲染对话流。每次执行同时落一条 ``AgentRun``
 （agent_id 为空、task_id 非空）供监控台复用。
 """
