@@ -627,10 +627,10 @@ const iconActionBtnStyle = (danger?: boolean, disabled?: boolean): CSSProperties
 
 const modalOverlayStyle: CSSProperties = {
   position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 1000,
-  display: 'flex', alignItems: 'center', justifyContent: 'center',
+  display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12,
 };
 
 const modalCardStyle: CSSProperties = {
   maxWidth: 'calc(100vw - 32px)', background: '#fff', borderRadius: 12,
-  boxShadow: '0 12px 32px rgba(0,0,0,0.18)', overflow: 'hidden',
+  maxHeight: 'calc(100dvh - 24px)', boxShadow: '0 12px 32px rgba(0,0,0,0.18)', overflowY: 'auto', overflowX: 'hidden',
 };

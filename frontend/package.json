@@ -17,6 +17,7 @@
     "test:business-conversation": "node scripts/test-business-conversation.mjs",
     "test:admin-session": "node scripts/test-admin-session.mjs",
     "test:login-feedback": "node scripts/test-login-feedback.mjs",
+    "test:responsive": "node scripts/test-responsive-shells.mjs",
     "test:admin-quota": "node scripts/test-admin-quota.mjs",
     "test:e2e:attachments": "node scripts/e2e-chat-attachments.mjs",
     "preview": "vite preview",
