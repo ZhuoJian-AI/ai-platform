@@ -92,6 +92,13 @@ class Settings(BaseSettings):
     multimodal_worker_poll_seconds: float = 1.0
     multimodal_worker_lease_seconds: int = 10 * 60
     multimodal_audio_max_bytes: int = 100 * 1024 * 1024
+    # Embedded subsystems may request narrowly scoped OCR/transcription/image
+    # analysis through the SaaS host.  Provider credentials never cross this
+    # boundary; every run is rebound to the current employee/application/page.
+    subsystem_ai_enabled: bool = True
+    subsystem_ai_org_allowlist: str = "alphabet"
+    subsystem_ai_max_files: int = 5
+    subsystem_ai_max_input_bytes: int = 20 * 1024 * 1024
 
     # Workspace binary object storage (authorized ZhuoJian Storage Gateway).
     # Text workspace files stay inline for editing; Office/PDF/images use this
@@ -224,6 +231,16 @@ class Settings(BaseSettings):
         return self._org_feature_enabled(
             self.multimodal_audio_enabled,
             self.multimodal_audio_org_allowlist,
+            organization_slug,
+            organization_id=organization_id,
+        )
+
+    def subsystem_ai_enabled_for(
+        self, organization_slug: str, *, organization_id: object | None = None
+    ) -> bool:
+        return self._org_feature_enabled(
+            self.subsystem_ai_enabled,
+            self.subsystem_ai_org_allowlist,
             organization_slug,
             organization_id=organization_id,
         )

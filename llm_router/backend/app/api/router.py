@@ -37,6 +37,7 @@ from app.api.routing_policies import router as routing_router
 from app.api.skill_packages import router as skill_package_router
 from app.api.skills import router as skill_router
 from app.api.storage_lifecycle import router as storage_lifecycle_router
+from app.api.subsystem_ai import router as subsystem_ai_router
 from app.api.teams import router as team_router
 from app.api.terminal import router as terminal_router
 from app.api.users import router as user_router
@@ -84,6 +85,7 @@ api_router.include_router(budget_router, tags=["budget"])
 # 应用监控台
 api_router.include_router(monitor_router, tags=["monitor"])
 api_router.include_router(multimodal_router, tags=["multimodal"])
+api_router.include_router(subsystem_ai_router, tags=["subsystem-ai"])
 # 终端用户端（require_user 守卫，用户 JWT）
 api_router.include_router(terminal_router, tags=["terminal"])
 api_router.include_router(file_event_router, tags=["terminal-file-events"])

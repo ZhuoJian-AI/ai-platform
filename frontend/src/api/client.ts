@@ -2136,6 +2136,27 @@ export interface EnterpriseApplicationManifestAction {
   operation: EnterpriseApplicationOperation; aiEnabled: boolean;
   requiresConfirmation: boolean; inputSchema: Record<string, unknown>;
   resultSchema: Record<string, unknown>;
+  platformAiCapability?: {
+    type: 'vision.ocr' | 'vision.compare' | 'vision.classify' | 'speech.transcribe' | 'text.extract' | 'business.predict';
+    inputKinds: Array<'image' | 'audio' | 'text' | 'json'>;
+    humanConfirmation: 'required';
+  };
+}
+
+export interface SubsystemAiRun {
+  run_id: string;
+  request_id: string;
+  capability: 'vision.ocr' | 'vision.compare' | 'vision.classify' | 'speech.transcribe' | 'text.extract' | 'business.predict';
+  application_id: string;
+  module_key: string;
+  page_key: string;
+  action_key: string;
+  status: 'queued' | 'processing' | 'succeeded' | 'failed' | 'cancelled';
+  result: Record<string, unknown>;
+  error: { code: string; messageZh: string; retryable: boolean } | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
 }
 
 export interface EnterpriseApplicationManifestPage {
@@ -2446,6 +2467,40 @@ export const terminal = {
       `/api/v1/terminal/application-action-confirmations/${id}/${decision}`,
       { method: 'POST' },
     ),
+  createSubsystemAiRun: (data: {
+    applicationId: string;
+    moduleKey: string;
+    pageKey: string;
+    actionKey: string;
+    capability: SubsystemAiRun['capability'];
+    instruction: string;
+    context: Record<string, unknown>;
+    textInput: string;
+    requestId: string;
+    files: Array<{ name: string; mimeType: string; blob: Blob }>;
+  }) => {
+    const form = new FormData();
+    form.append('application_id', data.applicationId);
+    form.append('module_key', data.moduleKey);
+    form.append('page_key', data.pageKey);
+    form.append('action_key', data.actionKey);
+    form.append('capability', data.capability);
+    form.append('instruction', data.instruction);
+    form.append('context_json', JSON.stringify(data.context));
+    form.append('text_input', data.textInput);
+    form.append('request_id', data.requestId);
+    for (const file of data.files) {
+      form.append('files', file.blob, file.name);
+    }
+    return userRequest<{ run_id: string; request_id: string; status: string }>(
+      '/api/v1/subsystem-ai/runs',
+      { method: 'POST', body: form },
+    );
+  },
+  getSubsystemAiRun: (runId: string) =>
+    userRequest<SubsystemAiRun>(`/api/v1/subsystem-ai/runs/${runId}`),
+  cancelSubsystemAiRun: (runId: string) =>
+    userRequest<SubsystemAiRun>(`/api/v1/subsystem-ai/runs/${runId}/cancel`, { method: 'POST' }),
   // ── 终端智能体管理（用户级）：列表展示权限范围内可见、改删仅限自己创建的 ──
   listAgents: (scope?: { scope_type: string; scope_id?: string | null }) => {
     const url = scope
