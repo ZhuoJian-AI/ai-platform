@@ -93,6 +93,7 @@ class AgentRunRead(BaseModel):
     agent_id: UUID
     session_id: str
     request: str
+    assistant_engine: str
     input_tokens: int | None
     output_tokens: int | None
     latency_ms: int | None

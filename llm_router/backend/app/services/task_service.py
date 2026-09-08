@@ -50,7 +50,6 @@ async def create_task(
         organization_id=org_id,
         user_id=user_id,
         department_id=department_id,
-        team_id=None,
         session_id=f"task-{uuid.uuid4()}",
         title=data.title.strip() if data.title.strip() else make_task_title(data.message),
         message=data.message,

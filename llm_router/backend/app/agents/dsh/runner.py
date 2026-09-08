@@ -845,10 +845,18 @@ async def _consume_dsh(
     state.setdefault("steps", []).append({"step": "llm_final"})
 
 
-async def _set_run_status(db: Any, run_id: int, status: str) -> None:
+async def _set_run_status(
+    db: Any,
+    run_id: int,
+    status: str,
+    *,
+    assistant_engine: str | None = None,
+) -> None:
     run = await db.get(AgentRun, run_id)
     if run is not None:
         run.status = status
+        if assistant_engine is not None:
+            run.assistant_engine = assistant_engine
         await db.commit()
 
 
@@ -885,7 +893,12 @@ async def _admitted_run(
     trace = {"category": "runtime", "title": "助手执行引擎", "engine": engine}
     state.setdefault("traces", []).append(trace)
     _publish(handle, staged, {"type": "trace", **trace})
-    await _set_run_status(deps["db"], run_id, "queued")
+    await _set_run_status(
+        deps["db"],
+        run_id,
+        "queued",
+        assistant_engine=engine,
+    )
 
     async def status(value: str, position: int | None) -> None:
         event: dict[str, Any] = {"type": "run_status", "status": value}
