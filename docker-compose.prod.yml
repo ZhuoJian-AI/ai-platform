@@ -23,9 +23,6 @@ services:
       DATABASE_URL: postgresql+asyncpg://ai_infra:ai_infra@postgres:5432/ai_infra
       REDIS_URL: redis://redis:6379/0
       PROXY_BASE_URL: https://infra.aievolve.org.cn
-      OAUTH_ISSUER: https://infra.aievolve.org.cn
-      OAUTH_PUBLIC_BASE_URL: https://infra.aievolve.org.cn
-      OAUTH_SIGNING_KEY: ${OAUTH_SIGNING_KEY}
       BROWSER_ALLOWED_ORIGINS: https://infra.aievolve.org.cn
       TRUSTED_PROXY_CIDRS: "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
       API_KEY_CACHE_TTL: "60"
@@ -35,6 +32,8 @@ services:
       SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:-skill-runner-local-dev-token}
       SKILL_RUNNER_TIMEOUT_SECONDS: "120"
       SKILL_RUNNER_QUEUE_WAIT_SECONDS: "300"
+      ASSISTANT_ENGINE: "${ASSISTANT_ENGINE:-dsh}"
+      ASSISTANT_NATIVE_CANARY_USER_IDS: "${ASSISTANT_NATIVE_CANARY_USER_IDS:-}"
       DSH_RUNTIME_URL: http://dsh-runtime:8030
       DSH_RUNTIME_TOKEN: ${DSH_RUNTIME_TOKEN:-dsh-runtime-local-dev-token}
       DSH_RUNTIME_TIMEOUT_SECONDS: "600"

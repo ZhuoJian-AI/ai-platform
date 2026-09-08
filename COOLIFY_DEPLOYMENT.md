@@ -36,10 +36,11 @@ Path 留空。不要给 PostgreSQL、Redis 或 backend 配置公网域名或宿�
 - `REDIS_PASSWORD=<随机强密码>`
 - `REDIS_URL=redis://:<URL编码后的Redis密码>@redis:6379/0`
 - `SECRET_KEY=<随机长字符串>`
-- `OAUTH_SIGNING_KEY=<独立的随机长字符串>`
 - `MASTER_ENCRYPTION_KEY=<Fernet key>`
 - `CODE_SKILLS_ENABLED=true`
 - `SKILL_RUNNER_TOKEN=<随机长字符串>`
+- `ASSISTANT_ENGINE=dsh`
+- `ASSISTANT_NATIVE_CANARY_USER_IDS=<原生引擎灰度员工 UUID，逗号分隔>`
 - `DSH_RUNTIME_TOKEN=<随机长字符串>`
 - `EXTENSION_BUILDER_TOKEN=<随机长字符串>`
 - `SKILL_RUNNER_TIMEOUT_SECONDS=120`
