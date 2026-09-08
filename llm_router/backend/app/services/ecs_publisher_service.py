@@ -222,7 +222,7 @@ async def begin_release_change(
     application_slug: str,
     target_commit: str,
 ) -> None:
-    """Fail-close employee access before a Runtime switches code."""
+    """Record the latest candidate without interrupting the active release."""
 
     target = target_commit.lower()
     if not runtime.is_active:
@@ -289,11 +289,9 @@ async def begin_release_change(
         # A blocked candidate may be corrected or rolled back without ever
         # reopening employee traffic.
         pass
-    elif previous_status == "verifying" and (
-        not release.last_success_commit or target == release.last_success_commit
-    ):
-        # Supersede an interrupted first candidate, or recover an interrupted
-        # update to the last accepted commit. The gate remains closed.
+    elif previous_status == "verifying":
+        # Latest candidate wins. A stale publisher can no longer register once
+        # ``requested_commit`` and ``changeIntent`` point at this new target.
         pass
     else:
         raise HTTPException(
@@ -424,8 +422,8 @@ async def _upsert_application(
                 description="由企业 AI 按灼见原生协议开发并部署在企业 ECS",
                 entry_url=release.base_url,
                 display_mode="embedded",
-                # Runtime registration creates an administrator-reviewable
-                # candidate.  Only an administrator may activate the app.
+                # The candidate remains hidden until its first complete
+                # Manifest validation. Successful activation is automatic.
                 is_active=False,
                 assistant_enabled=True,
                 assistant_config=config,
@@ -582,18 +580,14 @@ async def register_module(
             application,
             allow_initial_inactive_candidate=True,
         )
-        if sync.get("status") not in {"healthy", "pending_review"}:
+        if sync.get("status") != "healthy":
             raise ValueError(str(sync.get("detail") or "Manifest synchronization failed"))
         release.application_id = application.id
         release.contract_revision = contract_revision
         release.manifest_digest = _manifest_digest(manifest)
-        if sync.get("status") == "pending_review":
-            release.status = "pending_review"
-            application.health_status = "unknown"
-        else:
-            release.last_success_commit = target_commit
-            release.status = "healthy"
-            application.health_status = "healthy"
+        release.last_success_commit = target_commit
+        release.status = "healthy"
+        application.health_status = "healthy"
         release_metadata = dict(release.release_metadata or {})
         release_metadata.pop("changeIntent", None)
         release.release_metadata = release_metadata

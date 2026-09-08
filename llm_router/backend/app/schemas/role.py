@@ -48,6 +48,7 @@ class RoleSummary(BaseModel):
     id: UUID
     name: str
     code: str
+    system_key: str | None = None
     data_scope: str
     is_builtin: bool = False
 

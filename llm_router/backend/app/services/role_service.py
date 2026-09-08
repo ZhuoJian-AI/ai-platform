@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -18,6 +18,9 @@ from app.schemas.role import RoleCreate, RoleDataScopeReplace, RoleUpdate
 
 BUILTIN_ADMIN = "enterprise_admin"
 BUILTIN_MEMBER = "employee"
+BUILTIN_RUNTIME_DEVELOPER = "runtime_developer"
+RUNTIME_DEVELOPER_CODE = "zj-runtime-developer"
+RUNTIME_DEVELOPER_PERMISSION = "runtime.developer"
 
 
 def merge_effective_data_scopes(scopes: list[dict]) -> dict:
@@ -66,7 +69,18 @@ async def ensure_builtin_roles(db: AsyncSession, org_id: UUID | str) -> dict[str
                 .options(*_role_options())
                 .where(
                     Role.organization_id == UUID(str(org_id)),
-                    Role.code.in_([BUILTIN_ADMIN, BUILTIN_MEMBER]),
+                    or_(
+                        Role.system_key.in_([
+                            BUILTIN_ADMIN,
+                            BUILTIN_MEMBER,
+                            BUILTIN_RUNTIME_DEVELOPER,
+                        ]),
+                        Role.code.in_([
+                            BUILTIN_ADMIN,
+                            BUILTIN_MEMBER,
+                            RUNTIME_DEVELOPER_CODE,
+                        ]),
+                    ),
                     Role.deleted_at.is_(None),
                 )
             )
@@ -74,20 +88,51 @@ async def ensure_builtin_roles(db: AsyncSession, org_id: UUID | str) -> dict[str
         .scalars()
         .all()
     )
-    by_code = {row.code: row for row in rows}
-    defaults = {
-        BUILTIN_ADMIN: ("企业管理员", "all", ["*"]),
-        BUILTIN_MEMBER: ("普通员工", "self", []),
+    by_key = {
+        row.system_key or (
+            BUILTIN_RUNTIME_DEVELOPER
+            if row.code == RUNTIME_DEVELOPER_CODE
+            else row.code
+        ): row
+        for row in rows
     }
-    for code, (name, data_scope, permissions) in defaults.items():
-        if code in by_code:
+    defaults = {
+        BUILTIN_ADMIN: ("企业管理员", BUILTIN_ADMIN, "all", ["*"]),
+        BUILTIN_MEMBER: ("普通员工", BUILTIN_MEMBER, "self", []),
+        BUILTIN_RUNTIME_DEVELOPER: (
+            "系统研发者",
+            RUNTIME_DEVELOPER_CODE,
+            "all",
+            [RUNTIME_DEVELOPER_PERMISSION],
+        ),
+    }
+    for system_key, (name, code, data_scope, permissions) in defaults.items():
+        if system_key in by_key:
             # 内置角色是登录与兜底授权的基础设施，不能保持在历史误停用状态。
-            by_code[code].is_active = True
+            role = by_key[system_key]
+            role.system_key = system_key
+            role.is_active = True
+            if system_key == BUILTIN_RUNTIME_DEVELOPER:
+                # This role is policy, not customer-authored configuration.
+                role.name = name
+                role.code = code
+                role.description = "系统托管：查看和调试本企业 Runtime 发布的业务系统"
+                role.data_scope = data_scope
+                role.is_builtin = True
+                if set(role.permission_codes) != set(permissions):
+                    await db.execute(delete(RolePermission).where(RolePermission.role_id == role.id))
+                    for permission in permissions:
+                        db.add(RolePermission(role_id=role.id, permission_code=permission))
             continue
         role = Role(
             organization_id=UUID(str(org_id)),
             name=name,
             code=code,
+            system_key=system_key,
+            description=(
+                "系统托管：查看和调试本企业 Runtime 发布的业务系统"
+                if system_key == BUILTIN_RUNTIME_DEVELOPER else None
+            ),
             data_scope=data_scope,
             is_builtin=True,
             is_active=True,
@@ -96,9 +141,9 @@ async def ensure_builtin_roles(db: AsyncSession, org_id: UUID | str) -> dict[str
         await db.flush()
         for permission in permissions:
             db.add(RolePermission(role_id=role.id, permission_code=permission))
-        by_code[code] = role
+        by_key[system_key] = role
     await db.flush()
-    return by_code
+    return by_key
 
 
 async def list_roles(db: AsyncSession, org_id: UUID | str) -> list[Role]:
@@ -136,6 +181,8 @@ async def create_role(db: AsyncSession, org_id: UUID, data: RoleCreate) -> Role:
 
 
 async def update_role(db: AsyncSession, row: Role, data: RoleUpdate) -> Role:
+    if row.system_key == BUILTIN_RUNTIME_DEVELOPER and data.model_fields_set:
+        raise HTTPException(status_code=422, detail="系统研发者角色由平台托管，只能绑定或解绑员工")
     active_changed = "is_active" in data.model_fields_set and data.is_active != row.is_active
     if data.is_active is False and row.is_active:
         if row.is_builtin:
@@ -188,6 +235,8 @@ async def delete_role(db: AsyncSession, row: Role) -> None:
 
 
 async def replace_permissions(db: AsyncSession, row: Role, codes: list[str]) -> Role:
+    if row.system_key == BUILTIN_RUNTIME_DEVELOPER:
+        raise HTTPException(status_code=422, detail="系统研发者角色权限由平台托管")
     if row.is_builtin and row.code == BUILTIN_ADMIN and "*" not in codes:
         raise HTTPException(status_code=422, detail="Enterprise administrator must retain wildcard permission")
     await db.execute(delete(RolePermission).where(RolePermission.role_id == row.id))
@@ -199,6 +248,8 @@ async def replace_permissions(db: AsyncSession, row: Role, codes: list[str]) -> 
 
 
 async def replace_data_scope(db: AsyncSession, row: Role, data: RoleDataScopeReplace) -> Role:
+    if row.system_key == BUILTIN_RUNTIME_DEVELOPER:
+        raise HTTPException(status_code=422, detail="系统研发者角色数据范围由平台托管")
     department_ids = list(dict.fromkeys(data.department_ids))
     if data.data_scope == "custom_departments" and not department_ids:
         raise HTTPException(status_code=422, detail="Custom data scope requires at least one department")

@@ -513,6 +513,7 @@ export interface RoleSummary {
   id: string;
   name: string;
   code: string;
+  system_key: string | null;
   data_scope: RoleDataScope;
   is_builtin: boolean;
 }
@@ -2294,6 +2295,8 @@ export interface EnterpriseApplicationGrant {
   permissions: EnterpriseApplicationPermission[];
   module_keys: string[];
   module_access: Record<string, EnterpriseApplicationModuleAccess>;
+  managed_key: string | null;
+  denied_resources: Record<string, unknown>;
   created_at: string; updated_at: string;
 }
 
@@ -2308,6 +2311,7 @@ export interface EnterpriseApplication {
   id: string; organization_id: string; name: string; slug: string;
   description: string | null; icon_url: string | null; entry_url: string;
   display_mode: 'embedded' | 'external'; sort_order: number; is_active: boolean;
+  admin_disabled: boolean;
   assistant_enabled: boolean; assistant_prompt: string | null;
   assistant_config: Record<string, unknown>; health_status: string;
   grants: EnterpriseApplicationGrant[];
@@ -2429,7 +2433,7 @@ export interface EnterpriseApplicationAction {
   name: string; description: string | null; operation: EnterpriseApplicationOperation;
   ai_enabled: boolean; requires_confirmation: boolean;
   input_schema: Record<string, unknown>; result_schema: Record<string, unknown>;
-  is_active: boolean; created_at: string; updated_at: string;
+  is_active: boolean; admin_disabled: boolean; created_at: string; updated_at: string;
 }
 
 export interface EnterpriseApplicationActionResult {
@@ -2539,6 +2543,11 @@ export const enterpriseApplications = {
     queued_deliveries: number; delivered_events: number; cursor_sequence: number; detail: string | null;
   }>(`/api/v1/applications/${id}/integration/sync`, { method: 'POST' }),
   actions: (id: string) => request<EnterpriseApplicationAction[]>(`/api/v1/applications/${id}/actions`),
+  updateAction: (id: string, actionKey: string, isActive: boolean) =>
+    request<EnterpriseApplicationAction>(
+      `/api/v1/applications/${id}/actions/${encodeURIComponent(actionKey)}`,
+      { method: 'PATCH', body: JSON.stringify({ is_active: isActive }) },
+    ),
   eventRoutes: (id: string) => request<EnterpriseApplicationEventRoute[]>(`/api/v1/applications/${id}/event-routes`),
   replaceEventRoutes: (id: string, routes: Array<Omit<EnterpriseApplicationEventRoute, 'id' | 'application_id' | 'created_at' | 'updated_at'>>) =>
     request<EnterpriseApplicationEventRoute[]>(`/api/v1/applications/${id}/event-routes`, {

@@ -14,6 +14,7 @@ class Role(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     __tablename__ = "roles"
     __table_args__ = (
         UniqueConstraint("organization_id", "code", name="uq_role_org_code"),
+        UniqueConstraint("organization_id", "system_key", name="uq_role_org_system_key"),
         CheckConstraint(
             "data_scope IN ('all','custom_departments','department','department_and_children','self')",
             name="ck_role_data_scope",
@@ -25,6 +26,9 @@ class Role(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     )
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     code: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Stable machine identity for platform-managed roles. ``code`` remains the
+    # user-visible/importable identifier and may differ for compatibility.
+    system_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     data_scope: Mapped[str] = mapped_column(String(40), nullable=False, default="self")
     is_builtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

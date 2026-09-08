@@ -110,7 +110,9 @@ export default function RolesPage() {
       <Table dataSource={roleList} rowKey="id" loading={isLoading} columns={[
         { title: '角色', render: (_: unknown, role: Role) => <Space>
           <Typography.Text strong>{role.name}</Typography.Text>
-          {role.is_builtin && <Tag color="blue">内置</Tag>}
+          {role.system_key === 'runtime_developer'
+            ? <Tag color="purple">系统托管</Tag>
+            : role.is_builtin && <Tag color="blue">内置</Tag>}
         </Space> },
         { title: '标识', dataIndex: 'code' },
         { title: '平台能力', render: (_: unknown, role: Role) => role.permission_codes.includes('*')
@@ -119,7 +121,7 @@ export default function RolesPage() {
           <Tag color={value ? 'green' : 'default'}>{value ? '启用' : '停用'}</Tag>
         ) },
         { title: '操作', width: 180, render: (_: unknown, role: Role) => <Space>
-          <Button size="small" icon={<EditOutlined />} onClick={() => edit(role)}>编辑</Button>
+          {role.system_key !== 'runtime_developer' && <Button size="small" icon={<EditOutlined />} onClick={() => edit(role)}>编辑</Button>}
           {!role.is_builtin && <Button size="small" danger icon={<DeleteOutlined />} onClick={() => remove.mutate(role.id)}>删除</Button>}
         </Space> },
       ]} />

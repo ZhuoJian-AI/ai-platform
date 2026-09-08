@@ -37,7 +37,7 @@ from app.schemas.enterprise_application import (
     EnterpriseApplicationEventRouteInput,
     EnterpriseApplicationIntegrationInput,
 )
-from app.services import skill_scope_service
+from app.services import enterprise_application_service, skill_scope_service
 from app.services.subsystem_access_service import assert_application_available
 from app.utils.crypto import decrypt_provider_api_key, encrypt_provider_api_key, hash_api_key
 from app.utils.public_url import assert_public_http_url, request_public_http, same_origin
@@ -698,7 +698,6 @@ async def _sync_actions(
                 "requires_confirmation": action["requiresConfirmation"],
                 "input_schema": action["inputSchema"],
                 "result_schema": action["resultSchema"],
-                "is_active": True,
             }
             row = by_key.get(key)
             if row is None:
@@ -706,11 +705,14 @@ async def _sync_actions(
                     application_id=application.id,
                     organization_id=application.organization_id,
                     action_key=key,
+                    is_active=True,
+                    admin_disabled=False,
                     **values,
                 ))
             else:
                 for field, value in values.items():
                     setattr(row, field, value)
+                row.is_active = not row.admin_disabled
     for row in existing:
         if row.action_key not in seen:
             row.is_active = False
@@ -725,6 +727,14 @@ async def _activate_manifest(
     version: int,
 ) -> None:
     await _sync_actions(db, application, manifest)
+    if enterprise_application_service.is_runtime_managed(application):
+        await enterprise_application_service.synchronize_runtime_grants(
+            db,
+            application,
+            integration.manifest or {},
+            manifest,
+        )
+        application.is_active = not application.admin_disabled
     integration.manifest = manifest
     integration.events_url = events_url
     integration.protocol_version = version
@@ -1334,15 +1344,15 @@ async def sync_integration(
         raise HTTPException(status_code=409, detail="Subsystem integration is not configured")
     if not row.sync_enabled:
         raise HTTPException(status_code=409, detail="Subsystem integration is disabled")
-    is_initial_candidate = bool(
+    is_runtime_candidate = bool(
         allow_initial_inactive_candidate
+        and enterprise_application_service.is_runtime_managed(application)
         and not application.is_active
-        and not row.manifest
     )
     await assert_application_available(
         db,
         application,
-        require_application_active=not is_initial_candidate,
+        require_application_active=not is_runtime_candidate,
         require_release_healthy=False,
     )
     row.sync_status = "syncing"
@@ -1378,10 +1388,13 @@ async def sync_integration(
                 )
             manifest_diff = manifest_change_summary(row.manifest or {}, manifest)
 
-            needs_review = _manifest_requires_review(
+            needs_review = (
+                not enterprise_application_service.is_runtime_managed(application)
+                and _manifest_requires_review(
                 row.manifest or {},
                 contract_revision,
                 manifest_diff,
+                )
             )
             if needs_review:
                 row.manifest_diff = manifest_diff

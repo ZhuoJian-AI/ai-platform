@@ -158,6 +158,8 @@ class EnterpriseApplicationGrantRead(OrmModel):
     permissions: list[str]
     module_keys: list[str]
     module_access: dict[str, EnterpriseApplicationModuleAccess] = Field(default_factory=dict)
+    managed_key: str | None = None
+    denied_resources: dict = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
@@ -185,6 +187,7 @@ class EnterpriseApplicationRead(OrmModel):
     display_mode: str
     sort_order: int
     is_active: bool
+    admin_disabled: bool = False
     assistant_enabled: bool
     assistant_prompt: str | None
     assistant_config: dict
@@ -317,8 +320,13 @@ class EnterpriseApplicationActionRead(OrmModel):
     input_schema: dict = Field(default_factory=dict)
     result_schema: dict = Field(default_factory=dict)
     is_active: bool
+    admin_disabled: bool = False
     created_at: datetime
     updated_at: datetime
+
+
+class EnterpriseApplicationActionUpdate(BaseModel):
+    is_active: bool
 
 
 class EnterpriseApplicationDiscoveryInput(BaseModel):

@@ -26,6 +26,7 @@ from app.schemas.enterprise_application import (
     EnterpriseApplicationActionRead,
     EnterpriseApplicationActionRequestRead,
     EnterpriseApplicationActionResultRead,
+    EnterpriseApplicationActionUpdate,
     EnterpriseApplicationCreate,
     EnterpriseApplicationDiscoveryInput,
     EnterpriseApplicationDiscoveryRead,
@@ -297,6 +298,22 @@ async def list_application_actions_endpoint(
     row = await _application_or_404(db, app_id)
     assert_org_access(auth, row.organization_id)
     return await action_service.list_actions(db, row.id)
+
+
+@router.patch(
+    "/applications/{app_id}/actions/{action_key}",
+    response_model=EnterpriseApplicationActionRead,
+)
+async def update_application_action_endpoint(
+    app_id: UUID,
+    action_key: str,
+    data: EnterpriseApplicationActionUpdate,
+    auth: CurrentAdmin = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await _application_or_404(db, app_id)
+    assert_org_write_access(auth, row.organization_id)
+    return await action_service.set_action_active(db, row, action_key, data.is_active)
 
 
 @router.get(

@@ -41,6 +41,9 @@ class EnterpriseApplication(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin
     display_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="embedded")
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Runtime publication may update ``is_active`` but can never clear an
+    # administrator's explicit global stop.
+    admin_disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     assistant_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     assistant_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     assistant_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
@@ -104,6 +107,11 @@ class EnterpriseApplicationGrant(UUIDPrimaryKeyMixin, TimestampMixin, SoftDelete
     module_keys: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     # Protocol v2: per-submodule role + permissions. Empty preserves v1 behaviour.
     module_access: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Non-null rows are platform-managed and cannot be edited or removed by the
+    # ordinary replace-all administrator endpoint.
+    managed_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Explicit administrator exclusions survive later Manifest inheritance.
+    denied_resources: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     application = relationship("EnterpriseApplication", back_populates="grants")
 
@@ -266,6 +274,7 @@ class EnterpriseApplicationAction(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     input_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     result_schema: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    admin_disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     application = relationship("EnterpriseApplication", back_populates="actions")
     requests = relationship("EnterpriseApplicationActionRequest", back_populates="action", lazy="selectin")

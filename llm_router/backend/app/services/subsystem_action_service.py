@@ -28,7 +28,7 @@ from app.models.enterprise_application import (
     EnterpriseApplicationSsoCode,
 )
 from app.models.user import User
-from app.services import enterprise_application_service
+from app.services import enterprise_application_service, role_service
 from app.services.subsystem_access_service import assert_application_available
 from app.utils.crypto import decrypt_provider_api_key, encrypt_provider_api_key, hash_api_key
 from app.utils.public_url import request_public_http, same_origin
@@ -74,6 +74,33 @@ async def list_actions(
         .scalars()
         .all()
     )
+
+
+async def set_action_active(
+    db: AsyncSession,
+    application: EnterpriseApplication,
+    action_key: str,
+    is_active: bool,
+) -> EnterpriseApplicationAction:
+    action = (
+        await db.execute(
+            select(EnterpriseApplicationAction).where(
+                EnterpriseApplicationAction.application_id == application.id,
+                EnterpriseApplicationAction.action_key == action_key,
+            )
+        )
+    ).scalar_one_or_none()
+    if action is None:
+        raise HTTPException(status_code=404, detail="业务操作不存在")
+    action.admin_disabled = not is_active
+    action.is_active = is_active
+    await role_service.touch_users_for_role_ids(
+        db,
+        enterprise_application_service._application_role_ids(application),
+    )
+    await db.flush()
+    await db.refresh(action)
+    return action
 
 
 async def list_actions_for_user(

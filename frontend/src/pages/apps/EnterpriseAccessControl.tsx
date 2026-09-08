@@ -158,6 +158,7 @@ export default function EnterpriseAccessControl() {
     [application.id, integrationQueries[index]?.data as EnterpriseApplicationIntegration | undefined]
   ))), [appList, integrationVersion]);
   const role = roleList.find(item => item.id === selectedRoleId) ?? roleList.find(item => item.is_active);
+  const isRuntimeDeveloper = role?.system_key === 'runtime_developer';
   const inheritsAllWorkspaceAccess = Boolean(role?.permission_codes.includes('*'));
   const organizationDepartments = useMemo(() => Array.from(nodeMap.values())
     .filter(node => node.type === 'department' && node.orgId === orgId)
@@ -533,7 +534,7 @@ export default function EnterpriseAccessControl() {
       }} />}
       extra={<Space>
         <Button icon={<EyeOutlined />} onClick={() => setPreviewOpen(true)}>模拟员工查看</Button>
-        <Button type="primary" onClick={() => save.mutate()} loading={save.isPending} disabled={!role || integrationsLoading}>保存权限</Button>
+        <Button type="primary" onClick={() => save.mutate()} loading={save.isPending} disabled={!role || integrationsLoading || isRuntimeDeveloper}>保存权限</Button>
       </Space>}
     />
 
@@ -551,6 +552,12 @@ export default function EnterpriseAccessControl() {
         message="鉴权后聚合：员工只会看到其角色已获授权的系统、业务子模块和页面"
         description="员工只归属一个主部门；跨部门工作空间和企业页面都由角色授权，一个员工拥有多个角色时权限取并集。新接入页面和 Action 默认无权。"
       />
+      {isRuntimeDeveloper && <Alert
+        type="success"
+        showIcon
+        message="系统研发者权限由 Runtime 自动维护"
+        description="管理员只需在员工授权中绑定或解绑该角色；它自动获得本企业 Runtime 系统的全部业务页面和操作，但不获得平台管理、模型密钥或工作空间管理权限。"
+      />}
 
       <section className="permission-toolbar">
         <div className="toolbar-field">
