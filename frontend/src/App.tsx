@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
+import { lazy, Suspense, useState, useEffect, useRef, type CSSProperties, type ReactNode } from 'react';
 import { Routes, Route, useLocation, useNavigate } from 'react-router-dom';
 import { Drawer, ConfigProvider, Avatar, Popover, Button } from 'antd';
 import {
@@ -16,37 +16,46 @@ import { WB, WB_FONT, FS, antdTheme } from './components/finder/theme';
 import { AuthProvider, useAuth, RequireAuth } from './context/AuthContext';
 import { UserAuthProvider, UserRequireAuth } from './context/UserAuthContext';
 import HelpBody from './components/HelpDrawer';
-import Login from './pages/Login';
-import OrgLogin from './pages/OrgLogin';
-import UserLoginPage from './pages/terminal/UserLoginPage';
-import Terminal from './pages/terminal/Terminal';
-import FileDeepLinkPage from './pages/terminal/FileDeepLinkPage';
-import Organizations from './pages/Organizations';
-import ContactInfo from './pages/ContactInfo';
-import EnterpriseProfile from './pages/org/EnterpriseProfile';
-import ApiKeys from './pages/ApiKeys';
-import LlmProviders from './pages/LlmProviders';
-import DlpRules from './pages/DlpRules';
-import AdminManagement from './pages/AdminManagement';
-import UsersPage from './pages/org/Users';
-import RolesPage from './pages/org/Roles';
-import VoicesPage from './pages/org/Voices';
-import Workspaces from './pages/agent/Workspaces';
-import Agents from './pages/agent/Agents';
-import Rag from './pages/agent/Rag';
-import MemoryPage from './pages/agent/Memory';
-import Skills from './pages/tools/Skills';
-import MonitorOverview from './pages/monitor/MonitorOverview';
-import RouterMonitor from './pages/monitor/RouterMonitor';
-import AgentMonitor from './pages/monitor/AgentMonitor';
-import ToolMonitor from './pages/monitor/ToolMonitor';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS, applyBrandFavicon } from './branding/BrandLogoSlot';
 import { BRAND_TITLES, useBrandTitle } from './branding/brand';
-import EnterpriseApplications from './pages/apps/EnterpriseApplications';
-import EnterpriseApplicationDetail from './pages/apps/EnterpriseApplicationDetail';
-import EnterpriseAccessControl from './pages/apps/EnterpriseAccessControl';
-import NotFoundPage from './pages/NotFoundPage';
 import { useMobileBackDismiss, useResponsiveLayout } from './hooks/useResponsiveLayout';
+
+const Login = lazy(() => import('./pages/Login'));
+const OrgLogin = lazy(() => import('./pages/OrgLogin'));
+const UserLoginPage = lazy(() => import('./pages/terminal/UserLoginPage'));
+const Terminal = lazy(() => import('./pages/terminal/Terminal'));
+const FileDeepLinkPage = lazy(() => import('./pages/terminal/FileDeepLinkPage'));
+const Organizations = lazy(() => import('./pages/Organizations'));
+const ContactInfo = lazy(() => import('./pages/ContactInfo'));
+const EnterpriseProfile = lazy(() => import('./pages/org/EnterpriseProfile'));
+const ApiKeys = lazy(() => import('./pages/ApiKeys'));
+const LlmProviders = lazy(() => import('./pages/LlmProviders'));
+const DlpRules = lazy(() => import('./pages/DlpRules'));
+const AdminManagement = lazy(() => import('./pages/AdminManagement'));
+const UsersPage = lazy(() => import('./pages/org/Users'));
+const RolesPage = lazy(() => import('./pages/org/Roles'));
+const VoicesPage = lazy(() => import('./pages/org/Voices'));
+const Workspaces = lazy(() => import('./pages/agent/Workspaces'));
+const Agents = lazy(() => import('./pages/agent/Agents'));
+const Rag = lazy(() => import('./pages/agent/Rag'));
+const MemoryPage = lazy(() => import('./pages/agent/Memory'));
+const Skills = lazy(() => import('./pages/tools/Skills'));
+const MonitorOverview = lazy(() => import('./pages/monitor/MonitorOverview'));
+const RouterMonitor = lazy(() => import('./pages/monitor/RouterMonitor'));
+const AgentMonitor = lazy(() => import('./pages/monitor/AgentMonitor'));
+const ToolMonitor = lazy(() => import('./pages/monitor/ToolMonitor'));
+const EnterpriseApplications = lazy(() => import('./pages/apps/EnterpriseApplications'));
+const EnterpriseApplicationDetail = lazy(() => import('./pages/apps/EnterpriseApplicationDetail'));
+const EnterpriseAccessControl = lazy(() => import('./pages/apps/EnterpriseAccessControl'));
+const NotFoundPage = lazy(() => import('./pages/NotFoundPage'));
+
+function PageFallback() {
+  return (
+    <div role="status" aria-live="polite" style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', color: WB.textAux }}>
+      正在加载页面…
+    </div>
+  );
+}
 
 interface MenuEntry {
   path: string;
@@ -434,7 +443,8 @@ function AdminApp() {
 
 export default function App() {
   return (
-    <Routes>
+    <Suspense fallback={<PageFallback />}>
+      <Routes>
         {/* 终端用户门户完全独立于管理员会话。 */}
         <Route path="/:slug/terminal/login" element={
           <UserAuthProvider><UserLoginPage /></UserAuthProvider>
@@ -457,6 +467,7 @@ export default function App() {
           <UserAuthProvider><FileDeepLinkPage /></UserAuthProvider>
         } />
         <Route path="/*" element={<AdminApp />} />
-    </Routes>
+      </Routes>
+    </Suspense>
   );
 }
