@@ -206,7 +206,23 @@ try {
   );
 
   const terminalSource = await readFile(resolve('src/pages/terminal/Terminal.tsx'), 'utf8');
+  const apiClientSource = await readFile(resolve('src/api/client.ts'), 'utf8');
   const terminalStreamSource = await readFile(resolve('src/pages/terminal/terminalConversationModel.ts'), 'utf8');
+  assert.match(
+    terminalSource,
+    /case 'ui_intent':[\s\S]*navigateToEnterpriseIntent/,
+    'a trusted navigation intent must move the same assistant conversation into the authorized application view',
+  );
+  assert.match(
+    terminalSource,
+    /pageKey=\{selectedApplicationPageKey\}[\s\S]*assistantOpenRequestKey=\{assistantOpenRequestKey\}/,
+    'assistant navigation must preserve the exact page target and keep the assistant visible',
+  );
+  assert.match(
+    apiClientSource,
+    /if \(pageKey\) params\.set\('page_key', pageKey\)/,
+    'the launch request must send the exact page key for server-side role authorization',
+  );
   const applicationAssistantSource = terminalSource.slice(terminalSource.indexOf('onAskAI={async'));
   assert.match(
     applicationAssistantSource,

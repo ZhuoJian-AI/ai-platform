@@ -56,6 +56,49 @@ from app.utils.public_url import request_public_http, same_origin
 router = APIRouter()
 
 
+def _authorized_launch_route(
+    module: dict,
+    page_access: object,
+    requested_page_key: str | None,
+) -> tuple[str, list[str]]:
+    """Resolve an exact role-authorized page without trusting an LLM route."""
+
+    access = page_access if isinstance(page_access, dict) else {}
+    authorized_pages = [
+        page
+        for page in (module.get("pages") or [])
+        if isinstance(page, dict) and page.get("pageKey") in access
+    ]
+    page_keys = sorted(str(page.get("pageKey")) for page in authorized_pages)
+    authorized_routes = [
+        str(page.get("routePattern"))
+        for page in authorized_pages
+        if isinstance(page.get("routePattern"), str) and page.get("routePattern")
+    ]
+    if not authorized_routes:
+        raise HTTPException(status_code=403, detail="当前角色没有可访问的页面")
+    if requested_page_key:
+        selected_page = next(
+            (
+                page
+                for page in authorized_pages
+                if str(page.get("pageKey") or "") == requested_page_key
+            ),
+            None,
+        )
+        if selected_page is None:
+            raise HTTPException(status_code=403, detail="目标页面不存在或当前角色无权访问")
+        selected_route = selected_page.get("routePattern")
+        if not isinstance(selected_route, str) or not selected_route:
+            raise HTTPException(status_code=409, detail="目标页面未配置可访问地址")
+        return selected_route, page_keys
+    default_route = str(module.get("route") or "/")
+    return (
+        default_route if default_route in authorized_routes else authorized_routes[0],
+        page_keys,
+    )
+
+
 @router.post(
     "/subsystem-sso/exchange",
     response_model=SubsystemSsoCodeExchangeRead,
@@ -406,6 +449,7 @@ async def launch_terminal_application_endpoint(
     request: Request,
     response: Response,
     module_key: str | None = None,
+    page_key: str | None = None,
     cu: CurrentUser = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -440,21 +484,8 @@ async def launch_terminal_application_endpoint(
             raise HTTPException(status_code=404, detail="Subsystem module not found")
         module_claims = service.effective_module_claims(row, cu, selected_module)
         page_keys = sorted((module_claims.get("page_access") or {}).keys())
-        redirect_path = str(module.get("route") or "/")
         page_access = module_claims.get("page_access")
-        if isinstance(page_access, dict):
-            authorized_pages = [
-                page for page in (module.get("pages") or [])
-                if isinstance(page, dict) and page.get("pageKey") in page_access
-            ]
-            authorized_routes = [
-                str(page.get("routePattern")) for page in authorized_pages
-                if isinstance(page.get("routePattern"), str)
-            ]
-            if not authorized_routes:
-                raise HTTPException(status_code=403, detail="Module has no authorized launch page")
-            if redirect_path not in authorized_routes:
-                redirect_path = authorized_routes[0]
+        redirect_path, page_keys = _authorized_launch_route(module, page_access, page_key)
         auth = integration.manifest.get("auth") if isinstance(integration.manifest.get("auth"), dict) else {}
         sso_path = str(auth.get("ssoPath") or "/api/integration/sso")
         sso_url = urljoin(row.entry_url.rstrip("/") + "/", sso_path)

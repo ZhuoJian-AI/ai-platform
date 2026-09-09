@@ -212,6 +212,8 @@ export default function Terminal() {
   const [view, setView] = useState<TerminalView>(() => viewFromQuery(location.search));
   const [selectedApplicationId, setSelectedApplicationId] = useState<string | null>(() => new URLSearchParams(location.search).get('app'));
   const [selectedApplicationModuleKey, setSelectedApplicationModuleKey] = useState<string | null>(() => new URLSearchParams(location.search).get('module'));
+  const [selectedApplicationPageKey, setSelectedApplicationPageKey] = useState<string | null>(() => new URLSearchParams(location.search).get('page'));
+  const [assistantOpenRequestKey, setAssistantOpenRequestKey] = useState(0);
   const [applicationNavOpen, setApplicationNavOpen] = useState(false);
   const [applicationNavPinned, setApplicationNavPinned] = useState(() => readApplicationNavPinPreference(user?.id));
   const [applicationImmersive, setApplicationImmersive] = useState(false);
@@ -280,6 +282,25 @@ export default function Terminal() {
   const selectedApplication = terminalApplications.find((item) => item.id === selectedApplicationId) ?? null;
   const applicationShellActive = view === 'application' && selectedApplication !== null;
   const effectiveApplicationNavPinned = applicationNavPinned && !isCompact;
+
+  const navigateToEnterpriseIntent = useCallback((intent: Record<string, unknown>) => {
+    if (intent.type !== 'navigate') return;
+    const applicationId = typeof intent.applicationId === 'string' ? intent.applicationId : '';
+    const moduleKey = typeof intent.moduleKey === 'string' ? intent.moduleKey : '';
+    const pageKey = typeof intent.pageKey === 'string' ? intent.pageKey : '';
+    const application = terminalApplications.find((item) => item.id === applicationId);
+    if (!application || !moduleKey || !application.modules.some((item) => item.module_key === moduleKey)) {
+      message.error('目标系统或模块不存在，或者当前角色无权访问');
+      return;
+    }
+    setSelectedApplicationId(applicationId);
+    setSelectedApplicationModuleKey(moduleKey);
+    setSelectedApplicationPageKey(pageKey || null);
+    setView('application');
+    setComposerOpen(false);
+    setApplicationNavOpen(false);
+    setAssistantOpenRequestKey((current) => current + 1);
+  }, [terminalApplications]);
 
   useEffect(() => {
     setApplicationNavOpen(false);
@@ -417,11 +438,13 @@ export default function Terminal() {
     if (params.get('view') !== 'application') return;
     const applicationId = params.get('app');
     const moduleKey = params.get('module');
+    const pageKey = params.get('page');
     const conversationId = params.get('conversation');
     if (applicationId) {
       setView('application');
       setSelectedApplicationId(applicationId);
       if (moduleKey) setSelectedApplicationModuleKey(moduleKey);
+      setSelectedApplicationPageKey(pageKey);
       if (conversationId) setSelectedId(conversationId);
     }
   }, [location.search]);
@@ -434,6 +457,8 @@ export default function Terminal() {
     else params.delete('app');
     if (view === 'application' && selectedApplicationModuleKey) params.set('module', selectedApplicationModuleKey);
     else params.delete('module');
+    if (view === 'application' && selectedApplicationPageKey) params.set('page', selectedApplicationPageKey);
+    else params.delete('page');
     if (view === 'application' && selectedApplicationId && selectedBusinessTaskId) {
       params.set('conversation', selectedBusinessTaskId);
     } else {
@@ -453,7 +478,7 @@ export default function Terminal() {
     const routeTaskId = taskId || null;
     if (routeTaskId !== selectedId && (location.pathname === terminalBasePath || location.pathname.startsWith(`${terminalBasePath}/tasks/`))) return;
     if (desired !== current) navigate(desired, { replace: true });
-  }, [composerOpen, location.pathname, location.search, navigate, selectedApplicationId, selectedApplicationModuleKey, selectedBusinessTaskId, selectedId, taskId, terminalBasePath, view]);
+  }, [composerOpen, location.pathname, location.search, navigate, selectedApplicationId, selectedApplicationModuleKey, selectedApplicationPageKey, selectedBusinessTaskId, selectedId, taskId, terminalBasePath, view]);
 
   useEffect(() => {
     if (!selectedTask) return;
@@ -670,6 +695,12 @@ export default function Terminal() {
         }
         break;
       }
+      case 'ui_intent': {
+        if (evt.intent && typeof evt.intent === 'object') {
+          navigateToEnterpriseIntent(evt.intent as Record<string, unknown>);
+        }
+        break;
+      }
       case 'trace': {
         // 原生资源调用痕迹（记忆/文件）+ policy。
         // policy 类 approval_requested/approval_decided 只作为轻量痕迹渲染，审批卡片本体由 approval_request 事件负责。
@@ -710,7 +741,7 @@ export default function Terminal() {
       default:
         break;
     }
-  }, [updateTurn]);
+  }, [navigateToEnterpriseIntent, updateTurn]);
 
   // SSE 读取循环：解析 `data: {...}` 行并派发。POST /run 与 GET /stream 共用。
   const consumeSSE = useCallback(async (resp: Response) => {
@@ -1292,7 +1323,12 @@ export default function Terminal() {
                 <button
                   type="button"
                   key={application.id}
-                  onClick={() => { setSelectedApplicationId(application.id); setView('application'); }}
+                  onClick={() => {
+                    setSelectedApplicationId(application.id);
+                    setSelectedApplicationModuleKey(null);
+                    setSelectedApplicationPageKey(null);
+                    setView('application');
+                  }}
                   style={navItemStyle(view === 'application' && selectedApplicationId === application.id)}
                 >
                   {application.icon_url
@@ -1463,7 +1499,13 @@ export default function Terminal() {
               <EnterpriseApplicationView
                 application={selectedApplication}
                 moduleKey={selectedApplicationModuleKey}
-                onModuleChange={setSelectedApplicationModuleKey}
+                pageKey={selectedApplicationPageKey}
+                onModuleChange={(moduleKey) => {
+                  setSelectedApplicationModuleKey(moduleKey);
+                  setSelectedApplicationPageKey(null);
+                }}
+                onNavigate={navigateToEnterpriseIntent}
+                assistantOpenRequestKey={assistantOpenRequestKey}
                 models={modelData?.models ?? []}
                 modelAlias={config.model_alias ?? modelData?.models?.[0] ?? null}
                 onModelAliasChange={(modelAlias) => setConfig((current) => ({ ...current, model_alias: modelAlias }))}
@@ -1726,6 +1768,7 @@ export default function Terminal() {
                         onClick={() => {
                           setSelectedApplicationId(application.id);
                           setSelectedApplicationModuleKey(null);
+                          setSelectedApplicationPageKey(null);
                           setView('application');
                           setApplicationNavOpen(false);
                         }}
@@ -1759,6 +1802,7 @@ export default function Terminal() {
                               onClick={() => {
                                 setSelectedApplicationId(application.id);
                                 setSelectedApplicationModuleKey(module.module_key);
+                                setSelectedApplicationPageKey(null);
                                 setView('application');
                                 setApplicationNavOpen(false);
                               }}

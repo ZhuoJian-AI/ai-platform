@@ -278,7 +278,10 @@ function appendProgress(
 export default function EnterpriseApplicationView({
   application,
   moduleKey,
+  pageKey,
   onModuleChange,
+  onNavigate,
+  assistantOpenRequestKey,
   onAskAI,
   onResumeAI,
   models,
@@ -299,7 +302,10 @@ export default function EnterpriseApplicationView({
 }: {
   application: TerminalEnterpriseApplication;
   moduleKey: string | null;
+  pageKey: string | null;
   onModuleChange: (moduleKey: string) => void;
+  onNavigate: (intent: Record<string, unknown>) => void;
+  assistantOpenRequestKey: number;
   onAskAI: (
     prompt: string,
     pageContext: Record<string, unknown>,
@@ -358,6 +364,10 @@ export default function EnterpriseApplicationView({
   const launch = frameSlots[activeFrameIndex];
   const [launchLoading, setLaunchLoading] = useState(true);
   const [launchError, setLaunchError] = useState<unknown>();
+
+  useEffect(() => {
+    if (assistantOpenRequestKey > 0) setAssistantOpen(true);
+  }, [assistantOpenRequestKey]);
 
   useEffect(() => {
     bridgeContextRef.current = bridgeContext;
@@ -459,10 +469,14 @@ export default function EnterpriseApplicationView({
     if (application.is_active === false) throw new ApiError(403, '应用已停用，不能启动');
     // Launch URLs contain single-use SSO tickets. They must never enter the
     // shared React Query cache or be reused when an iframe is remounted.
-    const freshLaunch = await terminal.launchApplication(application.id, moduleKey ?? undefined);
+    const freshLaunch = await terminal.launchApplication(
+      application.id,
+      moduleKey ?? undefined,
+      pageKey ?? undefined,
+    );
     validatedLaunchOrigin(freshLaunch, application);
     return freshLaunch;
-  }, [application, moduleKey]);
+  }, [application, moduleKey, pageKey]);
 
   const requestFreshLaunch = useCallback(async () => {
     const requestId = ++launchRequestRef.current;
@@ -973,6 +987,9 @@ export default function EnterpriseApplicationView({
         page_key: fallbackPageKey,
         ...bridgeContext,
       }, (event) => {
+        if (event.type === 'ui_intent' && event.intent && typeof event.intent === 'object') {
+          onNavigate(event.intent as Record<string, unknown>);
+        }
         const liveArtifact = businessArtifactFromEvent(event);
         if (liveArtifact) {
           updateRunningAssistant((item) => {
@@ -1412,7 +1429,7 @@ export default function EnterpriseApplicationView({
                     size="small"
                     type="link"
                     style={{ paddingInline: 0, marginTop: 8 }}
-                    onClick={() => onModuleChange(String(item.navigationSuggestion?.moduleKey))}
+                    onClick={() => onNavigate(item.navigationSuggestion as Record<string, unknown>)}
                   >
                     前往{typeof item.navigationSuggestion.pageName === 'string'
                       ? `「${item.navigationSuggestion.pageName}」`

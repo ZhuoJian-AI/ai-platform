@@ -703,6 +703,9 @@ async def _consume_native(
             except (json.JSONDecodeError, TypeError):
                 tool_envelope = None
             if isinstance(tool_envelope, dict) and isinstance(tool_envelope.get("uiIntent"), dict):
+                ui_intent = dict(tool_envelope["uiIntent"])
+                if ui_intent.get("type") == "navigate":
+                    state["business_navigation_suggestion"] = ui_intent
                 _publish(
                     handle,
                     staged,
@@ -710,7 +713,7 @@ async def _consume_native(
                         "type": "ui_intent",
                         "runId": str(state.get("run_id") or ""),
                         "toolCallId": call_id,
-                        "intent": tool_envelope["uiIntent"],
+                        "intent": ui_intent,
                     },
                 )
             if entry_kind == "enterprise_action":
