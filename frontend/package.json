@@ -13,7 +13,6 @@
     "test:csv-document": "node scripts/test-csv-document.mjs",
     "test:file-ui": "node scripts/test-workspace-file-ui.mjs",
     "test:subsystem-bridge": "node scripts/test-subsystem-bridge.mjs",
-    "test:business-conversation": "node scripts/test-business-conversation.mjs",
     "test:admin-session": "node scripts/test-admin-session.mjs",
     "test:login-feedback": "node scripts/test-login-feedback.mjs",
     "test:responsive": "node scripts/test-responsive-shells.mjs",

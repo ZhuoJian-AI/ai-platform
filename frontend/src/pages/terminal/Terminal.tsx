@@ -47,7 +47,6 @@ import './TerminalApplicationShell.css';
 import { removeAttachmentReferenceTokens, workspaceDisplayName } from '../../utils/workspacePresentation';
 import { parseWorkspaceInternalUrl, workspaceFileLabel, workspaceInternalPath } from '../../utils/workspaceFileLinks';
 import { useWorkspaceFileEvents } from '../../hooks/useWorkspaceFileEvents';
-import { resolveBusinessConversationId } from '../../utils/businessConversation';
 import { AssistantBubble, MessageTimestamp } from './TerminalAssistantMessage';
 import { FilePanel, MemoryPanel, ResourcePanel } from './TerminalPanels';
 import {
@@ -223,12 +222,6 @@ export default function Terminal() {
   const { isMobile, isCompact } = useResponsiveLayout();
   const closeTerminalNav = useMobileBackDismiss(terminalNavOpen, isMobile, setTerminalNavOpen, 'terminal-navigation');
   const closeApplicationNav = useMobileBackDismiss(applicationNavOpen, isMobile, setApplicationNavOpen, 'application-navigation');
-  const [businessTaskSelection, setBusinessTaskSelection] = useState<Record<string, string | null>>(() => {
-    const params = new URLSearchParams(location.search);
-    const applicationId = params.get('app');
-    const conversationId = params.get('conversation');
-    return applicationId && conversationId ? { [applicationId]: conversationId } : {};
-  });
   const [businessWorkspaceSelection, setBusinessWorkspaceSelection] = useState<Record<string, string>>({});
 
   const updateApplicationNavPinned = useCallback((pinned: boolean) => {
@@ -377,17 +370,9 @@ export default function Terminal() {
   const { data: tasks } = useQuery<TerminalTask[]>({
     queryKey: ['terminal-tasks', deferredTaskSearch], queryFn: () => terminal.listTasks(deferredTaskSearch),
   });
-  const { data: businessTasks } = useQuery<TerminalTask[]>({
-    queryKey: ['terminal-business-tasks', selectedApplication?.id],
-    queryFn: () => terminal.listTasks({ applicationId: selectedApplication!.id, limit: 100 }),
-    enabled: Boolean(selectedApplication),
-  });
-  const selectedBusinessTaskId = resolveBusinessConversationId(
-    selectedApplicationId,
-    Boolean(selectedApplication),
-    businessTaskSelection,
-    businessTasks ?? [],
-  );
+  // 首页与业务页面侧栏只是同一助手 Task 的两个视图。
+  // 应用和页面仅作为本轮上下文，不再选择第二套对话命名空间。
+  const selectedBusinessTaskId = selectedId;
   const selectedBusinessWorkspaceId = selectedApplication ? (
     businessWorkspaceSelection[selectedApplication.id]
       ?? resources?.defaults?.workspace_id
@@ -437,11 +422,7 @@ export default function Terminal() {
       setView('application');
       setSelectedApplicationId(applicationId);
       if (moduleKey) setSelectedApplicationModuleKey(moduleKey);
-      setBusinessTaskSelection((current) => (
-        current[applicationId] === conversationId
-          ? current
-          : { ...current, [applicationId]: conversationId }
-      ));
+      if (conversationId) setSelectedId(conversationId);
     }
   }, [location.search]);
 
@@ -896,9 +877,9 @@ export default function Terminal() {
         ? pageContext.module_key
         : application.modules?.[0]?.module_key ?? null;
       setComposerOpen(false);
+      setSelectedId(task.id);
       setSelectedApplicationId(applicationId);
       setSelectedApplicationModuleKey(moduleKey);
-      setBusinessTaskSelection((current) => ({ ...current, [applicationId]: task.id }));
       setView('application');
       setApplicationNavOpen(false);
       navigate(terminalBasePath);
@@ -911,7 +892,6 @@ export default function Terminal() {
 
   const resumeBusinessTask = useCallback(async (
     taskId: string,
-    applicationId: string,
     onProgress: (event: Record<string, unknown>) => void,
   ): Promise<BusinessAssistantTurnResult> => {
     const controller = new AbortController();
@@ -924,7 +904,7 @@ export default function Terminal() {
     let completed = false;
     for (let attempt = 0; attempt < 3 && !completed; attempt += 1) {
       if (!response.ok || !response.body) {
-        throw new Error(`业务小助手连接恢复失败（HTTP ${response.status}）`);
+        throw new Error(`灼见助手连接恢复失败（HTTP ${response.status}）`);
       }
       let sawFinal = false;
       if (attempt > 0) {
@@ -935,7 +915,7 @@ export default function Terminal() {
         await consumeTerminalEventStream(response, (event) => {
           onProgress({ ...event, task_id: taskId });
           if (event.type === 'text') streamedAnswer += String(event.delta ?? '');
-          if (event.type === 'error') streamedError = String(event.message ?? '业务小助手执行失败');
+          if (event.type === 'error') streamedError = String(event.message ?? '灼见助手执行失败');
           if (event.type === 'final') sawFinal = true;
           if (event.type === 'final' && event.interrupted === true) streamInterrupted = true;
           if (event.type === 'tool_result' && event.business_mutation_committed === true) {
@@ -952,11 +932,11 @@ export default function Terminal() {
       }
       response = await terminal.streamTask(taskId, controller.signal);
     }
-    if (!completed) throw new Error('业务小助手连接恢复失败，请稍后重试');
+    if (!completed) throw new Error('灼见助手连接恢复失败，请稍后重试');
     if (streamedError) throw new Error(streamedError);
     await qc.invalidateQueries({ queryKey: ['terminal-business-task', taskId] });
-    await qc.invalidateQueries({ queryKey: ['terminal-business-tasks', applicationId] });
-    const freshTask = await terminal.getTask(taskId, applicationId);
+    await qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
+    const freshTask = await terminal.getTask(taskId);
     const assistantMessage = [...freshTask.messages].reverse().find((item) => item.role === 'assistant');
     const userMessage = [...freshTask.messages].reverse().find((item) => item.role === 'user');
     return {
@@ -1070,7 +1050,6 @@ export default function Terminal() {
     try {
       await terminal.deleteTask(id);
       qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
-      qc.invalidateQueries({ queryKey: ['terminal-business-tasks'] });
       if (selectedId === id) newTask();
       message.success('已删除对话，工作空间文件保持不变');
     } catch (e) {
@@ -1492,11 +1471,10 @@ export default function Terminal() {
                 onOpenNavigation={() => setApplicationNavOpen(true)}
                 onToggleImmersive={() => setApplicationImmersive((value) => !value)}
                 businessTaskId={selectedBusinessTaskId}
-                businessTasks={businessTasks ?? []}
+                businessTasks={tasks ?? []}
                 onSelectConversation={(taskId) => {
-                  setBusinessTaskSelection((current) => ({
-                    ...current, [selectedApplication.id]: taskId,
-                  }));
+                  setSelectedId(taskId);
+                  setComposerOpen(false);
                   const params = new URLSearchParams(location.search);
                   params.set('view', 'application');
                   params.set('app', selectedApplication.id);
@@ -1507,24 +1485,19 @@ export default function Terminal() {
                 onDeleteConversation={async (taskId) => {
                   await terminal.deleteTask(taskId);
                   const nextTask = taskId === selectedBusinessTaskId
-                    ? (businessTasks ?? []).find((task) => task.id !== taskId)?.id ?? null
+                    ? (tasks ?? []).find((task) => task.id !== taskId)?.id ?? null
                     : selectedBusinessTaskId;
-                  setBusinessTaskSelection((current) => ({
-                    ...current, [selectedApplication.id]: nextTask,
-                  }));
+                  setSelectedId(nextTask);
                   if (taskId === selectedBusinessTaskId) {
                     const params = new URLSearchParams(location.search);
                     if (nextTask) params.set('conversation', nextTask);
                     else params.delete('conversation');
                     navigate(`${location.pathname}${params.toString() ? `?${params.toString()}` : ''}`, { replace: true });
                   }
-                  await qc.invalidateQueries({ queryKey: ['terminal-business-tasks', selectedApplication.id] });
                   await qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
                 }}
                 onNewConversation={async () => {
-                  setBusinessTaskSelection((current) => ({
-                    ...current, [selectedApplication.id]: null,
-                  }));
+                  setSelectedId(null);
                   const params = new URLSearchParams(location.search);
                   params.delete('conversation');
                   navigate(`${location.pathname}${params.toString() ? `?${params.toString()}` : ''}`);
@@ -1539,7 +1512,6 @@ export default function Terminal() {
                 )}
                 onResumeAI={(taskId, onProgress) => resumeBusinessTask(
                   taskId,
-                  selectedApplication.id,
                   onProgress,
                 )}
                 onAskAI={async (prompt, context, onProgress, fileRefs) => {
@@ -1556,11 +1528,9 @@ export default function Terminal() {
                   if (!activeTaskId) {
                     const created = await terminal.createTask({ message: prompt, config: assistantConfig });
                     activeTaskId = created.id;
-                    setBusinessTaskSelection((current) => ({
-                      ...current, [selectedApplication.id]: created.id,
-                    }));
+                    setSelectedId(created.id);
+                    setComposerOpen(false);
                     qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
-                    qc.invalidateQueries({ queryKey: ['terminal-business-tasks', selectedApplication.id] });
                   }
                   const controller = new AbortController();
                   const clientRequestId = crypto.randomUUID();
@@ -1601,7 +1571,7 @@ export default function Terminal() {
                       await consumeTerminalEventStream(streamResponse, (event) => {
                         onProgress({ ...event, task_id: activeTaskId });
                         if (event.type === 'text') streamedAnswer += String(event.delta ?? '');
-                        if (event.type === 'error') streamedError = String(event.message ?? '业务小助手执行失败');
+                        if (event.type === 'error') streamedError = String(event.message ?? '灼见助手执行失败');
                         if (event.type === 'final') sawFinal = true;
                         if (event.type === 'final' && event.interrupted === true) streamInterrupted = true;
                         if (event.type === 'tool_result' && event.business_mutation_committed === true) {
@@ -1618,16 +1588,17 @@ export default function Terminal() {
                     }
                     streamResponse = await terminal.streamTask(activeTaskId, controller.signal);
                     if (!streamResponse.ok || !streamResponse.body) {
-                      throw new Error(`业务小助手连接恢复失败（HTTP ${streamResponse.status}）`);
+                      throw new Error(`灼见助手连接恢复失败（HTTP ${streamResponse.status}）`);
                     }
                   }
-                  if (!streamCompleted) throw new Error('业务小助手连接中断，请稍后重试');
+                  if (!streamCompleted) throw new Error('灼见助手连接中断，请稍后重试');
                   if (streamedError) throw new Error(streamedError);
                   qc.invalidateQueries({ queryKey: ['terminal-task', activeTaskId] });
                   qc.invalidateQueries({ queryKey: ['terminal-business-task', activeTaskId] });
+                  qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
                   qc.invalidateQueries({ queryKey: ['terminal-memory'] });
                   qc.invalidateQueries({ queryKey: ['application-action-confirmations'] });
-                  const freshTask = await terminal.getTask(activeTaskId, selectedApplication.id);
+                  const freshTask = await terminal.getTask(activeTaskId);
                   const assistantMessage = [...freshTask.messages].reverse().find((item) => item.role === 'assistant');
                   const userMessage = [...freshTask.messages].reverse().find((item) => item.role === 'user');
                   const result: BusinessAssistantTurnResult = {

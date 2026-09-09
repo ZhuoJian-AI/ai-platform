@@ -507,7 +507,7 @@ async def _prepare(
             })
             trace = {
                 "category": "business_orchestration",
-                "title": "业务意图与页面路由",
+                "title": "业务路由提示（非执行门禁）",
                 "intent": intent.intent,
                 "targetPage": intent.target.page_key,
                 "attempts": attempts,
@@ -598,23 +598,11 @@ async def _consume_native(
     deps: dict,
 ) -> None:
     intent = state.get("business_turn_intent") or {}
-    if intent.get("intent") == "clarify":
-        text = str(intent.get("clarificationQuestion") or "请补充要处理的业务对象和期望结果。")
-        _publish(handle, staged, {"type": "text", "delta": text})
-        state["assistant_final"] = text
-        state.setdefault("messages", []).append({"role": "assistant", "content": text})
-        state.setdefault("steps", []).append({"step": "awaiting_clarification"})
-        return
-    if intent.get("intent") == "navigate":
-        suggestion = state.get("business_navigation_suggestion") or {}
-        page_name = str(suggestion.get("pageName") or intent.get("target", {}).get("pageKey") or "目标页面")
-        text = f"这个操作需要先进入“{page_name}”。我已为你准备好页面跳转建议，进入后再确认执行。"
-        _publish(handle, staged, {"type": "navigation_suggestion", "suggestion": suggestion})
-        _publish(handle, staged, {"type": "text", "delta": text})
-        state["assistant_final"] = text
-        state.setdefault("messages", []).append({"role": "assistant", "content": text})
-        state.setdefault("steps", []).append({"step": "navigation_required", "suggestion": suggestion})
-        return
+    # The classifier is a retrieval hint only.  It may suggest clarification or a
+    # target page, but it must never short-circuit the main LLM before the LLM sees
+    # the current context and authorized tools.  The main loop can query for missing
+    # facts, repair invalid tool arguments, navigate when useful, or ask the user only
+    # when the ambiguity genuinely cannot be resolved.
     _publish(handle, staged, {"type": "business_state", "status": "executing", "intent": intent.get("intent")})
     request = {
         "run_id": str(state["run_id"]),

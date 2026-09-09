@@ -186,7 +186,7 @@ try {
   assert.match(applicationViewSource, /setActiveFrameIndex\(nextIndex\)/);
   assert.match(
     applicationViewSource,
-    /aria-label="选择业务小助手模型"[\s\S]*placeholder="请选择模型"/,
+    /aria-label="选择灼见助手模型"[\s\S]*placeholder="请选择模型"/,
     'business assistant must expose the selected model instead of silently choosing one',
   );
   assert.match(
@@ -196,7 +196,7 @@ try {
   );
   assert.match(
     applicationViewSource,
-    /aria-label="业务小助手实时执行过程"/,
+    /aria-label="灼见助手实时执行过程"/,
     'business assistant must show accessible live execution progress instead of a spinner-only state',
   );
   assert.doesNotMatch(

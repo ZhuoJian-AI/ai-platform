@@ -375,7 +375,7 @@ export default function EnterpriseApplicationView({
   const closeAssistant = useMobileBackDismiss(assistantOpen, isMobile, setAssistantOpen, 'business-assistant');
   const { data: restoredBusinessTask } = useQuery({
     queryKey: ['terminal-business-task', businessTaskId],
-    queryFn: () => terminal.getTask(businessTaskId!, application.id),
+    queryFn: () => terminal.getTask(businessTaskId!),
     enabled: Boolean(businessTaskId),
   });
   const restoredBusinessTaskRunning = restoredBusinessTask?.run_status === 'queued'
@@ -1032,7 +1032,7 @@ export default function EnterpriseApplicationView({
       }));
       if (result.refreshRequired) scheduleSilentRefresh();
     } catch (assistantError) {
-      const errorMessage = assistantError instanceof Error ? assistantError.message : '业务小助手执行失败';
+      const errorMessage = assistantError instanceof Error ? assistantError.message : '灼见助手执行失败';
       updateRunningAssistant((item) => ({
         ...item,
         content: `执行失败：${errorMessage}`,
@@ -1155,7 +1155,7 @@ export default function EnterpriseApplicationView({
         >
           <Button className="enterprise-app-view__more" aria-label="更多应用操作" icon={<MoreOutlined />} />
         </Dropdown>}
-        {application.assistant_enabled && <Badge count={pendingConfirmations.length} size="small"><Button type="primary" icon={<RobotOutlined />} onClick={() => setAssistantOpen(true)}><span className="enterprise-app-view__action-label">业务小助手</span></Button></Badge>}
+        {application.assistant_enabled && <Badge count={pendingConfirmations.length} size="small"><Button type="primary" icon={<RobotOutlined />} onClick={() => setAssistantOpen(true)}><span className="enterprise-app-view__action-label">灼见助手</span></Button></Badge>}
       </div>
 
       {launch.display_mode === 'embedded' ? (
@@ -1182,7 +1182,7 @@ export default function EnterpriseApplicationView({
       )}
 
       <Drawer
-        title={<Space className="business-assistant-drawer__title"><RobotOutlined style={{ color: '#6366f1' }} /><span>{application.name} · 业务小助手</span></Space>}
+        title={<Space className="business-assistant-drawer__title"><RobotOutlined style={{ color: '#6366f1' }} /><span>灼见助手</span></Space>}
         extra={<Space className="business-assistant-drawer__header-actions">
           <Button size="small" icon={<HistoryOutlined />} aria-label="历史对话" disabled={conversationLocked} onClick={() => setHistoryOpen((value) => !value)}><span className="business-assistant-drawer__header-label">历史对话</span></Button>
           <Button size="small" icon={<PlusOutlined />} aria-label="新建对话" loading={creatingConversation} disabled={conversationLocked} onClick={async () => {
@@ -1206,7 +1206,7 @@ export default function EnterpriseApplicationView({
         rootClassName="business-assistant-drawer responsive-fullscreen-drawer"
         styles={{ body: { padding: isMobile ? '12px 12px calc(12px + env(safe-area-inset-bottom))' : undefined } }}
       >
-        {historyOpen && <Card size="small" title="当前应用的历史对话" style={{ marginBottom: 16 }}>
+        {historyOpen && <Card size="small" title="助手历史对话" style={{ marginBottom: 16 }}>
           {businessTasks.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无历史对话" /> : (
             <div style={{ display: 'grid', gap: 8 }}>
               {businessTasks.map((task) => {
@@ -1278,7 +1278,7 @@ export default function EnterpriseApplicationView({
         <div style={{ marginBottom: 18 }}>
           <Typography.Text strong>本次使用模型</Typography.Text>
           <Select
-            aria-label="选择业务小助手模型"
+            aria-label="选择灼见助手模型"
             value={modelAlias ?? undefined}
             options={models.map((model) => ({ value: model, label: model }))}
             onChange={onModelAliasChange}
@@ -1290,7 +1290,7 @@ export default function EnterpriseApplicationView({
         <div style={{ marginBottom: 18 }}>
           <Typography.Text strong>文件保存位置</Typography.Text>
           <Select
-            aria-label="选择业务小助手文件保存位置"
+            aria-label="选择灼见助手文件保存位置"
             value={targetWorkspaceId ?? undefined}
             options={workspaceOptions}
             onChange={onTargetWorkspaceChange}
@@ -1303,7 +1303,7 @@ export default function EnterpriseApplicationView({
           <Typography.Text strong>本对话引用文件</Typography.Text>
           <Select
             mode="multiple"
-            aria-label="选择业务小助手引用文件"
+            aria-label="选择灼见助手引用文件"
             value={selectedInputFileIds}
             options={availableInputFiles.map((file) => ({
               value: file.id,
@@ -1357,7 +1357,7 @@ export default function EnterpriseApplicationView({
           ))}
         </div>}
         {assistantMessages.length > 0 && (
-          <div aria-label="业务小助手对话" style={{ display: 'grid', gap: 10, marginBottom: 18 }}>
+          <div aria-label="灼见助手对话" style={{ display: 'grid', gap: 10, marginBottom: 18 }}>
             {assistantMessages.map((item, index) => (
               <div
                 key={`${item.role}-${index}`}
@@ -1371,14 +1371,14 @@ export default function EnterpriseApplicationView({
                 }}
               >
                 <Space size={6} wrap>
-                  <Typography.Text strong>{item.role === 'user' ? '我' : '业务小助手'}</Typography.Text>
+                  <Typography.Text strong>{item.role === 'user' ? '我' : '灼见助手'}</Typography.Text>
                   {item.pageName && <Tag style={{ marginInlineEnd: 0 }}>当时页面：{item.pageName}</Tag>}
                 </Space>
                 {item.role === 'assistant' && item.progress?.length ? (
                   <div
                     className={`business-assistant-progress${item.failed ? ' business-assistant-progress--failed' : ''}`}
                     aria-live={item.running ? 'polite' : 'off'}
-                    aria-label="业务小助手实时执行过程"
+                    aria-label="灼见助手实时执行过程"
                   >
                     <div className="business-assistant-progress__header">
                       <span>{item.running ? '实时执行中' : (item.failed ? '执行未完成' : '本轮执行过程')}</span>
