@@ -14,7 +14,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-ai_infra}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
     command:
       - postgres
       - -c
@@ -45,7 +45,7 @@ services:
       - -c
       - exec redis-server --appendonly yes --appendfsync everysec --requirepass "$${REDIS_PASSWORD}" --bind 127.0.0.1 ${DATA_PLANE_PREFIX:-10.0.10}.11 --protected-mode yes
     volumes:
-      - redis_data:/data
+      - redis-data:/data
     healthcheck:
       test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
       interval: 5s
@@ -431,8 +431,10 @@ services:
         limits: { cpus: "0.20", memory: 256M }
 
 volumes:
-  postgres_data:
-  redis_data:
+  # Keep the historical volume keys stable. Coolify prefixes these keys with
+  # the application UUID; renaming them would silently create empty volumes.
+  postgres-data:
+  redis-data:
 
 networks:
   # PostgreSQL and Redis are invisible to fixed platform tools. Backend and the
