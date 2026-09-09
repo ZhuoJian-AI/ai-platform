@@ -8,6 +8,7 @@ it never grants a tool or decides whether a business operation should execute.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
 from typing import Any
@@ -241,6 +242,54 @@ def search_tool_specs(
             ranked.append((score, name, spec))
     ranked.sort(key=lambda item: (-item[0], item[1]))
     return [item[2] for item in ranked[: max(1, min(int(limit or 8), 12))]]
+
+
+def search_business_capabilities(
+    query: str,
+    items: Iterable[dict[str, Any]],
+    *,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Rank an already-authorized enterprise catalog using Chinese-aware terms.
+
+    Capability discovery is not an authorization decision.  Callers must pass a
+    catalog that has already been filtered by the current role.  CJK bigrams let
+    natural phrases such as ``204A231款图片`` match catalog descriptions such as
+    ``查询款号图片资料`` without requiring the user to name a system or Action.
+    """
+
+    query_text = str(query or "").strip().lower()
+    query_terms = _terms(query_text)
+    ranked: list[tuple[int, int, str, dict[str, Any]]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        searchable = {
+            key: value
+            for key, value in item.items()
+            if key not in {"inputSchema", "outputSchema"}
+        }
+        haystack = json.dumps(searchable, ensure_ascii=False, default=str).lower()
+        haystack_terms = _terms(haystack)
+        score = 0
+        if query_text and query_text in haystack:
+            score += 60
+        for term in query_terms:
+            if term in haystack:
+                score += 8 if len(term) > 1 else 1
+            elif term in haystack_terms:
+                score += 4
+        # Prefer executable Actions over their containing page when both match.
+        if item.get("actionKey"):
+            score += 3
+        if score:
+            stable_name = "|".join(
+                str(item.get(key) or "")
+                for key in ("applicationId", "moduleKey", "pageKey", "actionKey")
+            )
+            ranked.append((score, -index, stable_name, item))
+    ranked.sort(key=lambda entry: (-entry[0], entry[1], entry[2]))
+    return [entry[3] for entry in ranked[: max(1, min(int(limit or 8), 12))]]
 
 
 def partition_tool_specs(

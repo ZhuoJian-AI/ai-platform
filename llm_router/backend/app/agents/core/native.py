@@ -22,7 +22,7 @@ from app.agents.core import approval_registry
 from app.agents.graph.context import bind_runtime
 from app.agents.graph.nodes import _execute_tool_call
 from app.services import model_gateway
-from app.services.assistant_tool_catalog import search_tool_specs
+from app.services.assistant_tool_catalog import search_business_capabilities, search_tool_specs
 from app.services.assistant_tool_protocol import descriptor_from_spec, tool_result_json
 
 logger = structlog.get_logger()
@@ -190,21 +190,10 @@ def _capability_search_result(
         {"kind": "tool", "descriptor": descriptor_from_spec(item)}
         for item in selected_specs
     ]
-    query_text = str(query or "").strip().lower()
-    page_candidates: list[dict[str, Any]] = []
-    for item in business_catalog:
-        search_text = " ".join(
-            str(value or "")
-            for key, value in item.items()
-            if key not in {"inputSchema", "outputSchema"}
-        ).lower()
-        if query_text and query_text not in search_text:
-            query_tokens = [token for token in query_text.split() if token]
-            if query_tokens and not any(token in search_text for token in query_tokens):
-                continue
-        page_candidates.append({"kind": "business", **item})
-        if len(page_candidates) >= limit:
-            break
+    page_candidates = [
+        {"kind": "business", **item}
+        for item in search_business_capabilities(query, business_catalog, limit=limit)
+    ]
     candidates = [*page_candidates, *tool_candidates][:limit]
     return (
         tool_result_json(

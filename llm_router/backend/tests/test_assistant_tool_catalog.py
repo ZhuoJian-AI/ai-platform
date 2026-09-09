@@ -7,6 +7,7 @@ import pytest
 from app.services.assistant_tool_catalog import (
     entry_tool_definitions,
     partition_tool_specs,
+    search_business_capabilities,
     search_tool_specs,
 )
 from app.services.assistant_tool_protocol import descriptor_from_spec, tool_result
@@ -119,6 +120,32 @@ def test_chinese_capability_search_can_activate_stable_audio_tools():
     assert selected
     assert selected[0]["name"] == "audio_transcribe"
     assert all(item["name"] != "spreadsheet_create" for item in selected)
+
+
+def test_enterprise_catalog_understands_business_language_without_system_names():
+    candidates = [
+        {
+            "applicationName": "爱法贝生产协同",
+            "moduleName": "款号资料中心",
+            "pageName": "款号资料中心",
+            "name": "查询款号图片资料",
+            "description": "按款号查询款式图片和基础资料",
+            "actionKey": "style_profile.query",
+        },
+        {
+            "applicationName": "爱法贝生产协同",
+            "moduleName": "工厂进度",
+            "pageName": "工厂进度监测",
+            "name": "查询延期订单",
+            "description": "查看工厂延期风险",
+            "actionKey": "factory_progress.query",
+        },
+    ]
+
+    selected = search_business_capabilities("调用204A231款图片", candidates, limit=3)
+
+    assert selected
+    assert selected[0]["actionKey"] == "style_profile.query"
 
 
 def test_tool_result_envelope_uses_one_typed_error_shape():

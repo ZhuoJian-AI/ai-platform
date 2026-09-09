@@ -36,6 +36,7 @@ from app.models.audit_log import AuditLog
 from app.models.task import Task
 from app.models.workspace import WorkspaceFile
 from app.services import (
+    business_assistant_orchestration,
     enterprise_application_service,
     memory_service,
     multimodal_service,
@@ -1273,9 +1274,115 @@ async def _build_tools(
     business_intent: dict | None = None,
     business_envelope: dict | None = None,
 ) -> tuple[list[dict], dict[str, dict]]:
-    """Load platform tools and the current page's authorized Manifest Actions."""
+    """Load platform tools plus role-authorized enterprise capabilities.
+
+    Current-page Actions are provider-visible immediately.  Actions from other
+    authorized pages stay in the server-side lazy catalog until the main LLM
+    searches for the relevant business capability.
+    """
     tools: list[dict] = []
     registry: dict[str, dict] = {}
+    from app.services.platform_tool_registry import active_platform_tool_names, platform_managed_tool_names
+
+    active_names = await active_platform_tool_names(db)
+
+    def register_enterprise_action(
+        *,
+        application,
+        action,
+        page_key: str | None,
+        current_page: bool,
+        intent: dict | None = None,
+        expected_version: Any = None,
+    ) -> str | None:
+        base_tool_name = subsystem_action_service.action_tool_name(application, action)
+        if action.operation == "export":
+            format_tools = {
+                "xlsx": "spreadsheet_create",
+                "csv": "spreadsheet_create",
+                "docx": "document_create",
+                "pptx": "presentation_create",
+                "pdf": "pdf_create",
+                "md": "text_create",
+                "txt": "text_create",
+            }
+            supported_formats = [
+                output_format
+                for output_format, platform_tool in format_tools.items()
+                if platform_tool_enabled(platform_tool, active_names)
+            ]
+            if not supported_formats:
+                return None
+            tool_name = _enterprise_export_file_tool_name(base_tool_name)
+            if tool_name in registry:
+                if current_page:
+                    registry[tool_name].update(
+                        {"page_key": page_key, "current_page": True, "business_intent": intent or {}}
+                    )
+                return tool_name
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": (
+                            f"{action.description or action.name}。由平台可信执行器读取同一权限快照的全部分页，"
+                            "直接生成 Excel、CSV、Word、PPT、PDF 或文本到当前员工选定的工作空间；"
+                            "模型不会接触或拼接全部数据行。"
+                        ),
+                        "parameters": _enterprise_export_file_parameters(
+                            action.input_schema,
+                            supported_formats,
+                        ),
+                        "strict": True,
+                    },
+                }
+            )
+            registry[tool_name] = {
+                "kind": "enterprise_export_file",
+                "application": application,
+                "action": action,
+                "page_key": page_key,
+                "supported_formats": supported_formats,
+                "business_intent": intent or {},
+                "current_page": current_page,
+            }
+            return tool_name
+
+        tool_name = base_tool_name
+        if tool_name in registry:
+            if current_page:
+                registry[tool_name].update(
+                    {
+                        "page_key": page_key,
+                        "expected_version": expected_version,
+                        "business_intent": intent or {},
+                        "current_page": True,
+                    }
+                )
+            return tool_name
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": action.description or action.name,
+                    "parameters": _enterprise_action_parameters(action.input_schema, action.operation),
+                    "strict": True,
+                },
+            }
+        )
+        registry[tool_name] = {
+            "kind": "enterprise_action",
+            "application": application,
+            "action": action,
+            "page_key": page_key,
+            "expected_version": expected_version,
+            "business_intent": intent or {},
+            "current_page": current_page,
+        }
+        return tool_name
+
     if application_id and user is not None:
         application = await enterprise_application_service.get_application(db, application_id)
         if (
@@ -1290,9 +1397,6 @@ async def _build_tools(
             # replace the LLM's tool choice or silently remove an authorized Action.
             context_module_key = context.get("module_key")
             context_page_key = context.get("page_key")
-            from app.services.platform_tool_registry import active_platform_tool_names
-
-            active_names = await active_platform_tool_names(db)
             candidate_actions = await subsystem_action_service.list_actions_for_user(
                 db,
                 application,
@@ -1301,79 +1405,33 @@ async def _build_tools(
                 module_key=context_module_key,
             )
             for action in candidate_actions:
-                tool_name = subsystem_action_service.action_tool_name(application, action)
-                parameters = _enterprise_action_parameters(action.input_schema, action.operation)
-                if action.operation == "export":
-                    format_tools = {
-                        "xlsx": "spreadsheet_create",
-                        "csv": "spreadsheet_create",
-                        "docx": "document_create",
-                        "pptx": "presentation_create",
-                        "pdf": "pdf_create",
-                        "md": "text_create",
-                        "txt": "text_create",
-                    }
-                    supported_formats = [
-                        output_format
-                        for output_format, platform_tool in format_tools.items()
-                        if platform_tool_enabled(platform_tool, active_names)
-                    ]
-                    if not supported_formats:
-                        continue
-                    export_file_tool_name = _enterprise_export_file_tool_name(tool_name)
-                    if export_file_tool_name in registry:
-                        # One page has one trusted composite export entry.  Do
-                        # not let a second manifest Action silently replace it.
-                        continue
-                    tools.append(
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": export_file_tool_name,
-                                "description": (
-                                    f"{action.description or action.name}。由平台可信执行器读取同一权限快照的全部分页，"
-                                    "直接生成 Excel、CSV、Word、PPT、PDF 或文本到当前员工选定的工作空间；"
-                                    "模型不会接触或拼接全部数据行。"
-                                ),
-                                "parameters": _enterprise_export_file_parameters(
-                                    action.input_schema,
-                                    supported_formats,
-                                ),
-                                "strict": True,
-                            },
-                        }
-                    )
-                    registry[export_file_tool_name] = {
-                        "kind": "enterprise_export_file",
-                        "application": application,
-                        "action": action,
-                        "page_key": context_page_key,
-                        "supported_formats": supported_formats,
-                        "business_intent": intent,
-                    }
-                else:
-                    tools.append(
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": tool_name,
-                                "description": action.description or action.name,
-                                "parameters": parameters,
-                                "strict": True,
-                            },
-                        }
-                    )
-                    registry[tool_name] = {
-                        "kind": "enterprise_action",
-                        "application": application,
-                        "action": action,
-                        "page_key": context_page_key,
-                        "expected_version": context.get("data_version"),
-                        "business_intent": intent,
-                    }
+                register_enterprise_action(
+                    application=application,
+                    action=action,
+                    page_key=context_page_key,
+                    current_page=True,
+                    intent=intent,
+                    expected_version=context.get("data_version"),
+                )
         # Do not return here.  A page turn is the same assistant as the global
         # surface, so it inherits the same platform/workspace/model capability
         # tools in addition to current-page Manifest Actions.
+
+    enterprise_index: dict[str, list[Any]] = {"pages": [], "actions": [], "bindings": []}
+    if user is not None:
+        enterprise_index = await business_assistant_orchestration.build_enterprise_capability_index(
+            db,
+            user=user,
+        )
+        for binding in enterprise_index["bindings"]:
+            tool_name = register_enterprise_action(
+                application=binding["application"],
+                action=binding["action"],
+                page_key=binding["page_key"],
+                current_page=False,
+            )
+            if tool_name:
+                binding["catalog"]["toolName"] = tool_name
     existing_tool_names = {
         str(item.get("function", {}).get("name") or "")
         for item in tools
@@ -1385,16 +1443,51 @@ async def _build_tools(
             tools.append(item)
             existing_tool_names.add(name)
     envelope = business_envelope if isinstance(business_envelope, dict) else {}
+    candidate_pages = list(enterprise_index["pages"])
+    authorized_actions = list(enterprise_index["actions"])
+    # Preserve any trusted current-turn hints while ensuring every item carries
+    # the application identity required by a multi-application catalog.
+    for item in envelope.get("candidatePages") or []:
+        if not isinstance(item, dict):
+            continue
+        enriched = {"applicationId": application_id, **item}
+        key = (enriched.get("applicationId"), enriched.get("moduleKey"), enriched.get("pageKey"))
+        if not any(
+            (page.get("applicationId"), page.get("moduleKey"), page.get("pageKey")) == key
+            for page in candidate_pages
+        ):
+            candidate_pages.append(enriched)
+    for item in envelope.get("authorizedActions") or []:
+        if not isinstance(item, dict):
+            continue
+        enriched = {"applicationId": application_id, **item}
+        key = (
+            enriched.get("applicationId"),
+            enriched.get("moduleKey"),
+            enriched.get("pageKey"),
+            enriched.get("actionKey"),
+        )
+        if not any(
+            (
+                action.get("applicationId"),
+                action.get("moduleKey"),
+                action.get("pageKey"),
+                action.get("actionKey"),
+            )
+            == key
+            for action in authorized_actions
+        ):
+            authorized_actions.append(enriched)
     registry["enterprise_capability_search"] = {
         "kind": "assistant_capability_search",
         "application_id": application_id,
-        "candidate_pages": list(envelope.get("candidatePages") or []),
-        "authorized_actions": list(envelope.get("authorizedActions") or []),
+        "candidate_pages": candidate_pages,
+        "authorized_actions": authorized_actions,
     }
     registry["enterprise_navigate"] = {
         "kind": "assistant_navigation",
         "application_id": application_id,
-        "candidate_pages": list(envelope.get("candidatePages") or []),
+        "candidate_pages": candidate_pages,
     }
     include_image_generation = False
     capability_availability: dict[str, Any] = {}
@@ -1411,15 +1504,13 @@ async def _build_tools(
             db,
             user,
         )
-    from app.services.platform_tool_registry import active_platform_tool_names, platform_managed_tool_names
-
     builtin_defs = _builtin_tool_defs(
         include_workspace=bool(workspace_id) or user is not None,
         include_image_generation=include_image_generation,
         include_image_understanding=bool(capability_availability.get("vision")),
         model_capability_availability=capability_availability,
     )
-    active_builtin_names = await active_platform_tool_names(db)
+    active_builtin_names = active_names
     if active_builtin_names is not None:
         builtin_defs = [
             item
@@ -1542,7 +1633,7 @@ async def _execute_tool_call(
             (
                 item
                 for item in allowed_pages
-                if str(entry.get("application_id") or application_id) == application_id
+                if str(item.get("applicationId") or entry.get("application_id") or "") == application_id
                 and str(item.get("moduleKey") or "") == module_key
                 and str(item.get("pageKey") or "") == page_key
             ),

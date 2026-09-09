@@ -263,6 +263,103 @@ def _manifest_pages(application: EnterpriseApplication) -> dict[tuple[str, str],
     return pages
 
 
+async def build_enterprise_capability_index(
+    db: AsyncSession,
+    *,
+    user: CurrentUser,
+) -> dict[str, list[Any]]:
+    """Build the role-filtered enterprise capability map for one assistant turn.
+
+    This is deliberately rebuilt from the current principal instead of being
+    copied from a Task.  Role grants, ``auth_epoch`` changes, application stops
+    and Manifest updates therefore take effect on the next turn.  The returned
+    public catalog is compact; complete Action schemas stay in ``bindings`` and
+    are only exposed to the model after capability discovery.
+    """
+
+    pages: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = []
+    bindings: list[dict[str, Any]] = []
+    visible_applications = await enterprise_application_service.list_applications_for_user(db, user)
+    for application, _permissions in visible_applications:
+        if (
+            not application.assistant_enabled
+            or application.admin_disabled
+            or application.integration is None
+            or application.integration.protocol_version < 2
+        ):
+            continue
+        manifest = (
+            application.integration.manifest
+            if isinstance(application.integration.manifest, dict)
+            else {}
+        )
+        manifest_modules = {
+            str(module.get("moduleKey")): module
+            for module in manifest.get("modules") or []
+            if isinstance(module, dict) and module.get("moduleKey")
+        }
+        for visible_module in enterprise_application_service.visible_manifest_modules(application, user):
+            module_key = str(visible_module.get("module_key") or "")
+            module = manifest_modules.get(module_key)
+            if not isinstance(module, dict):
+                continue
+            module_name = str(module.get("name") or visible_module.get("name") or module_key)[:255]
+            for page in module.get("pages") or []:
+                if not isinstance(page, dict) or not page.get("pageKey"):
+                    continue
+                page_key = str(page["pageKey"])
+                if "view" not in enterprise_application_service.effective_page_permissions(
+                    application,
+                    user,
+                    module_key,
+                    page_key,
+                ):
+                    continue
+                page_name = str(page.get("name") or page_key)[:255]
+                page_entry = {
+                    "applicationId": str(application.id),
+                    "applicationSlug": application.slug,
+                    "applicationName": application.name,
+                    "applicationDescription": str(application.description or "")[:1_000],
+                    "moduleKey": module_key,
+                    "moduleName": module_name,
+                    "pageKey": page_key,
+                    "pageName": page_name,
+                    "routePattern": str(page.get("routePattern") or "")[:1_000],
+                    "aiSemantics": _safe_semantics(page),
+                }
+                pages.append(page_entry)
+                permitted_actions = await subsystem_action_service.list_actions_for_user(
+                    db,
+                    application,
+                    user,
+                    module_key=module_key,
+                    page_key=page_key,
+                )
+                for action in permitted_actions:
+                    action_entry = {
+                        **{key: value for key, value in page_entry.items() if key != "aiSemantics"},
+                        "actionKey": action.action_key,
+                        "name": action.name,
+                        "description": str(action.description or "")[:1_000],
+                        "operation": action.operation,
+                        "requiresConfirmation": subsystem_action_service.action_requires_confirmation(action),
+                    }
+                    actions.append(action_entry)
+                    bindings.append(
+                        {
+                            "application": application,
+                            "action": action,
+                            "module_key": module_key,
+                            "page_key": page_key,
+                            "page_name": page_name,
+                            "catalog": action_entry,
+                        }
+                    )
+    return {"pages": pages, "actions": actions, "bindings": bindings}
+
+
 async def build_business_turn_envelope(
     db: AsyncSession,
     *,
