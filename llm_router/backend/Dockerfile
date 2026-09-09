@@ -14,7 +14,25 @@ ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
 # 使用无界面组件，避免在服务端安装桌面环境。
 COPY pyproject.toml .
 
-RUN apt-get update \
+# 构建服务器位于中国大陆/香港网络，系统包统一走阿里云 Debian 镜像，
+# 避免构建阶段隐式访问 deb.debian.org / security.debian.org。
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i \
+          -e 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+          -e 's|http://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
+          -e 's|https://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+          -e 's|https://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
+          /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && if [ -f /etc/apt/sources.list ]; then \
+        sed -i \
+          -e 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+          -e 's|http://security.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
+          -e 's|https://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+          -e 's|https://security.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
+          /etc/apt/sources.list; \
+    fi \
+    && apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
