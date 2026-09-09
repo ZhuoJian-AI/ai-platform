@@ -151,7 +151,9 @@ def cancel_approvals(token: str) -> None:
 
 async def await_approval(
     context: AssistantRunContext, *, approval_id: str, tool: str, call_id: str, reason: str,
-    arguments_preview: str, timeout_ms: int = APPROVAL_DEFAULT_TIMEOUT_MS,
+    arguments_preview: str, display_title: str = "确认本次操作",
+    summary_fields: list[dict[str, str]] | None = None,
+    timeout_ms: int = APPROVAL_DEFAULT_TIMEOUT_MS,
 ) -> dict[str, str]:
     """Ask the terminal user about one tool call and block until decided, timed out or cancelled.
 
@@ -172,12 +174,15 @@ async def await_approval(
             "callId": call_id,
             "reason": reason,
             "argumentsPreview": arguments_preview,
+            "displayTitle": display_title,
+            "summaryFields": list(summary_fields or []),
             "expiresAt": expires_at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "runId": context.state.get("run_id"),
         })
         publish_event(context, {
             "type": "approval_request", "approval_id": approval_id, "tool": tool, "call_id": call_id,
             "reason": reason, "arguments_preview": arguments_preview,
+            "display_title": display_title, "summary_fields": list(summary_fields or []),
             "expires_at": expires_at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "run_id": context.state.get("run_id"),
         })

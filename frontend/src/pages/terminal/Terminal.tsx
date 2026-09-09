@@ -662,6 +662,14 @@ export default function Terminal() {
             tool: String(evt.tool ?? ''),
             reason: String(evt.reason ?? ''),
             argumentsPreview,
+            displayTitle: String(evt.display_title ?? ''),
+            summaryFields: Array.isArray(evt.summary_fields)
+              ? evt.summary_fields.filter((item): item is { label: string; value: string } => (
+                !!item && typeof item === 'object'
+                && typeof (item as Record<string, unknown>).label === 'string'
+                && typeof (item as Record<string, unknown>).value === 'string'
+              ))
+              : [],
             expiresAt: String(evt.expires_at ?? ''),
             runId: typeof evt.run_id === 'number' ? evt.run_id : undefined,
           }];

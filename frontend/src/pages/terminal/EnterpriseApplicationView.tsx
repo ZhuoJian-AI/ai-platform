@@ -169,6 +169,14 @@ function businessApprovalsFromTask(
         tool: typeof value.tool === 'string' ? value.tool : '',
         reason: typeof value.reason === 'string' ? value.reason : '',
         argumentsPreview: typeof value.argumentsPreview === 'string' ? value.argumentsPreview : '',
+        displayTitle: typeof value.displayTitle === 'string' ? value.displayTitle : '',
+        summaryFields: Array.isArray(value.summaryFields)
+          ? value.summaryFields.filter((field): field is { label: string; value: string } => (
+            !!field && typeof field === 'object'
+            && typeof (field as Record<string, unknown>).label === 'string'
+            && typeof (field as Record<string, unknown>).value === 'string'
+          ))
+          : [],
         expiresAt: typeof value.expiresAt === 'string' ? value.expiresAt : new Date(0).toISOString(),
         runId: typeof value.runId === 'number' ? value.runId : undefined,
         outcome: value.outcome as TerminalApprovalOutcome | undefined,
@@ -1016,6 +1024,14 @@ export default function EnterpriseApplicationView({
                 tool: String(event.tool ?? ''),
                 reason: String(event.reason ?? ''),
                 argumentsPreview,
+                displayTitle: String(event.display_title ?? ''),
+                summaryFields: Array.isArray(event.summary_fields)
+                  ? event.summary_fields.filter((field): field is { label: string; value: string } => (
+                    !!field && typeof field === 'object'
+                    && typeof (field as Record<string, unknown>).label === 'string'
+                    && typeof (field as Record<string, unknown>).value === 'string'
+                  ))
+                  : [],
                 expiresAt: String(event.expires_at ?? new Date(Date.now() + 5 * 60_000).toISOString()),
                 runId: typeof event.run_id === 'number' ? event.run_id : undefined,
               }]);

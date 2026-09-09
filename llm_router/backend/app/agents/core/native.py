@@ -305,6 +305,19 @@ async def _approval(
         preview = _stable_json(arguments)
         if len(preview) > _MAX_APPROVAL_PREVIEW_CHARS:
             preview = preview[: _MAX_APPROVAL_PREVIEW_CHARS - 3] + "..."
+        labels = spec.get("confirmation_field_labels")
+        labels = labels if isinstance(labels, dict) else {}
+        summary_fields = []
+        for field, value in arguments.items():
+            rendered = _stable_json(value) if isinstance(value, (dict, list)) else str(value)
+            if len(rendered) > 160:
+                rendered = rendered[:157] + "..."
+            summary_fields.append(
+                {
+                    "label": str(labels.get(field) or field),
+                    "value": rendered,
+                }
+            )
         result = await approval_registry.await_approval(
             context,
             approval_id=approval_id,
@@ -312,6 +325,8 @@ async def _approval(
             call_id=call_id,
             reason=f"{name} 会产生业务或文件副作用，需要用户确认",
             arguments_preview=preview,
+            display_title=str(spec.get("display_title") or "确认本次操作"),
+            summary_fields=summary_fields,
             timeout_ms=int(spec.get("approval_timeout_ms") or 120_000),
         )
     decided = {

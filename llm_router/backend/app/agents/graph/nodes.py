@@ -1930,6 +1930,63 @@ def _assistant_tool_metadata(name: str, entry: dict | None) -> dict:
     return metadata
 
 
+_CONFIRMATION_FIELD_LABELS = {
+    "application_id": "应用",
+    "module_key": "模块",
+    "page_key": "页面",
+    "record_id": "业务记录",
+    "order_id": "订单",
+    "order_no": "订单",
+    "file_id": "文件",
+    "folder_id": "文件夹",
+    "name": "名称",
+    "title": "标题",
+    "assignee": "负责人",
+    "assignee_id": "负责人",
+    "owner": "负责人",
+    "owner_id": "负责人",
+    "new_assignee": "新负责人",
+    "new_assignee_id": "新负责人",
+    "new_owner": "新负责人",
+    "new_owner_id": "新负责人",
+    "status": "状态",
+    "reason": "原因",
+}
+
+
+def _assistant_confirmation_metadata(name: str, entry: dict | None) -> dict:
+    """Return plain, user-facing labels for a deterministic confirmation card.
+
+    These labels are presentation metadata only.  The approval still references
+    the server-owned tool name and the exact schema-validated arguments.
+    """
+    action = (entry or {}).get("action") if isinstance(entry, dict) else None
+    display_title = str(getattr(action, "name", "") or "").strip()
+    if not display_title:
+        display_title = {
+            "workspace_delete_file": "删除文件",
+            "workspace_delete_folder": "删除文件夹",
+        }.get(name, "确认本次操作")
+
+    schema = getattr(action, "input_schema", None)
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    field_labels: dict[str, str] = {}
+    if isinstance(properties, dict):
+        for field, definition in properties.items():
+            if not isinstance(field, str):
+                continue
+            definition = definition if isinstance(definition, dict) else {}
+            label = str(definition.get("title") or "").strip()
+            if not label:
+                description = str(definition.get("description") or "").strip()
+                if description and len(description) <= 24 and "。" not in description:
+                    label = description
+            field_labels[field] = label or _CONFIRMATION_FIELD_LABELS.get(field, field)
+    else:
+        field_labels = dict(_CONFIRMATION_FIELD_LABELS)
+    return {"display_title": display_title, "confirmation_field_labels": field_labels}
+
+
 def assistant_tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -> list[dict]:
     """Add execution metadata to the authorized tools for one Assistant Core run."""
     registry = registry or {}
@@ -1956,6 +2013,7 @@ def assistant_tool_specs(tools: list[dict], registry: dict[str, dict] | None = N
                 )
                 or {"type": "object"},
                 **_assistant_tool_metadata(name, entry),
+                **_assistant_confirmation_metadata(name, entry),
             }
         )
     return specs
