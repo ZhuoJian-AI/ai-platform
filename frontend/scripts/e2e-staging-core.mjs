@@ -24,6 +24,7 @@ const userUsername = process.env.E2E_USER_USERNAME;
 const userPassword = process.env.E2E_USER_PASSWORD;
 const applicationIdOverride = process.env.E2E_APPLICATION_ID || '';
 const moduleKey = process.env.E2E_MODULE_KEY || 'progress_dashboard';
+const modelAliasOverride = process.env.E2E_MODEL_ALIAS || '';
 const proxyServer = process.env.E2E_PROXY_SERVER || '';
 const browserExecutable = process.env.E2E_BROWSER_EXECUTABLE || '';
 const artifactTimeoutMs = Math.min(
@@ -490,10 +491,119 @@ async function ensureAntSelectValue(page, combobox, failureMessage) {
   ).trim());
   if (await selectedText()) return;
   await combobox.click();
-  const firstOption = page.locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden) [role="option"]').first();
+  const firstOption = page.locator(
+    '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option',
+  ).first();
   await firstOption.waitFor({ state: 'visible', timeout: 15_000 });
   await firstOption.click();
   assert.ok(await selectedText(), failureMessage);
+}
+
+async function adminJson(page, url, options = {}) {
+  const result = await page.evaluate(async ({ requestUrl, requestOptions }) => {
+    const method = String(requestOptions.method || 'GET').toUpperCase();
+    const headers = new Headers(requestOptions.headers || {});
+    if (requestOptions.body && !headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json');
+    }
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+      const csrfCookieNames = new Set(['__Host-ai-infra-admin-csrf', 'ai_infra_admin_csrf']);
+      const cookieToken = document.cookie.split(';').map((part) => part.trim()).reduce((token, part) => {
+        const separator = part.indexOf('=');
+        if (separator <= 0) return token;
+        const name = part.slice(0, separator);
+        return csrfCookieNames.has(name) ? decodeURIComponent(part.slice(separator + 1)) : token;
+      }, '');
+      if (cookieToken) {
+        headers.set('X-CSRF-Token', cookieToken);
+      } else {
+        const csrfResponse = await fetch('/api/v1/auth/csrf', { credentials: 'include' });
+        const csrfBody = await csrfResponse.json().catch(() => ({}));
+        if (!csrfResponse.ok || typeof csrfBody.csrf_token !== 'string') {
+          return { ok: false, status: csrfResponse.status, body: csrfBody };
+        }
+        headers.set('X-CSRF-Token', csrfBody.csrf_token);
+      }
+    }
+    const response = await fetch(requestUrl, {
+      ...requestOptions,
+      method,
+      headers,
+      credentials: 'include',
+    });
+    const body = response.status === 204 ? null : await response.json().catch(() => null);
+    return { ok: response.ok, status: response.status, body };
+  }, { requestUrl: url, requestOptions: options });
+  assert.equal(result.ok, true, `管理员接口 ${safePath(url)} 失败（HTTP ${result.status}）`);
+  return result.body;
+}
+
+async function grantModelForE2E(page, modelAlias) {
+  if (!modelAlias) return null;
+  const organizations = await adminJson(page, '/api/v1/organizations');
+  const organization = organizations.find((item) => item.slug === orgSlug);
+  assert.ok(organization, '管理员端找不到目标企业，无法准备 E2E 模型权限');
+  const keys = await adminJson(page, `/api/v1/organizations/${organization.id}/api-keys`);
+  const key = keys.find((item) => (
+    item.scope_type === 'organization'
+    && item.is_active
+    && !item.revoked_at
+    && item.key_name === 'Alphabet 总密钥'
+  )) || keys.find((item) => item.scope_type === 'organization' && item.is_active && !item.revoked_at);
+  assert.ok(key, '目标企业没有可临时扩展模型范围的组织级 API Key');
+  const originalModels = Array.isArray(key.allowed_models) ? [...key.allowed_models] : [];
+  if (originalModels.length === 1 && originalModels[0] === modelAlias) return null;
+  await adminJson(page, `/api/v1/api-keys/${key.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ allowed_models: [modelAlias] }),
+  });
+  return { keyId: String(key.id), originalModels };
+}
+
+async function restoreModelGrant(page, state) {
+  if (!state) return;
+  await adminJson(page, `/api/v1/api-keys/${state.keyId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ allowed_models: state.originalModels }),
+  });
+}
+
+async function selectAntOption(page, combobox, optionText, failureMessage) {
+  const selectedText = async () => combobox.evaluate((element) => (
+    element.closest('.ant-select')?.querySelector('.ant-select-selection-item')?.textContent || ''
+  ).trim());
+  if (await selectedText() === optionText) return;
+  const selectState = await combobox.evaluate((element) => ({
+    selected: (element.closest('.ant-select')?.querySelector('.ant-select-selection-item')?.textContent || '').trim(),
+    className: element.closest('.ant-select')?.className || '',
+    disabled: element.hasAttribute('disabled'),
+    expanded: element.getAttribute('aria-expanded'),
+  }));
+  assert.equal(
+    selectState.disabled || selectState.className.includes('ant-select-disabled'),
+    false,
+    `${failureMessage}；模型选择器当前被禁用（当前值：${selectState.selected || '空'}）`,
+  );
+  // The searchable input itself can have a zero-width box. Click Ant Select's
+  // visible selector node, while resolving it from the current input so drawer
+  // polling cannot leave us holding a detached element.
+  const selector = combobox.locator(
+    'xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " ant-select-selector ")][1]',
+  );
+  await selector.waitFor({ state: 'visible', timeout: 15_000 });
+  await selector.scrollIntoViewIfNeeded();
+  await selector.click();
+  const options = page.locator(
+    '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option',
+  );
+  await options.first().waitFor({ state: 'visible', timeout: 15_000 });
+  const option = options.filter({ hasText: exactTextPattern(optionText) }).first();
+  if (!await option.count()) {
+    const available = (await options.allTextContents()).map((item) => item.trim()).filter(Boolean);
+    throw new Error(`${failureMessage}；界面可选项：${available.join('、') || '无'}`);
+  }
+  await option.click();
+  assert.equal(await selectedText(), optionText, failureMessage);
 }
 
 async function generateAndVerifyArtifact(page, applicationId, cleanupState) {
@@ -511,7 +621,16 @@ async function generateAndVerifyArtifact(page, applicationId, cleanupState) {
   const workspaceSelect = drawer.getByRole('combobox', { name: '选择业务小助手文件保存位置' });
   await modelSelect.waitFor({ timeout: 30_000 });
   await workspaceSelect.waitFor({ timeout: 30_000 });
-  await ensureAntSelectValue(page, modelSelect, '业务小助手没有可用模型');
+  if (modelAliasOverride) {
+    await selectAntOption(
+      page,
+      modelSelect,
+      modelAliasOverride,
+      `业务小助手无法选择指定模型：${modelAliasOverride}`,
+    );
+  } else {
+    await ensureAntSelectValue(page, modelSelect, '业务小助手没有可用模型');
+  }
   await ensureAntSelectValue(page, workspaceSelect, '业务小助手没有可写工作空间');
 
   const newConversation = drawer.getByRole('button', { name: '新建对话' });
@@ -688,6 +807,7 @@ const adminDiagnostics = diagnosticsFor(adminPage);
 const employeeDiagnostics = diagnosticsFor(employeePage);
 let artifactState = {};
 let cleanupResult = null;
+let modelGrantState = null;
 
 try {
   console.log('E2E 管理员登录与中文错误提示：开始');
@@ -695,11 +815,19 @@ try {
   console.log('E2E 管理员保留导航：开始');
   await traverseAdminNavigation(adminPage);
   const accessFromAdmin = await adminEffectiveAccess(adminPage);
+  modelGrantState = await grantModelForE2E(adminPage, modelAliasOverride);
   adminDiagnostics.assertClean('管理员端');
   console.log(`E2E 管理员保留导航：通过（可见 ${ADMIN_NAVIGATION.length}，隐藏直达 ${ADMIN_DIRECT_ROUTES.length}）`);
 
   console.log('E2E 员工登录与中文错误提示：开始');
   await loginEmployee(employeePage, employeeDiagnostics);
+  if (modelAliasOverride) {
+    const models = await userJson(employeePage, '/api/v1/terminal/models');
+    assert.ok(
+      Array.isArray(models.models) && models.models.includes(modelAliasOverride),
+      `员工端未获得指定 E2E 模型：${modelAliasOverride}`,
+    );
+  }
   console.log('E2E 员工核心导航：开始');
   await traverseEmployeeNavigation(employeePage);
   const accessFromEmployee = await userJson(employeePage, '/api/v1/terminal/effective-access');
@@ -723,6 +851,8 @@ try {
   assert.equal(cleanupResult.failures.length, 0, cleanupResult.failures.join('；'));
   employeeDiagnostics.assertClean('员工端');
   console.log(`E2E 测试记录清理：通过（对话 ${cleanupResult.tasksDeleted}，文件移入回收站 ${cleanupResult.filesTrashed}）`);
+  await restoreModelGrant(adminPage, modelGrantState);
+  modelGrantState = null;
   await logoutFromUi(employeePage, {
     endpoint: '/api/v1/users/logout',
     expectedPath: `/${orgSlug}/terminal/login`,
@@ -740,6 +870,9 @@ try {
 } finally {
   if (artifactState) {
     cleanupResult = await cleanupBusinessRun(employeePage, artifactState).catch(() => null);
+  }
+  if (modelGrantState) {
+    await restoreModelGrant(adminPage, modelGrantState).catch(() => null);
   }
   await employeeContext.close();
   await adminContext.close();
