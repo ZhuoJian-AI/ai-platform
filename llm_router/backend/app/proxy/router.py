@@ -103,7 +103,18 @@ async def list_models(
         typed_providers = providers  # 回退：没有任何 openai 类型 provider，用全部
 
     for provider in typed_providers:
-        for model_id in provider.supported_models:
+        explicit_deployments = [
+            deployment
+            for deployment in (provider.model_deployments or [])
+            if deployment.deleted_at is None and deployment.is_active
+        ]
+        chat_models = [
+            deployment.model_id
+            for deployment in explicit_deployments
+            if "chat" in (deployment.capabilities or [])
+        ]
+        provider_models = chat_models if explicit_deployments else provider.supported_models
+        for model_id in provider_models:
             if model_id in seen:
                 continue
             if "*" not in perms.allowed_models and model_id not in perms.allowed_models:

@@ -23,7 +23,7 @@ branch_labels = None
 depends_on = None
 
 _BASELINE_FILE = Path(__file__).with_name("0075_schema_baseline.sql")
-_BASELINE_SHA256 = "e2a69cdbed3cc7ab3b8dcb2cc32003c5a947e4a194263179ae9182ecbbea39f6"
+_BASELINE_SHA256 = "b0fc1bc253ad9734d68f561b0c15368a05787eb9e86ba5c6b49de367337c4a38"
 _REQUIRED_MARKERS = (
     "CREATE FUNCTION public.reject_ai_quota_event_mutation()",
     "CREATE MATERIALIZED VIEW public.ai_quota_monthly_rollups AS",

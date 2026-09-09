@@ -715,7 +715,6 @@ CREATE TABLE public.model_deployments (
     capabilities jsonb DEFAULT '[]'::jsonb NOT NULL,
     base_url_override text,
     endpoint_path character varying(255),
-    embedding_dimensions integer,
     routing_priority integer DEFAULT 0 NOT NULL,
     is_active boolean DEFAULT true NOT NULL,
     verification_status character varying(32) DEFAULT 'unverified'::character varying NOT NULL,

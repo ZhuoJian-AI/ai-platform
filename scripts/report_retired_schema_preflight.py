@@ -456,6 +456,18 @@ async def build_report(connection: asyncpg.Connection, *, schema: str) -> dict[s
             "WHERE connector_id IS NOT NULL OR endpoint_id IS NOT NULL"
         )
 
+    embedding_deployments = 0
+    if (
+        await _table_exists(connection, schema, "model_deployments")
+        and await _column_exists(connection, schema, "model_deployments", "adapter")
+        and await _column_exists(connection, schema, "model_deployments", "capabilities")
+    ):
+        embedding_deployments = await _count(
+            connection,
+            f"SELECT COUNT(*) FROM {_quote_ident(schema)}.model_deployments "
+            "WHERE adapter = 'openai_embeddings' OR capabilities::jsonb ? 'embedding'",
+        )
+
     active_legacy_bindings = 0
     if inventory["enterprise_application_tool_bindings"]["present"]:
         clauses: list[str] = []
@@ -496,8 +508,10 @@ async def build_report(connection: asyncpg.Connection, *, schema: str) -> dict[s
         "schema": schema,
         "gates": {
             "runtimeDependenciesReady": not hard_blockers,
-            "retiredDataArchiveRequired": bool(nonempty_retired_tables),
-            "destructiveContractReady": not hard_blockers and not nonempty_retired_tables,
+            "retiredDataArchiveRequired": bool(nonempty_retired_tables or embedding_deployments),
+            "destructiveContractReady": (
+                not hard_blockers and not nonempty_retired_tables and not embedding_deployments
+            ),
         },
         "hardBlockers": hard_blockers,
         "retiredTables": inventory,
@@ -516,12 +530,14 @@ async def build_report(connection: asyncpg.Connection, *, schema: str) -> dict[s
             "activeLegacyApplicationBindings": active_legacy_bindings,
             "historicalConnectorCallCount": connector_calls,
             "connectorLastCallAt": connector_last_call.isoformat() if connector_last_call else None,
+            "embeddingModelDeployments": embedding_deployments,
         },
         "manualChecks": [
             "在写 contract 迁移前，用代码搜索确认 ORM、API、后台任务和工具注册均不再引用待退役对象。",
             "对所有非空退役表生成独立归档并记录行数与 SHA-256；本脚本不会把非空表当作可直接删除。",
             "导出 platform_extension_sources.artifact_ref 对象清单，确认与工作空间 OSS 引用无交集。",
             "确认 tool_call_logs 不再被已退役的产品监控消费，再退役该条件表。",
+            "归档并核对待退役 Embedding 模型部署；迁移不得影响同一供应商的聊天或多模态模型。",
             "保存受保护数据快照、Schema 指纹、pg_dump 校验值和对应不可变镜像 digest。",
         ],
     }

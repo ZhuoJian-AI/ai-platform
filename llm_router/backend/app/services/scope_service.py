@@ -239,13 +239,12 @@ async def list_api_keys_for_user(db: AsyncSession, cu: CurrentUser) -> list[ApiK
 async def list_available_models_for_user(
     db: AsyncSession, cu: CurrentUser,
 ) -> list[str]:
-    """用户可用的模型名（按可访问 API Key 聚合，embedding 模型已过滤）。
+    """用户可用的对话模型名（按可访问 API Key 和有效部署聚合）。
 
     模型名按可访问 API Key 聚合：任一 Key 的 ``allowed_models`` 为空（= 不限模型）→ 组织全部
     活跃 provider 的 ``supported_models`` 并集；否则 → 各 Key 的 ``allowed_models`` 并集。
     返回的模型名可直接填入 ``TaskConfig.model_alias``（真实模型 id，或 "default" 走组织默认路由）。
 
-    embedding 类模型（名字含 ``embed``，不区分大小写）一律过滤——任务配置只关心对话/生成类模型。
     """
     keys = await list_api_keys_for_user(db, cu)
 
@@ -281,10 +280,7 @@ async def list_available_models_for_user(
             # that the gateway will reject at run time.
             provider_models.extend(declared)
         else:
-            # Pre-gateway providers retain the old conservative name filter.
-            provider_models.extend(
-                model for model in (p.supported_models or []) if "embed" not in model.lower()
-            )
+            provider_models.extend(p.supported_models or [])
 
     if any(not k.allowed_models for k in keys):
         # 存在不限模型的 Key → 用户可调用 provider 全集
@@ -292,7 +288,7 @@ async def list_available_models_for_user(
     else:
         models = sorted({m for k in keys for m in (k.allowed_models or []) if m in set(provider_models)})
 
-    # 过滤 embedding 模型：任务配置只列对话/生成类，避免误选无法 chat 的嵌入模型
+    # 图片生成模型由专用多模态工具调用，不进入对话模型选择器。
     generation_models = {
         deployment.model_id
         for provider in providers

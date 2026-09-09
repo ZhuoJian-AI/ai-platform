@@ -79,9 +79,13 @@ def test_anthropic_multimodal_content_conversion():
 
 
 def test_deployment_schema_rejects_capability_adapter_mismatch():
-    with pytest.raises(ValueError, match="only declare embedding"):
+    with pytest.raises(ValueError, match="unsupported model adapter"):
         ModelDeploymentCreate(
-            model_id="bge-m3", adapter="openai_embeddings", capabilities=["chat", "embedding"],
+            model_id="bge-m3", adapter="openai_embeddings", capabilities=["embedding"],
+        )
+    with pytest.raises(ValueError, match="unsupported model capability"):
+        ModelDeploymentCreate(
+            model_id="bge-m3", adapter="openai_chat_completions", capabilities=["embedding"],
         )
     with pytest.raises(ValueError, match="image_generation"):
         ModelDeploymentCreate(
@@ -126,12 +130,6 @@ async def test_create_bailian_provider_and_mask_secret(client: AsyncClient, monk
                     "adapter": "openai_chat_completions",
                     "capabilities": ["chat", "vision"],
                 },
-                {
-                    "model_id": "text-embedding-v4",
-                    "adapter": "openai_embeddings",
-                    "capabilities": ["embedding"],
-                    "embedding_dimensions": 1024,
-                },
             ],
         },
     )
@@ -161,22 +159,15 @@ async def test_create_bailian_provider_and_mask_secret(client: AsyncClient, monk
     assert vision_check.status_code == 200, vision_check.text
     assert vision_check.json()["status"] == "verified"
 
-    async def quota_failure(*_args, **_kwargs):
-        raise model_gateway.GatewayError("quota_or_rate_limit")
-
-    monkeypatch.setattr("app.api.llm_providers.test_deployment", quota_failure)
-    embedding_model = next(item for item in data["model_deployments"] if "embedding" in item["capabilities"])
-    quota_check = await client.post(
-        f"/api/v1/providers/{data['id']}/models/{embedding_model['id']}/test/embedding"
+    embedding_create = await client.post(
+        f"/api/v1/providers/{data['id']}/models",
+        json={
+            "model_id": "text-embedding-v4",
+            "adapter": "openai_embeddings",
+            "capabilities": ["embedding"],
+        },
     )
-    assert quota_check.status_code == 400
-    assert "余额或配额不足" in quota_check.json()["detail"]
-    provider_after_failure = (await client.get(f"/api/v1/providers/{data['id']}")).json()
-    failed_embedding = next(
-        item for item in provider_after_failure["model_deployments"]
-        if item["id"] == embedding_model["id"]
-    )
-    assert failed_embedding["last_error"] == "quota_or_rate_limit"
+    assert embedding_create.status_code == 422
 
 
 class _FakeResponse:
@@ -207,14 +198,6 @@ class _FakeClient:
                 "output": [{"type": "message", "content": [{"type": "output_text", "text": "OK"}]}],
                 "usage": {"input_tokens": 3, "output_tokens": 1},
             })
-        if url.endswith("/embeddings"):
-            dimensions = json.get("dimensions") or 3
-            return _FakeResponse({
-                "data": [
-                    {"index": index, "embedding": [0.1] * dimensions}
-                    for index, _value in enumerate(json.get("input") or [])
-                ],
-            })
         if url.endswith("/images/generations"):
             return _FakeResponse({"data": [{"b64_json": base64.b64encode(b"fake-png").decode()}]})
         raise AssertionError(f"unexpected URL: {url}")
@@ -238,7 +221,7 @@ def _deployment(provider: LlmProvider, *, model_id: str, adapter: str, capabilit
 
 
 @pytest.mark.asyncio
-async def test_mock_gateway_chat_vision_embedding_image_and_stream(monkeypatch, db_session):
+async def test_mock_gateway_chat_vision_image_and_stream(monkeypatch, db_session):
     _FakeClient.calls = []
     monkeypatch.setattr(model_gateway.httpx, "AsyncClient", _FakeClient)
     provider = _provider()
@@ -246,10 +229,6 @@ async def test_mock_gateway_chat_vision_embedding_image_and_stream(monkeypatch, 
         provider, model_id="ep-chat", adapter="openai_responses", capabilities=["chat", "vision"],
         path="/responses",
     )
-    embedding = _deployment(
-        provider, model_id="ep-embedding", adapter="openai_embeddings", capabilities=["embedding"],
-    )
-    embedding.embedding_dimensions = 4
     image = _deployment(
         provider, model_id="ep-image", adapter="volcengine_images", capabilities=["image_generation"],
         path="/images/generations",
@@ -257,12 +236,10 @@ async def test_mock_gateway_chat_vision_embedding_image_and_stream(monkeypatch, 
 
     chat_result = await model_gateway.test_deployment(db_session, provider, chat, "chat")
     vision_result = await model_gateway.test_deployment(db_session, provider, chat, "vision")
-    embedding_result = await model_gateway.test_deployment(db_session, provider, embedding, "embedding")
     image_result = await model_gateway.test_deployment(db_session, provider, image, "image_generation")
 
     assert chat_result["output"] == "OK"
     assert vision_result["output"] == "OK"
-    assert embedding_result["dimensions"] == 4
     assert image_result["bytes"] == len(b"fake-png")
     vision_bodies = [body for url, body in _FakeClient.calls if url.endswith("/responses")]
     assert any("input_image" in str(body) for body in vision_bodies)
@@ -274,8 +251,6 @@ async def test_mock_gateway_chat_vision_embedding_image_and_stream(monkeypatch, 
         "input_image" not in str(body) and body["max_output_tokens"] == 128
         for body in vision_bodies
     )
-    embedding_body = next(body for url, body in _FakeClient.calls if url.endswith("/embeddings"))
-    assert embedding_body["dimensions"] == 4
 
 
 def test_effective_provider_survives_nested_resolution_after_original_is_collected():

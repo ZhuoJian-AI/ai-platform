@@ -123,8 +123,106 @@ def upgrade() -> None:
     )
     op.execute("ALTER TABLE memories DROP COLUMN IF EXISTS embedding")
 
-    # Embedding model routing remains supported. Only the platform-owned
-    # vector store is removed, so PostgreSQL no longer needs pgvector.
+    # Embedding is no longer a platform model capability.  Preserve the full
+    # pre-migration database snapshot, then remove embedding-only deployments
+    # and their legacy model selectors without disturbing chat/multimodal
+    # deployments that share the same provider.
+    op.execute(
+        """
+        CREATE TEMP TABLE retired_embedding_models ON COMMIT DROP AS
+        SELECT DISTINCT provider.organization_id, deployment.provider_id, deployment.model_id
+        FROM model_deployments AS deployment
+        JOIN llm_providers AS provider ON provider.id = deployment.provider_id
+        WHERE deployment.adapter = 'openai_embeddings'
+           OR deployment.capabilities ? 'embedding'
+        """
+    )
+    op.execute(
+        """
+        UPDATE model_deployments
+        SET capabilities = capabilities - 'embedding'
+        WHERE adapter <> 'openai_embeddings'
+          AND capabilities ? 'embedding'
+          AND jsonb_array_length(capabilities) > 1
+        """
+    )
+    op.execute(
+        """
+        DELETE FROM model_deployments
+        WHERE adapter = 'openai_embeddings'
+           OR capabilities ? 'embedding'
+        """
+    )
+    op.execute(
+        """
+        UPDATE llm_providers AS provider
+        SET supported_models = COALESCE(
+            (
+                SELECT jsonb_agg(item.value ORDER BY item.ordinality)
+                FROM jsonb_array_elements_text(COALESCE(provider.supported_models, '[]'::jsonb))
+                     WITH ORDINALITY AS item(value, ordinality)
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM retired_embedding_models AS retired
+                    WHERE retired.provider_id = provider.id
+                      AND retired.model_id = item.value
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM model_deployments AS surviving
+                          WHERE surviving.provider_id = provider.id
+                            AND surviving.model_id = retired.model_id
+                            AND surviving.deleted_at IS NULL
+                      )
+                )
+            ),
+            '[]'::jsonb
+        )
+        WHERE EXISTS (
+            SELECT 1 FROM retired_embedding_models AS retired
+            WHERE retired.provider_id = provider.id
+        )
+        """
+    )
+    op.execute(
+        """
+        UPDATE api_keys AS api_key
+        SET allowed_models = COALESCE(
+            (
+                SELECT jsonb_agg(item.value ORDER BY item.ordinality)
+                FROM jsonb_array_elements_text(COALESCE(api_key.allowed_models, '[]'::jsonb))
+                     WITH ORDINALITY AS item(value, ordinality)
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM retired_embedding_models AS retired
+                    WHERE retired.organization_id = api_key.organization_id
+                      AND retired.model_id = item.value
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM model_deployments AS surviving
+                          JOIN llm_providers AS surviving_provider
+                            ON surviving_provider.id = surviving.provider_id
+                          WHERE surviving_provider.organization_id = api_key.organization_id
+                            AND surviving.model_id = retired.model_id
+                            AND surviving.deleted_at IS NULL
+                      )
+                )
+            ),
+            '[]'::jsonb
+        )
+        WHERE EXISTS (
+            SELECT 1 FROM retired_embedding_models AS retired
+            WHERE retired.organization_id = api_key.organization_id
+              AND retired.model_id IN (
+                  SELECT value
+                  FROM jsonb_array_elements_text(COALESCE(api_key.allowed_models, '[]'::jsonb))
+              )
+        )
+        """
+    )
+    op.execute("ALTER TABLE model_deployments DROP COLUMN IF EXISTS embedding_dimensions")
+
+    # With RAG, memory vectors and embedding routing retired, PostgreSQL no
+    # longer needs pgvector.
     op.execute("DROP EXTENSION IF EXISTS vector")
 
 

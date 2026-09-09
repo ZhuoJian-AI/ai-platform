@@ -10,12 +10,12 @@ from app.services.multimodal_service import validate_provider_config
 VENDORS = {"openai", "anthropic", "azure_openai", "aliyun_bailian", "volcengine_ark", "custom"}
 PROVIDER_TYPES = {"anthropic", "openai", "azure_openai", "custom"}
 CAPABILITIES = {
-    "chat", "vision", "embedding", "image_generation", "audio_understanding",
+    "chat", "vision", "image_generation", "audio_understanding",
     "speech_to_text", "text_to_speech", "voice_design", "voice_clone",
 }
 ADAPTERS = {
     "openai_chat_completions", "openai_responses", "anthropic_messages",
-    "openai_embeddings", "openai_images", "bailian_multimodal_generation", "volcengine_images",
+    "openai_images", "bailian_multimodal_generation", "volcengine_images",
     "openai_audio_transcription_chat", "openai_audio_synthesis_chat",
 }
 
@@ -27,7 +27,6 @@ class ModelDeploymentCreate(BaseModel):
     capabilities: list[str] = Field(default_factory=lambda: ["chat"])
     base_url_override: str | None = None
     endpoint_path: str | None = None
-    embedding_dimensions: int | None = Field(None, gt=0)
     routing_priority: int = 0
     is_active: bool = True
     config: dict = Field(default_factory=dict)
@@ -50,14 +49,12 @@ class ModelDeploymentCreate(BaseModel):
             raise ValueError("unsupported model capability")
         if "vision" in normalized and "chat" not in normalized:
             raise ValueError("vision deployments must also declare chat")
-        if self.adapter == "anthropic_messages" and ({"embedding", "image_generation"} & set(normalized)):
-            raise ValueError("Anthropic Messages does not provide embedding or image generation")
+        if self.adapter == "anthropic_messages" and "image_generation" in normalized:
+            raise ValueError("Anthropic Messages does not provide image generation")
         if self.adapter in {"openai_chat_completions", "openai_responses"} and not set(normalized).issubset(
             {"chat", "vision", "audio_understanding"}
         ):
             raise ValueError("chat adapters only support chat, vision and audio understanding")
-        if self.adapter == "openai_embeddings" and normalized != ["embedding"]:
-            raise ValueError("openai_embeddings deployments must only declare embedding")
         if self.adapter in {"openai_images", "bailian_multimodal_generation", "volcengine_images"}:
             if normalized != ["image_generation"]:
                 raise ValueError("image adapters must only declare image_generation")
@@ -82,7 +79,6 @@ class ModelDeploymentUpdate(BaseModel):
     capabilities: list[str] | None = None
     base_url_override: str | None = None
     endpoint_path: str | None = None
-    embedding_dimensions: int | None = Field(None, gt=0)
     routing_priority: int | None = None
     is_active: bool | None = None
     config: dict | None = None
@@ -105,7 +101,6 @@ class ModelDeploymentRead(BaseModel):
     capabilities: list[str]
     base_url_override: str | None
     endpoint_path: str | None
-    embedding_dimensions: int | None
     routing_priority: int
     is_active: bool
     verification_status: str

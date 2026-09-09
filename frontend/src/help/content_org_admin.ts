@@ -52,7 +52,7 @@ export const HELP_SECTIONS_ORG_ADMIN: HelpSection[] = [
     id: 'models', title: '模型与安全', items: [
       {
         heading: '模型提供商',
-        paragraphs: ['为企业或部门注册 LLM、Embedding、多模态等模型提供商；部门配置优先、企业配置兜底。'],
+        paragraphs: ['为企业或部门注册 LLM、多模态、图像和音频模型提供商；部门配置优先、企业配置兜底。'],
       },
       {
         heading: '安全围栏',

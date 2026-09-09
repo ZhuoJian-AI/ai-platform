@@ -131,7 +131,6 @@ export interface LlmProvider {
 export type ModelCapability =
   | 'chat'
   | 'vision'
-  | 'embedding'
   | 'image_generation'
   | 'audio_understanding'
   | 'speech_to_text'
@@ -148,7 +147,6 @@ export interface ModelDeployment {
   capabilities: ModelCapability[];
   base_url_override: string | null;
   endpoint_path: string | null;
-  embedding_dimensions: number | null;
   routing_priority: number;
   is_active: boolean;
   verification_status: 'unverified' | 'partially_verified' | 'verified' | 'failed' | 'legacy';
@@ -165,7 +163,6 @@ export interface ModelDeploymentInput {
   capabilities: ModelCapability[];
   base_url_override?: string;
   endpoint_path?: string;
-  embedding_dimensions?: number;
   routing_priority?: number;
   is_active?: boolean;
   config?: Record<string, unknown>;
@@ -1238,7 +1235,7 @@ export interface TerminalResources {
 }
 
 export interface TerminalModels {
-  /** 用户可用的原始模型名（按可访问 API Key 聚合，embedding 已过滤）。 */
+  /** 用户可用的对话模型名（按可访问 API Key 与有效部署聚合）。 */
   models: string[];
   capabilities: Record<string, { vision: boolean }>;
   vision_fallback_available: boolean;

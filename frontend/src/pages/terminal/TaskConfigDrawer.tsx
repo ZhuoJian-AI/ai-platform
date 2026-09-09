@@ -37,7 +37,7 @@ export default function TaskConfigDrawer({ open, onApply, resources, config, mod
 
   const apply = () => onApply({ ...local, workspace_id: personalWorkspace?.id ?? null });
 
-  // 模型下拉：直接列用户权限范围内 API Key 允许的全部模型（embedding 已在后端过滤）
+  // 模型下拉：只列用户权限范围内 API Key 允许的有效对话模型。
   const modelOptions = models.map((m) => ({
     value: m,
     label: modelCapabilities?.[m]?.vision ? `${m}（视觉）` : m,

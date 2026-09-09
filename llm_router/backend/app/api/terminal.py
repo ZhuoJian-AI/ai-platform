@@ -464,7 +464,7 @@ async def list_all_ws_files_endpoint(
 async def models_endpoint(
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
-    """该用户可用的真实模型 id（按可访问的全部 API Key 聚合，embedding 模型已过滤）。
+    """该用户可用的真实对话模型 id（按可访问 API Key 与有效部署聚合）。
 
     ``model_alias`` 字段直接填这些模型 id 之一即可（或 "default" 走组织默认路由）。
     """

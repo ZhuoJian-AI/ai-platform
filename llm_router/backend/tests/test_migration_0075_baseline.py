@@ -24,10 +24,10 @@ VERSIONS_DIR = BACKEND_DIR / "alembic" / "versions"
 BASELINE_MIGRATION = VERSIONS_DIR / "0075_retired_schema_contract.py"
 BASELINE_SQL = VERSIONS_DIR / "0075_schema_baseline.sql"
 DEFAULT_TEST_DATABASE_URL = "postgresql+asyncpg://ai_infra:ai_infra@127.0.0.1:5434/ai_infra_test"
-EXPECTED_SQL_SHA256 = "e2a69cdbed3cc7ab3b8dcb2cc32003c5a947e4a194263179ae9182ecbbea39f6"
-EXPECTED_SCHEMA_SHA256 = "cc0e33965fe10b6029e0356bd76401b62154e2fb8eb822262bbd3d07a6354cb1"
+EXPECTED_SQL_SHA256 = "b0fc1bc253ad9734d68f561b0c15368a05787eb9e86ba5c6b49de367337c4a38"
+EXPECTED_SCHEMA_SHA256 = "eb3ceb8802daf268996c81007fa2b8d34d6bd3c0f8b49e6981dc18ba0ec14033"
 EXPECTED_SCHEMA_CATEGORIES = {
-    "columns": (672, "232db02b65059a29ffcf14ed05dd10ae1f40f5f92577593b96a4a37fb3ba2258"),
+    "columns": (671, "e71d9a8c44d0de62a0c69ddaae03b8c3d2b7c900df6eaf8ba88c43f09c96c553"),
     "constraints": (680, "034b93267f8ad5e44d56fa539e2baea2f87a943d59bcac444a1d9591be5c27a8"),
     "extensions": (1, "c9462b51547b30b2988ac202f0f666df58a79ca58f1468921122f4505ad7a3d3"),
     "functions": (2, "91b13a067d341bd9df13a123070fe64327a24a6ab4e5745ea80b3d3005b02108"),
@@ -196,7 +196,8 @@ async def test_empty_postgresql_installs_exact_current_schema_and_remains_noop(
                 "SELECT COUNT(*) FROM information_schema.columns "
                 "WHERE table_schema = 'public' AND "
                 "((table_name = 'agents' AND column_name = ANY($1::text[])) OR "
-                " (table_name = 'memories' AND column_name = 'embedding'))",
+                " (table_name = 'memories' AND column_name = 'embedding') OR "
+                " (table_name = 'model_deployments' AND column_name = 'embedding_dimensions'))",
                 [
                     "model_alias",
                     "memory_config",
@@ -271,6 +272,114 @@ async def test_empty_postgresql_installs_exact_current_schema_and_remains_noop(
     checked = _invoke_alembic(migration_database_url, "check")
     assert checked.returncode == 0, f"{checked.stdout}\n{checked.stderr}"
     assert "No new upgrade operations detected" in f"{checked.stdout}\n{checked.stderr}"
+
+
+@pytest.mark.asyncio
+async def test_embedding_deployments_and_legacy_selectors_are_retired(
+    migration_database_url: str,
+) -> None:
+    installed = _invoke_alembic(migration_database_url, "upgrade", "0075_retired_schema_contract")
+    assert installed.returncode == 0, f"{installed.stdout}\n{installed.stderr}"
+
+    raw_url = make_url(migration_database_url)
+    connect_kwargs = _asyncpg_connect_kwargs(raw_url, database=raw_url.database or "")
+    connection = await asyncpg.connect(**connect_kwargs, timeout=5)
+    organization_id = uuid4()
+    provider_id = uuid4()
+    api_key_id = uuid4()
+    try:
+        await connection.execute(
+            """
+            INSERT INTO organizations (id, name, slug, settings)
+            VALUES ($1, 'Embedding 迁移企业', $2, '{}'::jsonb)
+            """,
+            organization_id,
+            f"embedding-retire-{organization_id.hex[:8]}",
+        )
+        await connection.execute(
+            """
+            INSERT INTO llm_providers (
+                id, organization_id, name, vendor, provider_type, base_url,
+                api_key_encrypted, api_key_version, scope_type, is_active,
+                priority, weight, timeout_seconds, max_retries,
+                supported_models, health_status, config
+            ) VALUES (
+                $1, $2, '迁移供应商', 'custom', 'openai', 'https://example.com/v1',
+                'encrypted-placeholder', 1, 'organization', TRUE,
+                0, 1, 120, 2,
+                '["chat-model", "text-embedding-v4", "legacy-hybrid"]'::jsonb,
+                'unknown', '{}'::jsonb
+            )
+            """,
+            provider_id,
+            organization_id,
+        )
+        await connection.execute(
+            """
+            INSERT INTO model_deployments (
+                id, provider_id, model_id, adapter, capabilities
+            ) VALUES
+                ($1, $4, 'chat-model', 'openai_chat_completions', '["chat"]'::jsonb),
+                ($2, $4, 'text-embedding-v4', 'openai_embeddings', '["embedding"]'::jsonb),
+                ($3, $4, 'legacy-hybrid', 'openai_chat_completions', '["chat", "embedding"]'::jsonb)
+            """,
+            uuid4(),
+            uuid4(),
+            uuid4(),
+            provider_id,
+        )
+        await connection.execute(
+            """
+            INSERT INTO api_keys (
+                id, key_prefix, key_hash, key_encrypted, key_name, scope_type,
+                organization_id, allowed_models, is_active
+            ) VALUES (
+                $1, 'e2e_embed', $2, '', 'Embedding 迁移 Key', 'organization',
+                $3, '["chat-model", "text-embedding-v4", "legacy-hybrid"]'::jsonb, TRUE
+            )
+            """,
+            api_key_id,
+            uuid4().hex,
+            organization_id,
+        )
+    finally:
+        await connection.close()
+
+    upgraded = _invoke_alembic(migration_database_url, "upgrade", "head")
+    assert upgraded.returncode == 0, f"{upgraded.stdout}\n{upgraded.stderr}"
+
+    connection = await asyncpg.connect(**connect_kwargs, timeout=5)
+    try:
+        deployments = await connection.fetch(
+            """
+            SELECT model_id, capabilities
+            FROM model_deployments
+            WHERE provider_id = $1
+            ORDER BY model_id
+            """,
+            provider_id,
+        )
+        assert [(row["model_id"], row["capabilities"]) for row in deployments] == [
+            ("chat-model", '["chat"]'),
+            ("legacy-hybrid", '["chat"]'),
+        ]
+        assert await connection.fetchval(
+            "SELECT supported_models FROM llm_providers WHERE id = $1", provider_id
+        ) == '["chat-model", "legacy-hybrid"]'
+        assert await connection.fetchval(
+            "SELECT allowed_models FROM api_keys WHERE id = $1", api_key_id
+        ) == '["chat-model", "legacy-hybrid"]'
+        assert await connection.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'model_deployments'
+              AND column_name = 'embedding_dimensions'
+            """
+        ) == 0
+    finally:
+        await connection.close()
 
 
 @pytest.mark.asyncio
