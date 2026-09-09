@@ -136,6 +136,12 @@ SYSTEM_TOOL_GROUPS = [
         "tools": ["image_tool", "image_generation_tool"],
     },
     {
+        "slug": "audio",
+        "name": "语音",
+        "description": "语音转写、音频理解和文字转语音",
+        "tools": ["audio_transcribe", "audio_understand", "speech_synthesize"],
+    },
+    {
         "slug": "archives",
         "name": "压缩包",
         "description": "安全查看、创建和解压归档文件",
@@ -158,6 +164,7 @@ _GROUP_ALIASES = {
         "文档 报告 报表 导出 创建 编辑 转换 合并 拆分"
     ),
     "media": "图片 图像 识图 视觉 ocr 文字识别 生图 生成图片",
+    "audio": "音频 语音 录音 asr 转写 听写 理解 tts 朗读 配音 音色 声音",
     "archives": "压缩包 zip tar 解压 打包 归档",
     "web": "网页 web 互联网 搜索 抓取 下载 公开资料",
 }

@@ -106,6 +106,21 @@ def test_chinese_capability_search_finds_the_relevant_small_tool_set():
     assert len(selected) <= 2
 
 
+def test_chinese_capability_search_can_activate_stable_audio_tools():
+    specs = [
+        _spec("audio_transcribe", "把录音转写成文字"),
+        _spec("audio_understand", "直接理解音频并回答问题"),
+        _spec("speech_synthesize", "把文字合成为语音文件"),
+        _spec("spreadsheet_create", "生成 Excel 表格"),
+    ]
+
+    selected = search_tool_specs("把这段会议录音转写成文字", specs, limit=2)
+
+    assert selected
+    assert selected[0]["name"] == "audio_transcribe"
+    assert all(item["name"] != "spreadsheet_create" for item in selected)
+
+
 def test_tool_result_envelope_uses_one_typed_error_shape():
     result = tool_result(
         "retryable_error",

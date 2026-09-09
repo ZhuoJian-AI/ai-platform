@@ -235,6 +235,27 @@ def test_builtin_tool_specs_carry_runtime_metadata():
     assert specs["image_generation_tool"]["timeout_ms"] == nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS
 
 
+def test_model_capability_tool_specs_are_provider_neutral_and_artifact_aware():
+    definitions = nodes._builtin_tool_defs(
+        model_capability_availability={
+            "audio_transcribe": True,
+            "audio_understand": True,
+            "speech_synthesize": True,
+            "speech_modes": ["standard", "design", "clone"],
+        }
+    )
+    specs = {spec["name"]: spec for spec in nodes.assistant_tool_specs(definitions, {})}
+
+    assert specs["audio_transcribe"]["model_capability_binding"] == "speech_to_text"
+    assert specs["audio_understand"]["model_capability_binding"] == "audio_understanding"
+    assert specs["speech_synthesize"]["model_capability_binding"] == "text_to_speech"
+    assert specs["audio_transcribe"]["concurrency_safe"] is True
+    assert specs["audio_understand"]["concurrency_safe"] is True
+    assert specs["speech_synthesize"]["concurrency_safe"] is False
+    assert specs["speech_synthesize"]["artifact_policy"] == "required"
+    assert specs["speech_synthesize"]["timeout_ms"] == nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS
+
+
 def test_registry_backed_tool_specs_are_classified_by_kind():
     registry = {
         "crm_create_order": {"kind": "enterprise_action"},

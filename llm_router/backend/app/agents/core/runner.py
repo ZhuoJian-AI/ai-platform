@@ -75,6 +75,7 @@ _FILE_OUTPUT_TOOL_NAMES = tuple(
             "workspace_copy_file",
             "workspace_restore_version",
             "image_generation_tool",
+            "speech_synthesize",
         }
     )
 )

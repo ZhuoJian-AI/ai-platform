@@ -1376,7 +1376,8 @@ async def _build_tools(
         "candidate_pages": list(envelope.get("candidatePages") or []),
     }
     include_image_generation = False
-    if workspace_id and user is not None:
+    capability_availability: dict[str, Any] = {}
+    if user is not None:
         include_image_generation = (
             await multimodal_service.resolve_image_generation(
                 db,
@@ -1385,11 +1386,17 @@ async def _build_tools(
             )
             is not None
         )
+        capability_availability = await _builtin_tools.model_capability_tools.model_capability_availability(
+            db,
+            user,
+        )
     from app.services.platform_tool_registry import active_platform_tool_names, platform_managed_tool_names
 
     builtin_defs = _builtin_tool_defs(
         include_workspace=bool(workspace_id) or user is not None,
         include_image_generation=include_image_generation,
+        include_image_understanding=bool(capability_availability.get("vision")),
+        model_capability_availability=capability_availability,
     )
     active_builtin_names = await active_platform_tool_names(db)
     if active_builtin_names is not None:
@@ -1480,6 +1487,9 @@ async def _execute_tool_call(
                 "error",
                 "unavailable",
                 "conflict",
+                "needs_input",
+                "retryable_error",
+                "failed",
             }:
                 ok = False
             if ok and isinstance(structured_result, dict):
@@ -1677,6 +1687,8 @@ _ASSISTANT_READ_ONLY_TOOL_NAMES = {
     "workspace_list_versions",
     "read_memory",
     "web_tool",
+    "audio_transcribe",
+    "audio_understand",
     "spreadsheet_inspect",
     "document_inspect",
     "presentation_inspect",
@@ -1690,6 +1702,9 @@ _ASSISTANT_READ_ONLY_REGISTRY_KINDS = {
 _ASSISTANT_LONG_RUNNING_TOOL_NAMES = {
     "web_tool",
     "image_generation_tool",
+    "audio_transcribe",
+    "audio_understand",
+    "speech_synthesize",
     "spreadsheet_convert",
     "document_convert",
     "presentation_convert",
@@ -1732,7 +1747,12 @@ def _assistant_tool_kind(name: str, entry: dict | None) -> str:
         return "workspace_file"
     if name == "web_tool":
         return "web"
-    if name in PLATFORM_TOOL_NAMES or name in LEGACY_BUILTIN_TOOL_NAMES or name == "image_generation_tool":
+    if (
+        name in PLATFORM_TOOL_NAMES
+        or name in _builtin_tools.MODEL_CAPABILITY_TOOL_NAMES
+        or name in LEGACY_BUILTIN_TOOL_NAMES
+        or name == "image_generation_tool"
+    ):
         return "platform_tool"
     if kind in {"enterprise_action", "enterprise_export_file", "memory"}:
         return kind
@@ -1759,9 +1779,18 @@ def _assistant_tool_metadata(name: str, entry: dict | None) -> dict:
         "audio_understand": "audio_understanding",
         "speech_synthesize": "text_to_speech",
     }
+    role_permissions = {
+        "audio_transcribe": ["multimodal.audio.transcribe"],
+        "audio_understand": ["multimodal.audio.understand"],
+        "speech_synthesize": ["multimodal.speech.use"],
+    }
     if kind in {"enterprise_action", "enterprise_export_file"}:
         required_context = "current_page"
-    elif name.startswith("workspace_") or name in STRICT_FILE_TOOL_NAMES | LEGACY_FILE_TOOL_NAMES:
+    elif (
+        name.startswith("workspace_")
+        or name in STRICT_FILE_TOOL_NAMES | LEGACY_FILE_TOOL_NAMES
+        or name in _builtin_tools.MODEL_CAPABILITY_TOOL_NAMES
+    ):
         required_context = "workspace"
     else:
         required_context = None
@@ -1771,13 +1800,17 @@ def _assistant_tool_metadata(name: str, entry: dict | None) -> dict:
         "concurrency_safe": read_only,
         "max_model_chars": ASSISTANT_TOOL_MAX_MODEL_CHARS,
         "risk_level": str((entry or {}).get("risk_level") or ("high" if requires_approval else "low")),
-        "required_role_permissions": list((entry or {}).get("required_role_permissions") or []),
+        "required_role_permissions": list(
+            (entry or {}).get("required_role_permissions") or role_permissions.get(name) or []
+        ),
         "required_context": required_context,
         "model_capability_binding": model_capabilities.get(name),
         "idempotency_policy": "read_only" if read_only else "run_tool_call",
         "confirmation_policy": "ask" if requires_approval else "never",
         "artifact_policy": (
-            "required" if name in FILE_CREATE_TOOL_NAMES or kind == "enterprise_export_file" else "none"
+            "required"
+            if name in FILE_CREATE_TOOL_NAMES or name == "speech_synthesize" or kind == "enterprise_export_file"
+            else "none"
         ),
     }
     if settings.assistant_tool_approval_enabled and requires_approval:
