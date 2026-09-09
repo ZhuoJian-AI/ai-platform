@@ -5,7 +5,7 @@ import {
   ApartmentOutlined, KeyOutlined, CloudServerOutlined,
   SafetyOutlined, TeamOutlined,
   LogoutOutlined, ToolOutlined, MonitorOutlined, RobotOutlined, UserOutlined,
-  FolderOpenOutlined, DatabaseOutlined,
+  FolderOpenOutlined,
   BarChartOutlined, QuestionCircleOutlined, ReadOutlined,
   MoreOutlined, PhoneOutlined,
   AudioOutlined,
@@ -37,9 +37,7 @@ const RolesPage = lazy(() => import('./pages/org/Roles'));
 const VoicesPage = lazy(() => import('./pages/org/Voices'));
 const Workspaces = lazy(() => import('./pages/agent/Workspaces'));
 const Agents = lazy(() => import('./pages/agent/Agents'));
-const Rag = lazy(() => import('./pages/agent/Rag'));
 const MemoryPage = lazy(() => import('./pages/agent/Memory'));
-const Skills = lazy(() => import('./pages/tools/Skills'));
 const MonitorOverview = lazy(() => import('./pages/monitor/MonitorOverview'));
 const RouterMonitor = lazy(() => import('./pages/monitor/RouterMonitor'));
 const AgentMonitor = lazy(() => import('./pages/monitor/AgentMonitor'));
@@ -134,23 +132,12 @@ const SUBSYSTEMS: Subsystem[] = [
     menu: [
       { path: '/agent/workspaces', label: '工作空间', icon: <FolderOpenOutlined /> },
       { path: '/agent/agents', label: '智能体', icon: <RobotOutlined /> },
-      { path: '/agent/rag', label: 'RAG知识库', icon: <DatabaseOutlined /> },
       { path: '/agent/memory', label: '长期记忆', icon: <ReadOutlined /> },
     ],
     routes: [
       { path: '/agent/workspaces', element: <Workspaces /> },
       { path: '/agent/agents', element: <Agents /> },
-      { path: '/agent/rag', element: <Rag /> },
       { path: '/agent/memory', element: <MemoryPage /> },
-    ],
-  },
-  {
-    key: 'tools', label: '工具与技能', icon: <ToolOutlined />, built: true,
-    menu: [
-      { path: '/tools/skills', label: '技能', icon: <ToolOutlined /> },
-    ],
-    routes: [
-      { path: '/tools/skills', element: <Skills /> },
     ],
   },
   {

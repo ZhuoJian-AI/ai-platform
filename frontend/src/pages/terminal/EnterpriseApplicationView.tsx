@@ -228,7 +228,6 @@ function progressForAssistantEvent(event: Record<string, unknown>): AssistantPro
     const category = String(event.category ?? '');
     const labels: Record<string, string> = {
       memory: '正在读取与你相关的业务上下文',
-      rag: '正在检索相关业务知识',
       policy: '正在校验本次操作权限',
       file: '正在处理任务所需的文件',
     };

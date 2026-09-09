@@ -1,6 +1,6 @@
 import type { TerminalTaskMessage } from '../../api/client';
 import type {
-  ArtifactOutput, Block, ChatMsg, InvokedSkill, MessageAttachment, MessageFileRef, TraceCategory,
+  ArtifactOutput, Block, ChatMsg, MessageAttachment, MessageFileRef, TraceCategory,
 } from './terminalConversationTypes';
 
 export async function consumeTerminalEventStream(
@@ -92,20 +92,6 @@ export function messageFileRefLabel(ref: MessageFileRef): string {
 }
 
 
-function messageInvokedSkills(metadata: Record<string, unknown> | undefined): InvokedSkill[] {
-  const raw = metadata?.invoked_skills;
-  if (!Array.isArray(raw)) return [];
-  return raw.flatMap((item) => {
-    if (!item || typeof item !== 'object') return [];
-    const value = item as Record<string, unknown>;
-    const id = typeof value.id === 'string' ? value.id : '';
-    const name = typeof value.name === 'string' ? value.name : '';
-    const slug = typeof value.slug === 'string' ? value.slug : '';
-    if (!id || !name || !slug) return [];
-    return [{ id, name, slug, scope_type: typeof value.scope_type === 'string' ? value.scope_type : undefined }];
-  });
-}
-
 function messageArtifacts(metadata: Record<string, unknown> | undefined): ArtifactOutput[] {
   const raw = metadata?.artifacts;
   if (!Array.isArray(raw)) return [];
@@ -116,7 +102,6 @@ function messageArtifacts(metadata: Record<string, unknown> | undefined): Artifa
     const fileId = typeof value.file_id === 'string' ? value.file_id : '';
     const path = typeof value.workspace_path === 'string' ? value.workspace_path : '';
     if (!fileId && !path) return [];
-    const skillName = typeof source.skill_display_name === 'string' ? source.skill_display_name : '';
     return [{
       fileId,
       path,
@@ -124,23 +109,19 @@ function messageArtifacts(metadata: Record<string, unknown> | undefined): Artifa
       mimeType: typeof value.mime_type === 'string' ? value.mime_type : '',
       size: typeof value.size === 'number' ? value.size : undefined,
       parseStatus: typeof value.parse_status === 'string' ? value.parse_status : undefined,
-      sourceLabel: source.kind === 'skill' ? (skillName ? `技能 · ${skillName}` : '技能生成') : '平台工具生成',
+      sourceLabel: source.kind === 'skill' ? '历史平台产物' : '平台工具生成',
     }];
   });
 }
 
 
-/** 把后端持久化的 traces 数组还原为执行过程 blocks（历史回放用）。
- *  skill → tool_call block（复用 ToolCard 展示）；其余四类 → trace block（TraceChip 展示）。
- *  仅还原资源调用痕迹；终答正文由调用方末尾补一条 text block（见上方回放 map）。 */
+/** 把后端持久化的 traces 数组还原为执行过程 blocks（历史回放用）。 */
 function tracesToBlocks(traces: Record<string, unknown>[]): Block[] {
   const blocks: Block[] = [];
   for (const t of traces) {
     const category = t.category as TraceCategory;
     const title = (t.title as string) || category;
-    // 所有真实工具轨迹都携带 name。平台文件工具使用 file 分类，Skill
-    // 使用 skill 分类；二者都必须还原为 tool_call，才能从持久化 result 中恢复
-    // 图片和文档交付物。仅按 skill 分类会让刷新后的文件输出退化成普通轨迹。
+    // 所有真实工具轨迹都携带 name，并统一还原为工具调用卡片。
     if (t.name as string) {
       blocks.push({
         kind: 'tool_call',
@@ -171,7 +152,6 @@ export function restoreChat(messages: TerminalTaskMessage[]): ChatMsg[] {
           createdAt: m.created_at,
           attachments: messageAttachments(m.metadata),
           fileRefs: messageFileRefs(m.metadata),
-          invokedSkills: messageInvokedSkills(m.metadata),
         };
       }
       const traces = (m.metadata?.traces as Record<string, unknown>[] | undefined) ?? [];

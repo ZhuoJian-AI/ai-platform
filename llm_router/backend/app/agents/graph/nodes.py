@@ -6,9 +6,8 @@ evaluation and audit persistence. Built-in file/web execution lives in
 step scheduling, observations and termination.
 
 两种模式（state["mode"]）：
-- ``agent``：管理端测试广场，load_config 读预配置 ``Agent`` 行（单 RAG / session 记忆）。
-- ``general``：终端通用智能体，按任务配置动态装配（多 RAG / 内置工作空间文件
-  工具 / 4 级长期记忆 / 个人记忆沉淀），不创建 ``Agent`` 行。
+- ``agent``：管理端测试广场，读取文本角色定义。
+- ``general``：终端助手，按当前用户权限装配平台固定工具、工作空间和长期记忆。
 """
 
 from __future__ import annotations
@@ -17,7 +16,6 @@ import base64
 import copy
 import hashlib
 import json
-import mimetypes
 import re
 import time
 from pathlib import PurePosixPath
@@ -35,23 +33,15 @@ from app.dlp.scanner import scan_request
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.audit_log import AuditLog
-from app.models.organization import Organization
-from app.models.skill import SkillExecution, SkillFolder, SkillVersion
 from app.models.task import Task
 from app.models.workspace import WorkspaceFile
-from app.schemas.rag import RagRetrieveRequest
-from app.schemas.workspace import WorkspaceFileCreate
 from app.services import (
-    agent_service,
     enterprise_application_service,
     memory_service,
     multimodal_service,
     scope_service,
-    skill_import_service,
-    skill_runner_client,
-    skill_scope_service,
     subsystem_action_service,
-    workspace_governance_service,
+    tool_executor_client,
     workspace_permission_service,
     workspace_service,
 )
@@ -59,14 +49,6 @@ from app.services import model_gateway as llm_client
 from app.services.file_capability_registry import (
     FILE_CREATE_TOOL_NAMES,
     platform_tool_enabled,
-)
-from app.services.rag_service import retrieve as rag_retrieve
-from app.services.skill_store_service import SKILL_MANIFEST_PATH
-from app.services.skill_store_service import get_file_by_path as get_skill_file_by_path
-from app.tools.skill_manifest import parse_skill_manifest
-from app.utils.workspace_presentation import (
-    clean_display_name,
-    enrich_metadata,
 )
 
 ALWAYS_AVAILABLE_TOOL_NAMES = _builtin_tools.ALWAYS_AVAILABLE_TOOL_NAMES
@@ -126,11 +108,8 @@ async def _task_source_fields(db: Any, state: AgentState) -> dict[str, str | Non
 
 GENERAL_SYSTEM_PROMPT = (
     "你是组织智能助手。默认用 Markdown 直接回答；只有用户明确要求生成、编辑、转换或导出文件时，"
-    "才调用相应的平台文件工具。你可以：按需调用当前用户有权使用的技能完成专业业务操作；使用平台"
-    "文件工具处理表格、文档、演示文稿、PDF、文本、图片与压缩包；按需搜索和读取公开网页；"
-    "管理当前工作空间文件；参考获准的知识库与四级长期记忆。"
-    "用户明确调用 Skill 或某个 Skill 明显匹配专业流程时优先遵循该 Skill，平台文件工具作为通用能力。只有系统实际提供了"
-    "[知识库检索结果]时才能使用RAG内容，通用智能体不会自动加载知识库。"
+    "才调用相应的平台文件工具。你可以使用平台文件工具处理表格、文档、演示文稿、PDF、文本、图片与压缩包；"
+    "按需搜索和读取公开网页；管理当前用户有权访问的工作空间文件；参考当前用户的长期记忆。"
     "请基于上述上下文完成用户任务，必要时分步调用工具，最终给出清晰的结果。"
     "文件交付与检索结果应使用可读的 canonical_path（例如 技术部:/2026冬/尺寸表.xlsx），便于用户定位和"
     "再次引用；不要在正文中输出 file_id、UUID、OSS Key、服务器路径、Token 或签名地址。"
@@ -139,21 +118,21 @@ GENERAL_SYSTEM_PROMPT = (
 # ── 执行模式（exec_mode）prompt 注入 ────────────────────────────────────
 # Craft：自主多步执行（默认，挂全量工具）。Ask / Plan：不挂工具，单轮输出。
 ASK_PROMPT = (
-    "\n\n[执行模式：Ask 问答]\n当前为问答模式：仅依据上方上下文（长期记忆 / 组织本体 / 知识库检索）"
+    "\n\n[执行模式：Ask 问答]\n当前为问答模式：仅依据上方上下文（长期记忆、文件引用和对话历史）"
     "与对话历史直接回答用户问题。禁止调用任何工具、禁止读写或创建文件、禁止执行业务操作。"
     "信息不足时如实说明，不要编造。"
 )
 PLAN_PROMPT = (
     "\n\n[执行模式：Plan 规划]\n当前为规划模式：为用户需求产出一份可执行的分步计划，但不要真正执行、"
     "不要调用工具、不要读写文件。计划须包含：① 目标 ② 分步动作（每步说明做什么、会读写哪些工作空间"
-    "文件、调用哪些技能/工具）③ 所需资源与前置条件 ④ 风险与验收标准。以结构化清单输出。"
+    "文件、调用哪些平台工具）③ 所需资源与前置条件 ④ 风险与验收标准。以结构化清单输出。"
 )
 
 # ── 工具调用策略（Craft 挂工具时注入）────────────────────────────────────
 # 约束 agent「先分析再调用」：结合本体与数据接口目录确定最少的端点集合与入参，
 # 而非把所有端点都试一遍；失败后据返回信息修正而非无差别重试。
 TOOL_STRATEGY_PROMPT = (
-    "\n\n[工具调用策略] 调用任何技能/端点前，请先按以下原则规划：\n"
+    "\n\n[工具调用策略] 调用任何工具或业务 Action 前，请先按以下原则规划：\n"
     "1. 结合当前任务、已授权工具与文件上下文，分析任务到底需要哪些数据或操作，确定**最少且最直接可达**"
     "的端点集合——不要把所有端点都试一遍，只调用与当前步骤真正相关的。\n"
     "2. 对每个选定端点，按其参数清单（名称/是否必填/类型）准备入参：优先使用任务上下文里已有的具体"
@@ -168,8 +147,7 @@ TOOL_STRATEGY_PROMPT = (
     "6. Agent 可根据任务自主搜索和读取当前用户全部实时 read=true 的工作空间，"
     "不需要本轮先点名空间或 @ 文件。仅当多个候选无法根据任务可靠判断，且继续会导致写入、覆盖、移动或删除风险时才询问。"
     "每个工具调用均会重新校验当前 RBAC；status=unavailable 表示已删除或当前无权。\n"
-    "7. 用户明确调用 Skill，或已载入 Skill 与当前专业流程匹配时，优先遵循 SKILL.md 并执行其脚本；"
-    "只有没有适用 Skill 时才使用 spreadsheet/document/presentation/pdf/text/image/archive/web 平台通用工具兜底。"
+    "7. 只使用本轮由服务端装配的平台固定工具与当前页面实时授权的业务 Action，不得请求或执行用户脚本。"
 )
 
 # ── 输出协议（Craft 模式注入，场景无关 boilerplate，避免每个任务提示词重复）────
@@ -178,14 +156,12 @@ TOOL_STRATEGY_PROMPT = (
 OUTPUT_PROTOCOL_PROMPT = (
     "\n\n[输出协议]\n"
     "1. 默认以 Markdown 返回结果。仅当用户请求或智能体任务说明明确要求生成、编辑、转换、导出、下载或归档附件时，"
-    "才调用与目标格式对应的平台文件工具或已匹配 Skill；普通问答、解释或文件分析不得擅自生成附件。\n"
+    "才调用与目标格式对应的平台文件工具；普通问答、解释或文件分析不得擅自生成附件。\n"
     "2. 不要臆造数据：所有编码 / 工单号 / 款号 / 数值 / 结论必须来自已注入的数据接口返回、"
-    "本体、知识库检索命中或用户给定，不可拼凑不存在的标识符。\n"
+    "业务 Action、工作空间文件、长期记忆或用户给定，不可拼凑不存在的标识符。\n"
     "3. 任何‘已调用工具 / 执行成功 / 已生成文件’的声明，以及 file_id、输出路径和处理结果，都必须来自"
     "本轮真实 tool_result。若本轮没有真实 tool_call，只能如实说明尚未执行，严禁编造 UUID、路径或成功状态。"
-    "\n4. 用户明确要求使用 Skill 处理附件并交付文件时，load_skill / read_skill_resource 仅是准备步骤；"
-    "必须继续调用脚本或平台文件工具，直到真实 tool_result 确认产物已生成。不得以‘先加载技能’、"
-    "‘接下来处理’等进度说明作为最终回答。"
+    "\n4. 文件任务必须继续执行到平台文件工具返回真实产物；不得以‘接下来处理’等进度说明作为最终回答。"
 )
 
 
@@ -217,7 +193,7 @@ def _emit(event: dict) -> None:
 async def load_config(state: AgentState) -> dict:
     """加载配置，创建 AgentRun（status=running），注入首轮 user 消息。
 
-    agent 模式读 ``Agent`` 行；general 模式从任务配置装配并按用户权限解析自动匹配的资源。
+    agent 模式读文本角色；general 模式从任务配置装配当前用户可用的平台能力。
     """
     deps = get_deps()
     db = deps["db"]
@@ -247,13 +223,11 @@ async def load_config(state: AgentState) -> dict:
     return {
         "run_id": run.id,
         "system_prompt": agent.system_prompt,
-        "model_alias": agent.model_alias,
-        "memory_config": agent.memory_config or {},
-        "skill_ids": list(agent.skill_ids or []),
-        "temperature": agent.temperature,
-        "max_tokens": agent.max_tokens,
-        "workspace_id": str(agent.workspace_id) if agent.workspace_id else None,
-        "rag_collection_ids": list(agent.rag_collection_ids or []),
+        "model_alias": state.get("model_alias") or "default",
+        "memory_config": {"enabled": True},
+        "temperature": None,
+        "max_tokens": None,
+        "workspace_id": None,
         "messages": messages,
         "steps": [],
         "usage": {"input_tokens": 0, "output_tokens": 0},
@@ -265,98 +239,45 @@ async def load_config(state: AgentState) -> dict:
     }
 
 
-async def _runtime_skill_summary(db, folder: SkillFolder) -> dict | None:
-    """Return a compact ready-to-use Skill catalog row without loading full instructions."""
-    version = await db.get(SkillVersion, folder.active_version_id) if folder.active_version_id else None
-    if folder.active_version_id:
-        if version is None or version.install_status != "ready":
-            return None
-        manifest = version.manifest if isinstance(version.manifest, dict) else {}
-        description = str(manifest.get("description") or folder.name)
-        executable = bool(version.is_executable)
-        platform = manifest.get("_platform") if isinstance(manifest.get("_platform"), dict) else {}
-        package_format = str(platform.get("package_format") or "package")
-    else:
-        manifest_file = await get_skill_file_by_path(db, folder.id, SKILL_MANIFEST_PATH)
-        manifest = parse_skill_manifest(manifest_file.content if manifest_file else None)
-        if manifest is None:
-            return None
-        description = manifest.description or folder.name
-        executable = manifest.runtime in {"python", "node"}
-        package_format = "legacy"
-    return {
-        "id": str(folder.id),
-        "name": folder.name,
-        "slug": folder.slug,
-        "description": description[:1000],
-        "scope_type": folder.scope_type,
-        "scope_id": str(folder.scope_id) if folder.scope_id else None,
-        "is_executable": executable,
-        "package_format": package_format,
-    }
-
-
 async def _load_config_general(state: AgentState, deps, db) -> dict:
-    """General mode: fixed Agent RAG plus a prioritized catalog of every authorized Skill."""
+    """Load one personal-assistant turn and optionally prepend a visible text persona."""
     user = deps.get("user")
     org_id = state["org_id"]
-
-    # 可选「场景模板」：引用一个 Agent 行，其 system_prompt 作为 persona/policy 前缀
-    # 拼到 GENERAL_SYSTEM_PROMPT 之前。承载场景 persona + 不可由本体/数据接口目录
-    # 推导的业务规则 + 输出骨架。用户 composer 只写目标+对象，不必复制整套提示词。
     base_prompt = GENERAL_SYSTEM_PROMPT
     tpl_id = state.get("template_agent_id")
+    tpl = None
     tpl_traces: list[dict] = []
-    if tpl_id:
+
+    # Business Assistant is bound only to its verified application/page context.
+    # A stale or client-supplied personal persona never changes that tool boundary.
+    if state.get("application_id"):
+        if tpl_id:
+            tpl_traces.append({"category": "policy", "title": "业务会话已忽略文本智能体"})
+        tpl_id = None
+        state["template_agent_id"] = None
+    elif tpl_id:
         try:
             tpl = await db.get(Agent, UUID(str(tpl_id)))
-        except Exception:  # noqa: BLE001
+        except (TypeError, ValueError, AttributeError):
             tpl = None
-        if tpl is not None and (tpl.deleted_at is not None or not tpl.is_active):
-            raise HTTPException(status_code=404, detail="智能体不存在或已停用")
-        if tpl is not None and tpl.system_prompt:
+        visible_ids = {
+            str(agent.id)
+            for agent in (await scope_service.list_agents_for_user(db, user))
+        } if user is not None else set()
+        if (
+            tpl is None
+            or tpl.deleted_at is not None
+            or not tpl.is_active
+            or str(tpl.organization_id) != str(org_id)
+            or (user is not None and str(tpl.id) not in visible_ids)
+        ):
+            raise HTTPException(status_code=404, detail="智能体不存在或无权使用")
+        if tpl.system_prompt:
             base_prompt = f"{tpl.system_prompt.rstrip()}\n\n{GENERAL_SYSTEM_PROMPT}"
             tpl_traces.append(
-                {"category": "template", "title": "场景模板注入", "slug": tpl.slug, "chars": len(tpl.system_prompt)}
+                {"category": "template", "title": "文本角色已应用", "slug": tpl.slug, "chars": len(tpl.system_prompt)}
             )
-            if not state.get("model_alias") or state.get("model_alias") == "default":
-                if tpl.model_alias and tpl.model_alias != "default":
-                    state["model_alias"] = tpl.model_alias
-        if tpl is not None and tpl.application_id:
-            if user is None:
-                raise HTTPException(status_code=403, detail="业务智能体必须由已登录员工运行")
-            await agent_service.validate_application_context(
-                db,
-                org_id,
-                tpl.application_id,
-                tpl.module_key,
-                tpl.page_key,
-                user=user,
-            )
-            current_application_id = str(state.get("application_id") or "")
-            if current_application_id and current_application_id != str(tpl.application_id):
-                raise HTTPException(status_code=409, detail="当前对话已绑定其他业务应用，请新建对话")
-            state["application_id"] = str(tpl.application_id)
-            state["page_context"] = {
-                **dict(state.get("page_context") or {}),
-                "application_id": str(tpl.application_id),
-                "module_key": tpl.module_key,
-                "page_key": tpl.page_key,
-            }
 
-    # RAG remains fixed to the selected Agent. Skill bindings are recommendations, not an allowlist.
-    default_skill_ids = [str(s) for s in (tpl.skill_ids or [])] if tpl_id and tpl is not None else []
-    # Preserve old task configs as additional recommendations while new UI selections use invoked_skill_ids.
-    for legacy_id in state.get("skill_ids") or []:
-        if str(legacy_id) not in default_skill_ids:
-            default_skill_ids.append(str(legacy_id))
-    skill_ids: list[str] = []
-    skill_catalog: list[dict] = []
-    default_skills: list[dict] = []
-    rag_ids = [str(r) for r in (tpl.rag_collection_ids or [])] if tpl_id and tpl is not None else []
-    referenced_skills: list[dict] = list(state.get("invoked_skills") or [])
-    slug_ambiguities: list[str] = []
-    # 结构化附件优先进入 state；正文中的历史 @UUID 再补充，按出现顺序去重。
     referenced_file_ids: list[str] = []
     access_summary: dict = {"roles": [], "workspaces": []}
     workspace_intent: dict = {
@@ -364,86 +285,27 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
         "write_workspace_ids": [],
         "ambiguous_names": [],
     }
-
     if user is not None:
-        visible_folders = await scope_service.list_skills_for_user(db, user)
-        visible_rows: list[tuple[SkillFolder, dict]] = []
-        for folder in visible_folders:
-            summary = await _runtime_skill_summary(db, folder)
-            if summary is not None:
-                visible_rows.append((folder, summary))
-        visible_by_id = {str(folder.id): (folder, summary) for folder, summary in visible_rows}
-
-        default_folders = await skill_scope_service.assert_bound_skills_visible(
-            db,
-            user,
-            default_skill_ids,
-        )
-        invoked_folders = await skill_scope_service.assert_bound_skills_visible(
-            db,
-            user,
-            list(state.get("invoked_skill_ids") or []),
-        )
-        invoked_id_order = [str(folder.id) for folder in invoked_folders]
-        default_id_order = [str(folder.id) for folder in default_folders]
-        ordered_ids = list(
-            dict.fromkeys(
-                [
-                    *invoked_id_order,
-                    *default_id_order,
-                    *(str(folder.id) for folder, _ in visible_rows),
-                ]
-            )
-        )
-        skill_catalog = [visible_by_id[sid][1] for sid in ordered_ids if sid in visible_by_id]
-        skill_ids = [row["id"] for row in skill_catalog]
-        default_skills = [
-            {**visible_by_id[sid][1], "is_default": True} for sid in default_id_order if sid in visible_by_id
-        ]
-        # Trust server-side snapshots, not client names/descriptions, after UUID authorization succeeds.
-        explicit_ids = set(invoked_id_order)
-        referenced_skills = [
-            {**visible_by_id[sid][1], "activation": "explicit"} for sid in invoked_id_order if sid in visible_by_id
-        ]
-        bound_rags = await scope_service.assert_bound_rags_visible(db, user, rag_ids)
-        rag_ids = [str(r.id) for r in bound_rags]
-        # /slug remains current-turn compatibility. A duplicate visible slug is deliberately ambiguous.
-        slug_to_rows: dict[str, list[dict]] = {}
-        for row in skill_catalog:
-            slug_to_rows.setdefault(row["slug"], []).append(row)
-        seen_slugs: set[str] = set()
-        for m in re.finditer(r"(?<![\w/])/([a-z0-9][a-z0-9-]*)", state.get("request", "") or ""):
-            slug = m.group(1)
-            matches = slug_to_rows.get(slug, [])
-            if len(matches) > 1:
-                if slug not in slug_ambiguities:
-                    slug_ambiguities.append(slug)
-                continue
-            if matches and slug not in seen_slugs:
-                seen_slugs.add(slug)
-                row = matches[0]
-                if row["id"] not in explicit_ids:
-                    referenced_skills.append({**row, "activation": "slash"})
-        # 解析用户消息中 @<file_id> 引用的工作空间文件（精确 UUID，避免误命中邮件等）。
-        # Turn preparation injects these authorized file references into model context.
         seen_fids: set[str] = set()
         for raw_fid in state.get("referenced_file_ids") or []:
             fid = str(raw_fid)
             if fid not in seen_fids:
                 seen_fids.add(fid)
                 referenced_file_ids.append(fid)
-        for m in re.finditer(
+        for match in re.finditer(
             r"(?<![\w])@([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
             state.get("request", "") or "",
         ):
-            fid = m.group(1)
+            fid = match.group(1)
             if fid not in seen_fids:
                 seen_fids.add(fid)
                 referenced_file_ids.append(fid)
 
         access_summary = await workspace_permission_service.effective_access(db, user)
-        referenced_workspace_ids: list[str] = [
-            str(item.get("workspace_id")) for item in (state.get("attachment_files") or []) if item.get("workspace_id")
+        referenced_workspace_ids = [
+            str(item.get("workspace_id"))
+            for item in (state.get("attachment_files") or [])
+            if item.get("workspace_id")
         ]
         for fid in referenced_file_ids:
             try:
@@ -453,7 +315,9 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
             if file is None:
                 continue
             workspace = await workspace_service.get_workspace(db, file.workspace_id)
-            if workspace is not None and (await workspace_permission_service.capabilities(db, workspace, user))["read"]:
+            if workspace is not None and (
+                await workspace_permission_service.capabilities(db, workspace, user)
+            )["read"]:
                 referenced_workspace_ids.append(str(workspace.id))
         workspace_intent = workspace_permission_service.resolve_workspace_intent(
             access_summary,
@@ -463,7 +327,7 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
 
     run = AgentRun(
         organization_id=org_id,
-        agent_id=tpl.id if tpl_id and tpl is not None else None,
+        agent_id=tpl.id if tpl is not None else None,
         task_id=state.get("task_id"),
         user_id=state.get("user_id"),
         session_id=state["session_id"],
@@ -473,44 +337,24 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
     )
     db.add(run)
     await db.flush()
-    # 提前提交 run 行：让 agent_runs 行立即对其他会话可见（崩溃收口 _finalize_bg_error 能据此
-    # 置 status=error；事件落库的独立会话也能满足 run_id 外键）。后台 runner 不再在此会话上
-    # 提交事件——见 runner._run_graph_bg（避免与图节点 DB 调用并发争用同一 asyncpg 连接）。
     await db.commit()
 
     messages: list[dict] = [{"role": "user", "content": state.get("request", "")}]
-
-    _emit(
-        {
-            "type": "step",
-            "step": "load_config",
-            "mode": "general",
-            "skills": len(skill_ids),
-            "rags": len(rag_ids),
-            "default_skills": len(default_skills),
-            "referenced_skills": len(referenced_skills),
-            "referenced_files": len(referenced_file_ids),
-            "template": bool(tpl_traces),
-            "run_id": run.id,
-        }
-    )
-    for t in tpl_traces:
-        _emit({"type": "trace", **t})
+    _emit({
+        "type": "step",
+        "step": "load_config",
+        "mode": "general",
+        "referenced_files": len(referenced_file_ids),
+        "template": tpl is not None,
+        "run_id": run.id,
+    })
+    for trace in tpl_traces:
+        _emit({"type": "trace", **trace})
     return {
         "run_id": run.id,
         "system_prompt": base_prompt,
         "model_alias": state.get("model_alias") or "default",
         "memory_config": {"enabled": True},
-        "skill_ids": skill_ids,
-        "skill_catalog": skill_catalog,
-        "default_skills": default_skills,
-        "invoked_skills": referenced_skills,
-        "invoked_skill_ids": [row["id"] for row in referenced_skills],
-        "loaded_skills": [],
-        "executed_skills": [],
-        "skill_slug_ambiguities": slug_ambiguities,
-        "rag_collection_ids": rag_ids,
-        "referenced_skills": referenced_skills,
         "referenced_file_ids": referenced_file_ids,
         "effective_access": access_summary,
         "workspace_intent": workspace_intent,
@@ -527,78 +371,6 @@ async def _load_config_general(state: AgentState, deps, db) -> dict:
         "file_accesses_v1": [],
         "traces": list(tpl_traces),
         "org_id": org_id,
-    }
-
-
-# ── retrieve_rag ───────────────────────────────────────────────────────
-
-
-async def retrieve_rag(state: AgentState) -> dict:
-    """检索 RAG 命中注入 rag_context。
-
-    所有助手模式均遍历多个 ``rag_collection_ids`` 合并 top-k。
-    """
-    deps = get_deps()
-    db = deps["db"]
-    from app.models.rag import RagCollection
-
-    coll_ids = list(state.get("rag_collection_ids") or [])
-    if not coll_ids:
-        return {}
-
-    merged: list[dict] = []
-    for cid in coll_ids:
-        coll = await db.get(RagCollection, UUID(cid))
-        if coll is None:
-            continue
-        try:
-            req = RagRetrieveRequest(query=state.get("request", ""), top_k=5)
-            hits = await rag_retrieve(
-                db,
-                coll,
-                UUID(state["org_id"]),
-                req,
-                department_id=state.get("department_id"),
-            )
-            for h in hits:
-                merged.append(
-                    {
-                        "content": h["content"],
-                        "score": h["score"],
-                        "document_id": h["document_id"],
-                        "collection_id": cid,
-                        "metadata": h.get("metadata") or {},
-                    }
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("agent_rag_retrieve_failed", coll=str(cid), error=str(exc))
-
-    merged.sort(key=lambda h: h.get("score", 0.0), reverse=True)
-    merged = merged[:8]
-    preview = [h["content"][:120] for h in merged[:3]]
-    # 命中 metadata.retriever='keyword_fallback' 说明向量通道不可用、走了关键词兜底
-    retriever = next(
-        (
-            h.get("metadata", {}).get("retriever")
-            for h in merged
-            if isinstance(h.get("metadata"), dict) and h["metadata"].get("retriever")
-        ),
-        "vector",
-    )
-    title = "知识库检索" if retriever == "vector" else "知识库检索（关键词兜底）"
-    trace = {
-        "category": "rag",
-        "title": title,
-        "retriever": retriever,
-        "collections": len(coll_ids),
-        "hits": len(merged),
-        "preview": preview,
-    }
-    _emit({"type": "trace", **trace})
-    return {
-        "rag_context": merged,
-        "steps": [*state.get("steps", []), {"step": "rag", "hits": len(merged), "collections": len(coll_ids)}],
-        "traces": [*state.get("traces", []), trace],
     }
 
 
@@ -823,7 +595,7 @@ async def _prepare_current_turn_images(state: AgentState, db, user) -> list[mult
 
         # OCR is only a DLP pre-check. Failure does not turn OCR into a prerequisite for vision.
         try:
-            ocr, _ = await skill_runner_client.execute_builtin(
+            ocr, _ = await tool_executor_client.execute_builtin(
                 tool_kind="image",
                 action="ocr",
                 params={"language": "chi_sim+eng", "max_pages": 1},
@@ -835,7 +607,7 @@ async def _prepare_current_turn_images(state: AgentState, db, user) -> list[mult
                     }
                 ],
                 execution_id=f"vision-dlp-{state.get('task_id') or 'playground'}-{uuid4().hex[:8]}",
-                timeout_seconds=min(settings.skill_runner_timeout_seconds, 45),
+                timeout_seconds=min(settings.tool_executor_timeout_seconds, 45),
             )
             summary = ocr.get("summary") or {}
             ocr_text = str(summary.get("content") or summary.get("text") or "").strip()
@@ -845,7 +617,6 @@ async def _prepare_current_turn_images(state: AgentState, db, user) -> list[mult
                     ocr_text,
                     str(state["org_id"]),
                     state.get("department_id"),
-                    None,
                 )
                 # Redacting extracted text cannot redact pixels, so raw image transmission must stop.
                 if dlp.blocked or dlp.redacted_text is not None:
@@ -1470,7 +1241,6 @@ async def _execute_enterprise_export_file(
 
 async def _build_tools(
     db,
-    skill_ids: list[str],
     workspace_id: str | None,
     user=None,
     *,
@@ -1481,7 +1251,7 @@ async def _build_tools(
     business_intent: dict | None = None,
     business_envelope: dict | None = None,
 ) -> tuple[list[dict], dict[str, dict]]:
-    """Load user Skills and the current page's authorized Manifest Actions."""
+    """Load platform tools and the current page's authorized Manifest Actions."""
     tools: list[dict] = []
     registry: dict[str, dict] = {}
     if application_id and user is not None:
@@ -1643,213 +1413,9 @@ async def _build_tools(
                         properties.pop("target_workspace_id", None)
                     file_tools.append(item)
                 tools.extend(file_tools)
-        # 应用会话只混入当前应用 Action 与平台受控文件工具。普通 Skill、长期记忆、
-        # 数据接口和外部连接器仍保持隔离，避免绕回其他系统或扩大权限。
+        # 应用会话只混入当前应用 Action 与平台受控文件工具。长期记忆和跨应用
+        # 能力保持隔离，避免绕回其他系统或扩大权限。
         return tools, registry
-    agent_skills: dict[str, dict] = {}
-    agent_skill_slugs: dict[str, list[str]] = {}
-    for sid in skill_ids:
-        folder = await db.get(SkillFolder, UUID(sid))
-        if folder is None or folder.deleted_at is not None or not folder.is_active:
-            continue
-        if user is not None and not skill_scope_service.user_can_use_folder(user, folder):
-            continue
-        version = await db.get(SkillVersion, folder.active_version_id) if folder.active_version_id else None
-        if version is not None and version.install_status != "ready":
-            continue
-        platform = (
-            version.manifest.get("_platform") if version is not None and isinstance(version.manifest, dict) else None
-        )
-        if isinstance(platform, dict) and platform.get("package_format") == "agent_skill":
-            organization = await db.get(Organization, folder.organization_id)
-            if organization is None or not settings.agent_skills_enabled_for(
-                organization.slug, organization_id=organization.id
-            ):
-                continue
-            try:
-                skill_path = next(
-                    item["path"]
-                    for item in platform.get("resources", [])
-                    if PurePosixPath(str(item.get("path") or "")).name.lower() == "skill.md"
-                )
-                skill_content = (await skill_import_service.read_version_resource(version, skill_path)).decode("utf-8")
-            except (StopIteration, UnicodeDecodeError, KeyError):
-                logger.warning("agent_skill_manifest_unavailable", skill_folder=str(folder.id), slug=folder.slug)
-                continue
-            folder_id = str(folder.id)
-            agent_skills[folder_id] = {
-                "folder": folder,
-                "version": version,
-                "content": skill_content,
-                "platform": platform,
-            }
-            agent_skill_slugs.setdefault(folder.slug, []).append(folder_id)
-            continue
-        manifest_file = await get_skill_file_by_path(db, folder.id, SKILL_MANIFEST_PATH)
-        manifest = parse_skill_manifest(manifest_file.content if manifest_file else None)
-        if manifest is None:
-            logger.warning("skill_manifest_missing_or_invalid", skill_folder=str(folder.id), slug=folder.slug)
-            continue
-        if version is not None and version.is_executable:
-            if not settings.code_skills_enabled:
-                continue
-            tool_name = re.sub(r"[^a-zA-Z0-9_-]", "_", manifest.command or folder.slug)[:64]
-            params = dict(manifest.parameters or {"type": "object", "properties": {}})
-            params.setdefault("type", "object")
-            properties = dict(params.get("properties") or {})
-            properties.setdefault(
-                "input_file_ids",
-                {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "工作空间输入文件 UUID；未传时使用本轮聊天附件",
-                },
-            )
-            properties.setdefault(
-                "target_workspace_id",
-                {
-                    "type": "string",
-                    "description": "输出目标；省略时写入个人空间，点名且有写权限时可写共享空间",
-                },
-            )
-            params["properties"] = properties
-            tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "description": manifest.description or folder.name,
-                        "parameters": params,
-                    },
-                }
-            )
-            registry[tool_name] = {"kind": "code", "folder": folder, "version": version}
-            continue
-        if manifest is not None:
-            tool_name = f"load_{re.sub(r'[^a-zA-Z0-9_-]', '_', folder.slug)[:55]}"
-            tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "description": manifest.description or f"载入技能 {folder.name} 的详细操作说明",
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                }
-            )
-            registry[tool_name] = {
-                "kind": "prompt",
-                "folder": folder,
-                "version": version,
-                "content": manifest_file.content or "",
-            }
-            continue
-    if agent_skills:
-        summaries = "; ".join(
-            f"{skill_id} ({entry['folder'].slug}): "
-            f"{entry['version'].manifest.get('description') or entry['folder'].name}"
-            for skill_id, entry in agent_skills.items()
-        )
-        id_schema = {"type": "string", "enum": list(agent_skills)}
-        tools.extend(
-            [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "load_skill",
-                        "description": "按需载入当前用户可用标准 Skill 的完整 SKILL.md。可用技能：" + summaries,
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "skill_id": {**id_schema, "description": "技能 UUID（来自 Skill 目录）"},
-                            },
-                            "required": ["skill_id"],
-                        },
-                    },
-                },
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "read_skill_resource",
-                        "description": "读取已载入 Skill 中 references/、assets/ 或脚本说明等文本资源。",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "skill_id": id_schema,
-                                "path": {"type": "string", "description": "资源索引中显示的相对路径"},
-                            },
-                            "required": ["skill_id", "path"],
-                        },
-                    },
-                },
-            ]
-        )
-        if any(entry["version"].is_executable for entry in agent_skills.values()):
-            tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "run_skill_script",
-                        "description": (
-                            "在隔离 Runner 中执行当前用户可用 Skill 的 scripts/ 内 Python、Node 或 Bash 脚本。"
-                            "先调用 load_skill 并遵循其说明。"
-                        ),
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "skill_id": id_schema,
-                                "script_path": {"type": "string", "description": "load_skill 返回的 scripts/ 相对路径"},
-                                "args": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": (
-                                        "直接传给脚本的参数数组，不是 Shell 命令。"
-                                        "严禁猜测服务器文件名、UUID 或相对路径；"
-                                        "输入文件必须写 {input_file}（多个输入用 {input_dir}），输出路径必须写在 "
-                                        "{output_dir} 下，例如 ['{input_file}', '{output_dir}/处理后.xlsx']。"
-                                    ),
-                                },
-                                "input_file_ids": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "工作空间输入文件 UUID；省略时使用本轮附件",
-                                },
-                                "target_workspace_id": {
-                                    "type": "string",
-                                    "description": "新建输出目标；省略时写入个人空间，有 create 权限时可写共享空间",
-                                },
-                                "target_file_id": {
-                                    "type": "string",
-                                    "description": "可选：脚本恰好一个产出时原位更新的稳定文件 UUID",
-                                },
-                                "base_version_id": {
-                                    "type": "string",
-                                    "description": "target_file_id 存在时必填：开始编辑时读取到的版本 UUID",
-                                },
-                                "idempotency_key": {
-                                    "type": "string",
-                                    "minLength": 8,
-                                    "description": "兼容客户端重试键；服务端会按本轮工具调用生成最终写入键",
-                                },
-                                "output_path": {
-                                    "type": "string",
-                                    "description": "新建单输出的完整相对路径；多输出时作为目标目录前缀",
-                                },
-                            },
-                            "required": ["skill_id", "script_path"],
-                        },
-                    },
-                }
-            )
-        tool_names = ["load_skill", "read_skill_resource"]
-        if any(entry["version"].is_executable for entry in agent_skills.values()):
-            tool_names.append("run_skill_script")
-        for name in tool_names:
-            registry[name] = {
-                "kind": name,
-                "skills": agent_skills,
-                "slug_index": agent_skill_slugs,
-            }
     include_image_generation = False
     if workspace_id and user is not None:
         include_image_generation = (
@@ -1879,564 +1445,6 @@ async def _build_tools(
             registry.pop(name, None)
     tools.extend(builtin_defs)
     return tools, registry
-
-
-async def _execute_code_skill(
-    state: AgentState,
-    entry: dict,
-    params: dict,
-    *,
-    script_path: str | None = None,
-    script_args: list[str] | None = None,
-) -> str:
-    deps = get_deps()
-    db = deps["db"]
-    user = deps.get("user")
-    user = await _fresh_user_principal(db, user)
-    folder: SkillFolder = entry["folder"]
-    version: SkillVersion = entry["version"]
-    if user is None or not skill_scope_service.user_can_use_folder(user, folder):
-        return json.dumps({"status": "error", "error": "Skill is outside the current user scope"})
-    # Re-check mutable authorization/lifecycle state immediately before each
-    # execution. A Skill may be disabled, upgraded, or revoked after the LLM
-    # received its tool schema but before it returns the tool call.
-    await db.refresh(folder)
-    await db.refresh(version)
-    if not folder.is_active or str(folder.active_version_id or "") != str(version.id):
-        return json.dumps({"status": "error", "error": "Skill is disabled or its active version changed"})
-    if version.install_status != "ready" or not version.is_executable:
-        return json.dumps({"status": "error", "error": "Skill version is not executable"})
-    if version.runtime == "agent_skill":
-        organization = await db.get(Organization, folder.organization_id)
-        if organization is None or not settings.agent_skills_enabled_for(
-            organization.slug, organization_id=organization.id
-        ):
-            return json.dumps({"status": "error", "error": "Agent Skills are not enabled for this organization"})
-    if state.get("exec_mode") != "craft":
-        return json.dumps({"status": "error", "error": "请切换到 Craft 模式执行代码 Skill"}, ensure_ascii=False)
-    params = dict(params)
-    requested_ids = params.pop("input_file_ids", None) or state.get("referenced_file_ids") or []
-    if not isinstance(requested_ids, list):
-        return json.dumps({"status": "error", "error": "input_file_ids must be an array"})
-    target_file_id = str(params.pop("target_file_id", "") or "").strip()
-    target_workspace_id = params.pop("target_workspace_id", None)
-    base_version_id = str(params.pop("base_version_id", "") or "").strip()
-    output_path = str(params.pop("output_path", "") or "").strip()
-    mutation_key = str(params.pop("_mutation_key", "") or params.pop("idempotency_key", "") or "")
-    target_file = None
-    if target_file_id:
-        if not base_version_id:
-            return json.dumps(
-                {
-                    "status": "error",
-                    "error": "base_version_id is required with target_file_id",
-                }
-            )
-        if output_path:
-            return json.dumps(
-                {
-                    "status": "error",
-                    "error": "output_path cannot rename a target_file_id update",
-                }
-            )
-        target_file, ws, user = await _authorized_file(
-            state,
-            target_file_id,
-            user,
-            capability="update",
-        )
-        if target_file is None or ws is None:
-            return json.dumps({"status": "error", "error": "target file not found or update denied"})
-        if target_file_id not in {str(value) for value in requested_ids}:
-            requested_ids = [*requested_ids, target_file_id]
-    else:
-        workspace_params = {"target_workspace_id": target_workspace_id}
-        ws, user, workspace_error = await _resolve_tool_workspace(
-            state,
-            workspace_params,
-            user,
-            capability="create",
-            parameter="target_workspace_id",
-        )
-        if workspace_error:
-            return json.dumps({"status": "error", "error": workspace_error}, ensure_ascii=False)
-    if not mutation_key:
-        # Direct internal callers predating server-owned tool keys still get a
-        # deterministic execution-scoped fallback, never a random write key.
-        mutation_key = (
-            "skill-"
-            + hashlib.sha256(
-                f"{state.get('task_id')}:{version.id}:{script_path}:{base_version_id}".encode()
-            ).hexdigest()
-        )
-    if script_path is not None:
-        platform = version.manifest.get("_platform") if isinstance(version.manifest, dict) else None
-        allowed_scripts = {
-            str(item.get("path"))
-            for item in (platform.get("scripts") if isinstance(platform, dict) else [])
-            if isinstance(item, dict) and item.get("path")
-        }
-        if script_path not in allowed_scripts:
-            return json.dumps({"status": "error", "error": "Script is not declared in this Skill version"})
-    inputs: list[dict] = []
-    valid_ids: list[str] = []
-    input_identities: list[dict] = []
-    for value in requested_ids:
-        file, user = await _authorized_input_file(state, value, user)
-        if file is None:
-            return json.dumps({"status": "error", "error": f"Input file {value} is unavailable"})
-        inputs.append(await _runner_input(file))
-        valid_ids.append(str(file.id))
-        input_workspace = await workspace_service.get_workspace(db, file.workspace_id)
-        if input_workspace is not None:
-            input_identities.append(await _workspace_file_identity(db, file, input_workspace, user))
-
-    execution = SkillExecution(
-        organization_id=UUID(state["org_id"]),
-        user_id=UUID(user.id),
-        task_id=UUID(state["task_id"]) if state.get("task_id") else None,
-        agent_id=UUID(state["template_agent_id"]) if state.get("template_agent_id") else None,
-        skill_folder_id=folder.id,
-        skill_version_id=version.id,
-        input_file_ids=valid_ids,
-        params=params,
-        status="running",
-    )
-    db.add(execution)
-    await db.flush()
-    try:
-        result, latency = await skill_runner_client.execute_version(
-            version,
-            params=params,
-            inputs=inputs,
-            execution_id=execution.id,
-            script_path=script_path,
-            args=script_args,
-        )
-        for identity in input_identities:
-            _remember_tool_file(
-                state,
-                identity,
-                operation="read",
-                tool_name="run_skill_script",
-            )
-        output_ids: list[str] = []
-        output_items: list[dict] = []
-        task_source = await _task_source_fields(db, state)
-        task_part = state.get("task_id") or "playground"
-        outputs = list(result.get("outputs") or [])
-        if target_file is not None and len(outputs) != 1:
-            return json.dumps(
-                {
-                    "status": "error",
-                    "error": "target_file_id requires exactly one Runner output",
-                }
-            )
-        for output_index, item in enumerate(outputs):
-            output_mutation_key = f"{mutation_key}-{output_index}"
-            original = PurePosixPath(str(item.get("name") or "output.bin")).name
-            relative = PurePosixPath(str(item.get("relative_path") or original).replace("\\", "/"))
-            safe_parts = [part for part in relative.parts if part not in {"", ".", ".."}]
-            relative_path = "/".join(safe_parts) or original
-            if output_path:
-                path = output_path if len(outputs) == 1 else f"{output_path.rstrip('/')}/{relative_path}"
-            else:
-                stable_suffix = hashlib.sha256(output_mutation_key.encode()).hexdigest()[:12]
-                path = f"技能输出/{task_part}/{stable_suffix}-{relative_path}"
-            mime = item.get("mime_type") or mimetypes.guess_type(original)[0] or "application/octet-stream"
-            content_ref: str | None = None
-            inline_content: str | None = None
-            content_hash: str | None = None
-            actual_etag = ""
-            detected_format = ""
-            format_verified = False
-            if item.get("content_ref"):
-                (
-                    content_ref,
-                    actual_size,
-                    mime,
-                    actual_etag,
-                    content_hash,
-                    detected_format,
-                    format_verified,
-                ) = await _validated_runner_output(item, mime)
-            else:
-                raw = base64.b64decode(item.get("content_base64") or "", validate=True)
-                if not raw:
-                    raise ValueError("Runner 输出文件为空")
-                actual_size = len(raw)
-                content_hash = hashlib.sha256(raw).hexdigest()
-                inline_content = base64.b64encode(raw).decode("ascii")
-            metadata = enrich_metadata(
-                target_file.path if target_file is not None else path,
-                {
-                    **((target_file.metadata_ or {}) if target_file is not None else {}),
-                    "binary": True,
-                    "mime": mime,
-                    "name": (
-                        clean_display_name(target_file.path, target_file.metadata_ or {})
-                        if target_file is not None
-                        else original
-                    ),
-                    "storage_backend": "oss_gateway" if content_ref else "postgres_base64",
-                    **({"etag": actual_etag} if actual_etag else {}),
-                    **(
-                        {
-                            "artifact_format_verified": True,
-                            "detected_artifact_format": detected_format,
-                        }
-                        if format_verified
-                        else {}
-                    ),
-                },
-                source_kind="skill",
-                **task_source,
-                skill_id=str(folder.id),
-                skill_display_name=folder.name,
-                skill_version=str(version.version_no),
-            )
-            if target_file is None:
-                ws, user, workspace_error = await _resolve_tool_workspace(
-                    state,
-                    {"target_workspace_id": str(ws.id)},
-                    user,
-                    capability="create",
-                    parameter="target_workspace_id",
-                )
-                if workspace_error:
-                    return json.dumps(
-                        {
-                            "status": "error",
-                            "error": "target workspace create permission was revoked",
-                        },
-                        ensure_ascii=False,
-                    )
-            if target_file is not None:
-                # Runner time must not bridge a role revocation or a human edit.
-                target_file, ws, user = await _authorized_file(
-                    state,
-                    target_file_id,
-                    user,
-                    capability="update",
-                )
-                if target_file is None or ws is None:
-                    return json.dumps(
-                        {
-                            "status": "error",
-                            "error": "target file update permission was revoked",
-                        }
-                    )
-                try:
-                    saved = await workspace_service.replace_file_artifact(
-                        db,
-                        target_file,
-                        content=inline_content,
-                        content_ref=content_ref,
-                        size=actual_size,
-                        content_hash=content_hash,
-                        metadata=metadata,
-                        parse_status="queued",
-                        parse_kind=None,
-                        base_version_id=UUID(base_version_id),
-                        idempotency_key=mutation_key,
-                        created_by_user_id=user.id,
-                    )
-                except workspace_service.WorkspaceFileVersionConflict as exc:
-                    return json.dumps(
-                        {
-                            "status": "conflict",
-                            "error": str(exc),
-                            "current_version_id": exc.current_version_id,
-                            "latest_version_id": exc.current_version_id,
-                        },
-                        ensure_ascii=False,
-                    )
-                except workspace_service.WorkspaceFileIdempotencyConflict as exc:
-                    return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
-                if inline_content is not None:
-                    await workspace_service.reparse_file(db, saved)
-                await workspace_governance_service.audit(
-                    db,
-                    ws,
-                    "file_updated",
-                    user_id=user.id,
-                    file=saved,
-                    version_id=saved.current_version_id,
-                    metadata={"skill_id": str(folder.id)},
-                )
-            else:
-                mutation, replayed = await workspace_service.begin_file_mutation(
-                    db,
-                    workspace=ws,
-                    file=None,
-                    actor_type="user",
-                    actor_id=str(user.id),
-                    operation="skill_create",
-                    idempotency_key=output_mutation_key,
-                    payload={
-                        "skill_id": str(folder.id),
-                        "output_index": output_index,
-                        "path": path,
-                        "size": actual_size,
-                        "content_hash": content_hash,
-                        "content_ref": content_ref,
-                    },
-                )
-                if replayed:
-                    saved, replay_workspace, user = await _authorized_create_replay(
-                        state,
-                        mutation,
-                        user,
-                    )
-                    if saved is None or replay_workspace is None:
-                        return json.dumps(
-                            {
-                                "status": "conflict",
-                                "error": "idempotent Skill output is unavailable",
-                            }
-                        )
-                    ws = replay_workspace
-                else:
-                    existing = await workspace_service.get_file_by_path(db, ws.id, path)
-                    if existing is not None:
-                        await db.delete(mutation)
-                        await db.flush()
-                        return json.dumps(
-                            {
-                                "status": "conflict",
-                                "error": "output path already exists; use target_file_id with its base version",
-                                "file_id": str(existing.id),
-                                "current_version_id": (
-                                    str(existing.current_version_id) if existing.current_version_id else None
-                                ),
-                            }
-                        )
-                    try:
-                        if content_ref:
-                            saved = await workspace_service.upsert_file(
-                                db,
-                                ws,
-                                WorkspaceFileCreate(path=path, content="", metadata=metadata),
-                                content_ref=content_ref,
-                                raw_size=actual_size,
-                                raw_content_hash=content_hash,
-                                created_by_user_id=user.id,
-                            )
-                            saved.content = None
-                            saved.parse_status = "queued"
-                            await workspace_service.sync_current_version(db, saved)
-                        else:
-                            saved = await workspace_service.ingest_uploaded_file(
-                                db,
-                                ws,
-                                path=path,
-                                filename=original,
-                                content_type=mime,
-                                raw=base64.b64decode(inline_content or "", validate=True),
-                                created_by_user_id=user.id,
-                            )
-                            saved.metadata_ = metadata
-                            await workspace_service.sync_current_version(db, saved)
-                        await workspace_service.complete_file_mutation(
-                            db,
-                            mutation,
-                            result_file=saved,
-                            result={
-                                "file_id": str(saved.id),
-                                "workspace_id": str(ws.id),
-                                "path": saved.path,
-                            },
-                        )
-                    except Exception:
-                        await db.delete(mutation)
-                        await db.flush()
-                        raise
-                    await workspace_governance_service.audit(
-                        db,
-                        ws,
-                        "file_written",
-                        user_id=user.id,
-                        file=saved,
-                        version_id=saved.current_version_id,
-                        metadata={"skill_id": str(folder.id)},
-                    )
-            output_ids.append(str(saved.id))
-            identity = await _workspace_file_identity(db, saved, ws, user)
-            display_name = clean_display_name(saved.path, saved.metadata_ or {})
-            output_items.append(
-                {
-                    **identity,
-                    "display_name": display_name,
-                    "name": display_name,
-                    "parse_status": saved.parse_status,
-                }
-            )
-        execution.status = "success"
-        execution.latency_ms = latency
-        execution.output_file_ids = output_ids
-        await db.flush()
-        return json.dumps(
-            {
-                "status": "success",
-                "skill": folder.name,
-                "summary": result.get("stdout") or "执行完成",
-                "outputs": output_items,
-            },
-            ensure_ascii=False,
-        )
-    except workspace_service.WorkspaceFileUnsupportedTextUpdate:
-        execution.status = "failed"
-        execution.error = "skill_output_format_incompatible"
-        await db.flush()
-        return json.dumps(
-            {
-                "status": "error",
-                "error": "Skill 输出格式与目标文件不兼容；请另建文件或使用匹配格式的工具",
-            },
-            ensure_ascii=False,
-        )
-    except Exception as exc:  # noqa: BLE001
-        # Do not persist or echo raw Runner/storage failures: they may contain a
-        # temporary signed URL, object key, or document excerpt.
-        failure_code = f"skill_execution_failed:{type(exc).__name__}"
-        execution.status = "failed"
-        execution.error = failure_code
-        await db.flush()
-        logger.warning(
-            "skill_execution_failed",
-            skill_id=str(folder.id),
-            error_type=type(exc).__name__,
-        )
-        return json.dumps(
-            {"status": "error", "error": "Skill 执行失败，请重试或检查输入文件"},
-            ensure_ascii=False,
-        )
-
-
-def _skill_record(folder: SkillFolder, version: SkillVersion | None, action: str) -> dict:
-    return {
-        "id": str(folder.id),
-        "name": folder.name,
-        "slug": folder.slug,
-        "scope_type": folder.scope_type,
-        "scope_id": str(folder.scope_id) if folder.scope_id else None,
-        "version_id": str(version.id) if version is not None else None,
-        "version_no": version.version_no if version is not None else None,
-        "action": action,
-    }
-
-
-def _append_skill_record(
-    state: AgentState,
-    key: str,
-    folder: SkillFolder,
-    version: SkillVersion | None,
-    action: str,
-) -> None:
-    records = state.setdefault(key, [])
-    record = _skill_record(folder, version, action)
-    marker = (record["id"], record["version_id"], record["action"])
-    if marker not in {(item.get("id"), item.get("version_id"), item.get("action")) for item in records}:
-        records.append(record)
-
-
-async def _resolve_agent_skill(state: AgentState, entry: dict, params: dict) -> tuple[dict | None, str | None]:
-    skill_id = str(params.get("skill_id") or "")
-    if not skill_id:
-        # Backward compatibility for persisted/older model tool calls. Duplicate slugs must use UUID.
-        slug = str(params.get("skill_slug") or "")
-        matches = entry.get("slug_index", {}).get(slug, [])
-        if len(matches) > 1:
-            return None, "Skill slug is ambiguous; choose it from the picker so a UUID is supplied"
-        skill_id = matches[0] if matches else ""
-    selected = entry.get("skills", {}).get(skill_id)
-    if selected is None:
-        return None, "Skill is not available in the current user's catalog"
-    deps = get_deps()
-    db = deps["db"]
-    user = deps.get("user")
-    folder: SkillFolder = selected["folder"]
-    version: SkillVersion = selected["version"]
-    if user is None or not skill_scope_service.user_can_use_folder(user, folder):
-        return None, "Skill is outside the current user scope"
-    await db.refresh(folder)
-    await db.refresh(version)
-    if not folder.is_active or str(folder.active_version_id or "") != str(version.id):
-        return None, "Skill is disabled or its active version changed"
-    if version.install_status != "ready":
-        return None, "Skill version is not ready"
-    organization = await db.get(Organization, folder.organization_id)
-    if organization is None or not settings.agent_skills_enabled_for(
-        organization.slug, organization_id=organization.id
-    ):
-        return None, "Agent Skills are not enabled for this organization"
-    return selected, None
-
-
-async def _execute_agent_skill_tool(state: AgentState, entry: dict, name: str, params: dict) -> str:
-    selected, error = await _resolve_agent_skill(state, entry, params)
-    if error or selected is None:
-        return json.dumps({"status": "error", "error": error or "Skill unavailable"}, ensure_ascii=False)
-    platform = selected["platform"]
-    folder: SkillFolder = selected["folder"]
-    version: SkillVersion = selected["version"]
-    if name == "load_skill":
-        _append_skill_record(state, "loaded_skills", folder, version, "load_skill")
-        return json.dumps(
-            {
-                "status": "success",
-                "skill": {"id": str(folder.id), "name": folder.name, "slug": folder.slug},
-                "instructions": selected["content"],
-                "scripts": platform.get("scripts") or [],
-                "resources": platform.get("resources") or [],
-                "compatibility_warnings": platform.get("compatibility_warnings") or [],
-                "execution_contract": {
-                    "input_dir": "SKILL_INPUT_DIR",
-                    "output_dir": "SKILL_OUTPUT_DIR",
-                    "skill_dir": "SKILL_DIR",
-                    "params_json": "SKILL_PARAMS_JSON",
-                    "argument_placeholders": ["{input_file}", "{input_dir}", "{output_dir}", "{params_json}"],
-                },
-            },
-            ensure_ascii=False,
-        )
-    if name == "read_skill_resource":
-        _append_skill_record(state, "loaded_skills", folder, version, "read_skill_resource")
-        path = str(params.get("path") or "")
-        indexed = {str(item.get("path")) for item in platform.get("resources") or [] if isinstance(item, dict)}
-        if path not in indexed:
-            return json.dumps({"status": "error", "error": "Resource is not part of this Skill version"})
-        try:
-            raw = await skill_import_service.read_version_resource(selected["version"], path)
-            if len(raw) > 200_000:
-                return json.dumps({"status": "error", "error": "Text resource exceeds 200KB"})
-            content = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            return json.dumps({"status": "error", "error": "Binary assets cannot be injected into the model"})
-        except Exception as exc:  # noqa: BLE001
-            return json.dumps({"status": "error", "error": str(exc)})
-        return json.dumps({"status": "success", "path": path, "content": content}, ensure_ascii=False)
-    if name == "run_skill_script":
-        raw_args = params.get("args") or []
-        if not isinstance(raw_args, list) or not all(isinstance(value, str) for value in raw_args):
-            return json.dumps({"status": "error", "error": "args must be an array of strings"})
-        execution_params = {
-            key: value for key, value in params.items() if key not in {"skill_id", "skill_slug", "script_path", "args"}
-        }
-        result = await _execute_code_skill(
-            state,
-            selected,
-            execution_params,
-            script_path=str(params.get("script_path") or ""),
-            script_args=raw_args,
-        )
-        try:
-            if json.loads(result).get("status") == "success":
-                _append_skill_record(state, "executed_skills", folder, version, "runner_script")
-        except (json.JSONDecodeError, AttributeError):
-            pass
-        return result
-    return json.dumps({"status": "error", "error": "Unknown Agent Skill tool"})
 
 
 async def _execute_tool_call(
@@ -2501,93 +1509,10 @@ async def _execute_tool_call(
         msg = f"tool '{name}' not found"
         return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
 
-    if entry.get("kind") in {"code", "run_skill_script"}:
-        params = dict(params)
-        params["_mutation_key"] = server_mutation_key
-
     if entry.get("kind") == "memory":
         content, ok = await _execute_memory_tool(state, entry, params)
         return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
 
-    if entry.get("kind") == "rag_search":
-        query = str(params.get("query") or state.get("request") or "").strip()
-        top_k = max(1, min(int(params.get("top_k") or 5), 8))
-        if not query:
-            msg = "rag_search requires a non-empty query"
-            return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
-        from app.models.rag import RagCollection
-
-        merged: list[dict] = []
-        for cid in entry.get("collection_ids") or []:
-            try:
-                coll = await db.get(RagCollection, UUID(str(cid)))
-                if coll is None:
-                    continue
-                hits = await rag_retrieve(
-                    db,
-                    coll,
-                    UUID(state["org_id"]),
-                    RagRetrieveRequest(query=query, top_k=top_k),
-                    department_id=state.get("department_id"),
-                )
-                for hit in hits:
-                    merged.append(
-                        {
-                            "content": hit["content"],
-                            "score": hit["score"],
-                            "document_id": hit["document_id"],
-                            "collection_id": str(cid),
-                            "metadata": hit.get("metadata") or {},
-                        }
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("agent_rag_tool_failed", collection=str(cid), error=str(exc))
-        merged.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-        content = json.dumps({"status": "success", "query": query, "hits": merged[:top_k]}, ensure_ascii=False)
-        return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], True)
-
-    if entry.get("kind") == "prompt":
-        content = entry.get("content") or ""
-        _append_skill_record(state, "loaded_skills", entry["folder"], entry.get("version"), "load_skill")
-        return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], True)
-    if entry.get("kind") == "code":
-        content = await _execute_code_skill(state, entry, params)
-        try:
-            ok = json.loads(content).get("status") == "success"
-        except (json.JSONDecodeError, AttributeError):
-            ok = False
-        if ok:
-            _append_skill_record(
-                state,
-                "executed_skills",
-                entry["folder"],
-                entry.get("version"),
-                "runner_script",
-            )
-            try:
-                structured = json.loads(content)
-            except (json.JSONDecodeError, TypeError):
-                structured = None
-            if isinstance(structured, dict):
-                # The server has already materialized and verified these
-                # Runner outputs.  Record them under the canonical trusted
-                # source name rather than a model/config supplied tool name.
-                _remember_structured_tool_result(state, "run_skill_script", structured)
-        return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
-    if entry.get("kind") in {"load_skill", "read_skill_resource", "run_skill_script"}:
-        content = await _execute_agent_skill_tool(state, entry, entry["kind"], params)
-        try:
-            ok = json.loads(content).get("status") == "success"
-        except (json.JSONDecodeError, AttributeError):
-            ok = False
-        if ok and entry.get("kind") == "run_skill_script":
-            try:
-                structured = json.loads(content)
-            except (json.JSONDecodeError, TypeError):
-                structured = None
-            if isinstance(structured, dict):
-                _remember_structured_tool_result(state, "run_skill_script", structured)
-        return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
     if entry.get("kind") == "enterprise_export_file":
         user = deps.get("user")
         if user is None:
@@ -2671,39 +1596,6 @@ async def _execute_tool_call(
     return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
 
 
-def _skill_catalog_prompt(state: AgentState, *, load_skill_available: bool) -> str:
-    """Render Skill discovery without advertising an unavailable host tool."""
-    skill_catalog = list(state.get("skill_catalog") or [])
-    if not skill_catalog:
-        return ""
-    default_ids = {item.get("id") for item in state.get("default_skills") or []}
-    invoked_ids = {item.get("id") for item in state.get("invoked_skills") or []}
-    lines: list[str] = []
-    for item in skill_catalog[:80]:
-        priority = (
-            "本轮明确" if item.get("id") in invoked_ids else ("智能体默认" if item.get("id") in default_ids else "可用")
-        )
-        executable = "可执行" if item.get("is_executable") else "说明/API"
-        description = str(item.get("description") or "").replace("\n", " ")[:240]
-        lines.append(
-            f"- [{priority}] id={item.get('id')} /{item.get('slug')} {item.get('name')} | "
-            f"{item.get('scope_type')} | {executable} | {description}"
-        )
-    if len(skill_catalog) > 80:
-        lines.append(f"- 其余 {len(skill_catalog) - 80} 个技能未展开；请让用户用选择器明确指定。")
-    if load_skill_available:
-        instruction = (
-            "此目录仅用于发现能力。不要把目录内容当作已执行结果；需要说明时调用 load_skill，"
-            "需要脚本或企业操作时必须实际调用相应工具。"
-        )
-    else:
-        instruction = (
-            "此目录仅用于发现能力。本轮没有提供 Skill 载入工具，不得调用或声称已经调用 load_skill；"
-            "只能使用本轮工具列表中真实存在的工具。"
-        )
-    return "\n\n[当前用户可用 Skill 目录]\n" + instruction + "\n" + "\n".join(lines)
-
-
 def _workspace_access_prompt(access: dict, intent: dict) -> str:
     """Render capabilities only; never include file names or contents."""
     roles = access.get("roles") or []
@@ -2749,9 +1641,6 @@ _ASSISTANT_READ_ONLY_TOOL_NAMES = {
     "workspace_list_files",
     "workspace_read_file",
     "workspace_list_versions",
-    "rag_search",
-    "load_skill",
-    "read_skill_resource",
     "read_memory",
     "web_tool",
     "spreadsheet_inspect",
@@ -2760,9 +1649,8 @@ _ASSISTANT_READ_ONLY_TOOL_NAMES = {
     "pdf_inspect",
     "text_inspect",
 }
-_ASSISTANT_READ_ONLY_REGISTRY_KINDS = {"prompt", "load_skill", "read_skill_resource", "rag_search"}
+_ASSISTANT_READ_ONLY_REGISTRY_KINDS: set[str] = set()
 _ASSISTANT_LONG_RUNNING_TOOL_NAMES = {
-    "run_skill_script",
     "web_tool",
     "image_generation_tool",
     "spreadsheet_convert",
@@ -2771,12 +1659,9 @@ _ASSISTANT_LONG_RUNNING_TOOL_NAMES = {
     "pdf_convert",
 }
 _ASSISTANT_LONG_RUNNING_REGISTRY_KINDS = {
-    "code",
-    "run_skill_script",
     "enterprise_action",
     "enterprise_export_file",
 }
-_ASSISTANT_SKILL_REGISTRY_KINDS = {"code", "prompt", "load_skill", "read_skill_resource", "run_skill_script"}
 # Tools with ``approval="ask"`` are parked by the native core until the terminal user decides.
 _ASSISTANT_APPROVAL_TOOL_NAMES = {"workspace_delete_file", "workspace_delete_folder"}
 _ASSISTANT_APPROVAL_RISK_LEVELS = {"high", "critical"}
@@ -2812,10 +1697,6 @@ def _assistant_tool_kind(name: str, entry: dict | None) -> str:
         return "web"
     if name in PLATFORM_TOOL_NAMES or name in LEGACY_BUILTIN_TOOL_NAMES or name == "image_generation_tool":
         return "platform_tool"
-    if kind in _ASSISTANT_SKILL_REGISTRY_KINDS:
-        return "skill"
-    if kind == "rag_search":
-        return "rag"
     if kind in {"enterprise_action", "enterprise_export_file", "memory"}:
         return kind
     # Unknown registry kinds remain identifiable in traces, but no retired external
@@ -2938,9 +1819,8 @@ async def _execute_memory_tool(state: AgentState, entry: dict, params: dict) -> 
 async def prepare_assistant_turn(state: AgentState) -> dict:
     """Assemble the authorized prompt and tool catalog for the native coordinator.
 
-    Python remains the capability and authorization boundary.  This function deliberately
-    performs no model loop and no eager RAG retrieval: the core receives ``rag_search`` like any
-    other scoped platform tool and decides when it is needed.
+    Python remains the capability and authorization boundary. This function performs no model
+    loop; the native core receives only platform fixed tools and current-page Manifest Actions.
     """
     deps = get_deps()
     db = deps["db"]
@@ -3007,13 +1887,6 @@ async def prepare_assistant_turn(state: AgentState) -> dict:
                 system_prompt = (
                     f"{system_prompt}\n\n[企业管理员配置的业务助手规则]\n{application.assistant_prompt.strip()}"
                 )
-
-    ambiguities = state.get("skill_slug_ambiguities") or []
-    if ambiguities:
-        system_prompt = (
-            f"{system_prompt}\n\n[Skill 引用歧义]\n以下 /slug 对应多个作用域，不能自动选择："
-            f"{', '.join('/' + slug for slug in ambiguities)}。请让用户通过‘本轮调用技能’选择器指定。"
-        )
 
     file_parts: list[str] = []
     file_names: list[str] = []
@@ -3124,7 +1997,6 @@ async def prepare_assistant_turn(state: AgentState) -> dict:
     else:
         tools, registry = await _build_tools(
             db,
-            state.get("skill_ids") or [],
             state.get("workspace_id"),
             user,
             application_id=state.get("application_id"),
@@ -3133,55 +2005,12 @@ async def prepare_assistant_turn(state: AgentState) -> dict:
             business_intent=state.get("business_turn_intent") or {},
             business_envelope=state.get("business_turn_envelope") or {},
         )
-        rag_ids = list(state.get("rag_collection_ids") or [])
-        from app.services.platform_tool_registry import active_platform_tool_names
-
-        active_platform_names = await active_platform_tool_names(db)
-        if not application_id and rag_ids and (active_platform_names is None or "rag_search" in active_platform_names):
-            tools.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "rag_search",
-                        "description": "按需检索当前智能体已绑定且当前用户有权访问的知识库。",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "检索问题或关键词"},
-                                "top_k": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5},
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                }
-            )
-            registry["rag_search"] = {"kind": "rag_search", "collection_ids": rag_ids}
         if user is not None and not application_id:
             # Long-term memory is a per-user capability; the admin playground has no principal.
             tools.extend(_memory_tool_defs())
             registry["read_memory"] = {"kind": "memory", "operation": "read"}
             registry["write_memory"] = {"kind": "memory", "operation": "write"}
         system_prompt = f"{system_prompt}{TOOL_STRATEGY_PROMPT}{OUTPUT_PROTOCOL_PROMPT}"
-        referenced = state.get("referenced_skills") or []
-        if referenced:
-            lines = "\n".join(
-                f"- id={item.get('id')} {item['name']} (/{item['slug']}, {item.get('activation', 'explicit')})"
-                for item in referenced
-            )
-            if "load_skill" in registry:
-                instruction = (
-                    "请先调用 load_skill 加载其完整说明，并在任务需要操作时务必实际调用脚本或接口，不得仅声称完成："
-                )
-            else:
-                instruction = (
-                    "本轮没有提供 Skill 载入工具，不得调用或声称已经调用 load_skill；"
-                    "如无其他对应工具，应明确说明当前无法执行："
-                )
-            system_prompt = (
-                f"{system_prompt}\n\n[用户本轮明确调用的 Skill] 以下选择仅对当前轮有效。{instruction}\n{lines}"
-            )
-
-    system_prompt = f"{system_prompt}{_skill_catalog_prompt(state, load_skill_available='load_skill' in registry)}"
 
     provider, model, system_prompt = await _configure_visual_turn(
         state,
@@ -3222,7 +2051,6 @@ async def save_memory(state: AgentState) -> dict:
         # 仅落 assistant 消息：user 消息已在 _run_graph_bg 起始落库并提交
         # （让 run 期间 GET /tasks 能带回提示词、重连回放时前面有用户消息）。
         traces = state.get("traces", [])
-        executed_skills = state.get("executed_skills", [])
         # File identities are captured before a tool result is truncated for
         # trace display.  Never reconstruct authorization/audit data from the
         # human-facing 4,000 character trace JSON.
@@ -3251,7 +2079,6 @@ async def save_memory(state: AgentState) -> dict:
             deps.get("user"),
             task_id=str(task_id),
             task_title=task.title if task is not None else None,
-            executed_skills=executed_skills,
         )
         tool_file_refs, artifacts = await _verified_tool_file_records(
             state,
@@ -3259,7 +2086,6 @@ async def save_memory(state: AgentState) -> dict:
             deps.get("user"),
             task_id=str(task_id),
             task_title=task.title if task is not None else None,
-            executed_skills=executed_skills,
         )
         streamed_final = str(state.get("assistant_final") or "")
         from app.services.business_assistant_orchestration import intent_requires_artifact
@@ -3290,8 +2116,6 @@ async def save_memory(state: AgentState) -> dict:
             content=state.get("assistant_final", ""),
             metadata_={
                 "traces": traces,
-                "loaded_skills": state.get("loaded_skills", []),
-                "executed_skills": executed_skills,
                 "artifacts": artifacts,
                 "file_refs_v1": tool_file_refs,
                 "file_accesses_v1": file_accesses_v1,

@@ -15,9 +15,8 @@ from app.agents.graph import nodes as graph_nodes
 from app.api.organizations import _assert_platform_quota_write
 from app.auth.admin_auth import CurrentAdmin
 from app.schemas.organization import OrganizationUpdate
-from app.schemas.rag import RagReingestRequest, RagRetrieveRequest
 from app.services import ai_quota_service as quota
-from app.services import model_gateway, multimodal_audio_service, rag_service
+from app.services import model_gateway, multimodal_audio_service
 from app.workers import multimodal_worker
 
 
@@ -82,100 +81,6 @@ def _quota_resource(identifier: UUID, **overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
-
-
-@pytest.mark.asyncio
-async def test_rag_embedding_paths_forward_department(monkeypatch) -> None:
-    department_id, org_id = uuid4(), uuid4()
-    observed: list[dict] = []
-
-    async def fake_embed(_db, _org, _model, texts, **kwargs):
-        observed.append({"texts": texts, **kwargs})
-        return [[0.1, 0.2] for _ in texts]
-
-    async def fake_collection(_db, collection_id):
-        return SimpleNamespace(
-            id=collection_id,
-            embedding_model="embed-model",
-            chunk_size=100,
-            chunk_overlap=0,
-        )
-
-    async def fake_keyword(_db, _coll, _req):
-        return []
-
-    monkeypatch.setattr(rag_service.llm_client, "embed", fake_embed)
-    monkeypatch.setattr(rag_service, "get_collection", fake_collection)
-    monkeypatch.setattr(rag_service, "_keyword_retrieve", fake_keyword)
-    db = _FakeDb()
-    doc = SimpleNamespace(id=uuid4(), collection_id=uuid4(), content="original", status="ready")
-    coll = SimpleNamespace(id=doc.collection_id, embedding_model="embed-model")
-
-    await rag_service._chunk_and_embed(
-        db,
-        doc,
-        coll,
-        org_id,
-        ["first"],
-        department_id=department_id,
-    )
-    await rag_service.reingest_document(
-        db,
-        doc,
-        org_id,
-        RagReingestRequest(chunks=["second"]),
-        department_id=department_id,
-    )
-    await rag_service.retrieve(
-        db,
-        coll,
-        org_id,
-        RagRetrieveRequest(query="needle", top_k=3),
-        department_id=department_id,
-    )
-
-    assert len(observed) == 3
-    assert all(item["dept_id"] == department_id for item in observed)
-
-
-@pytest.mark.asyncio
-async def test_uploaded_rag_job_keeps_department_scope_for_background_embedding(monkeypatch) -> None:
-    department_id, org_id, coll_id = uuid4(), uuid4(), uuid4()
-    captured: tuple[str, str, str, str | None] | None = None
-
-    async def fake_folder_chain(*_args, **_kwargs):
-        return None
-
-    def fake_background(*args):
-        nonlocal captured
-        captured = args
-
-        async def done():
-            return None
-
-        return done()
-
-    def fake_create_task(coro):
-        coro.close()
-        return SimpleNamespace()
-
-    monkeypatch.setattr(rag_service.doc_parser, "extract_text", lambda *_args: ("body", "text"))
-    monkeypatch.setattr(rag_service, "_ensure_folder_chain", fake_folder_chain)
-    monkeypatch.setattr(rag_service, "_run_ingest_bg", fake_background)
-    monkeypatch.setattr(rag_service.asyncio, "create_task", fake_create_task)
-
-    await rag_service.ingest_uploaded_file(
-        _FakeDb(),
-        SimpleNamespace(id=coll_id),
-        org_id,
-        filename="scope.txt",
-        content_type="text/plain",
-        raw=b"body",
-        department_id=department_id,
-    )
-
-    assert captured is not None
-    assert captured[2:] == (str(org_id), str(department_id))
 
 
 @pytest.mark.asyncio

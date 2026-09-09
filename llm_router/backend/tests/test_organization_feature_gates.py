@@ -10,7 +10,6 @@ from app.config import Settings
 @pytest.mark.parametrize(
     ("method_name", "enabled_field", "allowlist_field"),
     [
-        ("agent_skills_enabled_for", "code_skills_enabled", "agent_skills_org_allowlist"),
         (
             "multimodal_vision_enabled_for",
             "multimodal_vision_enabled",
@@ -60,7 +59,6 @@ def test_org_feature_gate_accepts_stable_id_and_slug_fallback(
 @pytest.mark.parametrize(
     ("method_name", "enabled_field", "allowlist_field"),
     [
-        ("agent_skills_enabled_for", "code_skills_enabled", "agent_skills_org_allowlist"),
         (
             "multimodal_vision_enabled_for",
             "multimodal_vision_enabled",

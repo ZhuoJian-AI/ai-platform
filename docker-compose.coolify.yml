@@ -62,10 +62,10 @@ services:
       resources:
         limits: { cpus: "0.25", memory: 512M }
 
-  skill-runner:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-skill-runner-app@sha256:08cac524b5a411eec2b7e0d6d8cfa265adb78427b63d64297e77a4b728a86e38
+  tool-executor:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-tool-executor-app@sha256:c4b62e92156bbaf5f5a7efd1dacfbcac49f6890400f662b4b4f7ae27de819f8b
     environment:
-      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
+      TOOL_EXECUTOR_TOKEN: ${TOOL_EXECUTOR_TOKEN:?}
       # Standard Compose runtimes honor these empty overrides. The image
       # entrypoint also rebuilds PID 1's environment for platforms that inject
       # application variables after Compose merging.
@@ -79,21 +79,12 @@ services:
       MASTER_ENCRYPTION_KEY: ""
       STORAGE_GATEWAY_URL: ""
       STORAGE_PROJECT_TOKEN: ""
-      SKILL_CACHE_ROOT: /cache
-      SKILL_RUNNER_MAX_CONCURRENCY: "${SKILL_RUNNER_MAX_CONCURRENCY:-4}"
-      SKILL_RUNNER_MAX_QUEUE: "${SKILL_RUNNER_MAX_QUEUE:-100}"
-      SKILL_RUNNER_QUEUE_WAIT_SECONDS: "${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}"
-      SKILL_RUNNER_OFFICE_CONCURRENCY: "${SKILL_RUNNER_OFFICE_CONCURRENCY:-1}"
-      SKILL_PACKAGE_MAX_BYTES: "${SKILL_PACKAGE_MAX_BYTES:-104857600}"
-      SKILL_PACKAGE_EXPANDED_MAX_BYTES: "${SKILL_PACKAGE_EXPANDED_MAX_BYTES:-524288000}"
-      SKILL_PACKAGE_MAX_FILES: "${SKILL_PACKAGE_MAX_FILES:-1000}"
-      SKILL_CACHE_RETENTION_SECONDS: "${SKILL_CACHE_RETENTION_SECONDS:-604800}"
-      SKILL_CACHE_MAX_BYTES: "${SKILL_CACHE_MAX_BYTES:-10737418240}"
-      SKILL_FAILED_TEMP_RETENTION_SECONDS: "${SKILL_FAILED_TEMP_RETENTION_SECONDS:-3600}"
+      TOOL_EXECUTOR_MAX_CONCURRENCY: "${TOOL_EXECUTOR_MAX_CONCURRENCY:-4}"
+      TOOL_EXECUTOR_MAX_QUEUE: "${TOOL_EXECUTOR_MAX_QUEUE:-100}"
+      TOOL_EXECUTOR_QUEUE_WAIT_SECONDS: "${TOOL_EXECUTOR_QUEUE_WAIT_SECONDS:-300}"
+      TOOL_EXECUTOR_OFFICE_CONCURRENCY: "${TOOL_EXECUTOR_OFFICE_CONCURRENCY:-1}"
     expose:
       - "8020"
-    volumes:
-      - skill_cache:/cache
     read_only: true
     tmpfs:
       - /tmp:size=1073741824,mode=1777
@@ -115,7 +106,7 @@ services:
         limits: { cpus: "1.50", memory: 3G, pids: 512 }
 
   backend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bca11b1e656032bd18ba249380ac391b8a1fa1fc8be292c3b5b40fb01d52cdef
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:99b5eb424fd65a7f64465f4f5a736e63dd7e6a13594de0aace41f44612be7fb1
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -128,12 +119,10 @@ services:
       TRUSTED_PROXY_CIDRS: "${TRUSTED_PROXY_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
       API_KEY_CACHE_TTL: "${API_KEY_CACHE_TTL:-60}"
       DLP_EXPOSE_MATCHES_IN_ERROR: "${DLP_EXPOSE_MATCHES_IN_ERROR:-false}"
-      CODE_SKILLS_ENABLED: "${CODE_SKILLS_ENABLED:-true}"
-      AGENT_SKILLS_ORG_ALLOWLIST: "${AGENT_SKILLS_ORG_ALLOWLIST:-alphabet}"
-      SKILL_RUNNER_URL: http://skill-runner:8020
-      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
-      SKILL_RUNNER_TIMEOUT_SECONDS: "${SKILL_RUNNER_TIMEOUT_SECONDS:-120}"
-      SKILL_RUNNER_QUEUE_WAIT_SECONDS: "${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}"
+      TOOL_EXECUTOR_URL: http://tool-executor:8020
+      TOOL_EXECUTOR_TOKEN: ${TOOL_EXECUTOR_TOKEN:?}
+      TOOL_EXECUTOR_TIMEOUT_SECONDS: "${TOOL_EXECUTOR_TIMEOUT_SECONDS:-120}"
+      TOOL_EXECUTOR_QUEUE_WAIT_SECONDS: "${TOOL_EXECUTOR_QUEUE_WAIT_SECONDS:-300}"
       AGENT_GLOBAL_CONCURRENCY: "${AGENT_GLOBAL_CONCURRENCY:-12}"
       AGENT_USER_CONCURRENCY: "${AGENT_USER_CONCURRENCY:-2}"
       AGENT_QUEUE_MAX: "${AGENT_QUEUE_MAX:-100}"
@@ -188,7 +177,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      skill-runner:
+      tool-executor:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
@@ -208,7 +197,7 @@ services:
         limits: { cpus: "1.50", memory: 2560M }
 
   workspace-parser:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bca11b1e656032bd18ba249380ac391b8a1fa1fc8be292c3b5b40fb01d52cdef
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:99b5eb424fd65a7f64465f4f5a736e63dd7e6a13594de0aace41f44612be7fb1
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -259,7 +248,7 @@ services:
         limits: { cpus: "0.75", memory: 1536M }
 
   workspace-preview:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-workspace-preview-app@sha256:8b0de72d64704baa1c16343f706aba0d204d9fb477a12bbc1f3933584cf54921
+    image: 127.0.0.1:5000/zhuojian/ai-platform-workspace-preview-app@sha256:a2396127c47f714b10893f4d9b279cf19c1cc10d9ec10e1035b36855094cf0eb
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -310,7 +299,7 @@ services:
         limits: { cpus: "1.00", memory: 2G, pids: 256 }
 
   storage-lifecycle:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bca11b1e656032bd18ba249380ac391b8a1fa1fc8be292c3b5b40fb01d52cdef
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:99b5eb424fd65a7f64465f4f5a736e63dd7e6a13594de0aace41f44612be7fb1
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -325,8 +314,8 @@ services:
       STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
       STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
       STORAGE_LIFECYCLE_INTERVAL_SECONDS: "${STORAGE_LIFECYCLE_INTERVAL_SECONDS:-3600}"
-      SKILL_RUNNER_URL: http://skill-runner:8020
-      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
+      TOOL_EXECUTOR_URL: http://tool-executor:8020
+      TOOL_EXECUTOR_TOKEN: ${TOOL_EXECUTOR_TOKEN:?}
     command: ["python", "-m", "app.workers.storage_lifecycle"]
     extra_hosts:
       - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
@@ -334,7 +323,7 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-      skill-runner:
+      tool-executor:
         condition: service_healthy
     healthcheck:
       test:
@@ -362,7 +351,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   multimodal-worker:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bca11b1e656032bd18ba249380ac391b8a1fa1fc8be292c3b5b40fb01d52cdef
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:99b5eb424fd65a7f64465f4f5a736e63dd7e6a13594de0aace41f44612be7fb1
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -416,7 +405,7 @@ services:
         limits: { cpus: "1.00", memory: 1536M, pids: 256 }
 
   frontend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:89a74d60eed20c220af7c9f9c08fb73e89d03023d21225d8b2288edc7eb0ca17
+    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:3443d271d9d8f26454a39ffb0607a22de7fba085aa8c8af3e5f8493364109125
     labels:
       # Coolify also attaches its public application network. Pin Traefik to
       # that network so it never selects the private Compose default network.
@@ -444,10 +433,9 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  skill_cache:
 
 networks:
-  # PostgreSQL and Redis are invisible to executable Skills.  Backend and the
+  # PostgreSQL and Redis are invisible to fixed platform tools. Backend and the
   # trusted workers bridge this internal network to the application network.
   data_plane:
     internal: true

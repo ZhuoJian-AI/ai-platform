@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, DateTime, Index, Integer, String, UniqueConstraint
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, UUIDPrimaryKeyMixin
@@ -35,6 +35,12 @@ class AiQuotaEvent(UUIDPrimaryKeyMixin, Base):
             "created_at",
             postgresql_using="brin",
         ),
+        CheckConstraint(
+            "event_type IN ('reserved','settled')",
+            name="ck_ai_quota_events_event_type",
+        ),
+        CheckConstraint("reserved_credits >= 0", name="ck_ai_quota_events_reserved_credits"),
+        CheckConstraint("reserved_tokens >= 0", name="ck_ai_quota_events_reserved_tokens"),
     )
 
     reservation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)

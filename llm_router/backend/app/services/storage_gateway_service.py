@@ -160,22 +160,6 @@ async def upload_bytes(raw: bytes, *, filename: str, content_type: str) -> str:
     return f"{OSS_REF_PREFIX}{object_key}"
 
 
-async def upload_skill_archive(raw: bytes, *, organization_id: str, package_hash: str) -> str:
-    """Store one immutable Skill package through the private project gateway.
-
-    The logical name is deterministic and intentionally contains no original
-    user filename. The gateway remains authoritative for the physical object
-    key and the database stores only the returned opaque reference.
-    """
-    if len(package_hash) != 64 or any(ch not in "0123456789abcdef" for ch in package_hash):
-        raise StorageGatewayError("Invalid Skill package hash")
-    return await upload_bytes(
-        raw,
-        filename=f"skill-packages/{organization_id}/{package_hash}.zip",
-        content_type="application/zip",
-    )
-
-
 async def sign_browser_upload(
     *, filename: str, content_type: str, size_bytes: int, weak_network: bool = False,
     max_allowed_bytes: int | None = None,
@@ -499,7 +483,7 @@ async def inspect_object(content_ref: str, *, version_id: str | None = None) -> 
 
 
 async def get_signed_download(content_ref: str, *, version_id: str | None = None) -> dict:
-    """Issue a signed download used by internal workers and the Skill Runner."""
+    """Issue a signed download used by internal workers."""
     object_key = object_key_from_ref(content_ref)
     try:
         async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:

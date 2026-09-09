@@ -75,9 +75,6 @@ class WorkspaceFilePresentation(BaseModel):
     source_kind: str = "upload"
     source_task_id: str | None = None
     source_task_title: str | None = None
-    skill_id: str | None = None
-    skill_display_name: str | None = None
-    skill_version: str | None = None
     created_at: str | None = None
 
 

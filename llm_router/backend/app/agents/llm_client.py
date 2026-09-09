@@ -1,12 +1,10 @@
 """Org-scoped LLM client for the agent runtime.
 
 复用模型路由器的 provider 解析、密钥解密与协议适配能力，但**不走** /v1 HTTP 代理端点：
-直接用解析后的 provider + 解密 key 经 httpx 调上游 chat / embeddings。这样 agent 运行时
-与 RAG 嵌入共享同一套 org 作用域模型解析，且无需自建 API Key 调用本机代理。
+直接用解析后的 provider + 解密 key 经 httpx 调上游对话与多模态接口。这样 agent 运行时
+与其他模型能力共享同一套组织作用域模型解析，且无需自建 API Key 调用本机代理。
 
 - ``chat``  / ``stream_chat``：消息 → assistant 文本 + tool_calls + usage（OpenAI/Anthropic 双协议）
-- ``embed``：文本列表 → 嵌入向量列表（OpenAI 兼容 /embeddings 端点）
-
 密钥仅在函数内按 provider 解密、就地使用，绝不返回或入 graph state（参照 ProxyState 约定）。
 """
 
@@ -93,7 +91,6 @@ async def _resolve(
     org_id: UUID,
     model_alias: str,
     *,
-    for_embeddings: bool = False,
     dept_id: str | UUID | None = None,
 ) -> tuple[LlmProvider, str]:
     """选 provider。model_alias 为真实模型 id（或 "default" 走组织默认路由）。返回 (provider, model)。
@@ -101,8 +98,7 @@ async def _resolve(
     dept_id 取自智能体运行时作用域，用于按 部门>组织 优先级筛选继承 provider。
     """
     model = model_alias
-    preferred = "openai" if for_embeddings else None
-    provider = await find_provider(db, org_id, model, preferred_type=preferred, dept_id=dept_id)
+    provider = await find_provider(db, org_id, model, dept_id=dept_id)
     if provider is None:
         raise RuntimeError(f"no provider available for model '{model}' in org {org_id}")
     return provider, model
@@ -113,7 +109,6 @@ async def resolve_provider_model(
     org_id: UUID,
     model_alias: str,
     *,
-    for_embeddings: bool = False,
     dept_id: str | UUID | None = None,
 ) -> tuple[str, str]:
     """公开封装：model_alias→(provider_id, model)。
@@ -125,7 +120,6 @@ async def resolve_provider_model(
         db,
         org_id,
         model_alias,
-        for_embeddings=for_embeddings,
         dept_id=dept_id,
     )
     return str(provider.id), actual_model
@@ -163,11 +157,6 @@ def _chat_url(provider: LlmProvider) -> str:
     if provider.provider_type == "anthropic":
         return f"{base}/v1/messages"
     return f"{base}/chat/completions"
-
-
-def _embed_url(provider: LlmProvider) -> str:
-    """上游 embeddings 端点（OpenAI 兼容；base_url 已含 ``/v1``，只补 ``/embeddings``）。"""
-    return f"{provider.base_url.rstrip('/')}/embeddings"
 
 
 def _images_url(provider: LlmProvider, endpoint_path: str) -> str:
@@ -255,10 +244,7 @@ def _build_chat_body(
     if tools:
         body["tools"] = tools
         if tool_choice:
-            available_names = {
-                str((item.get("function") or {}).get("name") or "")
-                for item in tools
-            }
+            available_names = {str((item.get("function") or {}).get("name") or "") for item in tools}
             if tool_choice not in available_names:
                 raise ValueError("tool_choice must reference an available tool")
             body["tool_choice"] = {
@@ -696,70 +682,3 @@ async def generate_image(
         model_served=model,
         revised_prompt=item.get("revised_prompt"),
     )
-
-
-async def embed_with_usage(
-    db: AsyncSession,
-    org_id: UUID,
-    model: str,
-    texts: list[str],
-    *,
-    dept_id: str | UUID | None = None,
-    provider_override: LlmProvider | None = None,
-    model_override: str | None = None,
-) -> tuple[list[list[float]], dict[str, int | None]]:
-    """Embedding call with provider-reported usage for mandatory settlement."""
-    if provider_override is not None:
-        provider, actual = provider_override, (model_override or model)
-    else:
-        provider, actual = await _resolve(
-            db,
-            org_id,
-            model,
-            for_embeddings=True,
-            dept_id=dept_id,
-        )
-    if provider.provider_type == "anthropic":
-        raise RuntimeError("Anthropic provider does not expose embeddings; configure an OpenAI-compatible provider")
-    api_key = await get_decrypted_api_key(provider)
-    headers = _auth_headers(provider, api_key)
-    async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
-        resp = await client.post(_embed_url(provider), headers=headers, json={"model": actual, "input": texts})
-    data = resp.json()
-    if resp.status_code >= 400:
-        raise RuntimeError(f"upstream embed error {resp.status_code}: {data}")
-    vectors = [item["embedding"] for item in sorted(data.get("data", []), key=lambda x: x.get("index", 0))]
-    raw_usage = data.get("usage") or {}
-    prompt_tokens = raw_usage.get("prompt_tokens", raw_usage.get("input_tokens"))
-    total_tokens = raw_usage.get("total_tokens")
-    output_tokens = 0
-    if total_tokens is not None and prompt_tokens is not None:
-        output_tokens = max(0, int(total_tokens) - int(prompt_tokens))
-    return vectors, {
-        "input_tokens": prompt_tokens,
-        "output_tokens": output_tokens if prompt_tokens is not None else None,
-    }
-
-
-async def embed(
-    db: AsyncSession,
-    org_id: UUID,
-    model: str,
-    texts: list[str],
-    *,
-    dept_id: str | UUID | None = None,
-    provider_override: LlmProvider | None = None,
-    model_override: str | None = None,
-) -> list[list[float]]:
-    """Backward-compatible vector-only embedding facade."""
-
-    vectors, _usage = await embed_with_usage(
-        db,
-        org_id,
-        model,
-        texts,
-        dept_id=dept_id,
-        provider_override=provider_override,
-        model_override=model_override,
-    )
-    return vectors

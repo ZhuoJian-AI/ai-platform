@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.user_auth import CurrentUser
 from app.models.workspace import Workspace
+
+if TYPE_CHECKING:
+    from app.auth.user_auth import CurrentUser
 
 DEPARTMENT_READ_PREFIX = "workspace.department.read:"
 DEPARTMENT_UPLOAD_PREFIX = "workspace.department.upload:"

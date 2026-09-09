@@ -41,12 +41,12 @@ async def test_failed_tool_without_final_text_is_reported_as_the_tool_failure(mo
     await _consume(
         monkeypatch,
         [
-            {"type": "tool_call", "id": "call-1", "name": "load_skill", "arguments": "{}"},
+            {"type": "tool_call", "id": "call-1", "name": "unknown_tool", "arguments": "{}"},
             {
                 "type": "tool_result",
                 "id": "call-1",
-                "name": "load_skill",
-                "content": 'unknown tool "load_skill"',
+                "name": "unknown_tool",
+                "content": 'unknown tool "unknown_tool"',
                 "ok": False,
             },
             {"type": "done", "text": ""},
@@ -54,8 +54,8 @@ async def test_failed_tool_without_final_text_is_reported_as_the_tool_failure(mo
         state,
     )
 
-    assert "Tool 'load_skill' failed" in state["error"]
-    assert "工具执行失败（load_skill）" in state["assistant_final"]
+    assert "Tool 'unknown_tool' failed" in state["error"]
+    assert "工具执行失败（unknown_tool）" in state["assistant_final"]
     assert "最大步数" not in state["assistant_final"]
 
 

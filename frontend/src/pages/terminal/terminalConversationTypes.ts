@@ -1,7 +1,7 @@
 import type { TerminalTaskMessage, WorkspaceFileListItem, WorkspaceFileRefV1 } from '../../api/client';
 import type { ApprovalCardData } from '../../components/terminal/ApprovalCard';
 
-export type TraceCategory = 'rag' | 'memory' | 'skill' | 'file' | 'policy';
+export type TraceCategory = 'memory' | 'file' | 'policy';
 
 export type Block =
   | { kind: 'phase'; index: number }
@@ -11,13 +11,6 @@ export type Block =
   | { kind: 'trace'; category: TraceCategory; title: string; detail?: unknown }
   | { kind: 'meta'; subtype: 'memory'; data: unknown }
   | ({ kind: 'approval' } & ApprovalCardData);
-
-export interface InvokedSkill {
-  id: string;
-  name: string;
-  slug: string;
-  scope_type?: string;
-}
 
 export interface MessageAttachment {
   file_id: string;
@@ -67,7 +60,6 @@ export interface ChatMsg {
   agentName?: string | null;
   attachments?: MessageAttachment[];
   fileRefs?: MessageFileRef[];
-  invokedSkills?: InvokedSkill[];
   executionVerification?: TerminalTaskMessage['execution_verification'];
   artifacts?: ArtifactOutput[];
 }

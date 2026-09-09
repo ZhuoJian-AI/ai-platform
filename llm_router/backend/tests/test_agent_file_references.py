@@ -242,7 +242,6 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
 
     async def fake_build_tools(
         _db,
-        _skill_ids,
         _workspace_id,
         _user=None,
         *,
@@ -272,10 +271,8 @@ async def test_agent_prompt_maps_uuid_to_only_the_referenced_file(
             "messages": [{"role": "user", "content": f"@{file_id} 这个能分析一下么？"}],
             "referenced_file_ids": [file_id],
             "file_refs_v1": [{"file_id": file_id, "inject_content": True}],
-            "skill_ids": [],
             "exec_mode": "craft",
             "memory_context": [],
-            "rag_context": [],
             "steps": [],
             "traces": [],
             "usage": {},
@@ -333,7 +330,6 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
 
     async def fake_build_tools(
         _db,
-        _skill_ids,
         _workspace_id,
         _user=None,
         *,
@@ -363,10 +359,8 @@ async def test_structured_attachment_injects_exact_file_without_uuid_in_message(
             "messages": [{"role": "user", "content": "请分析我刚刚拖入的文件"}],
             "referenced_file_ids": [file_id],
             "file_refs_v1": [{"file_id": file_id, "inject_content": True}],
-            "skill_ids": [],
             "exec_mode": "craft",
             "memory_context": [],
-            "rag_context": [],
             "steps": [],
             "traces": [],
             "usage": {},
@@ -418,13 +412,6 @@ def test_general_state_and_message_metadata_preserve_attachment_snapshot():
         "path": "会话附件/draft/report.xlsx",
         "name": "report.xlsx",
     }
-    invoked_skill = {
-        "id": str(uuid4()),
-        "name": "Workbook Cleaner",
-        "slug": "workbook-cleaner",
-        "scope_type": "user",
-        "is_executable": True,
-    }
     user = SimpleNamespace(id=str(uuid4()), department_id=None)
 
     state = runtime_support.general_initial_state(
@@ -435,14 +422,11 @@ def test_general_state_and_message_metadata_preserve_attachment_snapshot():
         session_id=None,
         config={"workspace_id": workspace_id, "model_alias": "test"},
         attachment_files=[snapshot],
-        invoked_skills=[invoked_skill],
     )
 
     assert state["referenced_file_ids"] == [file_id]
-    assert state["invoked_skill_ids"] == [invoked_skill["id"]]
     assert runtime_support.user_message_metadata(state) == {
         "attachments": [snapshot],
-        "invoked_skills": [invoked_skill],
     }
 
 
@@ -921,7 +905,7 @@ async def test_agent_searches_and_reads_authorized_shared_space_without_referenc
 
 
 @pytest.mark.asyncio
-async def test_platform_runner_target_file_updates_in_place(
+async def test_platform_tool_executor_target_file_updates_in_place(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -966,7 +950,7 @@ async def test_platform_runner_target_file_updates_in_place(
 
     monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db_session, "user": principal})
     monkeypatch.setattr(nodes.workspace_permission_service, "capabilities", caps)
-    monkeypatch.setattr(nodes.skill_runner_client, "execute_builtin", execute_builtin)
+    monkeypatch.setattr(nodes._builtin_tools.tool_executor_client, "execute_builtin", execute_builtin)
 
     result = json.loads(
         await nodes._execute_builtin_tool(

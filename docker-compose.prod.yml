@@ -9,7 +9,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      skill-runner:
+      tool-executor:
         condition: service_healthy
     environment:
       APP_ENV: production
@@ -22,12 +22,10 @@ services:
       BROWSER_ALLOWED_ORIGINS: https://infra.aievolve.org.cn
       TRUSTED_PROXY_CIDRS: "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
       API_KEY_CACHE_TTL: "60"
-      CODE_SKILLS_ENABLED: "true"
-      AGENT_SKILLS_ORG_ALLOWLIST: "${AGENT_SKILLS_ORG_ALLOWLIST:-}"
-      SKILL_RUNNER_URL: http://skill-runner:8020
-      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:-skill-runner-local-dev-token}
-      SKILL_RUNNER_TIMEOUT_SECONDS: "120"
-      SKILL_RUNNER_QUEUE_WAIT_SECONDS: "300"
+      TOOL_EXECUTOR_URL: http://tool-executor:8020
+      TOOL_EXECUTOR_TOKEN: ${TOOL_EXECUTOR_TOKEN:-tool-executor-local-dev-token}
+      TOOL_EXECUTOR_TIMEOUT_SECONDS: "120"
+      TOOL_EXECUTOR_QUEUE_WAIT_SECONDS: "300"
       AGENT_GLOBAL_CONCURRENCY: "12"
       AGENT_USER_CONCURRENCY: "2"
       AGENT_QUEUE_MAX: "100"
@@ -158,13 +156,9 @@ services:
       STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-}"
       STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
       STORAGE_LIFECYCLE_INTERVAL_SECONDS: "${STORAGE_LIFECYCLE_INTERVAL_SECONDS:-3600}"
-      SKILL_RUNNER_URL: http://skill-runner:8020
-      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:-skill-runner-local-dev-token}
     command: ["python", "-m", "app.workers.storage_lifecycle"]
     depends_on:
       backend:
-        condition: service_healthy
-      skill-runner:
         condition: service_healthy
     restart: unless-stopped
     networks:

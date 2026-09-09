@@ -87,8 +87,8 @@ async def test_backfill_command_is_repeatable() -> None:
 
 def test_structured_artifacts_hide_internal_path_from_display_name() -> None:
     traces = [{
-        "category": "skill",
-        "name": "run_skill_script",
+        "category": "file",
+        "name": "document_create",
         "ok": True,
         "result": '{"outputs":[{"file_id":"01234567-89ab-4cde-8fab-0123456789ab",'
                   '"display_name":"爱法贝经营方案.docx"}]}',
@@ -97,7 +97,6 @@ def test_structured_artifacts_hide_internal_path_from_display_name() -> None:
         traces,
         task_id="11111111-1111-4111-8111-111111111111",
         task_title="生成经营方案",
-        executed_skills=[{"id": "skill-1", "name": "经营文档工厂", "version_no": 3}],
     )
 
     assert artifacts == [{
@@ -107,12 +106,9 @@ def test_structured_artifacts_hide_internal_path_from_display_name() -> None:
         "size": None,
         "parse_status": None,
         "source": {
-            "kind": "skill",
+            "kind": "platform_tool",
             "task_id": "11111111-1111-4111-8111-111111111111",
             "task_title": "生成经营方案",
-            "skill_id": "skill-1",
-            "skill_display_name": "经营文档工厂",
-            "skill_version": 3,
         },
         "workspace_path": None,
     }]
@@ -124,9 +120,9 @@ def test_structured_artifacts_exclude_files_deleted_during_the_same_run() -> Non
     csv_path = "平台工具输出/task/复核.csv"
     traces = [
         {
-            "name": "run_skill_script",
+            "name": "spreadsheet_create",
             "ok": True,
-            "result": {"outputs": [{"file_id": output_id, "path": "技能输出/task/结果.xlsx"}]},
+            "result": {"outputs": [{"file_id": output_id, "path": "平台工具输出/task/结果.xlsx"}]},
         },
         {
             "name": "spreadsheet_tool",

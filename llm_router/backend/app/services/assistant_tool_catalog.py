@@ -73,18 +73,6 @@ SYSTEM_TOOL_GROUPS = [
         "description": "搜索、抓取与下载公开网页",
         "tools": ["web_tool"],
     },
-    {
-        "slug": "rag",
-        "name": "RAG 检索",
-        "description": "按智能体绑定集合检索企业知识",
-        "tools": ["rag_search"],
-    },
-    {
-        "slug": "agent-skills",
-        "name": "用户 Skill 桥接",
-        "description": "读取并运行当前智能体绑定的用户 Skill",
-        "tools": ["load_skill", "read_skill_resource", "run_skill_script"],
-    },
 ]
 
 

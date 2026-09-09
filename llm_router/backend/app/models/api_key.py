@@ -3,7 +3,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -12,6 +12,12 @@ from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 class ApiKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "api_keys"
+    __table_args__ = (
+        CheckConstraint(
+            "budget_cap_credits IS NULL OR budget_cap_credits >= 0",
+            name="ck_api_keys_budget_cap_credits_nonnegative",
+        ),
+    )
 
     key_prefix: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
     key_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)

@@ -1,32 +1,33 @@
 """Scope service — resolve a terminal user's effective resource scope.
 
-资源（Skill / RagCollection / Workspace）按 ``scope_type`` + ``scope_id`` 分级：
-organization（全组织，scope_id 为 None）/ department / user / role。一个资源对用户可见当且仅当
-其落在用户的有效 scope 集合内：企业级 + 用户所属部门 + 用户所绑定角色 + 用户本人。
+资源（Agent / Workspace）按 ``scope_type`` + ``scope_id`` 分级。工作空间仍兼容
+历史 role scope；文本智能体只允许 organization / department / user 三种作用域。
 
-「自动匹配全部」= 用户有效 scope 集合内的资源并集（终端在 skills/rag 未指定时由
-运行时调用本服务解析为全集）。
+「自动匹配全部」= 用户有效 scope 集合内的资源并集。
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import exists, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.user_auth import CurrentUser
 from app.config import settings
 from app.models.agent import Agent
 from app.models.api_key import ApiKey
 from app.models.department import Department
 from app.models.organization import Organization
-from app.models.rag import RagCollection
-from app.models.skill import SkillFile, SkillFolder
+from app.models.role import Role
+from app.models.user import User
 from app.models.workspace import Workspace
 from app.services import multimodal_service, workspace_permission_service
+
+if TYPE_CHECKING:
+    from app.auth.user_auth import CurrentUser
 
 
 def department_scope_ids(cu: CurrentUser) -> tuple[str, ...]:
@@ -76,92 +77,81 @@ def scope_filter(model, cu: CurrentUser):
     return or_(*conds)
 
 
-async def list_skills_for_user(db: AsyncSession, cu: CurrentUser) -> list[SkillFolder]:
-    """用户可见的技能文件夹（组织级 + 用户部门/角色/个人命中）。
-
-    新版包必须已有活动版本；存量技能只要存在 skill.md 仍兼容显示。
-    """
-    stmt = select(SkillFolder).where(
-        SkillFolder.organization_id == cu.organization_id,
-        SkillFolder.deleted_at.is_(None),
-        SkillFolder.is_active.is_(True),
-        scope_filter(SkillFolder, cu),
-        or_(
-            SkillFolder.active_version_id.is_not(None),
-            exists(select(SkillFile.id).where(
-                SkillFile.skill_folder_id == SkillFolder.id,
-                SkillFile.path == "skill.md",
-                SkillFile.deleted_at.is_(None),
-            )),
-        ),
-    )
-    return list((await db.execute(stmt)).scalars().all())
+VALID_SCOPE_TYPES = {"organization", "department", "user", "role"}
 
 
-async def list_rags_for_user(db: AsyncSession, cu: CurrentUser) -> list[RagCollection]:
-    stmt = select(RagCollection).where(
-        RagCollection.organization_id == cu.organization_id,
-        RagCollection.deleted_at.is_(None),
-        scope_filter(RagCollection, cu),
-    )
-    return list((await db.execute(stmt)).scalars().all())
+async def validate_scope_target(
+    db: AsyncSession,
+    org_id: UUID | str,
+    scope_type: str,
+    scope_id: str | UUID | None,
+) -> str | None:
+    """Validate a tenant-owned authorization scope."""
+    if scope_type not in VALID_SCOPE_TYPES:
+        raise HTTPException(status_code=422, detail="作用域类型无效")
+    sid = str(scope_id) if scope_id else None
+    if scope_type == "organization":
+        if sid:
+            raise HTTPException(status_code=422, detail="企业级智能体不能设置 scope_id")
+        return None
+    if not sid:
+        raise HTTPException(status_code=422, detail="该作用域必须指定 scope_id")
+    model = {"department": Department, "user": User, "role": Role}[scope_type]
+    row = (await db.execute(select(model).where(
+        model.id == UUID(sid),
+        model.organization_id == UUID(str(org_id)),
+        model.deleted_at.is_(None),
+    ))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=422, detail="所选作用域不属于当前企业")
+    return sid
 
 
-def is_rag_visible(collection: RagCollection, cu: CurrentUser) -> bool:
-    if str(collection.organization_id) != str(cu.organization_id) or collection.deleted_at is not None:
-        return False
-    if collection.scope_type == "organization":
-        return True
-    if collection.scope_type == "department":
-        return has_unrestricted_data_scope(cu) or collection.scope_id in department_scope_ids(cu)
-    if collection.scope_type == "role":
-        return collection.scope_id in set(getattr(cu, "role_ids", ()) or ())
-    return collection.scope_type == "user" and collection.scope_id == cu.id
+async def validate_agent_scope_target(
+    db: AsyncSession,
+    org_id: UUID | str,
+    scope_type: str,
+    scope_id: str | UUID | None,
+) -> str | None:
+    """Text personas support only enterprise, department and personal scopes."""
+    if scope_type not in {"organization", "department", "user"}:
+        raise HTTPException(status_code=422, detail="智能体作用域只支持企业、部门或个人")
+    return await validate_scope_target(db, org_id, scope_type, scope_id)
 
 
-async def assert_bound_rags_visible(
-    db: AsyncSession, cu: CurrentUser, collection_ids: list[str],
-) -> list[RagCollection]:
-    """Validate Agent RAG bindings without trusting client-supplied UUIDs."""
-    if not collection_ids:
-        return []
-    try:
-        ids = [UUID(str(value)) for value in collection_ids]
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise HTTPException(status_code=422, detail="Invalid RAG collection id") from exc
-    rows = list((await db.execute(select(RagCollection).where(
-        RagCollection.id.in_(ids), RagCollection.deleted_at.is_(None),
+async def validate_user_membership(
+    db: AsyncSession,
+    org_id: UUID | str,
+    department_id: UUID | None,
+) -> None:
+    """Ensure the selected primary department belongs to the user's enterprise."""
+    if department_id is None:
+        return
+    department = (await db.execute(select(Department).where(
+        Department.id == department_id,
+        Department.organization_id == UUID(str(org_id)),
+        Department.deleted_at.is_(None),
+    ))).scalar_one_or_none()
+    if department is None:
+        raise HTTPException(status_code=422, detail="所选主部门不属于当前企业")
+
+
+async def validate_user_departments(
+    db: AsyncSession,
+    org_id: UUID | str,
+    department_ids: list[UUID],
+) -> None:
+    """Ensure all department references stay inside one enterprise."""
+    unique_ids = set(department_ids)
+    if not unique_ids:
+        return
+    rows = set((await db.execute(select(Department.id).where(
+        Department.id.in_(unique_ids),
+        Department.organization_id == UUID(str(org_id)),
+        Department.deleted_at.is_(None),
     ))).scalars().all())
-    by_id = {str(row.id): row for row in rows}
-    ordered = []
-    for value in collection_ids:
-        collection = by_id.get(str(value))
-        if collection is None or not is_rag_visible(collection, cu):
-            raise HTTPException(status_code=403, detail="RAG collection is not available to this user")
-        ordered.append(collection)
-    return ordered
-
-
-async def assert_admin_bound_rags(
-    db: AsyncSession, org_id: UUID | str, collection_ids: list[str],
-) -> list[RagCollection]:
-    if not collection_ids:
-        return []
-    try:
-        ids = [UUID(str(value)) for value in collection_ids]
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise HTTPException(status_code=422, detail="Invalid RAG collection id") from exc
-    rows = list((await db.execute(select(RagCollection).where(
-        RagCollection.id.in_(ids), RagCollection.deleted_at.is_(None),
-    ))).scalars().all())
-    by_id = {str(row.id): row for row in rows}
-    ordered = []
-    for value in collection_ids:
-        collection = by_id.get(str(value))
-        if collection is None or str(collection.organization_id) != str(org_id):
-            raise HTTPException(status_code=403, detail="RAG collection belongs to another organization")
-        ordered.append(collection)
-    return ordered
+    if rows != unique_ids:
+        raise HTTPException(status_code=422, detail="所选部门中存在不属于当前企业的部门")
 
 
 async def list_workspaces_for_user(db: AsyncSession, cu: CurrentUser) -> list[Workspace]:
@@ -196,7 +186,7 @@ async def list_workspaces_for_user(db: AsyncSession, cu: CurrentUser) -> list[Wo
 
 
 async def list_agents_for_user(db: AsyncSession, cu: CurrentUser) -> list[Agent]:
-    """用户可见的活跃智能体（企业、部门、角色和个人范围取并集）。
+    """用户可见的活跃智能体（企业、部门和个人范围取并集）。
 
     供终端「选智能体」下拉：返回 Agent 行（已加 scope_type/scope_id 列），
     仅 is_active 且未删除者。终端选中后以 template_agent_id 逐次覆盖运行（不落库）。
@@ -249,13 +239,12 @@ async def list_api_keys_for_user(db: AsyncSession, cu: CurrentUser) -> list[ApiK
 async def list_available_models_for_user(
     db: AsyncSession, cu: CurrentUser,
 ) -> list[str]:
-    """用户可用的模型名（按可访问 API Key 聚合，embedding 模型已过滤）。
+    """用户可用的对话模型名（按可访问 API Key 和有效部署聚合）。
 
     模型名按可访问 API Key 聚合：任一 Key 的 ``allowed_models`` 为空（= 不限模型）→ 组织全部
     活跃 provider 的 ``supported_models`` 并集；否则 → 各 Key 的 ``allowed_models`` 并集。
     返回的模型名可直接填入 ``TaskConfig.model_alias``（真实模型 id，或 "default" 走组织默认路由）。
 
-    embedding 类模型（名字含 ``embed``，不区分大小写）一律过滤——任务配置只关心对话/生成类模型。
     """
     keys = await list_api_keys_for_user(db, cu)
 
@@ -291,10 +280,7 @@ async def list_available_models_for_user(
             # that the gateway will reject at run time.
             provider_models.extend(declared)
         else:
-            # Pre-gateway providers retain the old conservative name filter.
-            provider_models.extend(
-                model for model in (p.supported_models or []) if "embed" not in model.lower()
-            )
+            provider_models.extend(p.supported_models or [])
 
     if any(not k.allowed_models for k in keys):
         # 存在不限模型的 Key → 用户可调用 provider 全集
@@ -302,7 +288,7 @@ async def list_available_models_for_user(
     else:
         models = sorted({m for k in keys for m in (k.allowed_models or []) if m in set(provider_models)})
 
-    # 过滤 embedding 模型：任务配置只列对话/生成类，避免误选无法 chat 的嵌入模型
+    # 图片生成模型由专用多模态工具调用，不进入对话模型选择器。
     generation_models = {
         deployment.model_id
         for provider in providers

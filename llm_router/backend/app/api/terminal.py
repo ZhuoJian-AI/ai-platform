@@ -44,33 +44,9 @@ from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.department import Department
 from app.models.organization import Organization
-from app.models.rag import RagCollection, RagDocument, RagFolder
-from app.models.skill import SkillFolder, SkillVersion
 from app.models.task import Task, TaskMessage
 from app.models.workspace import WorkspaceFileVersion, WorkspaceUploadSession
 from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
-from app.schemas.rag import (
-    RagChunkRead,
-    RagCollectionCreate,
-    RagCollectionRead,
-    RagCollectionUpdate,
-    RagDocumentCreate,
-    RagDocumentRead,
-    RagDocumentStatusRead,
-    RagDocumentUpdate,
-    RagFolderCreate,
-    RagFolderRead,
-    RagFolderUpdate,
-    RagReingestRequest,
-)
-from app.schemas.skill import (
-    SkillFileCreate,
-    SkillFileRead,
-    SkillFileReadMeta,
-    SkillFolderCreate,
-    SkillFolderRead,
-    SkillFolderUpdate,
-)
 from app.schemas.task import (
     TaskApprovalDecision,
     TaskCreate,
@@ -118,12 +94,9 @@ from app.schemas.workspace import (
 )
 from app.services import (
     business_assistant_orchestration,
-    doc_parser,
     enterprise_application_service,
     memory_service,
-    rag_service,
     scope_service,
-    skill_scope_service,
     storage_gateway_service,
     subsystem_integration_service,
     task_service,
@@ -143,47 +116,13 @@ from app.services.agent_service import (
     list_agents as list_agents_svc,
 )
 from app.services.agent_service import (
-    merged_application_context,
-)
-from app.services.agent_service import (
     soft_delete_agent as soft_delete_agent_svc,
-)
-from app.services.agent_service import (
-    validate_application_context as validate_agent_application_context,
-)
-from app.services.skill_store_service import (
-    create_folder as create_skill_folder,
-)
-from app.services.skill_store_service import (
-    get_file as get_skill_file,
-)
-from app.services.skill_store_service import (
-    get_folder as get_skill_folder,
-)
-from app.services.skill_store_service import (
-    list_files as list_skill_files,
-)
-from app.services.skill_store_service import (
-    list_folders as list_skill_folders,
-)
-from app.services.skill_store_service import (
-    soft_delete_file as soft_delete_skill_file,
-)
-from app.services.skill_store_service import (
-    soft_delete_folder as soft_delete_skill_folder,
-)
-from app.services.skill_store_service import (
-    update_folder as update_skill_folder,
-)
-from app.services.skill_store_service import (
-    upsert_file as upsert_skill_file,
 )
 from app.services.workspace_preview_service import (
     OriginalPreviewError,
     build_original_preview,
     source_metadata,
 )
-from app.tools.skill_manifest import parse_skill_manifest
 from app.utils.workspace_presentation import clean_display_name, presentation_dict
 
 router = APIRouter()
@@ -218,49 +157,6 @@ async def _assert_client_request_not_completed(
     )).scalar_one_or_none()
     if existing is not None:
         raise HTTPException(status_code=409, detail="本次请求已经提交，请查看当前对话中的已有结果")
-
-
-async def _skill_summaries(db: AsyncSession, folders: list[SkillFolder]) -> list[dict]:
-    """Build the compact, executable Skill catalog shared by the UI and runtime request snapshots."""
-    active_ids = [UUID(str(folder.active_version_id)) for folder in folders if folder.active_version_id]
-    versions = list((await db.execute(select(SkillVersion).where(
-        SkillVersion.id.in_(active_ids),
-    ))).scalars().all()) if active_ids else []
-    by_version = {str(version.id): version for version in versions}
-    summaries: list[dict] = []
-    for folder in folders:
-        version = by_version.get(str(folder.active_version_id)) if folder.active_version_id else None
-        description = ""
-        is_executable = False
-        install_status = "ready"
-        package_format = "legacy"
-        if folder.active_version_id:
-            if version is None or version.install_status != "ready":
-                continue
-            manifest = version.manifest if isinstance(version.manifest, dict) else {}
-            platform = manifest.get("_platform") if isinstance(manifest.get("_platform"), dict) else {}
-            description = str(manifest.get("description") or folder.name)
-            is_executable = bool(version.is_executable)
-            install_status = version.install_status
-            package_format = str(platform.get("package_format") or "package")
-        else:
-            manifest_file = next((
-                item for item in (folder.files or [])
-                if item.deleted_at is None and item.path.lower() == "skill.md"
-            ), None)
-            manifest = parse_skill_manifest(manifest_file.content if manifest_file else None)
-            if manifest is None:
-                continue
-            description = manifest.description or folder.name
-            is_executable = manifest.runtime in {"python", "node"}
-        summaries.append({
-            "id": str(folder.id), "name": folder.name, "slug": folder.slug,
-            "description": description, "scope_type": folder.scope_type,
-            "scope_id": str(folder.scope_id) if folder.scope_id else None,
-            "is_executable": is_executable, "install_status": install_status,
-            "package_format": package_format,
-        })
-    return summaries
 
 
 async def _get_owned_task(db: AsyncSession, task_id: UUID, cu: CurrentUser) -> Task:
@@ -505,10 +401,7 @@ async def resources_endpoint(
 ):
     """用户有效 scope 内的全部资源（供下拉与「全部自动匹配」预览）。"""
     workspaces = await scope_service.list_workspaces_for_user(db, cu)
-    skills = await scope_service.list_skills_for_user(db, cu)
-    rags = await scope_service.list_rags_for_user(db, cu)
     defaults = await _user_defaults(db, cu)
-    skill_summaries = await _skill_summaries(db, skills)
     workspace_reads: list[dict] = []
     for workspace in workspaces:
         item = WorkspaceRead.model_validate(workspace).model_dump()
@@ -516,8 +409,6 @@ async def resources_endpoint(
         workspace_reads.append(item)
     return {
         "workspaces": workspace_reads,
-        "skills": skill_summaries,
-        "rags": [RagCollectionRead.model_validate(r).model_dump() for r in rags],
         "defaults": defaults,
     }
 
@@ -573,7 +464,7 @@ async def list_all_ws_files_endpoint(
 async def models_endpoint(
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
-    """该用户可用的真实模型 id（按可访问的全部 API Key 聚合，embedding 模型已过滤）。
+    """该用户可用的真实对话模型 id（按可访问 API Key 与有效部署聚合）。
 
     ``model_alias`` 字段直接填这些模型 id 之一即可（或 "default" 走组织默认路由）。
     """
@@ -588,7 +479,7 @@ async def agents_endpoint(
     scope_id: str | None = Query(default=None),
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
-    """用户可见的活跃智能体（企业级 + 用户部门/角色/个人命中），供终端「选智能体」下拉与智能体管理页。
+    """用户可见的活跃文本智能体（企业级 + 用户部门/个人命中）。
 
     选中后以 ``template_agent_id`` 逐次覆盖运行（不落库）；选「不绑定」走通用智能体。
     不传 scope → 返回用户有效集合内全部可见智能体；传 scope → 必须在用户有效集合内（404）后精确过滤。
@@ -608,37 +499,22 @@ async def create_agent_endpoint(
     data: AgentCreate,
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
-    """新建智能体（个人/角色/部门 scope）。后续仅创建者可改删。
+    """新建文本智能体（个人/部门 scope）。后续仅创建者可改删。
 
     - 不允许 organization scope（终端用户不得建组织级智能体）；
     - scope 必须落在用户有效集合内，否则 403；
-    - model_alias 必须在用户当前可用模型内（仿 run_task_endpoint）；
     - created_by 记为当前用户；slug 在同 scope 内重复 → 409。
     """
     assert_user_write(cu)
     if data.scope_type == "organization":
-        raise HTTPException(status_code=400, detail="终端不支持在企业级创建智能体，请选择个人、角色或部门")
+        raise HTTPException(status_code=400, detail="终端不支持在企业级创建智能体，请选择个人或部门")
     if not _scope_in_effective(cu, data.scope_type, str(data.scope_id) if data.scope_id else None):
         raise HTTPException(status_code=403, detail="无权在该作用域下创建智能体")
-    if data.model_alias != "default":
-        _available = await scope_service.list_available_models_for_user(db, cu)
-        if data.model_alias not in _available:
-            raise HTTPException(status_code=400, detail="所选模型当前不可用，请重新选择模型")
-    await skill_scope_service.assert_bound_skills_visible(db, cu, data.skill_ids)
-    await scope_service.assert_bound_rags_visible(db, cu, data.rag_collection_ids)
-    await validate_agent_application_context(
-        db,
-        cu.organization_id,
-        data.application_id,
-        data.module_key,
-        data.page_key,
-        user=cu,
-    )
     try:
         agent = await create_agent_svc(db, cu.organization_id, data, created_by=cu.id)
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(status_code=409, detail="Slug already exists")
+        raise HTTPException(status_code=409, detail="同一作用范围内已存在同名智能体，请换一个名称")
     await db.commit()
     await db.refresh(agent)
     return agent
@@ -656,25 +532,6 @@ async def update_agent_endpoint(
     provided = data.model_dump(exclude_unset=True)
     for k in ("scope_type", "scope_id", "created_by", "organization_id"):
         provided.pop(k, None)
-    if "model_alias" in provided and provided["model_alias"] != "default":
-        _available = await scope_service.list_available_models_for_user(db, cu)
-        if provided["model_alias"] not in _available:
-            raise HTTPException(status_code=400, detail="所选模型当前不可用，请重新选择模型")
-    if "skill_ids" in provided:
-        await skill_scope_service.assert_bound_skills_visible(db, cu, provided["skill_ids"] or [])
-    if "rag_collection_ids" in provided:
-        await scope_service.assert_bound_rags_visible(db, cu, provided["rag_collection_ids"] or [])
-    application_id, module_key, page_key = merged_application_context(agent, data)
-    await validate_agent_application_context(
-        db,
-        cu.organization_id,
-        application_id,
-        module_key,
-        page_key,
-        user=cu,
-    )
-    if provided.get("application_id") is not None:
-        provided["application_id"] = str(provided["application_id"])
     for field, value in provided.items():
         setattr(agent, field, value)
     agent.version += 1
@@ -953,35 +810,13 @@ async def run_task_endpoint(
         application_id=data.application_id,
         page_context=data.page_context,
     )
-    # The model cannot select an application or page. A custom Agent may carry
-    # a server-validated Manifest page; bind it before assembling any tools.
+    # A text agent only contributes a persona. It cannot select an application,
+    # page, model, workspace or tool set.
     if "template_agent_id" in provided:
         tpl = provided["template_agent_id"]
-        cfg["template_agent_id"] = tpl or None
-    selected_agent = None
+        cfg["template_agent_id"] = None if cfg.get("application_id") else (tpl or None)
     if cfg.get("template_agent_id"):
-        selected_agent = await _get_visible_agent(db, UUID(str(cfg["template_agent_id"])), cu)
-        await skill_scope_service.assert_bound_skills_visible(db, cu, list(selected_agent.skill_ids or []))
-        await scope_service.assert_bound_rags_visible(db, cu, list(selected_agent.rag_collection_ids or []))
-        if selected_agent.application_id:
-            await validate_agent_application_context(
-                db,
-                cu.organization_id,
-                selected_agent.application_id,
-                selected_agent.module_key,
-                selected_agent.page_key,
-                user=cu,
-            )
-            previous_application_id = str(cfg.get("application_id") or "")
-            if previous_application_id and previous_application_id != str(selected_agent.application_id):
-                raise HTTPException(status_code=409, detail="当前对话已绑定其他业务应用，请新建对话")
-            cfg["application_id"] = str(selected_agent.application_id)
-            cfg["page_context"] = {
-                **dict(cfg.get("page_context") or {}),
-                "application_id": str(selected_agent.application_id),
-                "module_key": selected_agent.module_key,
-                "page_key": selected_agent.page_key,
-            }
+        await _get_visible_agent(db, UUID(str(cfg["template_agent_id"])), cu)
     defaults = await _user_defaults(db, cu)
     target_workspace_id = data.target_workspace_id or UUID(str(defaults["workspace_id"]))
     target_workspace = await workspace_service.get_workspace(db, target_workspace_id)
@@ -1085,10 +920,6 @@ async def run_task_endpoint(
         elif item.get("inject_content") and not file_refs_v1[index].get("inject_content"):
             file_refs_v1[index] = item
     await task_service.upsert_task_file_refs(db, task.id, file_refs_v1)
-    invoked_folders = await skill_scope_service.assert_bound_skills_visible(
-        db, cu, [str(skill_id) for skill_id in data.invoked_skill_ids],
-    )
-    invoked_skills = await _skill_summaries(db, invoked_folders)
     # 模型必须在用户当前可用范围内（脏值如裸 "glm" 或已失效模型直接挡掉，避免跑到路由失败）。
     _available = await scope_service.list_available_models_for_user(db, cu)
     if cfg["model_alias"] != "default" and cfg["model_alias"] not in _available:
@@ -1106,7 +937,6 @@ async def run_task_endpoint(
             session_id=task.session_id, db=db, request=request,
             attachment_files=attachment_files,
             file_refs_v1=file_refs_v1,
-            invoked_skills=invoked_skills,
             client_request_id=data.client_request_id,
         )
         # 流式响应内部完成图执行（含 save_memory/extract_memory/write_run_log）；
@@ -1125,7 +955,6 @@ async def run_task_endpoint(
             session_id=task.session_id, db=db, request=request,
             attachment_files=attachment_files,
             file_refs_v1=file_refs_v1,
-            invoked_skills=invoked_skills,
             client_request_id=data.client_request_id,
         )
     finally:
@@ -2381,7 +2210,6 @@ async def bulk_delete_ws_items_endpoint(
     return deleted
 
 
-# ── 知识库（RAG）：用户 scope 内可见；删除/重命名/编辑仅限自己创建 ──
 
 def _scope_in_effective(cu: CurrentUser, scope_type: str, scope_id: str | None) -> bool:
     """选中 scope 是否落在用户有效 scope 集合内（企业/部门/角色/个人）。"""
@@ -2391,19 +2219,8 @@ def _scope_in_effective(cu: CurrentUser, scope_type: str, scope_id: str | None) 
     return False
 
 
-async def _get_visible_collection(db: AsyncSession, coll_id: UUID, cu: CurrentUser) -> RagCollection:
-    """取知识库并校验可见（同组织 + scope 命中用户有效集合）；不可见一律 404。"""
-    coll = await rag_service.get_collection(db, coll_id)
-    if coll is None:
-        raise HTTPException(status_code=404, detail="RAG collection not found")
-    assert_user_org_access(cu, coll.organization_id)
-    if not _scope_in_effective(cu, coll.scope_type, coll.scope_id):
-        raise HTTPException(status_code=404, detail="RAG collection not found")
-    return coll
-
-
 def _assert_owner(
-    entity: RagCollection | RagDocument | RagFolder | SkillFolder | Agent,
+    entity: Agent,
     cu: CurrentUser,
 ) -> None:
     """断言当前用户为该资源的创建者；否则 403。
@@ -2425,23 +2242,11 @@ async def _get_visible_agent(db: AsyncSession, agent_id: UUID, cu: CurrentUser) 
     return a
 
 
-async def _get_visible_skill_folder(db: AsyncSession, folder_id: UUID, cu: CurrentUser) -> SkillFolder:
-    """取技能文件夹并校验可见（同组织 + scope 命中用户有效集合）；不可见一律 404。"""
-    f = await get_skill_folder(db, folder_id)
-    if f is None:
-        raise HTTPException(status_code=404, detail="Skill folder not found")
-    assert_user_org_access(cu, f.organization_id)
-    can_manage = (f.scope_type, f.scope_id) in await skill_scope_service.managed_scopes(db, cu)
-    if not skill_scope_service.user_can_use_folder(cu, f) and not can_manage:
-        raise HTTPException(status_code=404, detail="Skill folder not found")
-    return f
-
-
-@router.get("/terminal/kb-nodes")
-async def kb_nodes_endpoint(
+@router.get("/terminal/scope-nodes")
+async def scope_nodes_endpoint(
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
-    """用户可见的组织架构单链（企业→部门→个人），供左栏树渲染。
+    """用户可见的组织架构单链（企业→部门→个人），供文本智能体作用域树渲染。
 
     每级返回 ``{scope_type, scope_id, name}``；部门缺失则跳过该级。
     """
@@ -2465,436 +2270,3 @@ async def kb_nodes_endpoint(
     user_name = cu.user.display_name or cu.user.username
     nodes.append({"scope_type": "user", "scope_id": cu.id, "name": user_name})
     return nodes
-
-
-@router.get("/terminal/rag", response_model=list[RagCollectionRead])
-async def list_kb_collections_endpoint(
-    scope_type: str = Query(..., description="organization/department/user"),
-    scope_id: str | None = Query(default=None),
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """列出选中 scope 下的知识库（scope 必须在用户有效集合内）。"""
-    if not _scope_in_effective(cu, scope_type, scope_id):
-        raise HTTPException(status_code=404, detail="Scope not accessible")
-    return await rag_service.list_collections(
-        db, cu.organization_id, scope_type=scope_type, scope_id=scope_id,
-    )
-
-
-@router.post("/terminal/rag", response_model=RagCollectionRead, status_code=201)
-async def create_kb_collection_endpoint(
-    data: RagCollectionCreate,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """新建知识库。scope 必须在用户有效集合内；created_by 记为当前用户；
-    嵌入参数取组织级默认。"""
-    assert_user_write(cu)
-    if not _scope_in_effective(cu, data.scope_type, data.scope_id):
-        raise HTTPException(status_code=403, detail="无权在该作用域下新建知识库")
-    ingest_cfg = await rag_service.get_ingest_config(db, cu.organization_id)
-    data.embedding_model = ingest_cfg.embedding_model
-    data.embedding_dim = ingest_cfg.embedding_dim
-    try:
-        coll = await rag_service.create_collection(db, cu.organization_id, data, created_by=cu.id)
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail="Slug already exists")
-    await db.commit()
-    await db.refresh(coll)
-    return coll
-
-
-@router.patch("/terminal/rag/{coll_id}", response_model=RagCollectionRead)
-async def update_kb_collection_endpoint(
-    coll_id: UUID, data: RagCollectionUpdate,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """重命名知识库（仅创建者）。"""
-    assert_user_write(cu)
-    coll = await _get_visible_collection(db, coll_id, cu)
-    _assert_owner(coll, cu)
-    # 终端不允许改 scope，仅 name/description/chunk 参数
-    data.scope_type = None
-    data.scope_id = None
-    coll = await rag_service.update_collection(db, coll, data)
-    await db.commit()
-    await db.refresh(coll)
-    return coll
-
-
-@router.delete("/terminal/rag/{coll_id}", status_code=204)
-async def delete_kb_collection_endpoint(
-    coll_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """删除知识库（仅创建者）。"""
-    assert_user_write(cu)
-    coll = await _get_visible_collection(db, coll_id, cu)
-    _assert_owner(coll, cu)
-    await rag_service.soft_delete_collection(db, coll)
-    await db.commit()
-
-
-@router.get("/terminal/rag/{coll_id}/folders", response_model=list[RagFolderRead])
-async def list_kb_folders_endpoint(
-    coll_id: UUID,
-    parent: str | None = Query(default=None, description="仅返回该文件夹直接子文件夹；空串=根"),
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    coll = await _get_visible_collection(db, coll_id, cu)
-    return await rag_service.list_folders(db, coll.id, parent=parent)
-
-
-@router.post("/terminal/rag/{coll_id}/folders", response_model=RagFolderRead, status_code=201)
-async def create_kb_folder_endpoint(
-    coll_id: UUID, data: RagFolderCreate,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """新建文件夹（可在任意可见知识库下；created_by 记为当前用户）。"""
-    assert_user_write(cu)
-    coll = await _get_visible_collection(db, coll_id, cu)
-    folder = await rag_service.create_folder(db, coll, data, created_by=cu.id)
-    await db.commit()
-    await db.refresh(folder)
-    return folder
-
-
-@router.patch("/terminal/rag/folders/{folder_id}", response_model=RagFolderRead)
-async def rename_kb_folder_endpoint(
-    folder_id: UUID, data: RagFolderUpdate,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """重命名文件夹（仅创建者）。"""
-    assert_user_write(cu)
-    folder = await rag_service.get_folder(db, folder_id)
-    if folder is None:
-        raise HTTPException(status_code=404, detail="RAG folder not found")
-    coll = await _get_visible_collection(db, folder.collection_id, cu)
-    _assert_owner(folder, cu)
-    try:
-        folder = await rag_service.rename_folder(db, folder, data)
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail="目标路径已存在同名文件夹")
-    await db.commit()
-    await db.refresh(folder)
-    _ = coll  # 可见性已校验
-    return folder
-
-
-@router.delete("/terminal/rag/folders/{folder_id}", status_code=204)
-async def delete_kb_folder_endpoint(
-    folder_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """删除文件夹及其下内容（仅创建者）。"""
-    assert_user_write(cu)
-    folder = await rag_service.get_folder(db, folder_id)
-    if folder is None:
-        raise HTTPException(status_code=404, detail="RAG folder not found")
-    await _get_visible_collection(db, folder.collection_id, cu)
-    _assert_owner(folder, cu)
-    await rag_service.soft_delete_folder(db, folder)
-    await db.commit()
-
-
-@router.get("/terminal/rag/{coll_id}/documents", response_model=list[RagDocumentRead])
-async def list_kb_documents_endpoint(
-    coll_id: UUID,
-    folder_path: str | None = Query(default=None, description="仅返回该文件夹直接下属文档；空串=根"),
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    coll = await _get_visible_collection(db, coll_id, cu)
-    return await rag_service.list_documents(db, coll.id, folder_path=folder_path)
-
-
-@router.post("/terminal/rag/{coll_id}/documents", response_model=RagDocumentRead, status_code=201)
-async def ingest_kb_document_endpoint(
-    coll_id: UUID, data: RagDocumentCreate,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """文档入库（可在任意可见知识库下；created_by 记为当前用户）。"""
-    assert_user_write(cu)
-    coll = await _get_visible_collection(db, coll_id, cu)
-    try:
-        doc = await rag_service.ingest_document(
-            db,
-            coll,
-            coll.organization_id,
-            data,
-            created_by=cu.id,
-            department_id=cu.department_id,
-        )
-    except rag_service.EmbeddingError as exc:
-        # service 已置 doc=failed + flush；commit 落库 failed 供排查，转 502
-        await db.commit()
-        raise HTTPException(status_code=502, detail=f"文档入库失败：embedding 不可用 — {exc}") from exc
-    await db.commit()
-    await db.refresh(doc)
-    return doc
-
-
-@router.post("/terminal/rag/{coll_id}/documents/upload", response_model=RagDocumentRead, status_code=201)
-async def upload_kb_document_endpoint(
-    coll_id: UUID,
-    file: UploadFile = File(..., description="待解析入库的 PDF / Word / Excel / PowerPoint / 文本文档"),
-    title: str | None = Form(default=None),
-    folder_path: str = Form(default=""),
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """上传文件入库（与管理端一致）：请求内同步解析抽取文本并落库，分块+嵌入交后台任务
-    异步进行。``created_by`` 记为当前用户；可在任意可见知识库下上传。返回 ``status='pending'``，
-    前端轮询 ``GET /terminal/rag/documents/{id}/status`` 获取阶段化进度。
-    """
-    assert_user_write(cu)
-    coll = await _get_visible_collection(db, coll_id, cu)
-    raw = await file.read()
-    try:
-        return await rag_service.ingest_uploaded_file(
-            db, coll, coll.organization_id,
-            filename=file.filename or "upload.bin",
-            content_type=file.content_type,
-            raw=raw,
-            title=title,
-            folder_path=folder_path,
-            created_by=cu.id,
-            department_id=cu.department_id,
-        )
-    except doc_parser.UnsupportedFileTypeError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@router.get("/terminal/rag/documents/{doc_id}/status", response_model=RagDocumentStatusRead)
-async def kb_document_status_endpoint(
-    doc_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """轮询文档解析入库状态（上传后前端按 ~1s 轮询至 ready/failed）。"""
-    doc = await rag_service.get_document(db, doc_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="RAG document not found")
-    await _get_visible_collection(db, doc.collection_id, cu)
-    status = await rag_service.get_document_status(db, doc.id)
-    if status is None:
-        raise HTTPException(status_code=404, detail="RAG document not found")
-    return status
-
-
-@router.patch("/terminal/rag/documents/{doc_id}", response_model=RagDocumentRead)
-async def update_kb_document_endpoint(
-    doc_id: UUID, data: RagDocumentUpdate,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """重命名文档（仅创建者）。"""
-    assert_user_write(cu)
-    doc = await rag_service.get_document(db, doc_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="RAG document not found")
-    await _get_visible_collection(db, doc.collection_id, cu)
-    _assert_owner(doc, cu)
-    doc = await rag_service.update_document(db, doc, data)
-    await db.commit()
-    await db.refresh(doc)
-    return doc
-
-
-@router.delete("/terminal/rag/documents/{doc_id}", status_code=204)
-async def delete_kb_document_endpoint(
-    doc_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """删除文档（仅创建者）。"""
-    assert_user_write(cu)
-    doc = await rag_service.get_document(db, doc_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="RAG document not found")
-    await _get_visible_collection(db, doc.collection_id, cu)
-    _assert_owner(doc, cu)
-    await rag_service.soft_delete_document(db, doc)
-    await db.commit()
-
-
-@router.get("/terminal/rag/documents/{doc_id}/chunks", response_model=list[RagChunkRead])
-async def list_kb_chunks_endpoint(
-    doc_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    doc = await rag_service.get_document(db, doc_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="RAG document not found")
-    await _get_visible_collection(db, doc.collection_id, cu)
-    chunks = await rag_service.list_chunks(db, doc.id)
-    return [
-        RagChunkRead(
-            id=c.id,
-            document_id=c.document_id,
-            content=c.content,
-            chunk_index=c.metadata_.get("chunk_index", 0) if isinstance(c.metadata_, dict) else 0,
-            has_embedding=c.embedding is not None,
-        )
-        for c in chunks
-    ]
-
-
-@router.post("/terminal/rag/documents/{doc_id}/reingest", response_model=RagDocumentRead)
-async def reingest_kb_document_endpoint(
-    doc_id: UUID, data: RagReingestRequest,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """重新入库（仅创建者）：``chunks`` 为分块列表时按编辑边界落库；为 null 时从原文重切。"""
-    assert_user_write(cu)
-    doc = await rag_service.get_document(db, doc_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="RAG document not found")
-    coll = await _get_visible_collection(db, doc.collection_id, cu)
-    _assert_owner(doc, cu)
-    try:
-        doc = await rag_service.reingest_document(
-            db,
-            doc,
-            coll.organization_id,
-            data,
-            department_id=cu.department_id,
-        )
-    except rag_service.EmbeddingError as exc:
-        # 回滚：恢复旧分块与原 doc，不留下 0 chunk 的 failed 行
-        await db.rollback()
-        raise HTTPException(status_code=502, detail=f"重新入库失败：embedding 不可用 — {exc}") from exc
-    await db.commit()
-    await db.refresh(doc)
-    return doc
-
-
-# ── 技能（SkillFolder）：用户 scope 内可见；删除/重命名/补传仅限自己创建 ──
-
-@router.get("/terminal/skills", response_model=list[SkillFolderRead])
-async def list_skills_endpoint(
-    scope_type: str = Query(..., description="organization/department/user"),
-    scope_id: str | None = Query(default=None),
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """列出选中 scope 下的技能文件夹（scope 必须在用户有效集合内）。"""
-    if not _scope_in_effective(cu, scope_type, scope_id) and (
-        scope_type, scope_id
-    ) not in await skill_scope_service.managed_scopes(db, cu):
-        raise HTTPException(status_code=404, detail="Scope not accessible")
-    folders = await list_skill_folders(db, cu.organization_id, scope_type, scope_id)
-    version_ids = [folder.active_version_id for folder in folders if folder.active_version_id]
-    versions = {
-        version.id: version
-        for version in (await db.execute(select(SkillVersion).where(SkillVersion.id.in_(version_ids)))).scalars().all()
-    } if version_ids else {}
-    result: list[dict] = []
-    for folder in folders:
-        version = versions.get(folder.active_version_id)
-        manifest = version.manifest if version is not None and isinstance(version.manifest, dict) else {}
-        item = SkillFolderRead.model_validate(folder).model_dump()
-        item.update({
-            "description": str(manifest.get("description") or "").strip() or None,
-            "active_version_no": version.version_no if version is not None else None,
-            "active_install_status": version.install_status if version is not None else None,
-        })
-        result.append(item)
-    return result
-
-
-@router.post("/terminal/skills", response_model=SkillFolderRead, status_code=201)
-async def create_skill_endpoint(
-    data: SkillFolderCreate,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """导入技能：新建技能文件夹（created_by 记为当前用户）；随后前端补传 skill.md。"""
-    assert_user_write(cu)
-    normalized_scope_id = await skill_scope_service.assert_user_can_manage_scope(
-        db, cu, data.scope_type, data.scope_id,
-    )
-    data = data.model_copy(update={"scope_id": normalized_scope_id})
-    try:
-        f = await create_skill_folder(db, cu.organization_id, data, created_by=cu.id)
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail=f"Slug '{data.slug}' already exists in this scope")
-    await db.commit()
-    await db.refresh(f)
-    return f
-
-
-@router.patch("/terminal/skills/{folder_id}", response_model=SkillFolderRead)
-async def update_skill_endpoint(
-    folder_id: UUID, data: SkillFolderUpdate,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """重命名技能（仅创建者）；终端仅允许改 name。"""
-    assert_user_write(cu)
-    f = await _get_visible_skill_folder(db, folder_id, cu)
-    await skill_scope_service.assert_user_can_manage_folder(db, cu, f)
-    if data.name is None and data.is_active is None:
-        raise HTTPException(status_code=400, detail="name or is_active required")
-    f = await update_skill_folder(
-        db, f, SkillFolderUpdate(name=data.name, is_active=data.is_active),
-    )
-    await db.commit()
-    await db.refresh(f)
-    return f
-
-
-@router.delete("/terminal/skills/{folder_id}", status_code=204)
-async def delete_skill_endpoint(
-    folder_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """删除技能（仅创建者）。"""
-    assert_user_write(cu)
-    f = await _get_visible_skill_folder(db, folder_id, cu)
-    await skill_scope_service.assert_user_can_manage_folder(db, cu, f)
-    await soft_delete_skill_folder(db, f)
-    await db.commit()
-
-
-@router.get("/terminal/skills/{folder_id}/files", response_model=list[SkillFileReadMeta])
-async def list_skill_files_endpoint(
-    folder_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """列出技能文件夹内文件（scope 可见即可读）。"""
-    f = await _get_visible_skill_folder(db, folder_id, cu)
-    return await list_skill_files(db, f.id)
-
-
-@router.post("/terminal/skills/{folder_id}/files", response_model=SkillFileRead, status_code=201)
-async def upsert_skill_file_endpoint(
-    folder_id: UUID, data: SkillFileCreate,
-    cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """补传文件（仅技能创建者）。"""
-    assert_user_write(cu)
-    f = await _get_visible_skill_folder(db, folder_id, cu)
-    await skill_scope_service.assert_user_can_manage_folder(db, cu, f)
-    if f.active_version_id:
-        raise HTTPException(status_code=409, detail="Versioned Skill files are immutable; import a new package version")
-    fl = await upsert_skill_file(db, f, data)
-    await db.commit()
-    await db.refresh(fl)
-    return fl
-
-
-@router.get("/terminal/skill-files/{file_id}", response_model=SkillFileRead)
-async def get_skill_file_endpoint(
-    file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """取技能文件内容（scope 可见即可读）。"""
-    fl = await get_skill_file(db, file_id)
-    if fl is None:
-        raise HTTPException(status_code=404, detail="Skill file not found")
-    await _get_visible_skill_folder(db, fl.skill_folder_id, cu)
-    return fl
-
-
-@router.delete("/terminal/skill-files/{file_id}", status_code=204)
-async def delete_skill_file_endpoint(
-    file_id: UUID, cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
-):
-    """删除技能文件（仅技能创建者）。"""
-    assert_user_write(cu)
-    fl = await get_skill_file(db, file_id)
-    if fl is None:
-        raise HTTPException(status_code=404, detail="Skill file not found")
-    f = await _get_visible_skill_folder(db, fl.skill_folder_id, cu)
-    await skill_scope_service.assert_user_can_manage_folder(db, cu, f)
-    if f.active_version_id:
-        raise HTTPException(status_code=409, detail="Versioned Skill files are immutable; import a new package version")
-    await soft_delete_skill_file(db, fl)
-    await db.commit()

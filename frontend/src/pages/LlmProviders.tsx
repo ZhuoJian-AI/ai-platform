@@ -38,7 +38,7 @@ const VENDOR_LABELS: Record<string, string> = {
 };
 
 const CAPABILITY_LABELS: Record<ModelCapability, string> = {
-  chat: '聊天', vision: '视觉理解', embedding: 'Embedding', image_generation: '生图',
+  chat: '聊天', vision: '视觉理解', image_generation: '生图',
   audio_understanding: '音频理解', speech_to_text: '语音转文字', text_to_speech: '文字转语音',
   voice_design: '音色设计', voice_clone: '音色克隆',
 };
@@ -49,7 +49,6 @@ const ADAPTER_OPTIONS = [
   { value: 'openai_audio_synthesis_chat', label: 'OpenAI 兼容 TTS / 音色（Chat Completions）' },
   { value: 'openai_responses', label: 'OpenAI Responses（方舟等）' },
   { value: 'anthropic_messages', label: 'Anthropic Messages' },
-  { value: 'openai_embeddings', label: 'OpenAI Embeddings' },
   { value: 'openai_images', label: 'OpenAI Images' },
   { value: 'volcengine_images', label: '火山方舟图片生成' },
   { value: 'bailian_multimodal_generation', label: '百炼图片生成' },
@@ -541,7 +540,7 @@ export default function LlmProviders() {
             description={vendor === 'aliyun_bailian'
               ? '请使用按量付费 API Key。Coding Plan / Token Plan 不适用于 SaaS 后端。Key、地域和 Base URL 必须属于同一地域。'
               : vendor === 'volcengine_ark'
-                ? '聊天/视觉、Embedding 和图片生成需要按实际模型选择不同适配器；图片生成不会被当作聊天接口调用。'
+                ? '聊天/视觉和图片生成需要按实际模型选择不同适配器；图片生成不会被当作聊天接口调用。'
                 : vendor === 'openai'
                   ? 'OpenAI 兼容服务请填写它提供的 Base URL 与 API Key；平台按 OpenAI 协议调用，不按品牌或 Key 前缀另建供应商。'
                   : vendor === 'anthropic'
@@ -563,9 +562,6 @@ export default function LlmProviders() {
                                 form.setFieldValue(['model_deployments', name, 'capabilities'], ['image_generation']);
                                 form.setFieldValue(['model_deployments', name, 'endpoint_path'], '/api/v1/services/aigc/multimodal-generation/generation');
                                 form.setFieldValue(['model_deployments', name, 'config', 'default_size'], '1024x1024');
-                              } else if (value === 'openai_embeddings') {
-                                form.setFieldValue(['model_deployments', name, 'capabilities'], ['embedding']);
-                                form.setFieldValue(['model_deployments', name, 'embedding_dimensions'], 1024);
                               }
                             }} />
                           </Form.Item>
@@ -575,7 +571,7 @@ export default function LlmProviders() {
                       <Row gutter={12}>
                         <Col span={12}><Form.Item {...rest} name={[name, 'capabilities']} label="能力" rules={[{ required: true }]}><Select mode="multiple" options={(Object.entries(CAPABILITY_LABELS) as [ModelCapability, string][]).map(([value, label]) => ({ value, label }))} /></Form.Item></Col>
                         <Col span={6}><Form.Item {...rest} name={[name, 'endpoint_path']} label="接口路径"><Input placeholder={providerType === 'anthropic' ? '/v1/messages' : '通常留空'} /></Form.Item></Col>
-                        <Col span={6}><Form.Item {...rest} name={[name, 'embedding_dimensions']} label="向量维度"><InputNumber min={1} style={{ width: '100%' }} /></Form.Item></Col>
+                        <Col span={6}><Form.Item {...rest} name={[name, 'routing_priority']} label="路由优先级"><InputNumber style={{ width: '100%' }} /></Form.Item></Col>
                       </Row>
                       <Form.Item noStyle shouldUpdate={(previous, current) => (
                         previous.model_deployments?.[name]?.adapter !== current.model_deployments?.[name]?.adapter
@@ -641,8 +637,6 @@ export default function LlmProviders() {
                   endpoint_path: '/api/v1/services/aigc/multimodal-generation/generation',
                   config: { default_size: '1024x1024', watermark: false },
                 });
-              } else if (value === 'openai_embeddings') {
-                modelForm.setFieldsValue({ capabilities: ['embedding'], embedding_dimensions: 1024 });
               }
             }} />
           </Form.Item>
@@ -651,8 +645,7 @@ export default function LlmProviders() {
           </Form.Item>
           <Row gutter={16}>
             <Col span={12}><Form.Item name="endpoint_path" label="能力接口路径"><Input placeholder="通常留空，图片生成可填写专用路径" /></Form.Item></Col>
-            <Col span={6}><Form.Item name="embedding_dimensions" label="向量维度"><InputNumber min={1} style={{ width: '100%' }} /></Form.Item></Col>
-            <Col span={6}><Form.Item name="routing_priority" label="路由优先级"><InputNumber style={{ width: '100%' }} /></Form.Item></Col>
+            <Col span={12}><Form.Item name="routing_priority" label="路由优先级"><InputNumber style={{ width: '100%' }} /></Form.Item></Col>
           </Row>
           <Form.Item noStyle shouldUpdate={(previous, current) => previous.adapter !== current.adapter}>
             {() => modelForm.getFieldValue('adapter') === 'bailian_multimodal_generation' ? (

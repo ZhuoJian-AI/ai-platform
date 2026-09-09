@@ -1,7 +1,7 @@
-"""Capability-aware model gateway used by Agent Runtime and RAG.
+"""Capability-aware model gateway used by the Assistant Core and public model APIs.
 
 The gateway owns provider/deployment selection and wire-protocol adaptation.  It
-does not plan agent work, execute Skills, or persist workspace files.  Existing
+does not plan agent work, execute tools, or persist workspace files. Existing
 providers without explicit deployments remain available through the legacy
 client so the rollout is backwards compatible.
 """
@@ -781,10 +781,9 @@ async def resolve_provider_model(
     org_id: UUID,
     model_alias: str,
     *,
-    for_embeddings: bool = False,
     dept_id: str | UUID | None = None,
 ) -> tuple[str, str]:
-    capability = "embedding" if for_embeddings else "chat"
+    capability = "chat"
     resolved = await resolve_deployment(
         db,
         org_id,
@@ -806,7 +805,6 @@ async def resolve_provider_model(
         db,
         org_id,
         model_alias,
-        for_embeddings=for_embeddings,
         dept_id=dept_id,
     )
 
@@ -1382,126 +1380,6 @@ async def stream_chat(
         )
 
 
-async def _embed_unmetered(
-    db: AsyncSession,
-    org_id: UUID,
-    model: str,
-    texts: list[str],
-    *,
-    dept_id: str | UUID | None = None,
-) -> tuple[list[list[float]], dict[str, Any]]:
-    resolved = await resolve_deployment(
-        db,
-        org_id,
-        model,
-        "embedding",
-        dept_id=dept_id,
-    )
-    if not resolved:
-        await _assert_legacy_fallback_allowed(
-            db,
-            org_id,
-            model,
-            "embedding",
-            dept_id=dept_id,
-        )
-        return await legacy_client.embed_with_usage(
-            db,
-            org_id,
-            model,
-            texts,
-            dept_id=dept_id,
-        )
-    provider, deployment = resolved
-    return await _embed_with_deployment(effective_provider(provider, deployment), deployment, texts)
-
-
-async def embed(
-    db: AsyncSession,
-    org_id: UUID,
-    model: str,
-    texts: list[str],
-    *,
-    dept_id: str | UUID | None = None,
-) -> list[list[float]]:
-    reservation = await _reserve_gateway_quota(
-        db,
-        org_id,
-        payload={"model": model, "input": texts},
-        dept_id=dept_id,
-        operation="embedding",
-    )
-
-    async def invoke() -> tuple[list[list[float]], dict[str, Any]]:
-        return await _embed_unmetered(
-            db,
-            org_id,
-            model,
-            texts,
-            dept_id=dept_id,
-        )
-
-    vectors, _usage = await _metered_result(db, reservation, invoke, lambda result: result[1])
-    return vectors
-
-
-async def _embed_with_deployment(
-    provider: LlmProvider,
-    deployment: ModelDeployment,
-    texts: list[str],
-) -> tuple[list[list[float]], dict[str, Any]]:
-    """Call one explicit embedding deployment and enforce its declared dimensions."""
-    if provider.provider_type == "anthropic":
-        raise GatewayError("capability_mismatch")
-    api_key = await get_decrypted_api_key(provider)
-    path = _safe_endpoint_path(deployment.endpoint_path or "/embeddings", "Embeddings API")
-    body: dict[str, Any] = {"model": deployment.model_id, "input": texts}
-    if deployment.embedding_dimensions:
-        body["dimensions"] = deployment.embedding_dimensions
-    try:
-        async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
-            response = await client.post(
-                f"{provider.base_url.rstrip('/')}{path}",
-                headers={"authorization": f"Bearer {api_key}", "content-type": "application/json"},
-                json=body,
-            )
-    except httpx.TimeoutException as exc:
-        raise GatewayError("network_timeout") from exc
-    except httpx.NetworkError as exc:
-        raise GatewayError("network_failure") from exc
-    try:
-        data = response.json()
-    except ValueError as exc:
-        raise GatewayError("invalid_provider_response") from exc
-    if response.status_code >= 400:
-        raise GatewayError(_upstream_error_category(response.status_code, data))
-    items = sorted(data.get("data") or [], key=lambda item: item.get("index", 0))
-    if len(items) != len(texts):
-        raise GatewayError("invalid_provider_response")
-    vectors: list[list[float]] = []
-    for item in items:
-        vector = item.get("embedding")
-        if (
-            not isinstance(vector, list)
-            or not vector
-            or any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in vector)
-        ):
-            raise GatewayError("invalid_provider_response")
-        if deployment.embedding_dimensions and len(vector) != deployment.embedding_dimensions:
-            raise GatewayError("capability_mismatch")
-        vectors.append(vector)
-    raw_usage = data.get("usage") or {}
-    prompt_tokens = raw_usage.get("prompt_tokens", raw_usage.get("input_tokens"))
-    total_tokens = raw_usage.get("total_tokens")
-    output_tokens = 0
-    if total_tokens is not None and prompt_tokens is not None:
-        output_tokens = max(0, int(total_tokens) - int(prompt_tokens))
-    return vectors, {
-        "input_tokens": prompt_tokens,
-        "output_tokens": output_tokens if prompt_tokens is not None else None,
-    }
-
-
 async def _generate_image_unmetered(
     provider: LlmProvider,
     model: str,
@@ -1712,16 +1590,6 @@ async def _test_deployment_unmetered(
             "output": output[:200],
             "provider_id": result.provider_id,
             "usage": result.usage,
-        }
-    if capability == "embedding":
-        vectors, usage = await _embed_with_deployment(
-            effective,
-            deployment,
-            ["gateway health check"],
-        )
-        return {
-            "dimensions": len(vectors[0]) if vectors else 0,
-            "usage": usage,
         }
     if capability == "image_generation":
         if deployment.adapter == "bailian_multimodal_generation":

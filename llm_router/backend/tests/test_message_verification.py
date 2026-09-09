@@ -52,7 +52,7 @@ def test_execution_verification_keeps_a_terminal_failure_partial():
         "仅完成了一部分",
         {
             "traces": [
-                {"name": "run_skill_script", "ok": True},
+                {"name": "document_create", "ok": True},
                 {"name": "spreadsheet_tool", "ok": False},
             ],
             "artifacts": [{"file_id": "01234567-89ab-4cde-8fab-0123456789ab"}],

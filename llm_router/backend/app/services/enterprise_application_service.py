@@ -23,7 +23,7 @@ from app.schemas.enterprise_application import (
     EnterpriseApplicationGrantInput,
     EnterpriseApplicationUpdate,
 )
-from app.services import role_service, scope_service, skill_scope_service
+from app.services import role_service, scope_service
 
 PERMISSIONS = {"view", "ai_query", "ai_create", "ai_update", "ai_delete", "ai_approve", "export"}
 OPERATION_PERMISSION = {
@@ -596,7 +596,7 @@ async def replace_grants(
                 detail="Contract 2.4+ native applications can only be granted to roles",
             )
         try:
-            sid = await skill_scope_service.validate_scope_target(
+            sid = await scope_service.validate_scope_target(
                 db,
                 row.organization_id,
                 item.scope_type,
@@ -720,7 +720,6 @@ async def get_application_overview(db: AsyncSession, row: EnterpriseApplication)
         "operation_counts": operation_counts,
         "active_capability_count": sum(operation_counts.values()),
         "direct_capability_count": len(capabilities),
-        "skill_binding_count": 0,
         "capabilities": capabilities,
         "recent_calls": recent_calls,
     }

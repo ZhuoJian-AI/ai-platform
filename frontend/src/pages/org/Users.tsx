@@ -7,7 +7,7 @@ import { PlusOutlined, DeleteOutlined, EditOutlined, LockOutlined, UserOutlined 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { organizations, roles, users } from '../../api/client';
-import type { ManagerScopeGrant, User } from '../../api/client';
+import type { User } from '../../api/client';
 import { ApiError } from '../../api/client';
 import { useOrgTree } from '../../hooks/useOrgTree';
 import OrgSelect from '../../components/OrgSelect';
@@ -23,7 +23,6 @@ export default function UsersPage() {
   const [conflictUser, setConflictUser] = useState<User | null>(null);
   const [searchText, setSearchText] = useState('');
   const [form] = Form.useForm();
-  const watchedDepartmentId = Form.useWatch('department_id', form) as string | undefined;
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [resetTarget, setResetTarget] = useState<User | null>(null);
   const [newPassword, setNewPassword] = useState('');
@@ -67,15 +66,6 @@ export default function UsersPage() {
     ].some(value => value.toLocaleLowerCase().includes(keyword)));
   }, [userList, searchText, nodeMap]);
 
-  const managerOptions = useMemo(() => {
-    const options: { value: string; label: string }[] = [];
-    if (watchedDepartmentId) options.push({
-      value: `department:${watchedDepartmentId}`,
-      label: `部门负责人：${deptName(watchedDepartmentId) ?? watchedDepartmentId}`,
-    });
-    return options;
-  }, [watchedDepartmentId, nodeMap]);
-
   const openCreate = () => {
     setEditing(null);
     setSubmitError(null);
@@ -104,7 +94,6 @@ export default function UsersPage() {
         // 带回提交，否则一次正常的员工修改也会被服务端整体拒绝。
         role_ids: (editing.role_ids ?? []).filter(roleId => activeRoleIds.has(roleId)),
         department_id: editing.department_id ?? editing.department_ids?.[0] ?? undefined,
-        manager_scope_keys: (editing.manager_scopes ?? []).map((grant) => `${grant.scope_type}:${grant.scope_id}`),
       });
     }
   }, [modalOpen, editing, form, activeRoleIds]);
@@ -122,7 +111,6 @@ export default function UsersPage() {
       username: string; display_name?: string | null; role: string; is_active: boolean; password: string;
       role_ids?: string[];
       department_ids?: string[]; department_id?: string | null;
-      manager_scopes?: ManagerScopeGrant[];
     }) => {
       if (!orgId) { message.error('请先创建组织'); return Promise.reject(new Error('No org')); }
       return users.create(orgId, data);
@@ -171,10 +159,6 @@ export default function UsersPage() {
     if (createUser.isPending || updateUser.isPending) return;
     setSubmitError(null);
     const department_id = (v.department_id as string | undefined) ?? null;
-    const manager_scopes = ((v.manager_scope_keys as string[] | undefined) ?? []).map((key) => {
-      const [scope_type, scope_id] = key.split(':');
-      return { scope_type, scope_id } as ManagerScopeGrant;
-    });
     const payload = {
       username: v.username,
       display_name: v.display_name,
@@ -185,7 +169,6 @@ export default function UsersPage() {
       // department_ids 仅保留为旧客户端兼容字段，服务端强制最多一个部门。
       department_ids: department_id ? [department_id] : [],
       department_id,
-      manager_scopes,
     };
     if (isEdit) {
       const { password, ...updatePayload } = payload;
@@ -248,14 +231,6 @@ export default function UsersPage() {
             {
               title: '状态', dataIndex: 'is_active', width: 80,
               render: (v: boolean) => <Tag color={v ? 'green' : 'red'}>{v ? '启用' : '停用'}</Tag>,
-            },
-            {
-              title: '负责人授权', dataIndex: 'manager_scopes', width: 180,
-              render: (grants: ManagerScopeGrant[] | undefined) => (grants?.length
-                ? grants.map((grant) => <Tag key={`${grant.scope_type}:${grant.scope_id}`} color="purple">
-                    部门负责人
-                  </Tag>)
-                : <Typography.Text type="secondary">—</Typography.Text>),
             },
             {
               title: '操作', width: 310, fixed: 'right',
@@ -332,10 +307,6 @@ export default function UsersPage() {
               optionFilterProp="label"
               options={departmentOptions}
               placeholder="选择一个所属部门"
-              onChange={(departmentId?: string) => {
-                void departmentId;
-                form.setFieldValue('manager_scope_keys', []);
-              }}
             />
           </Form.Item>
           <Form.Item
@@ -353,19 +324,6 @@ export default function UsersPage() {
                 label: `${role.name}${role.is_builtin ? '（内置）' : ''}`,
               }))}
               placeholder="选择一个或多个角色"
-            />
-          </Form.Item>
-          <Form.Item
-            name="manager_scope_keys"
-            label="技能负责人授权"
-            extra="负责人可上传、升级、停用其部门范围内的 Skill。普通成员留空。"
-          >
-            <Select
-              mode="multiple"
-              allowClear
-              options={managerOptions}
-              placeholder={managerOptions.length ? '可选：任命为当前部门负责人' : '请先选择部门'}
-              disabled={!managerOptions.length}
             />
           </Form.Item>
           {!isEdit && (

@@ -98,7 +98,6 @@ async def test_user_belongs_to_one_department(client: AsyncClient):
     data = created.json()
     assert data["department_id"] == finance_id
     assert data["department_ids"] == [finance_id]
-    assert data["manager_scopes"] == []
 
     retired_delegation = await client.patch(
         f"/api/v1/users/{data['id']}",
@@ -118,7 +117,6 @@ async def test_user_belongs_to_one_department(client: AsyncClient):
     assert updated.status_code == 200
     assert updated.json()["department_id"] == sales_id
     assert updated.json()["department_ids"] == [sales_id]
-    assert updated.json()["manager_scopes"] == []
 
     mismatched = await client.patch(
         f"/api/v1/users/{user_id}",

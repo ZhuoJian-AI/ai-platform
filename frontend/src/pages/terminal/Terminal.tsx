@@ -10,7 +10,7 @@ import {
 import {
   PlusOutlined, SendOutlined, RobotOutlined, SettingOutlined, FileTextOutlined,
   LogoutOutlined, DatabaseOutlined, PartitionOutlined,
-  UnorderedListOutlined, BookOutlined,
+  UnorderedListOutlined,
   FolderOpenOutlined, MoreOutlined, ThunderboltOutlined,
   AppstoreOutlined, CheckCircleOutlined,
   DownOutlined,
@@ -26,7 +26,7 @@ import {
   terminal, multimodal, type TaskConfig, type TerminalTask,
   type TerminalResources, type TerminalMemoryItem, type TerminalModels, type TerminalAgent, type WorkspaceFileListItem,
   type TerminalTaskWithMessages,
-  type SkillFolderSummary, type WorkspaceFileSummary, type TerminalEnterpriseApplication,
+  type WorkspaceFileSummary, type TerminalEnterpriseApplication,
   type WorkspaceFileEvent, type WorkspaceFileRefV1,
   type TerminalApprovalOutcome, type TerminalApprovalDecidedBy,
   WORKSPACE_MAX_FILE_BYTES,
@@ -35,8 +35,6 @@ import { useUserAuth } from '../../context/UserAuthContext';
 import TaskConfigDrawer from './TaskConfigDrawer';
 import BrowserDrawer, { classifyFile, classifyUrl, type Source } from './BrowserDrawer';
 import WorkspaceManagerView from './WorkspaceManagerView';
-import KnowledgeBaseView from './KnowledgeBaseView';
-import SkillManagerView from './SkillManagerView';
 import AgentManagerView from './AgentManagerView';
 import EnterpriseApplicationView, {
   businessArtifactsFromMessage, type BusinessAssistantTurnResult,
@@ -56,7 +54,7 @@ import {
   consumeTerminalEventStream, dropTurnFromChat, messageFileRefLabel, POLICY_TRACE_TITLE, restoreChat,
 } from './terminalConversationModel';
 import type {
-  Block, ChatFileLink, ChatMsg, InvokedSkill, MessageAttachment, TraceCategory,
+  Block, ChatFileLink, ChatMsg, MessageAttachment, TraceCategory,
 } from './terminalConversationTypes';
 
 /** WorkBuddy 配色（参考 HTML 的 tailwind theme）。 */
@@ -80,12 +78,12 @@ const DEFAULT_CONFIG: TaskConfig = {
   exec_mode: 'craft',
 };
 
-type TerminalView = 'assistant' | 'workspaces' | 'agents' | 'knowledge' | 'skills' | 'application';
+type TerminalView = 'assistant' | 'workspaces' | 'agents' | 'application';
 
 function viewFromQuery(search: string): TerminalView {
   const value = new URLSearchParams(search).get('view');
   if (value === 'workspace') return 'workspaces';
-  if (value === 'agents' || value === 'knowledge' || value === 'skills' || value === 'application') return value;
+  if (value === 'agents' || value === 'application') return value;
   return 'assistant';
 }
 
@@ -155,11 +153,11 @@ type BrowserWindowWithFilePicker = Window & typeof globalThis & {
   showOpenFilePicker?: (options?: { multiple?: boolean }) => Promise<BrowserFileHandle[]>;
 };
 
-const COMPOSER_PLACEHOLDER = '描述你要完成的任务…通用智能体可按需调用技能、处理工作空间文件并使用记忆；RAG仅随专业智能体固定加载。';
+const COMPOSER_PLACEHOLDER = '描述你要完成的任务…个人助手可处理工作空间文件、使用 Web、多模态与长期记忆。';
 
 /** 执行模式：Craft 自主执行 / Ask 只读问答 / Plan 出方案不执行。 */
 const EXEC_MODES: { key: TaskConfig['exec_mode']; label: string; desc: string }[] = [
-  { key: 'craft', label: 'Craft 动手', desc: '自主多步执行：读写工作空间、调用技能' },
+  { key: 'craft', label: 'Craft 动手', desc: '自主多步执行：读写工作空间并调用平台固定工具' },
   { key: 'ask', label: 'Ask 问答', desc: '只读单轮问答，不调用工具、不改文件' },
   { key: 'plan', label: 'Plan 规划', desc: '产出分步计划，不执行' },
 ];
@@ -202,7 +200,6 @@ export default function Terminal() {
   // 新建任务作曲器
   const [composerOpen, setComposerOpen] = useState(() => !taskId);
   const [input, setInput] = useState('');
-  const [inputSkills, setInputSkills] = useState<InvokedSkill[]>([]);
   const [inputFileRefs, setInputFileRefs] = useState<WorkspaceFileRefV1[]>([]);
   const [inputAttachments, setInputAttachments] = useState<ComposerAttachment[]>([]);
   const [draftAttachmentKey, setDraftAttachmentKey] = useState(() => crypto.randomUUID());
@@ -252,7 +249,6 @@ export default function Terminal() {
 
   // 跟随输入（选中任务后的对话）
   const [followUp, setFollowUp] = useState('');
-  const [followUpSkills, setFollowUpSkills] = useState<InvokedSkill[]>([]);
   const [followUpFileRefs, setFollowUpFileRefs] = useState<WorkspaceFileRefV1[]>([]);
   const [followUpAttachments, setFollowUpAttachments] = useState<ComposerAttachment[]>([]);
 
@@ -526,7 +522,7 @@ export default function Terminal() {
     setSelectedAgentId(selectedTask?.config?.template_agent_id ?? null);
   }, [selectedTask?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 每次打开「任务资源配置」抽屉时，强制刷新工作空间、技能、RAG 与模型清单，
+  // 每次打开「任务资源配置」抽屉时，强制刷新工作空间、模型和文本角色清单，
   // 避免使用 react-query 缓存中的旧数据。
   useEffect(() => {
     if (cfgOpen) {
@@ -694,10 +690,10 @@ export default function Terminal() {
         break;
       }
       case 'trace': {
-        // 原生资源调用痕迹（RAG/记忆/文件）+ policy；Skill 走 tool_call。
+        // 原生资源调用痕迹（记忆/文件）+ policy。
         // policy 类 approval_requested/approval_decided 只作为轻量痕迹渲染，审批卡片本体由 approval_request 事件负责。
         const { category: _c, title: _t, ...rest } = evt as Record<string, unknown>;
-        const category = (evt.category as TraceCategory) ?? 'rag';
+        const category = (evt.category as TraceCategory) ?? 'file';
         let title = (evt.title as string) ?? '';
         if (!title && category === 'policy') {
           title = POLICY_TRACE_TITLE[String(evt.action ?? '')] ?? String(evt.action ?? '策略');
@@ -741,17 +737,17 @@ export default function Terminal() {
   }, [dispatchEvent]);
 
   const runStream = useCallback(async (
-    taskId: string, msg: string, attachments: MessageAttachment[] = [], invokedSkills: InvokedSkill[] = [],
+    taskId: string, msg: string, attachments: MessageAttachment[] = [],
     applicationId?: string | null, currentPageContext: Record<string, unknown> = {},
     fileRefs: WorkspaceFileRefV1[] = [],
   ) => {
     // 乐观载入：立即显示用户消息 + 一个「思考中」回合，第一时间给反馈
-    // 该轮若选了智能体，把智能体名挂到用户消息上，气泡内按技能 chip 同款展示（逐次覆盖、不落库）。
+    // 该轮若选了文本角色，把名称挂到用户消息上（逐次覆盖、不落库）。
     const turnAgentName = selectedAgentId ? agentLabel : null;
     const optimisticCreatedAt = new Date().toISOString();
     setChat((c) => [
       ...c,
-      { role: 'user', content: msg, createdAt: optimisticCreatedAt, agentName: turnAgentName, attachments, fileRefs, invokedSkills },
+      { role: 'user', content: msg, createdAt: optimisticCreatedAt, agentName: turnAgentName, attachments, fileRefs },
       { role: 'assistant', content: '', createdAt: optimisticCreatedAt, blocks: [{ kind: 'phase', index: 0 }] },
     ]);
     setTraceLog([]);
@@ -766,7 +762,6 @@ export default function Terminal() {
       ].map((item) => [item.file_id, item])).values());
       const resp = await terminal.runTaskStream(
         taskId, msg, controller.signal, selectedAgentId, attachments.map((item) => item.file_id),
-        invokedSkills.map((item) => item.id),
         applicationId, currentPageContext, requestRefs,
       );
       if (!resp.ok || !resp.body) {
@@ -868,7 +863,6 @@ export default function Terminal() {
     if (id !== selectedId) abortActiveStream();
     if (id !== selectedId) {
       setFollowUpAttachments([]);
-      setFollowUpSkills([]);
       setFollowUpFileRefs([]);
     }
     if (id) {
@@ -998,7 +992,7 @@ export default function Terminal() {
 
   const startTask = async () => {
     const readyAttachments = inputAttachments.filter((item) => item.status === 'ready' && item.file_id);
-    if ((!input.trim() && !readyAttachments.length && !inputSkills.length && !inputFileRefs.length) || streaming) return;
+    if ((!input.trim() && !readyAttachments.length && !inputFileRefs.length) || streaming) return;
     if (!config.model_alias) {
       message.warning('请先选择模型后再执行');
       setCfgContext('composer'); setCfgOpen(true);
@@ -1006,9 +1000,7 @@ export default function Terminal() {
     }
     const msg = input.trim() || (readyAttachments.length
       ? `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`
-      : inputSkills.length
-        ? `请使用本轮选择的技能：${inputSkills.map((item) => item.name).join('、')}`
-        : '请处理已引用的工作空间文件');
+      : '请处理已引用的工作空间文件');
     const attachmentSnapshots: MessageAttachment[] = readyAttachments.map(({ file_id, workspace_id, path, name }) => ({
       file_id, workspace_id, path, name,
     }));
@@ -1023,13 +1015,11 @@ export default function Terminal() {
       setSelectedId(task.id);
       navigate(`${terminalBasePath}/tasks/${task.id}`);
       setInput('');
-      const invokedSkills = [...inputSkills];
       const selectedFileRefs = [...inputFileRefs];
       setFollowUpFileRefs(selectedFileRefs.filter((item) => item.scope === 'task'));
-      setInputSkills([]);
       setInputFileRefs([]);
       setInputAttachments([]);
-      await runStream(task.id, msg, attachmentSnapshots, invokedSkills, config.application_id, pageContext, selectedFileRefs);
+      await runStream(task.id, msg, attachmentSnapshots, config.application_id, pageContext, selectedFileRefs);
       setPageContext({});
     } catch (e) {
       message.error((e as Error).message);
@@ -1038,7 +1028,7 @@ export default function Terminal() {
 
   const sendFollowUp = async () => {
     const readyAttachments = followUpAttachments.filter((item) => item.status === 'ready' && item.file_id);
-    if (!selectedId || (!followUp.trim() && !readyAttachments.length && !followUpSkills.length && !followUpFileRefs.length) || streaming) return;
+    if (!selectedId || (!followUp.trim() && !readyAttachments.length && !followUpFileRefs.length) || streaming) return;
     if (!taskConfig.model_alias) {
       message.warning('请先选择模型后再执行');
       setCfgContext('chat'); setCfgOpen(true);
@@ -1046,17 +1036,13 @@ export default function Terminal() {
     }
     const msg = followUp.trim() || (readyAttachments.length
       ? `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`
-      : followUpSkills.length
-        ? `请使用本轮选择的技能：${followUpSkills.map((item) => item.name).join('、')}`
-        : '请继续处理任务中引用的工作空间文件');
+      : '请继续处理任务中引用的工作空间文件');
     const attachmentSnapshots: MessageAttachment[] = readyAttachments.map(({ file_id, workspace_id, path, name }) => ({
       file_id, workspace_id, path, name,
     }));
-    const invokedSkills = [...followUpSkills];
     setFollowUp('');
-    setFollowUpSkills([]);
     setFollowUpAttachments([]);
-    await runStream(selectedId, msg, attachmentSnapshots, invokedSkills, taskConfig.application_id, {}, followUpFileRefs);
+    await runStream(selectedId, msg, attachmentSnapshots, taskConfig.application_id, {}, followUpFileRefs);
   };
 
   const newTask = () => {
@@ -1069,11 +1055,9 @@ export default function Terminal() {
     setTraceLog([]);
     setComposerOpen(true);
     setInput('');
-    setInputSkills([]);
     setInputFileRefs([]);
     setInputAttachments([]);
     setFollowUpAttachments([]);
-    setFollowUpSkills([]);
     setFollowUpFileRefs([]);
     setDraftAttachmentKey(crypto.randomUUID());
     setConfig(DEFAULT_CONFIG);
@@ -1293,12 +1277,6 @@ export default function Terminal() {
               <Tooltip title="智能体" placement="right">
                 <button type="button" className="terminal-app-rail__button" aria-label="智能体" onClick={() => setView('agents')}><RobotOutlined /></button>
               </Tooltip>
-              <Tooltip title="知识库" placement="right">
-                <button type="button" className="terminal-app-rail__button" aria-label="知识库" onClick={() => setView('knowledge')}><BookOutlined /></button>
-              </Tooltip>
-              <Tooltip title="技能" placement="right">
-                <button type="button" className="terminal-app-rail__button" aria-label="技能" onClick={() => setView('skills')}><ThunderboltOutlined /></button>
-              </Tooltip>
               <Tooltip title="任务与平台导航" placement="right">
                 <button type="button" className="terminal-app-rail__button" aria-label="任务与平台导航" onClick={() => setApplicationNavOpen(true)}><HistoryOutlined /></button>
               </Tooltip>
@@ -1353,14 +1331,6 @@ export default function Terminal() {
               <button type="button" onClick={() => setView('agents')} style={navItemStyle(view === 'agents')}>
                 <RobotOutlined style={{ fontSize: 16 }} />
                 <span>智能体</span>
-              </button>
-              <button type="button" onClick={() => setView('knowledge')} style={navItemStyle(view === 'knowledge')}>
-                <BookOutlined style={{ fontSize: 16 }} />
-                <span>知识库</span>
-              </button>
-              <button type="button" onClick={() => setView('skills')} style={navItemStyle(view === 'skills')}>
-                <ThunderboltOutlined style={{ fontSize: 16 }} />
-                <span>技能</span>
               </button>
             </nav>
 
@@ -1510,10 +1480,6 @@ export default function Terminal() {
               />
             ) : view === 'agents' ? (
               <AgentManagerView />
-            ) : view === 'knowledge' ? (
-              <KnowledgeBaseView />
-            ) : view === 'skills' ? (
-              <SkillManagerView />
             ) : view === 'application' && selectedApplication ? (
               <EnterpriseApplicationView
                 application={selectedApplication}
@@ -1599,7 +1565,7 @@ export default function Terminal() {
                   const controller = new AbortController();
                   const clientRequestId = crypto.randomUUID();
                   const response = await terminal.runTaskStream(
-                    activeTaskId, prompt, controller.signal, null, [], [], selectedApplication.id,
+                    activeTaskId, prompt, controller.signal, null, [], selectedApplication.id,
                     context, fileRefs, selectedBusinessWorkspaceId, clientRequestId,
                   );
                   if (!response.ok || !response.body) {
@@ -1691,7 +1657,6 @@ export default function Terminal() {
             ) : composerOpen ? (
               <HomeView
                 input={input} setInput={setInput}
-                invokedSkills={inputSkills} setInvokedSkills={setInputSkills}
                 fileRefs={inputFileRefs} setFileRefs={setInputFileRefs}
                 attachments={inputAttachments} setAttachments={setInputAttachments}
                 attachmentScopeKey={`草稿-${draftAttachmentKey}`}
@@ -1704,7 +1669,6 @@ export default function Terminal() {
                   return true;
                 }}
                 onOpenConfig={() => { setCfgContext('composer'); setCfgOpen(true); }}
-                onImportSkill={() => setView('skills')}
                 onStart={startTask}
                 streaming={streaming}
                 agentLabel={agentLabel}
@@ -1714,7 +1678,6 @@ export default function Terminal() {
                 taskTitle={selectedTask?.title || '任务对话'}
                 chat={chat} streaming={streaming}
                 followUp={followUp} setFollowUp={setFollowUp}
-                invokedSkills={followUpSkills} setInvokedSkills={setFollowUpSkills}
                 fileRefs={followUpFileRefs} setFileRefs={setFollowUpFileRefs}
                 attachments={followUpAttachments} setAttachments={setFollowUpAttachments}
                 onSend={sendFollowUp} onStop={stopStream}
@@ -1724,7 +1687,6 @@ export default function Terminal() {
                 onSetExecMode={(m) => patchTaskConfig({ ...taskConfig, exec_mode: m })}
                 onSetWorkspace={(workspaceId) => patchTaskConfig({ ...taskConfig, workspace_id: workspaceId })}
                 onOpenConfig={() => { setCfgContext('chat'); setCfgOpen(true); }}
-                onImportSkill={() => setView('skills')}
                 selectedId={selectedId}
                 onLink={openLink}
                 onOpenFile={openWorkspaceFile}
@@ -1843,8 +1805,6 @@ export default function Terminal() {
                 {terminalApplications.length > 0 && <div style={{ height: 1, background: '#e5e7eb', margin: '8px 10px' }} />}
                 <button type="button" onClick={() => { setApplicationNavOpen(false); setView('workspaces'); }} style={navItemStyle(false)}><FolderOpenOutlined style={{ fontSize: 16 }} /><span>工作空间</span></button>
                 <button type="button" onClick={() => { setApplicationNavOpen(false); setView('agents'); }} style={navItemStyle(false)}><RobotOutlined style={{ fontSize: 16 }} /><span>智能体</span></button>
-                <button type="button" onClick={() => { setApplicationNavOpen(false); setView('knowledge'); }} style={navItemStyle(false)}><BookOutlined style={{ fontSize: 16 }} /><span>知识库</span></button>
-                <button type="button" onClick={() => { setApplicationNavOpen(false); setView('skills'); }} style={navItemStyle(false)}><ThunderboltOutlined style={{ fontSize: 16 }} /><span>技能</span></button>
               </nav>
 
               <div style={{ padding: '12px 16px 8px' }}>
@@ -2024,26 +1984,23 @@ export default function Terminal() {
   );
 }
 
-// ── 技能引用 chip 编辑器（contentEditable：/slug 引用为不可分割高亮整体，退格整体删除）──
+// ── 工作空间文件引用 chip 编辑器（@fileId 为不可分割整体）──
 
 export interface ComposerInputHandle {
-  /** 插入一个技能引用 chip：有 pending / 则替换之，否则插在光标处 */
-  insertSkillChip: (id: string, slug: string, name: string) => void;
   /** 插入一个工作空间文件引用 chip：有 pending @ 则替换之，否则插在光标处 */
   insertFileChip: (fileId: string, label: string) => void;
-  /** / 或 @ 触发后未选中即关闭：剥离那个孤立的触发符 */
+  /** @ 触发后未选中即关闭：剥离孤立触发符 */
   clearPendingMention: () => void;
   focus: () => void;
 }
 
-type PendingMention = { node: Text; offset: number; ch: '/' | '@' };
+type PendingMention = { node: Text; offset: number; ch: '@' };
 
 const MentionInput = forwardRef<ComposerInputHandle, {
   value: string; onChange: (v: string) => void; placeholder: string;
-  onSkillIdsChange: (ids: string[]) => void;
   onFileIdsChange: (ids: string[]) => void;
   onPasteFiles: (event: ReactClipboardEvent<HTMLDivElement>) => void;
-  onSlashTrigger: () => void; onAtTrigger: () => void; onSubmit: () => void; canSend: boolean;
+  onAtTrigger: () => void; onSubmit: () => void; canSend: boolean;
 }>(function MentionInput(props, ref) {
   const { value, placeholder } = props;
   const editorRef = useRef<HTMLDivElement>(null);
@@ -2055,7 +2012,7 @@ const MentionInput = forwardRef<ComposerInputHandle, {
 
   const isChip = (el: Node | null): el is HTMLElement =>
     !!el && el.nodeType === Node.ELEMENT_NODE &&
-    ((el as HTMLElement).hasAttribute('data-skill-slug') || (el as HTMLElement).hasAttribute('data-file-id'));
+    (el as HTMLElement).hasAttribute('data-file-id');
 
   const serialize = (el: HTMLElement): string => {
     let out = '';
@@ -2064,8 +2021,7 @@ const MentionInput = forwardRef<ComposerInputHandle, {
         out += n.textContent ?? '';
       } else if (n.nodeType === Node.ELEMENT_NODE) {
         const e = n as HTMLElement;
-        if (e.hasAttribute('data-skill-slug')) out += `/${e.getAttribute('data-skill-slug')}`;
-        else if (e.hasAttribute('data-file-id')) out += `@${e.getAttribute('data-file-id')}`;
+        if (e.hasAttribute('data-file-id')) out += `@${e.getAttribute('data-file-id')}`;
         else out += e.textContent ?? '';
       }
     });
@@ -2081,10 +2037,6 @@ const MentionInput = forwardRef<ComposerInputHandle, {
       el.textContent = '';
     }
     latest.current.onChange(text);
-    latest.current.onSkillIdsChange(Array.from(
-      el.querySelectorAll<HTMLElement>('[data-skill-id]'),
-      (chip) => chip.getAttribute('data-skill-id') || '',
-    ).filter((id, index, all) => !!id && all.indexOf(id) === index));
     latest.current.onFileIdsChange(Array.from(
       el.querySelectorAll<HTMLElement>('[data-file-id]'),
       (chip) => chip.getAttribute('data-file-id') || '',
@@ -2099,7 +2051,7 @@ const MentionInput = forwardRef<ComposerInputHandle, {
   }, [value]);
 
   // 共用插入：chip 为已建好的 span；triggerCh 为对应触发符（替换 pending 或插在光标）
-  const placeChip = (chip: HTMLSpanElement, triggerCh: '/' | '@') => {
+  const placeChip = (chip: HTMLSpanElement, triggerCh: '@') => {
     const el = editorRef.current;
     if (!el) return;
     el.focus();
@@ -2142,16 +2094,6 @@ const MentionInput = forwardRef<ComposerInputHandle, {
       el.normalize();
       syncToState();
     },
-    insertSkillChip: (id, slug, name) => {
-      const chip = document.createElement('span');
-      chip.setAttribute('contenteditable', 'false');
-      chip.setAttribute('data-skill-id', id);
-      chip.setAttribute('data-skill-slug', slug);
-      chip.className = 'skill-ref-chip';
-      chip.textContent = name;
-      chip.title = `技能：${name} (/${slug})`;
-      placeChip(chip, '/');
-    },
     insertFileChip: (fileId, label) => {
       const chip = document.createElement('span');
       chip.setAttribute('contenteditable', 'false');
@@ -2163,8 +2105,8 @@ const MentionInput = forwardRef<ComposerInputHandle, {
     },
   }), []);
 
-  // 词首键入触发符 / 或 @ → 记录 pending 并唤出对应下拉
-  const detectTrigger = (ch: '/' | '@') => {
+  // 词首键入 @ → 记录 pending 并唤出文件下拉
+  const detectTrigger = (ch: '@') => {
     const sel = window.getSelection();
     if (!sel || !sel.isCollapsed || !sel.rangeCount) return;
     const range = sel.getRangeAt(0);
@@ -2177,16 +2119,14 @@ const MentionInput = forwardRef<ComposerInputHandle, {
     const prev = txt[i - 1] ?? '';
     if (prev !== '' && !/\s/.test(prev)) return;
     pendingRef.current = { node: node as Text, offset: i, ch };
-    if (ch === '/') latest.current.onSlashTrigger();
-    else latest.current.onAtTrigger();
+    latest.current.onAtTrigger();
   };
 
   const handleInput = (e: FormEvent<HTMLDivElement>) => {
     const ev = e.nativeEvent as InputEvent & { isComposing?: boolean };
     if (composingRef.current || ev.isComposing) return;
     if (ev.inputType === 'insertText') {
-      if (ev.data === '/') detectTrigger('/');
-      else if (ev.data === '@') detectTrigger('@');
+      if (ev.data === '@') detectTrigger('@');
     }
     syncToState();
   };
@@ -2194,7 +2134,7 @@ const MentionInput = forwardRef<ComposerInputHandle, {
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (composingRef.current || (e.nativeEvent as { isComposing?: boolean }).isComposing) return;
     if (e.key === 'Backspace') {
-      // 光标紧贴 chip 之前时，整体删除该 chip（跨浏览器确定性，技能/文件皆然）
+      // 光标紧贴文件 chip 之前时，整体删除该 chip。
       const sel = window.getSelection();
       if (sel && sel.isCollapsed && sel.rangeCount) {
         const range = sel.getRangeAt(0);
@@ -2223,7 +2163,7 @@ const MentionInput = forwardRef<ComposerInputHandle, {
   return (
     <div
       ref={editorRef}
-      className="skill-composer"
+      className="assistant-composer"
       contentEditable
       suppressContentEditableWarning
       data-placeholder={placeholder}
@@ -2248,8 +2188,6 @@ const MentionInput = forwardRef<ComposerInputHandle, {
 
 function TaskInputBox(props: {
   value: string; setValue: (v: string) => void;
-  invokedSkills: InvokedSkill[];
-  setInvokedSkills: Dispatch<SetStateAction<InvokedSkill[]>>;
   fileRefs: WorkspaceFileRefV1[];
   setFileRefs: Dispatch<SetStateAction<WorkspaceFileRefV1[]>>;
   attachments: ComposerAttachment[];
@@ -2261,15 +2199,14 @@ function TaskInputBox(props: {
   onSetExecMode: (m: TaskConfig['exec_mode']) => void;
   onSetWorkspace: (workspaceId: string) => boolean | Promise<boolean>;
   onOpenConfig: () => void;
-  onImportSkill: () => void;
   /** 当前选中智能体显示名（null=通用），点 chip 打开同一抽屉在模型下方切换。 */
   agentLabel: string;
   maxWidth?: number; sendLabel?: string;
 }) {
   const {
-    value, setValue, invokedSkills, setInvokedSkills, fileRefs, setFileRefs, attachments, setAttachments, attachmentScopeKey,
+    value, setValue, fileRefs, setFileRefs, attachments, setAttachments, attachmentScopeKey,
     onSend, onStop, streaming, placeholder, config, resources,
-    onSetExecMode, onSetWorkspace, onOpenConfig, onImportSkill, agentLabel, maxWidth = 800, sendLabel = '开始执行',
+    onSetExecMode, onSetWorkspace, onOpenConfig, agentLabel, maxWidth = 800, sendLabel = '开始执行',
   } = props;
   const configuredWorkspaceId = config.workspace_id ?? resources?.defaults?.workspace_id ?? null;
   const [workspaceOverride, setWorkspaceOverride] = useState<string | null>(null);
@@ -2277,9 +2214,9 @@ function TaskInputBox(props: {
   const wsName = (effectiveWorkspaceId && resources?.workspaces.find((w) => w.id === effectiveWorkspaceId)?.name) || null;
   const hasReadyAttachment = attachments.some((item) => item.status === 'ready');
   const attachmentsReady = attachments.every((item) => item.status === 'ready');
-  const canSend = (!!value.trim() || hasReadyAttachment || invokedSkills.length > 0 || fileRefs.length > 0) && attachmentsReady && !streaming;
+  const canSend = (!!value.trim() || hasReadyAttachment || fileRefs.length > 0) && attachmentsReady && !streaming;
 
-  // ── 引用下拉（向上）：技能（/ 或 chip）/ 工作空间文件（@）共用一个 Popover ──
+  // ── 工作空间文件引用下拉（@ 或按钮） ──
   const inputRef = useRef<ComposerInputHandle>(null);
   const attachmentsRef = useRef(attachments);
   const uploadControllersRef = useRef(new Map<string, AbortController>());
@@ -2296,7 +2233,6 @@ function TaskInputBox(props: {
   const recordingChunksRef = useRef<Blob[]>([]);
 
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerMode, setPickerMode] = useState<'skill' | 'file'>('skill');
   const [query, setQuery] = useState('');
 
   useEffect(() => {
@@ -2310,19 +2246,15 @@ function TaskInputBox(props: {
   useEffect(() => { if (pickerOpen) searchRef.current?.focus({ cursor: 'end' }); }, [pickerOpen]);
   // 打开文件模式时刷新文件清单，避免用 react-query 旧缓存
   useEffect(() => {
-    if (pickerOpen && pickerMode === 'file') qc.invalidateQueries({ queryKey: ['terminal-ws-files'] });
-  }, [pickerOpen, pickerMode, qc]);
+    if (pickerOpen) qc.invalidateQueries({ queryKey: ['terminal-ws-files'] });
+  }, [pickerOpen, qc]);
 
-  const openPicker = (mode: 'skill' | 'file') => {
-    setPickerMode(mode); setQuery(''); setPickerOpen(true);
+  const openPicker = () => {
+    setQuery(''); setPickerOpen(true);
   };
 
-  const skills = resources?.skills ?? [];
   const files = wsFiles ?? [];
   const qstr = query.trim().toLowerCase();
-  const filteredSkills = qstr
-    ? skills.filter((s) => s.name.toLowerCase().includes(qstr) || s.slug.toLowerCase().includes(qstr))
-    : skills;
   const filteredFiles = qstr
     ? files.filter((f) => workspaceFileLabel(f).toLowerCase().includes(qstr)
       || workspaceDisplayName(f).toLowerCase().includes(qstr)
@@ -2347,11 +2279,11 @@ function TaskInputBox(props: {
     const onDocMouseDown = (e: DocumentEventMap['mousedown']) => {
       const target = e.target as HTMLElement | null;
       if (!target) return;
-      // 点击落在弹出层（技能/文件选择器、执行模式 Dropdown、Tooltip 等）内部 → 交给其自身处理
+      // 点击落在弹出层（文件选择器、执行模式 Dropdown、Tooltip 等）内部 → 交给其自身处理
       if (target.closest?.('.ant-popover, .ant-dropdown, .ant-tooltip, .ant-select-dropdown')) return;
       const wrap = triggerWrapRef.current;
       if (wrap && wrap.contains(target)) {
-        // 点击技能/文件按钮：交给 onClick 做 toggle，不在此处关闭
+        // 点击文件按钮：交给 onClick 做 toggle，不在此处关闭
         if (target.closest?.('[data-picker-trigger]')) return;
         // 点击 composer / 其它区域 → 关闭
         closePicker(false);
@@ -2368,10 +2300,6 @@ function TaskInputBox(props: {
     };
   }, [pickerOpen, closePicker]);
 
-  const onPick = (s: SkillFolderSummary) => {
-    setQuery(''); setPickerOpen(false);
-    inputRef.current?.insertSkillChip(s.id, s.slug, s.name);
-  };
   const onPickFile = (f: WorkspaceFileSummary) => {
     setQuery(''); setPickerOpen(false);
     setFileRefs((current) => Array.from(new Map([
@@ -2737,7 +2665,7 @@ function TaskInputBox(props: {
       <Input
         ref={searchRef as never}
         size="small" allowClear
-        placeholder={pickerMode === 'skill' ? '搜索技能（名称 / slug）' : '搜索工作空间文件（路径 / 工作空间）'}
+        placeholder="搜索工作空间文件（路径 / 工作空间）"
         // antd Input ref 形状与 searchRef 不完全一致，as never 规避类型摩擦
         prefix={<SearchOutlined style={{ color: '#9ca3af' }} />}
         value={query}
@@ -2745,30 +2673,12 @@ function TaskInputBox(props: {
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
             e.preventDefault();
-            if (pickerMode === 'skill') { const f = filteredSkills[0]; if (f) onPick(f); }
-            else { const f = filteredFiles[0]; if (f) onPickFile(f); }
+            const f = filteredFiles[0]; if (f) onPickFile(f);
           } else if (e.key === 'Escape') { e.preventDefault(); closePicker(false); }
         }}
       />
       <div style={{ flex: 1, overflowY: 'auto', marginTop: 6, minHeight: 60 }} className="wb-scroll-hide">
-        {pickerMode === 'skill' ? (
-          filteredSkills.length ? filteredSkills.map((s) => (
-            <div
-              key={s.id} onClick={() => onPick(s)}
-              style={{ padding: '6px 8px', cursor: 'pointer', borderRadius: 6, fontSize: 13 }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = WB.hover; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
-            >
-              <div style={{ fontWeight: 500 }}>{s.name}</div>
-              <div style={{ fontSize: 11, color: '#9ca3af' }}>/{s.slug}</div>
-            </div>
-          )) : (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={query ? '无匹配技能' : '暂无可访问技能'}
-              style={{ margin: '12px 0' }} />
-          )
-        ) : (
-          filteredFiles.length ? filteredFiles.map((f) => (
+        {filteredFiles.length ? filteredFiles.map((f) => (
             <div
               key={f.id} onClick={() => onPickFile(f)}
               style={{ padding: '6px 8px', cursor: 'pointer', borderRadius: 6, fontSize: 13 }}
@@ -2781,21 +2691,12 @@ function TaskInputBox(props: {
               </div>
               <div title={workspaceFileLabel(f)} style={{ fontSize: 11, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{workspaceFileLabel(f)}</div>
             </div>
-          )) : (
+        )) : (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
               description={query ? '无匹配文件' : '暂无可访问工作空间文件'}
               style={{ margin: '12px 0' }} />
-          )
         )}
       </div>
-      {pickerMode === 'skill' && (
-        <div style={{ borderTop: `1px solid ${WB.border}`, marginTop: 6, paddingTop: 6 }}>
-          <Button size="small" block icon={<UploadOutlined />}
-            onClick={() => { closePicker(false); onImportSkill(); }}>
-            导入技能
-          </Button>
-        </div>
-      )}
     </div>
   );
 
@@ -2879,10 +2780,6 @@ function TaskInputBox(props: {
         <MentionInput
           ref={inputRef}
           value={value} onChange={setValue}
-          onSkillIdsChange={(ids) => setInvokedSkills(ids.flatMap((id) => {
-            const skill = skills.find((item) => item.id === id);
-            return skill ? [{ id: skill.id, name: skill.name, slug: skill.slug, scope_type: skill.scope_type }] : [];
-          }))}
           onFileIdsChange={(ids) => setFileRefs((current) => {
             const kept = current.filter((item) => !value.includes(`@${item.file_id}`) || ids.includes(item.file_id));
             const added = ids.map((fileId) => current.find((item) => item.file_id === fileId)
@@ -2891,8 +2788,7 @@ function TaskInputBox(props: {
           })}
           placeholder={placeholder}
           onPasteFiles={pasteFiles}
-          onSlashTrigger={() => openPicker('skill')}
-          onAtTrigger={() => openPicker('file')}
+          onAtTrigger={openPicker}
           onSubmit={onSend} canSend={canSend}
         />
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', borderTop: `1px solid ${WB.border}` }}>
@@ -2919,13 +2815,8 @@ function TaskInputBox(props: {
               </button>
             </Dropdown>
             <span style={{ width: 1, height: 14, background: WB.border }} />
-            <span data-picker-trigger="skill" style={chipBtnStyle}
-              onClick={() => { if (pickerOpen && pickerMode === 'skill') closePicker(false); else openPicker('skill'); }}
-              title="明确指定本轮使用的Skill；不修改智能体配置（输入 / 也可唤出）">
-              <AppstoreOutlined /> 本轮调用技能
-            </span>
             <span data-picker-trigger="file" style={chipBtnStyle}
-              onClick={() => { if (pickerOpen && pickerMode === 'file') closePicker(false); else openPicker('file'); }}
+              onClick={() => { if (pickerOpen) closePicker(false); else openPicker(); }}
               title="引用工作空间文件（输入 @ 也可唤出，再次点击关闭）">
               <FileTextOutlined /> 文件
             </span>
@@ -3028,8 +2919,6 @@ function TaskInputBox(props: {
 
 function HomeView(props: {
   input: string; setInput: (v: string) => void; placeholder: string;
-  invokedSkills: InvokedSkill[];
-  setInvokedSkills: Dispatch<SetStateAction<InvokedSkill[]>>;
   fileRefs: WorkspaceFileRefV1[];
   setFileRefs: Dispatch<SetStateAction<WorkspaceFileRefV1[]>>;
   attachments: ComposerAttachment[];
@@ -3039,12 +2928,12 @@ function HomeView(props: {
   resources: TerminalResources | undefined;
   onSetExecMode: (m: TaskConfig['exec_mode']) => void;
   onSetWorkspace: (workspaceId: string) => boolean | Promise<boolean>;
-  onOpenConfig: () => void; onImportSkill: () => void; onStart: () => void; streaming: boolean;
+  onOpenConfig: () => void; onStart: () => void; streaming: boolean;
   agentLabel: string;
 }) {
   const {
-    input, setInput, invokedSkills, setInvokedSkills, fileRefs, setFileRefs, attachments, setAttachments, attachmentScopeKey, placeholder,
-    config, resources, onSetExecMode, onSetWorkspace, onOpenConfig, onImportSkill, onStart, streaming, agentLabel,
+    input, setInput, fileRefs, setFileRefs, attachments, setAttachments, attachmentScopeKey, placeholder,
+    config, resources, onSetExecMode, onSetWorkspace, onOpenConfig, onStart, streaming, agentLabel,
   } = props;
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
@@ -3069,7 +2958,6 @@ function HomeView(props: {
         {/* 输入框 */}
         <TaskInputBox
           value={input} setValue={setInput}
-          invokedSkills={invokedSkills} setInvokedSkills={setInvokedSkills}
           fileRefs={fileRefs} setFileRefs={setFileRefs}
           attachments={attachments} setAttachments={setAttachments}
           attachmentScopeKey={attachmentScopeKey}
@@ -3079,7 +2967,6 @@ function HomeView(props: {
           onSetExecMode={onSetExecMode}
           onSetWorkspace={onSetWorkspace}
           onOpenConfig={onOpenConfig}
-          onImportSkill={onImportSkill}
           agentLabel={agentLabel}
           maxWidth={800} sendLabel="开始执行"
         />
@@ -3090,64 +2977,37 @@ function HomeView(props: {
 
 // ── 聊天视图 ─────────────────────────────────────────────────────────────
 
-// 把用户消息正文里的 /slug、@fileId 引用还原为技能名 / 文件路径 chip；同时把正文里出现的
-// 技能「名称」也识别成 chip（picker 序列化或手敲名字都能显示为 chip，不再以纯文本末尾呈现）。
-// 仅当 slug/id/名称能在映射中解析到时才渲染为 chip，未命中的原样保留为纯文本。
-// agentName 非空时，在该轮用户消息正文最前补一个智能体 chip（与技能 chip 同款展示）。
+// 把用户消息正文里的 @fileId 引用还原为工作空间文件 chip。
+// agentName 非空时，在该轮用户消息正文最前补一个文本角色 chip。
 function renderUserContent(
   content: string,
-  skillMap: Map<string, string>,
   fileMap: Map<string, WorkspaceFileSummary>,
   agentName?: string | null,
 ): ReactNode[] {
-  // 文本片段里出现的技能名 → chip（长名优先，避免短名误命中）
-  const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const skillNames = [...skillMap.values()].filter((n) => !!n && n.length >= 2)
-    .sort((a, b) => b.length - a.length);
-  const nameRe = skillNames.length ? new RegExp(skillNames.map(escapeRe).join('|'), 'g') : null;
-  const chipNames = (text: string, keyBase: string): ReactNode[] => {
-    if (!nameRe || !text) return [text];
-    const out: ReactNode[] = [];
-    let last = 0; let k = 0; let m: RegExpExecArray | null;
-    nameRe.lastIndex = 0;
-    while ((m = nameRe.exec(text))) {
-      if (m.index > last) out.push(text.slice(last, m.index));
-      out.push(<span key={`${keyBase}n${k++}`} className="skill-ref-chip" title={`技能：${m[0]}`}>{m[0]}</span>);
-      last = m.index + m[0].length;
-    }
-    if (last < text.length) out.push(text.slice(last));
-    return out;
-  };
-
   const out: ReactNode[] = [];
   if (agentName) {
-    out.push(<span key="agent" className="agent-ref-chip" title="智能体">{agentName}</span>);
+    out.push(<span key="agent" className="agent-ref-chip" title="文本角色">{agentName}</span>);
   }
   if (!content) return out;
-  // 兼容旧消息里紧跟中英文标点的 @UUID（过去会因只认空白边界而退化成裸 UUID）。
-  const re = /(^|[\s([{"'“‘，。！？；：、])([/@])([A-Za-z0-9][A-Za-z0-9_-]*)/g;
+  const re = /(^|[\s([{"'“‘，。！？；：、])@([A-Za-z0-9][A-Za-z0-9_-]*)/g;
   let last = 0;
   let key = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(content))) {
     const full = m[0];
     const pre = m[1];
-    const ch = m[2];
-    const token = m[3];
-    const idx = m.index + pre.length; // chip 起始（不含前导空白）
-    if (idx > last) out.push(...chipNames(content.slice(last, idx), `t${key++}`));
-    const skill = ch === '/' ? skillMap.get(token) : undefined;
-    const file = ch === '@' ? fileMap.get(token) : undefined;
-    if (skill || file) {
-      out.push(skill
-        ? <span key={`s${key++}`} className="skill-ref-chip" title={`技能：${skill} (/${token})`}>{skill}</span>
-        : <span key={`f${key++}`} className="file-ref-chip" title={`工作空间文件：${workspaceFileLabel(file!)}`}>{workspaceFileLabel(file!)}</span>);
+    const token = m[2];
+    const idx = m.index + pre.length;
+    if (idx > last) out.push(content.slice(last, idx));
+    const file = fileMap.get(token);
+    if (file) {
+      out.push(<span key={`f${key++}`} className="file-ref-chip" title={`工作空间文件：${workspaceFileLabel(file)}`}>{workspaceFileLabel(file)}</span>);
     } else {
-      out.push(ch + token);
+      out.push(`@${token}`);
     }
     last = m.index + full.length;
   }
-  if (last < content.length) out.push(...chipNames(content.slice(last), `t${key++}`));
+  if (last < content.length) out.push(content.slice(last));
   return out;
 }
 
@@ -3155,8 +3015,6 @@ function ChatView(props: {
   taskTitle: string;
   chat: ChatMsg[]; streaming: boolean;
   followUp: string; setFollowUp: (v: string) => void;
-  invokedSkills: InvokedSkill[];
-  setInvokedSkills: Dispatch<SetStateAction<InvokedSkill[]>>;
   fileRefs: WorkspaceFileRefV1[];
   setFileRefs: Dispatch<SetStateAction<WorkspaceFileRefV1[]>>;
   attachments: ComposerAttachment[];
@@ -3167,7 +3025,6 @@ function ChatView(props: {
   onSetExecMode: (m: TaskConfig['exec_mode']) => void;
   onSetWorkspace: (workspaceId: string) => boolean | Promise<boolean>;
   onOpenConfig: () => void;
-  onImportSkill: () => void;
   selectedId: string | null;
   onLink: (href: string) => void;
   onOpenFile: (fileId: string, versionId?: string) => void;
@@ -3178,17 +3035,11 @@ function ChatView(props: {
   agentLabel: string;
 }) {
   const {
-    taskTitle, chat, streaming, followUp, setFollowUp, invokedSkills, setInvokedSkills, fileRefs, setFileRefs,
+    taskTitle, chat, streaming, followUp, setFollowUp, fileRefs, setFileRefs,
     attachments, setAttachments,
     onSend, onStop, onNew, config, resources, onSetExecMode, onSetWorkspace, onOpenConfig,
-    onImportSkill, selectedId, onLink, onOpenFile, fileLinks, fileRefMap, fileRefsLoaded, onDeleteTurn, agentLabel,
+    selectedId, onLink, onOpenFile, fileLinks, fileRefMap, fileRefsLoaded, onDeleteTurn, agentLabel,
   } = props;
-  // slug → 技能名称，供用户消息气泡把 /slug 还原为技能名 chip（样式与输入框一致）
-  const skillRefMap = useMemo(() => {
-    const m = new Map<string, string>();
-    (resources?.skills ?? []).forEach((s) => m.set(s.slug, s.name));
-    return m;
-  }, [resources]);
   const scrollRef = useRef<HTMLDivElement>(null);
   // 每轮 hover 才显示删除按钮：避免常驻图标干扰阅读，且只在 user 气泡上触发（删除一整轮）
   const [hoveredTurn, setHoveredTurn] = useState<number | null>(null);
@@ -3214,8 +3065,6 @@ function ChatView(props: {
           {chat.map((m, i) => {
             const isUser = m.role === 'user';
             const isLast = i === chat.length - 1;
-            const messageSkillMap = new Map(skillRefMap);
-            (m.invokedSkills ?? []).forEach((skill) => messageSkillMap.set(skill.slug, skill.name));
             const attachmentIds = new Set((m.attachments ?? []).map((item) => item.file_id));
             const messageFileCards = [
               ...(m.attachments ?? []).map((item) => ({ fileId: item.file_id, fallbackLabel: item.name, scope: 'turn' as const, versionId: undefined as string | undefined })),
@@ -3280,7 +3129,6 @@ function ChatView(props: {
                       <div style={{ fontSize: 14, color: '#1f2937', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
                         {renderUserContent(
                           removeAttachmentReferenceTokens(m.content, (m.attachments ?? []).map((item) => item.file_id)),
-                          messageSkillMap,
                           fileRefMap,
                           m.agentName,
                         )}
@@ -3301,7 +3149,6 @@ function ChatView(props: {
         <div style={{ maxWidth: 820, margin: '0 auto' }}>
           <TaskInputBox
             value={followUp} setValue={setFollowUp}
-            invokedSkills={invokedSkills} setInvokedSkills={setInvokedSkills}
             fileRefs={fileRefs} setFileRefs={setFileRefs}
             attachments={attachments} setAttachments={setAttachments}
             attachmentScopeKey={selectedId || '任务未选择'}
@@ -3311,7 +3158,6 @@ function ChatView(props: {
             onSetExecMode={onSetExecMode}
             onSetWorkspace={onSetWorkspace}
             onOpenConfig={onOpenConfig}
-            onImportSkill={onImportSkill}
             agentLabel={agentLabel}
             maxWidth={820} sendLabel="发送"
           />

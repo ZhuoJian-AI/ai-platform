@@ -1,4 +1,4 @@
-"""Tests for the retained agent platform CRUD (workspace / agent / rag)."""
+"""Tests for the retained workspace and text-persona agent CRUD."""
 
 import pytest
 from httpx import AsyncClient
@@ -55,11 +55,12 @@ async def test_agent_crud(client: AsyncClient):
     org_id = await _make_org(client, "ag-org")
     r = await client.post(
         f"/api/v1/organizations/{org_id}/agents",
-        json={"name": "客服", "slug": "support", "system_prompt": "你是客服", "model_alias": "default"},
+        json={"name": "客服", "description": "在线支持", "system_prompt": "你是客服"},
     )
     assert r.status_code == 201
     aid = r.json()["id"]
     assert r.json()["system_prompt"] == "你是客服"
+    assert r.json()["slug"]
 
     upd = await client.patch(f"/api/v1/agents/{aid}", json={"description": "在线客服"})
     assert upd.status_code == 200
@@ -73,27 +74,17 @@ async def test_agent_crud(client: AsyncClient):
     assert dele.status_code == 204
 
 
-# ── RAG collection + ingest（embedding 无 provider 时明确失败）──
-
 @pytest.mark.asyncio
-async def test_rag_collection_and_ingest(client: AsyncClient):
-    org_id = await _make_org(client, "rag-org")
-    coll = await client.post(
-        f"/api/v1/organizations/{org_id}/rag",
-        json={"name": "知识库", "slug": "kb", "chunk_size": 50, "chunk_overlap": 10},
+async def test_agent_rejects_retired_binding_fields(client: AsyncClient):
+    org_id = await _make_org(client, "ag-strict-org")
+    response = await client.post(
+        f"/api/v1/organizations/{org_id}/agents",
+        json={
+            "name": "不应创建",
+            "system_prompt": "文本角色",
+            "model_alias": "default",
+            "skill_ids": [],
+            "rag_collection_ids": [],
+        },
     )
-    assert coll.status_code == 201
-    coll_id = coll.json()["id"]
-
-    # 无 embedding provider：不得伪装成入库成功；保留 failed 文档供前端排查。
-    doc = await client.post(
-        f"/api/v1/rag/{coll_id}/documents",
-        json={"source": "manual.txt", "content": "a" * 120, "title": "手动文档"},
-    )
-    assert doc.status_code == 502
-    assert "embedding 不可用" in doc.json()["detail"]
-
-    docs = await client.get(f"/api/v1/rag/{coll_id}/documents")
-    assert len(docs.json()) == 1
-    assert docs.json()[0]["source"] == "manual.txt"
-    assert docs.json()[0]["status"] == "failed"
+    assert response.status_code == 422

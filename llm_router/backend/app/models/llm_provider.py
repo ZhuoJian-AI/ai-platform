@@ -86,7 +86,6 @@ class ModelDeployment(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base
     capabilities: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     base_url_override: Mapped[str | None] = mapped_column(Text, nullable=True)
     endpoint_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    embedding_dimensions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     routing_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     verification_status: Mapped[str] = mapped_column(

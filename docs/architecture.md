@@ -30,7 +30,7 @@ FastAPI backend
   │   └─ Artifact 提交与 SSE 重放
   ├─ Manifest Action 执行器
   ├─ 工作空间/OSS/预览服务
-  ├─ RAG/Web/多模态/记忆
+  ├─ Web/多模态/长期记忆
   └─ 配额、DLP、审计与监控
 ```
 
@@ -43,8 +43,8 @@ FastAPI backend
 - 平台固定工具；
 - 工作空间搜索、读取、创建和版本化修改；
 - 文件执行器；
-- RAG、Web、多模态和记忆；
-- 用户上传 Skill 与 Skill Runner；
+- Web、多模态和长期记忆；
+- 受控 Tool Executor，只运行平台注册的固定文件工具；
 - 业务小助手当前页面获权的 Manifest Action。
 
 个人助手不会自动获得业务 Action；业务小助手不会混入其他应用 Action、长期记忆、Connector、Data Interface、Ontology 或旧包装 Skill。
@@ -73,7 +73,7 @@ application_id + module_key + page_key + action_key
 - 企业管理员 `*` 提供全部部门工作空间读取、上传和修改，但不隐式批准新应用页面或 Action。
 - 管理员账户与员工身份分离。
 - Team 和多部门成员表已退出运行语义；兼容数据仅在迁移门禁通过后物理清理。
-- Task、TaskMessage、AgentRunEvent、Artifact、工作空间、RAG、记忆和审计记录不可因精简而丢失。
+- Task、TaskMessage、AgentRunEvent、Artifact、工作空间、长期记忆和审计记录不可因精简而丢失。
 
 ## 7. 部署单元
 
@@ -84,7 +84,7 @@ postgres
 redis
 backend
 frontend
-skill-runner
+tool-executor
 workspace-parser
 workspace-preview
 storage-lifecycle
@@ -107,8 +107,8 @@ multimodal-worker
 |---|---|
 | `llm_router/backend/app/agents/core/` | 原生 Assistant Core |
 | `llm_router/backend/app/agents/graph/` | 工具定义、执行和通用运行支持 |
-| `llm_router/backend/app/services/` | 权限、模型、文件、RAG、Skill、企业接入与治理服务 |
-| `llm_router/backend/app/api/` | 管理端、员工端、Manifest/Runtime 和兼容 410 API |
+| `llm_router/backend/app/services/` | 权限、模型、文件、助手、企业接入与治理服务 |
+| `llm_router/backend/app/api/` | 管理端、员工端、Manifest/Runtime API |
 | `frontend/src/` | 管理后台、员工终端、业务嵌入和 Artifact UI |
-| `skill_runner/` | 用户上传 Skill 的隔离执行器 |
+| `tool_executor/` | 平台固定文件工具的隔离执行器，不接受用户脚本 |
 | `docker-compose.coolify.yml` | Staging 部署拓扑 |

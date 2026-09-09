@@ -1,8 +1,7 @@
-"""Deterministic platform-owned file tools executed inside skill-runner.
+"""Deterministic, reviewed file and web tools for the platform executor.
 
-These handlers deliberately do not load a Skill package.  They use the
-Runner's immutable base image while user Skills continue to execute through
-their package-specific virtualenv/node_modules in ``app.py``.
+The executor never installs packages or runs user-provided code. Every exposed
+operation is implemented in this immutable module and validated before use.
 """
 
 from __future__ import annotations
@@ -88,7 +87,7 @@ def _assert_safe_zip_package(path: Path) -> None:
 def validate_builtin_request(
     tool_kind: str, action: str, inputs: list[Path], params: dict
 ) -> None:
-    """Fail closed at the Runner boundary even when a caller bypasses the model schema."""
+    """Fail closed at the executor boundary even if a caller bypasses model schemas."""
 
     if action not in _ALLOWED_ACTIONS.get(tool_kind, set()):
         raise BuiltinToolError(f"不支持的文件操作：{tool_kind}.{action}")

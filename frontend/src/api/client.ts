@@ -131,7 +131,6 @@ export interface LlmProvider {
 export type ModelCapability =
   | 'chat'
   | 'vision'
-  | 'embedding'
   | 'image_generation'
   | 'audio_understanding'
   | 'speech_to_text'
@@ -148,7 +147,6 @@ export interface ModelDeployment {
   capabilities: ModelCapability[];
   base_url_override: string | null;
   endpoint_path: string | null;
-  embedding_dimensions: number | null;
   routing_priority: number;
   is_active: boolean;
   verification_status: 'unverified' | 'partially_verified' | 'verified' | 'failed' | 'legacy';
@@ -165,7 +163,6 @@ export interface ModelDeploymentInput {
   capabilities: ModelCapability[];
   base_url_override?: string;
   endpoint_path?: string;
-  embedding_dimensions?: number;
   routing_priority?: number;
   is_active?: boolean;
   config?: Record<string, unknown>;
@@ -381,7 +378,6 @@ export interface User {
   department_id: string | null;
   is_active: boolean;
   must_change_password: boolean;
-  manager_scopes: ManagerScopeGrant[];
   created_at: string;
   updated_at: string;
 }
@@ -402,11 +398,6 @@ async function requestBlob(path: string, tokenKey: string, signal?: AbortSignal)
   return resp.blob();
 }
 
-export interface ManagerScopeGrant {
-  scope_type: 'department';
-  scope_id: string;
-}
-
 export interface UserCreateInput {
   username: string;
   display_name?: string | null;
@@ -416,7 +407,6 @@ export interface UserCreateInput {
   department_id?: string | null;
   is_active?: boolean;
   password: string;
-  manager_scopes?: ManagerScopeGrant[];
 }
 
 export interface EffectiveAccessSource {
@@ -832,8 +822,7 @@ export interface WorkspaceFile {
 
 export interface WorkspaceFilePresentation {
   display_name: string; source_kind: string; source_task_id: string | null;
-  source_task_title: string | null; skill_id: string | null;
-  skill_display_name: string | null; skill_version: string | null; created_at: string | null;
+  source_task_title: string | null; created_at: string | null;
 }
 
 export interface WorkspaceFileListItem {
@@ -1107,222 +1096,11 @@ export const workspaces = {
 export interface Agent {
   id: string; organization_id: string; scope_type: string; scope_id: string | null; created_by: string | null;
   name: string; slug: string; description: string | null;
-  system_prompt: string; model_alias: string;
-  memory_config: Record<string, unknown>;
-  workspace_id: string | null; rag_collection_ids: string[]; skill_ids: string[];
-  application_id: string | null; module_key: string | null; page_key: string | null;
-  temperature: number | null; max_tokens: number | null;
+  system_prompt: string;
   is_active: boolean; version: number; created_at: string; updated_at: string;
 }
 
-export interface AgentScope { scope_type: string; scope_id: string | null }
-
-export const agents = {
-  list: (orgId: string, scope?: AgentScope) => {
-    const qs = scope ? `?scope_type=${scope.scope_type}${scope.scope_id ? `&scope_id=${scope.scope_id}` : ''}` : '';
-    return request<Agent[]>(`/api/v1/organizations/${orgId}/agents${qs}`);
-  },
-  get: (id: string) => request<Agent>(`/api/v1/agents/${id}`),
-  create: (orgId: string, data: Partial<Agent>) =>
-    request<Agent>(`/api/v1/organizations/${orgId}/agents`, { method: 'POST', body: JSON.stringify(data) }),
-  update: (id: string, data: Partial<Agent>) =>
-    request<Agent>(`/api/v1/agents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  delete: (id: string) => request<void>(`/api/v1/agents/${id}`, { method: 'DELETE' }),
-};
-
-// ── Agent Platform: RAG知识库 ────────────────────────────────────────────────
-
-export interface RagCollection {
-  id: string; organization_id: string; name: string; slug: string; description: string | null;
-  embedding_model: string; embedding_dim: number | null; chunk_size: number; chunk_overlap: number;
-  metadata: Record<string, unknown>; scope_type: string; scope_id: string | null;
-  created_by: string | null; created_at: string; updated_at: string;
-}
-
-export interface RagDocument {
-  id: string; collection_id: string; source: string; title: string | null;
-  content: string; doc_hash: string | null; metadata: Record<string, unknown>;
-  folder_path: string; created_by: string | null;
-  // 解析入库状态：pending/parsing/chunking/embedding/ready/failed
-  status: string; progress: number; parse_error: string | null;
-  created_at: string; updated_at: string;
-}
-
-/** 文档解析入库状态（上传后轮询用）。 */
-export interface RagDocumentStatus {
-  id: string; status: string; progress: number;
-  parse_error: string | null; chunk_count: number;
-}
-
-export interface RagFolder {
-  id: string; collection_id: string; path: string; created_by: string | null;
-  created_at: string; updated_at: string;
-}
-
-/** 终端知识库左栏树节点：用户可见的作用域单链（企业→部门→个人）。 */
-export interface KbNode {
-  scope_type: 'organization' | 'department' | 'user';
-  scope_id: string | null;
-  name: string;
-}
-
-export interface RagChunk {
-  id: string; document_id: string | null; content: string;
-  chunk_index: number; has_embedding: boolean;
-}
-
-export interface RagIngestConfig {
-  embedding_model: string; embedding_dim: number | null;
-  chunk_size: number; chunk_overlap: number; top_k: number;
-}
-
-export interface RagScope {
-  scope_type: 'organization' | 'department' | 'user';
-  scope_id?: string | null;
-}
-
-export interface RagChunkHit {
-  chunk_id: string; document_id: string | null; content: string;
-  score: number; metadata: Record<string, unknown>;
-}
-
-export const rag = {
-  listCollections: (orgId: string, scope?: RagScope) => {
-    const qs = new URLSearchParams();
-    if (scope) {
-      qs.set('scope_type', scope.scope_type);
-      if (scope.scope_id) qs.set('scope_id', scope.scope_id);
-    }
-    const q = qs.toString();
-    return request<RagCollection[]>(`/api/v1/organizations/${orgId}/rag${q ? `?${q}` : ''}`);
-  },
-  getCollection: (id: string) => request<RagCollection>(`/api/v1/rag/${id}`),
-  createCollection: (orgId: string, data: Partial<RagCollection>) =>
-    request<RagCollection>(`/api/v1/organizations/${orgId}/rag`, { method: 'POST', body: JSON.stringify(data) }),
-  updateCollection: (id: string, data: Partial<RagCollection>) =>
-    request<RagCollection>(`/api/v1/rag/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteCollection: (id: string) => request<void>(`/api/v1/rag/${id}`, { method: 'DELETE' }),
-  listDocuments: (collId: string, folderPath?: string) => {
-    const q = folderPath !== undefined ? `?folder_path=${encodeURIComponent(folderPath)}` : '';
-    return request<RagDocument[]>(`/api/v1/rag/${collId}/documents${q}`);
-  },
-  ingestDocument: (collId: string, data: { source: string; title?: string; content: string; metadata?: Record<string, unknown>; folder_path?: string }) =>
-    request<RagDocument>(`/api/v1/rag/${collId}/documents`, { method: 'POST', body: JSON.stringify(data) }),
-  /** 上传文件入库（multipart）。上传字节进度经 onProgress 回调（0-1）；返回 pending 文档。 */
-  uploadDocumentFile: (
-    collId: string,
-    file: File,
-    opts: { title?: string; folder_path?: string },
-    onProgress?: (ratio: number) => void,
-  ) => new Promise<RagDocument>((resolve, reject) => {
-    const fd = new FormData();
-    fd.append('file', file);
-    if (opts.title) fd.append('title', opts.title);
-    if (opts.folder_path !== undefined) fd.append('folder_path', opts.folder_path);
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${BASE_URL}/api/v1/rag/${collId}/documents/upload`);
-    if (onProgress && xhr.upload) {
-      xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
-    }
-    xhr.onload = () => {
-      if (xhr.status === 401) {
-        handleAdminXhrUnauthorized(xhr.status);
-        reject(new ApiError(401, 'Session expired'));
-        return;
-      }
-      if (xhr.status < 200 || xhr.status >= 300) {
-        let detail = xhr.statusText;
-        try { detail = JSON.parse(xhr.responseText)?.detail || detail; } catch { /* keep statusText */ }
-        reject(new ApiError(xhr.status, detail));
-        return;
-      }
-      try { resolve(JSON.parse(xhr.responseText) as RagDocument); }
-      catch (e) { reject(new ApiError(xhr.status, '响应解析失败')); }
-    };
-    xhr.onerror = () => reject(new ApiError(0, '网络错误，上传失败'));
-    authorizeAdminXhr(xhr).then(() => xhr.send(fd)).catch(() => reject(new ApiError(0, '无法建立安全上传会话')));
-  }),
-  getDocumentStatus: (docId: string) =>
-    request<RagDocumentStatus>(`/api/v1/rag/documents/${docId}/status`),
-  updateDocument: (id: string, data: { source?: string; title?: string | null; folder_path?: string }) =>
-    request<RagDocument>(`/api/v1/rag/documents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteDocument: (id: string) => request<void>(`/api/v1/rag/documents/${id}`, { method: 'DELETE' }),
-  listChunks: (docId: string) => request<RagChunk[]>(`/api/v1/rag/documents/${docId}/chunks`),
-  reingestDocument: (docId: string, data: { chunks: string[] | null; source?: string; title?: string | null }) =>
-    request<RagDocument>(`/api/v1/rag/documents/${docId}/reingest`, { method: 'POST', body: JSON.stringify(data) }),
-  listFolders: (collId: string, parent?: string) => {
-    const q = parent !== undefined ? `?parent=${encodeURIComponent(parent)}` : '';
-    return request<RagFolder[]>(`/api/v1/rag/${collId}/folders${q}`);
-  },
-  createFolder: (collId: string, path: string) =>
-    request<RagFolder>(`/api/v1/rag/${collId}/folders`, { method: 'POST', body: JSON.stringify({ path }) }),
-  renameFolder: (id: string, path: string) =>
-    request<RagFolder>(`/api/v1/rag/folders/${id}`, { method: 'PATCH', body: JSON.stringify({ path }) }),
-  deleteFolder: (id: string) => request<void>(`/api/v1/rag/folders/${id}`, { method: 'DELETE' }),
-  getIngestConfig: (orgId: string) => request<RagIngestConfig>(`/api/v1/organizations/${orgId}/rag/ingest-config`),
-  setIngestConfig: (orgId: string, data: RagIngestConfig) =>
-    request<RagIngestConfig>(`/api/v1/organizations/${orgId}/rag/ingest-config`, { method: 'PUT', body: JSON.stringify(data) }),
-  retrieve: (collId: string, query: string, topK = 5) =>
-    request<{ query: string; hits: RagChunkHit[] }>(`/api/v1/rag/${collId}/retrieve`, {
-      method: 'POST', body: JSON.stringify({ query, top_k: topK }),
-    }),
-};
-
-// ── Skill Store（文件夹化，节点作用域）───────────────────────────────
-
-export interface SkillFolder {
-  id: string; organization_id: string; scope_type: string; scope_id: string | null;
-  name: string; slug: string; created_by: string | null;
-  active_version_id: string | null;
-  is_active: boolean;
-  is_installed: boolean;
-  description: string | null;
-  active_version_no: number | null;
-  active_install_status: string | null;
-  created_at: string; updated_at: string;
-}
-
-export interface SkillVersion {
-  id: string; skill_folder_id: string; version_no: number; package_hash: string;
-  manifest: Record<string, unknown>; runtime: 'prompt' | 'python' | 'node' | 'agent_skill';
-  entrypoint: string | null; is_executable: boolean;
-  install_status: 'pending' | 'installing' | 'ready' | 'failed';
-  package_format: 'legacy' | 'agent_skill'; script_languages: string[];
-  compatibility_warnings: string[];
-  python_version: string | null; node_version: string | null;
-  builtin_dependencies: Record<string, Record<string, string | null>>;
-  installed_dependencies: Record<string, string[]>;
-  install_error: string | null; created_at: string; updated_at: string;
-}
-
-export interface SkillImportResult { folder: SkillFolder; version: SkillVersion }
-
-export interface SkillScopeNode extends KbNode {
-  can_import: boolean;
-  can_manage: boolean;
-}
-
-export interface SkillFileMeta {
-  id: string; skill_folder_id: string; path: string; size: number;
-  content_hash: string | null; metadata: Record<string, unknown>;
-  created_at: string; updated_at: string;
-}
-
-export interface SkillFile extends SkillFileMeta {
-  content: string | null;
-}
-
-/** /terminal/resources 返回的技能文件夹轻量摘要。 */
-export interface SkillFolderSummary {
-  id: string; name: string; slug: string;
-  scope_type: string; scope_id: string | null;
-  description: string;
-  is_executable: boolean;
-  install_status: string;
-  package_format: string;
-}
-
-/** /terminal/workspace-files 返回的工作空间文件轻量摘要（跨全部可访问工作空间，供 @ 引用下拉）。 */
+/** 跨全部可访问工作空间的文件轻量摘要，供个人助手引用文件。 */
 export interface WorkspaceFileSummary {
   id: string; workspace_id: string; workspace_name: string;
   path: string; original_filename: string; presentation: WorkspaceFilePresentation;
@@ -1346,70 +1124,19 @@ export interface WorkspaceFileEvent {
   event_type: string;
 }
 
-const SKILL_ARCHIVE_MAX_BYTES = 100 * 1024 * 1024;
-const SKILL_FOLDER_MAX_BYTES = 500 * 1024 * 1024;
-const SKILL_FOLDER_MAX_FILES = 1000;
+export interface AgentScope { scope_type: string; scope_id: string | null }
 
-function assertSkillArchiveLimit(file: File): void {
-  if (file.size > SKILL_ARCHIVE_MAX_BYTES) {
-    throw new ApiError(413, 'Skill ZIP 或 Markdown 文件不能超过 100MB');
-  }
-}
-
-function assertSkillFolderLimits(files: File[]): void {
-  if (!files.length || files.length > SKILL_FOLDER_MAX_FILES) {
-    throw new ApiError(422, `Skill 文件夹必须包含 1-${SKILL_FOLDER_MAX_FILES} 个文件`);
-  }
-  const total = files.reduce((sum, file) => sum + file.size, 0);
-  if (total > SKILL_FOLDER_MAX_BYTES) {
-    throw new ApiError(413, 'Skill 文件夹展开后不能超过 500MB');
-  }
-}
-
-export const skillStore = {
-  listFolders: (orgId: string, scope: ScopeRef) =>
-    request<SkillFolder[]>(`/api/v1/organizations/${orgId}/skill-folders?scope_type=${scope.scope_type}&scope_id=${scope.scope_id ?? ''}`),
-  createFolder: (orgId: string, data: { name: string; slug: string; scope_type: string; scope_id: string | null }) =>
-    request<SkillFolder>(`/api/v1/organizations/${orgId}/skill-folders`, { method: 'POST', body: JSON.stringify(data) }),
-  updateFolder: (id: string, data: { name?: string; slug?: string; is_active?: boolean }) =>
-    request<SkillFolder>(`/api/v1/skill-folders/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteFolder: (id: string) => request<void>(`/api/v1/skill-folders/${id}`, { method: 'DELETE' }),
-  listFiles: (folderId: string) =>
-    request<SkillFileMeta[]>(`/api/v1/skill-folders/${folderId}/files`),
-  upsertFile: (folderId: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>
-    request<SkillFile>(`/api/v1/skill-folders/${folderId}/files`, { method: 'POST', body: JSON.stringify(data) }),
-  getFile: (id: string) => request<SkillFile>(`/api/v1/skill-files/${id}`),
-  updateFile: (id: string, data: { path?: string; content?: string; metadata?: Record<string, unknown> }) =>
-    request<SkillFile>(`/api/v1/skill-files/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteFile: (id: string) => request<void>(`/api/v1/skill-files/${id}`, { method: 'DELETE' }),
-  importPackage: (orgId: string, file: File, scope: ScopeRef) => {
-    assertSkillArchiveLimit(file);
-    const fd = new FormData();
-    fd.append('file', file);
-    fd.append('scope_type', scope.scope_type);
-    if (scope.scope_id) fd.append('scope_id', scope.scope_id);
-    return request<SkillImportResult>(`/api/v1/organizations/${orgId}/skill-folders/import`, {
-      method: 'POST', body: fd, headers: {},
-    });
+export const agents = {
+  list: (orgId: string, scope?: AgentScope) => {
+    const qs = scope ? `?scope_type=${scope.scope_type}${scope.scope_id ? `&scope_id=${scope.scope_id}` : ''}` : '';
+    return request<Agent[]>(`/api/v1/organizations/${orgId}/agents${qs}`);
   },
-  importPackageFolder: (orgId: string, files: File[], scope: ScopeRef) => {
-    assertSkillFolderLimits(files);
-    const fd = new FormData();
-    files.forEach((file) => {
-      fd.append('files', file, file.name);
-      fd.append('relative_paths', file.webkitRelativePath || file.name);
-    });
-    fd.append('scope_type', scope.scope_type);
-    if (scope.scope_id) fd.append('scope_id', scope.scope_id);
-    return request<SkillImportResult>(`/api/v1/organizations/${orgId}/skill-folders/import`, {
-      method: 'POST', body: fd, headers: {},
-    });
-  },
-  listVersions: (folderId: string) => request<SkillVersion[]>(`/api/v1/skill-folders/${folderId}/versions`),
-  retryVersion: (versionId: string) =>
-    request<SkillVersion>(`/api/v1/skill-versions/${versionId}/retry`, { method: 'POST' }),
-  activateVersion: (versionId: string) =>
-    request<SkillVersion>(`/api/v1/skill-versions/${versionId}/activate`, { method: 'POST' }),
+  get: (id: string) => request<Agent>(`/api/v1/agents/${id}`),
+  create: (orgId: string, data: Partial<Agent>) =>
+    request<Agent>(`/api/v1/organizations/${orgId}/agents`, { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: Partial<Agent>) =>
+    request<Agent>(`/api/v1/agents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  delete: (id: string) => request<void>(`/api/v1/agents/${id}`, { method: 'DELETE' }),
 };
 
 export interface ScopeRef { scope_type: string; scope_id: string | null }
@@ -1432,24 +1159,17 @@ export interface AgentMetrics {
   }[];
   components?: {
     workspace: { runs: number; ops: number };
-    rag: { runs: number; hits: number };
     memory: { load_runs: number; facts_loaded: number; extract_runs: number; facts_saved: number };
   };
 }
 
 export interface ToolMetrics {
   calls: number; success_count: number; error_count: number; error_rate: number; avg_latency_ms: number;
-  by_skill: {
-    skill_id: string; skill_name: string; scope_type: string | null; scope_id: string | null;
-    calls: number; error_count: number; error_rate: number; avg_latency_ms: number;
-  }[];
   by_action: {
     action_id: string; action_key: string; action_name: string; module_key: string | null;
     operation: string | null; calls: number; error_count: number; error_rate: number; avg_latency_ms: number;
   }[];
-  inventory: {
-    skills: { folders_total: number; files_total: number };
-  };
+  inventory: Record<string, never>;
 }
 
 export interface OverviewMetrics { router: RouterMetrics; agent: AgentMetrics; tool: ToolMetrics; }
@@ -1510,14 +1230,12 @@ export interface TerminalUser {
 
 export interface TerminalResources {
   workspaces: Workspace[];
-  skills: SkillFolderSummary[];
-  rags: RagCollection[];
   /** 用户默认装配：默认工作空间（个人）+ 默认模型（最近一次使用）。 */
   defaults?: { workspace_id: string | null; model_alias: string | null };
 }
 
 export interface TerminalModels {
-  /** 用户可用的原始模型名（按可访问 API Key 聚合，embedding 已过滤）。 */
+  /** 用户可用的对话模型名（按可访问 API Key 与有效部署聚合）。 */
   models: string[];
   capabilities: Record<string, { vision: boolean }>;
   vision_fallback_available: boolean;
@@ -2029,7 +1747,6 @@ async function uploadAdminWorkspaceFile(
 
 export interface TaskConfig {
   workspace_id: string | null;
-  // RAG 固定来自本次选中的智能体；Skill 绑定只是默认推荐，聊天可本轮调用其他有权 Skill。
   model_alias: string | null;
   /** 执行模式：craft（自主多步执行）/ ask（只读单轮问答）/ plan（出方案不执行） */
   exec_mode: 'craft' | 'ask' | 'plan';
@@ -2313,9 +2030,13 @@ export const enterpriseApplications = {
 export interface TerminalAgent {
   id: string; name: string; slug: string;
   scope_type: string; scope_id: string | null;
-  model_alias: string; description: string | null;
-  skill_ids: string[];
-  rag_collection_ids: string[];
+  description: string | null;
+}
+
+export interface ScopeNode {
+  scope_type: 'organization' | 'department' | 'user';
+  scope_id: string | null;
+  name: string;
 }
 
 export interface TerminalTask {
@@ -2475,32 +2196,7 @@ export const terminal = {
     userRequest<Agent>(`/api/v1/terminal/agents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAgent: (id: string) =>
     userRequest<void>(`/api/v1/terminal/agents/${id}`, { method: 'DELETE' }),
-  skillScopes: () => userRequest<SkillScopeNode[]>('/api/v1/terminal/skill-scopes'),
-  importSkill: (file: File, scope: { scope_type: string; scope_id?: string | null }) => {
-    assertSkillArchiveLimit(file);
-    const fd = new FormData();
-    fd.append('file', file);
-    fd.append('scope_type', scope.scope_type);
-    if (scope.scope_id) fd.append('scope_id', scope.scope_id);
-    return userRequest<SkillImportResult>('/api/v1/terminal/skills/import', { method: 'POST', body: fd });
-  },
-  importSkillFolder: (files: File[], scope: { scope_type: string; scope_id?: string | null }) => {
-    assertSkillFolderLimits(files);
-    const fd = new FormData();
-    files.forEach((file) => {
-      fd.append('files', file, file.name);
-      fd.append('relative_paths', file.webkitRelativePath || file.name);
-    });
-    fd.append('scope_type', scope.scope_type);
-    if (scope.scope_id) fd.append('scope_id', scope.scope_id);
-    return userRequest<SkillImportResult>('/api/v1/terminal/skills/import', { method: 'POST', body: fd });
-  },
-  listSkillVersions: (folderId: string) =>
-    userRequest<SkillVersion[]>(`/api/v1/terminal/skills/${folderId}/versions`),
-  retrySkillVersion: (versionId: string) =>
-    userRequest<SkillVersion>(`/api/v1/terminal/skill-versions/${versionId}/retry`, { method: 'POST' }),
-  activateSkillVersion: (versionId: string) =>
-    userRequest<SkillVersion>(`/api/v1/terminal/skill-versions/${versionId}/activate`, { method: 'POST' }),
+  scopeNodes: () => userRequest<ScopeNode[]>('/api/v1/terminal/scope-nodes'),
   memory: () => userRequest<TerminalMemoryItem[]>('/api/v1/terminal/memory'),
   listTasks: (query?: string | { q?: string; applicationId?: string; limit?: number; offset?: number }) => {
     const values = typeof query === 'string' ? { q: query } : (query ?? {});
@@ -2525,21 +2221,21 @@ export const terminal = {
     userRequest<void>(`/api/v1/terminal/tasks/${taskId}/messages/${messageId}`, { method: 'DELETE' }),
   runTask: (
     id: string, message: string, template_agent_id?: string | null,
-    attachment_file_ids: string[] = [], invoked_skill_ids: string[] = [],
+    attachment_file_ids: string[] = [],
     application_id?: string | null, page_context: Record<string, unknown> = {},
     file_refs_v1: WorkspaceFileRefV1[] = [],
     target_workspace_id?: string | null, client_request_id?: string,
   ) =>
     userRequest<{ assistant: string; steps: unknown[]; usage: Record<string, number>; run_id: number; latency_ms: number }>(
       `/api/v1/terminal/tasks/${id}/run`,
-      { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null, invoked_skill_ids, application_id: application_id ?? null, page_context, target_workspace_id: target_workspace_id ?? null, client_request_id: client_request_id ?? crypto.randomUUID(), ...buildTaskRunFilePayload(attachment_file_ids, file_refs_v1) }) },
+      { method: 'POST', body: JSON.stringify({ message, stream: false, template_agent_id: template_agent_id ?? null, application_id: application_id ?? null, page_context, target_workspace_id: target_workspace_id ?? null, client_request_id: client_request_id ?? crypto.randomUUID(), ...buildTaskRunFilePayload(attachment_file_ids, file_refs_v1) }) },
     ),
   /** 流式执行：返回原始 Response，由调用方解析持久化 SSE 事件。
    *  template_agent_id 逐次覆盖（不落库）：undefined=沿用 task.config；null=通用；UUID=该次用此智能体。 */
   runTaskStream: (
     id: string, message: string, signal: AbortSignal,
     template_agent_id?: string | null, attachment_file_ids: string[] = [],
-    invoked_skill_ids: string[] = [], application_id?: string | null,
+    application_id?: string | null,
     page_context: Record<string, unknown> = {},
     file_refs_v1: WorkspaceFileRefV1[] = [],
     target_workspace_id?: string | null, client_request_id?: string,
@@ -2547,7 +2243,7 @@ export const terminal = {
     fetch(`${BASE_URL}/api/v1/terminal/tasks/${id}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionStorage.getItem(USER_TOKEN_KEY) || ''}` },
-      body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null, invoked_skill_ids, application_id: application_id ?? null, page_context, target_workspace_id: target_workspace_id ?? null, client_request_id: client_request_id ?? crypto.randomUUID(), ...buildTaskRunFilePayload(attachment_file_ids, file_refs_v1) }),
+      body: JSON.stringify({ message, stream: true, template_agent_id: template_agent_id ?? null, application_id: application_id ?? null, page_context, target_workspace_id: target_workspace_id ?? null, client_request_id: client_request_id ?? crypto.randomUUID(), ...buildTaskRunFilePayload(attachment_file_ids, file_refs_v1) }),
       signal,
     }),
   /** resume：重连/回放一个运行中或已完成的 run（后台 detach 执行，刷新不丢）。 */
@@ -2676,103 +2372,6 @@ export const terminal = {
       { method: 'POST', body: JSON.stringify(data) },
     ),
 
-  // ── 知识库（RAG）：终端用户 scope 内可见；删除/重命名/编辑仅限自己创建 ──
-  kbNodes: () => userRequest<KbNode[]>('/api/v1/terminal/kb-nodes'),
-  listKbCollections: (scope: { scope_type: string; scope_id?: string | null }) => {
-    const qs = new URLSearchParams({ scope_type: scope.scope_type });
-    if (scope.scope_id) qs.set('scope_id', scope.scope_id);
-    return userRequest<RagCollection[]>(`/api/v1/terminal/rag?${qs.toString()}`);
-  },
-  createKbCollection: (data: {
-    name: string; description?: string | null; chunk_size: number; chunk_overlap: number;
-    scope_type: string; scope_id?: string | null;
-  }) => userRequest<RagCollection>('/api/v1/terminal/rag', { method: 'POST', body: JSON.stringify(data) }),
-  updateKbCollection: (id: string, data: { name?: string; description?: string | null; chunk_size?: number; chunk_overlap?: number }) =>
-    userRequest<RagCollection>(`/api/v1/terminal/rag/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteKbCollection: (id: string) => userRequest<void>(`/api/v1/terminal/rag/${id}`, { method: 'DELETE' }),
-  listKbFolders: (collId: string, parent?: string) => {
-    const q = parent !== undefined ? `?parent=${encodeURIComponent(parent)}` : '';
-    return userRequest<RagFolder[]>(`/api/v1/terminal/rag/${collId}/folders${q}`);
-  },
-  createKbFolder: (collId: string, path: string) =>
-    userRequest<RagFolder>(`/api/v1/terminal/rag/${collId}/folders`, { method: 'POST', body: JSON.stringify({ path }) }),
-  renameKbFolder: (id: string, path: string) =>
-    userRequest<RagFolder>(`/api/v1/terminal/rag/folders/${id}`, { method: 'PATCH', body: JSON.stringify({ path }) }),
-  deleteKbFolder: (id: string) => userRequest<void>(`/api/v1/terminal/rag/folders/${id}`, { method: 'DELETE' }),
-  listKbDocuments: (collId: string, folderPath?: string) => {
-    const q = folderPath !== undefined ? `?folder_path=${encodeURIComponent(folderPath)}` : '';
-    return userRequest<RagDocument[]>(`/api/v1/terminal/rag/${collId}/documents${q}`);
-  },
-  ingestKbDocument: (collId: string, data: { source: string; title?: string | null; content: string; folder_path?: string }) =>
-    userRequest<RagDocument>(`/api/v1/terminal/rag/${collId}/documents`, { method: 'POST', body: JSON.stringify(data) }),
-  /** 上传文件入库（multipart，与管理端一致）。上传字节进度经 onProgress 回调（0-1）；返回 pending 文档。 */
-  uploadKbDocumentFile: (
-    collId: string,
-    file: File,
-    opts: { title?: string; folder_path?: string },
-    onProgress?: (ratio: number) => void,
-  ) => new Promise<RagDocument>((resolve, reject) => {
-    const fd = new FormData();
-    fd.append('file', file);
-    if (opts.title) fd.append('title', opts.title);
-    if (opts.folder_path !== undefined) fd.append('folder_path', opts.folder_path);
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${BASE_URL}/api/v1/terminal/rag/${collId}/documents/upload`);
-    const token = sessionStorage.getItem(USER_TOKEN_KEY);
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-    if (onProgress && xhr.upload) {
-      xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
-    }
-    xhr.onload = () => {
-      if (xhr.status === 401) {
-        sessionStorage.removeItem(USER_TOKEN_KEY);
-        localStorage.removeItem('ai_infra_user');
-        const m = window.location.pathname.match(/^\/([^/]+)\/terminal/);
-        const slug = m ? m[1] : null;
-        window.location.href = slug ? `/${slug}/terminal/login` : '/login';
-        reject(new ApiError(401, 'Session expired'));
-        return;
-      }
-      if (xhr.status < 200 || xhr.status >= 300) {
-        let detail = xhr.statusText;
-        try { detail = JSON.parse(xhr.responseText)?.detail || detail; } catch { /* keep statusText */ }
-        reject(new ApiError(xhr.status, detail));
-        return;
-      }
-      try { resolve(JSON.parse(xhr.responseText) as RagDocument); }
-      catch { reject(new ApiError(xhr.status, '响应解析失败')); }
-    };
-    xhr.onerror = () => reject(new ApiError(0, '网络错误，上传失败'));
-    xhr.send(fd);
-  }),
-  getKbDocStatus: (docId: string) =>
-    userRequest<RagDocumentStatus>(`/api/v1/terminal/rag/documents/${docId}/status`),
-  updateKbDocument: (id: string, data: { source?: string; title?: string | null }) =>
-    userRequest<RagDocument>(`/api/v1/terminal/rag/documents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteKbDocument: (id: string) => userRequest<void>(`/api/v1/terminal/rag/documents/${id}`, { method: 'DELETE' }),
-  listDocChunks: (docId: string) => userRequest<RagChunk[]>(`/api/v1/terminal/rag/documents/${docId}/chunks`),
-  reingestDoc: (docId: string, data: { chunks: string[] | null; source?: string; title?: string | null }) =>
-    userRequest<RagDocument>(`/api/v1/terminal/rag/documents/${docId}/reingest`, { method: 'POST', body: JSON.stringify(data) }),
-
-  // ── 技能（SkillFolder + SkillFile）：终端用户 scope 内可见；删除/重命名/补传仅限自己创建 ──
-  /** 左栏 scope 单链（与 kb-nodes 同源，资源无关）。 */
-  skillNodes: () => userRequest<KbNode[]>('/api/v1/terminal/kb-nodes'),
-  listSkills: (scope: { scope_type: string; scope_id?: string | null }) => {
-    const qs = new URLSearchParams({ scope_type: scope.scope_type });
-    if (scope.scope_id) qs.set('scope_id', scope.scope_id);
-    return userRequest<SkillFolder[]>(`/api/v1/terminal/skills?${qs.toString()}`);
-  },
-  createSkill: (data: { name: string; slug: string; scope_type: string; scope_id: string | null }) =>
-    userRequest<SkillFolder>('/api/v1/terminal/skills', { method: 'POST', body: JSON.stringify(data) }),
-  updateSkill: (id: string, data: { name?: string; is_active?: boolean }) =>
-    userRequest<SkillFolder>(`/api/v1/terminal/skills/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  deleteSkill: (id: string) => userRequest<void>(`/api/v1/terminal/skills/${id}`, { method: 'DELETE' }),
-  listSkillFiles: (folderId: string) =>
-    userRequest<SkillFileMeta[]>(`/api/v1/terminal/skills/${folderId}/files`),
-  upsertSkillFile: (folderId: string, data: { path: string; content: string; metadata?: Record<string, unknown> }) =>
-    userRequest<SkillFile>(`/api/v1/terminal/skills/${folderId}/files`, { method: 'POST', body: JSON.stringify(data) }),
-  getSkillFile: (id: string) => userRequest<SkillFile>(`/api/v1/terminal/skill-files/${id}`),
-  deleteSkillFile: (id: string) => userRequest<void>(`/api/v1/terminal/skill-files/${id}`, { method: 'DELETE' }),
 };
 
 // ── Memory (随组织架构逐级嵌套的长期记忆树) ────────────────────────────

@@ -87,8 +87,6 @@ async def db_engine(_ensure_test_db):
     """
     engine = create_async_engine(TEST_DATABASE_URL, echo=False)
     async with engine.begin() as conn:
-        # 后续阶段引入 pgvector 的 RagChunk.embedding 列，测试库需先激活扩展。
-        await conn.execute(__import__("sqlalchemy").text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
     yield engine
     async with engine.begin() as conn:

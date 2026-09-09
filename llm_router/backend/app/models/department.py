@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, ForeignKey, Index, Integer, Numeric, String, Text, text
+from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, Integer, Numeric, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -21,6 +21,10 @@ class Department(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
             sqlite_where=text("deleted_at IS NULL"),
         ),
         Index("ix_departments_org_sort_order", "organization_id", "sort_order"),
+        CheckConstraint(
+            "budget_cap_credits IS NULL OR budget_cap_credits >= 0",
+            name="ck_departments_budget_cap_credits_nonnegative",
+        ),
     )
 
     organization_id: Mapped[str] = mapped_column(

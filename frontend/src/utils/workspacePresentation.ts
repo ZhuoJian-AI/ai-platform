@@ -17,7 +17,7 @@ export function workspaceSourceLabel(file: DisplayableFile): string | null {
   const source = file.presentation;
   if (!source) return null;
   if (source.source_kind === 'skill') {
-    return source.skill_display_name ? `由技能「${source.skill_display_name}」生成` : '由技能生成';
+    return '历史平台产物';
   }
   if (source.source_kind === 'platform_tool') return '由平台工具生成';
   return source.source_kind === 'upload' ? '用户上传' : null;
@@ -26,7 +26,7 @@ export function workspaceSourceLabel(file: DisplayableFile): string | null {
 export function workspaceVisiblePath(file: DisplayableFile): string {
   const displayName = workspaceDisplayName(file);
   if (/^(?:技能输出|平台工具输出)\/[0-9a-f-]{36}\//i.test(file.path)) {
-    const root = file.path.split('/')[0];
+    const root = file.path.startsWith('技能输出/') ? '历史平台产物' : '平台工具输出';
     const task = file.presentation?.source_task_title || '任务产物';
     return `${root}/${task}/${displayName}`;
   }

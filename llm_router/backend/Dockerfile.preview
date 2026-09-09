@@ -1,11 +1,26 @@
-ARG AI_PLATFORM_PYTHON_OFFICE_BASE
-FROM ${AI_PLATFORM_PYTHON_OFFICE_BASE}
+ARG AI_PLATFORM_BACKEND_APP_BASE
+FROM ${AI_PLATFORM_BACKEND_APP_BASE}
 
 ARG SOURCE_COMMIT=unknown
 ARG SOURCE_REPOSITORY=https://github.com/ZhuoJian-AI/ai-platform
 ENV SOURCE_COMMIT=${SOURCE_COMMIT}
 LABEL org.opencontainers.image.revision=${SOURCE_COMMIT} \
       org.opencontainers.image.source=${SOURCE_REPOSITORY}
+
+# Preview is the only backend-derived image that needs the Office renderer.
+# Build it on the current backend image so retired RAG/Skill dependencies do
+# not survive through an old, opaque office base image.
+USER root
+RUN sed -i 's|deb.debian.org/debian|mirrors.aliyun.com/debian|g; s|security.debian.org/debian-security|mirrors.aliyun.com/debian-security|g' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=5 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+        libreoffice-core-nogui \
+        libreoffice-writer-nogui \
+        libreoffice-calc-nogui \
+        libreoffice-impress-nogui \
+        fonts-wqy-microhei \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN rm -rf /app && mkdir -p /app
 WORKDIR /app

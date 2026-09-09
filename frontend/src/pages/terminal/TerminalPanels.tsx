@@ -24,14 +24,8 @@ export function ResourcePanel({ taskConfig, resources, agent }: {
         <div><Tag color={ws ? 'blue' : 'default'}>{ws ? ws.name : '未选择'}</Tag></div>
       </div>
       <div>
-        <Typography.Text type="secondary">智能体默认 Skill</Typography.Text>
-        <div><Tag color="blue">默认推荐 {agent?.skill_ids.length ?? 0} · 用户可用 {resources?.skills.length ?? 0}</Tag></div>
-      </div>
-      <div>
-        <Typography.Text type="secondary">智能体固定 RAG</Typography.Text>
-        <div><Tag color={agent?.rag_collection_ids.length ? 'blue' : 'default'}>
-          {agent ? `固定绑定 ${agent.rag_collection_ids.length}` : '通用智能体不加载 RAG'}
-        </Tag></div>
+        <Typography.Text type="secondary">文本角色</Typography.Text>
+        <div><Tag color={agent ? 'blue' : 'default'}>{agent?.name ?? '通用个人助手'}</Tag></div>
       </div>
       <div>
         <Typography.Text type="secondary">长期记忆</Typography.Text>

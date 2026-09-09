@@ -37,7 +37,7 @@ from app.schemas.enterprise_application import (
     EnterpriseApplicationEventRouteInput,
     EnterpriseApplicationIntegrationInput,
 )
-from app.services import enterprise_application_service, skill_scope_service
+from app.services import enterprise_application_service, scope_service
 from app.services.subsystem_access_service import assert_application_available
 from app.utils.crypto import decrypt_provider_api_key, encrypt_provider_api_key, hash_api_key
 from app.utils.public_url import assert_public_http_url, request_public_http, same_origin
@@ -1161,7 +1161,7 @@ async def replace_routes(
         row.deleted_at = now
     created: list[EnterpriseApplicationEventRoute] = []
     for item in items:
-        scope_id = await skill_scope_service.validate_scope_target(
+        scope_id = await scope_service.validate_scope_target(
             db, application.organization_id, item.target_scope_type, item.target_scope_id
         )
         target_application_id = None

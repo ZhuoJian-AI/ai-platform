@@ -74,12 +74,11 @@ _FILE_OUTPUT_TOOL_NAMES = tuple(
             "workspace_copy_file",
             "workspace_restore_version",
             "image_generation_tool",
-            "run_skill_script",
         }
     )
 )
 # Registry kinds whose dynamically named tools materialize Runner outputs as workspace files.
-_FILE_OUTPUT_REGISTRY_KINDS = {"code", "run_skill_script", "enterprise_export_file"}
+_FILE_OUTPUT_REGISTRY_KINDS = {"enterprise_export_file"}
 # A file-delivery request needs BOTH an explicit production verb AND an artifact noun
 # (audit M4): "处理一下" + attachment or "看看这个表里合计多少" must not arm the policy.
 _FILE_PRODUCTION_VERBS = (
@@ -225,8 +224,8 @@ _REQUEST_CLAUSE_SEPARATOR = re.compile(r"(?:[，,。；;！!？?\n]+|并且|然�
 # Runtime-side continuation budget (``settings.agent_completion_max_nudges`` overrides if defined).
 _COMPLETION_MAX_NUDGES = 1
 _COMPLETION_NUDGE_TEXT = (
-    "[系统续执行要求] 上一次只完成了技能加载或说明读取，尚未产生用户要求的文件。"
-    "请重新调用必要的 Skill/文件工具并实际生成产物；只有真实 tool_result 返回输出文件后才能结束。"
+    "[系统续执行要求] 上一次尚未产生用户要求的文件。"
+    "请调用必要的平台文件工具并实际生成产物；只有真实 tool_result 返回输出文件后才能结束。"
 )
 _POLICY_TITLES = {
     "continuation": "续执行要求",
@@ -421,16 +420,10 @@ def _trace_for_tool(state: dict, name: str, call_id: str, arguments: str, result
     kind = entry.get("kind")
     if name in FILE_TOOL_OPERATIONS or name.endswith("_tool") or name.startswith("workspace_"):
         category, title = "file", "文件解析与引用"
-    elif kind in {"code", "run_skill_script"}:
-        category, title = "skill", "Runner脚本执行"
-    elif kind in {"load_skill", "read_skill_resource", "prompt"}:
-        category, title = "skill", "Skill自动匹配"
-    elif kind == "rag_search":
-        category, title = "rag", "知识库按需检索"
     elif kind == "memory":
         category, title = "memory", "长期记忆"
     else:
-        category, title = "skill", name
+        category, title = "tool", name
     state.setdefault("traces", []).append(
         {
             "category": category,
@@ -963,7 +956,6 @@ async def run_general_agent(
     request: Any,
     attachment_files: list[dict] | None = None,
     file_refs_v1: list[dict] | None = None,
-    invoked_skills: list[dict] | None = None,
     client_request_id: str | None = None,
 ) -> dict:
     start = time.monotonic()
@@ -976,7 +968,6 @@ async def run_general_agent(
         config=config,
         attachment_files=attachment_files,
         file_refs_v1=file_refs_v1,
-        invoked_skills=invoked_skills,
     )
     state["client_request_id"] = client_request_id
     deps = general_context(db, request, user, task)
@@ -1037,7 +1028,6 @@ async def stream_general_agent(
     request: Any,
     attachment_files: list[dict] | None = None,
     file_refs_v1: list[dict] | None = None,
-    invoked_skills: list[dict] | None = None,
     client_request_id: str | None = None,
 ) -> Response:
     task_id = str(task.id)
@@ -1066,7 +1056,6 @@ async def stream_general_agent(
             config=config,
             attachment_files=attachment_files,
             file_refs_v1=file_refs_v1,
-            invoked_skills=invoked_skills,
         )
         state["client_request_id"] = client_request_id
         handle.bg_task = asyncio.create_task(

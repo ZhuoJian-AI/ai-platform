@@ -56,9 +56,7 @@ const ADMIN_NAVIGATION = [
   ['/dlp', '安全围栏'],
   ['/agent/workspaces', '工作空间'],
   ['/agent/agents', '智能体'],
-  ['/agent/rag', 'RAG知识库'],
   ['/agent/memory', '长期记忆'],
-  ['/tools/skills', '技能'],
   ['/monitor/overview', '总览'],
   ['/monitor/router', '路由器监控'],
   ['/monitor/agents', '智能体监控'],
@@ -75,9 +73,10 @@ const ADMIN_DIRECT_ROUTES = [
 const EMPLOYEE_NAVIGATION = [
   ['工作空间', 'workspace'],
   ['智能体', 'agents'],
-  ['知识库', 'knowledge'],
-  ['技能', 'skills'],
 ];
+
+const RETIRED_ADMIN_ROUTES = ['/agent/rag', '/tools/skills'];
+const RETIRED_EMPLOYEE_LABELS = ['知识库', '技能'];
 
 function safePath(value) {
   try {
@@ -218,6 +217,14 @@ async function traverseAdminNavigation(page) {
     const text = await page.locator('main.admin-shell__main').innerText();
     assert.ok(text.includes(marker), `${route} 未呈现预期功能标识`);
   }
+  for (const route of RETIRED_ADMIN_ROUTES) {
+    await page.goto(new URL(route, baseUrl).href, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    assert.equal(
+      await page.getByText('页面不存在', { exact: true }).count(),
+      1,
+      `${route} 退役后仍可进入`,
+    );
+  }
 }
 
 async function adminEffectiveAccess(page) {
@@ -311,6 +318,13 @@ function normalizeEffectiveAccess(access) {
 
 async function traverseEmployeeNavigation(page) {
   const nav = page.locator('aside').first();
+  for (const label of RETIRED_EMPLOYEE_LABELS) {
+    assert.equal(
+      await nav.locator('button').filter({ hasText: exactTextPattern(label) }).count(),
+      0,
+      `员工端仍显示已退役入口：${label}`,
+    );
+  }
   for (const [label, view] of EMPLOYEE_NAVIGATION) {
     await nav.locator('button').filter({ hasText: exactTextPattern(label) }).first().click();
     await page.waitForFunction(

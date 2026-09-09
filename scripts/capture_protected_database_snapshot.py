@@ -51,10 +51,6 @@ PROTECTED_TABLES = (
     "workspace_upload_sessions",
     "workspace_audit_events",
     "workspace_share_links",
-    "rag_collections",
-    "rag_folders",
-    "rag_documents",
-    "rag_chunks",
     "memories",
     "tasks",
     "task_messages",
@@ -62,10 +58,6 @@ PROTECTED_TABLES = (
     "agent_runs",
     "agent_run_events",
     "agents",
-    "skill_folders",
-    "skill_files",
-    "skill_versions",
-    "skill_executions",
     "enterprise_applications",
     "enterprise_application_grants",
     "enterprise_application_integrations",
@@ -371,7 +363,7 @@ async def build_report(
             table for table, item in table_reports.items() if not item["present"]
         ],
         "externalVerificationRequired": [
-            "对 workspace_files.content_ref、workspace_file_versions.content_ref 与 skill_versions.archive_ref "
+            "对 workspace_files.content_ref 与 workspace_file_versions.content_ref "
             "执行对象存储存在性抽样；本数据库脚本不持有 OSS 凭据。",
             "同时保存 pg_dump/pg_restore --list 校验结果以及 Backend、Frontend、Worker 镜像 digest。",
         ],

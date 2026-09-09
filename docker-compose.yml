@@ -1,8 +1,6 @@
 services:
   postgres:
-    # pgvector/pgvector 镜像 = 官方 postgres + vector 扩展预装，用于 RAG 向量检索。
-    # pg16 与原 postgres:16-alpine 数据卷兼容。
-    image: pgvector/pgvector:pg16
+    image: postgres:16-bookworm
     container_name: ai_infra_postgres
     environment:
       POSTGRES_USER: ai_infra
@@ -38,13 +36,13 @@ services:
     networks:
       - data_plane
 
-  skill-runner:
-    build: ./skill_runner
-    container_name: ai_infra_skill_runner
+  tool-executor:
+    build: ./tool_executor
+    container_name: ai_infra_tool_executor
     environment:
-      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:-skill-runner-local-dev-token}
+      TOOL_EXECUTOR_TOKEN: ${TOOL_EXECUTOR_TOKEN:-tool-executor-local-dev-token}
       # Defense in depth for Compose platforms that inject project variables
-      # into every service.  User code must never inherit platform credentials.
+      # into every service. The fixed executor must never inherit credentials.
       DATABASE_URL: ""
       REDIS_URL: ""
       POSTGRES_DB: ""
@@ -53,23 +51,14 @@ services:
       REDIS_PASSWORD: ""
       SECRET_KEY: ""
       MASTER_ENCRYPTION_KEY: ""
-      SKILL_CACHE_ROOT: /cache
       STORAGE_GATEWAY_URL: ""
       STORAGE_PROJECT_TOKEN: ""
-      SKILL_RUNNER_MAX_CONCURRENCY: ${SKILL_RUNNER_MAX_CONCURRENCY:-4}
-      SKILL_RUNNER_MAX_QUEUE: ${SKILL_RUNNER_MAX_QUEUE:-100}
-      SKILL_RUNNER_QUEUE_WAIT_SECONDS: ${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}
-      SKILL_RUNNER_OFFICE_CONCURRENCY: ${SKILL_RUNNER_OFFICE_CONCURRENCY:-1}
-      SKILL_PACKAGE_MAX_BYTES: ${SKILL_PACKAGE_MAX_BYTES:-104857600}
-      SKILL_PACKAGE_EXPANDED_MAX_BYTES: ${SKILL_PACKAGE_EXPANDED_MAX_BYTES:-524288000}
-      SKILL_PACKAGE_MAX_FILES: ${SKILL_PACKAGE_MAX_FILES:-1000}
-      SKILL_CACHE_RETENTION_SECONDS: ${SKILL_CACHE_RETENTION_SECONDS:-604800}
-      SKILL_CACHE_MAX_BYTES: ${SKILL_CACHE_MAX_BYTES:-10737418240}
-      SKILL_FAILED_TEMP_RETENTION_SECONDS: ${SKILL_FAILED_TEMP_RETENTION_SECONDS:-3600}
+      TOOL_EXECUTOR_MAX_CONCURRENCY: ${TOOL_EXECUTOR_MAX_CONCURRENCY:-4}
+      TOOL_EXECUTOR_MAX_QUEUE: ${TOOL_EXECUTOR_MAX_QUEUE:-100}
+      TOOL_EXECUTOR_QUEUE_WAIT_SECONDS: ${TOOL_EXECUTOR_QUEUE_WAIT_SECONDS:-300}
+      TOOL_EXECUTOR_OFFICE_CONCURRENCY: ${TOOL_EXECUTOR_OFFICE_CONCURRENCY:-1}
     ports:
       - "127.0.0.1:8020:8020"
-    volumes:
-      - skillcache:/cache
     read_only: true
     tmpfs:
       - /tmp:size=1073741824,mode=1777
@@ -93,10 +82,9 @@ services:
 volumes:
   pgdata:
   redisdata:
-  skillcache:
 
 networks:
   # Only trusted data services and the backend/workers may join this bridge.
-  # The ordinary application network remains available to executable Skills.
+  # The ordinary application network remains available to fixed platform tools.
   data_plane:
     internal: true

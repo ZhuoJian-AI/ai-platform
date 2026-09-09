@@ -30,13 +30,9 @@ dependencies = [
     "bcrypt>=4.2.0",
     "pyjwt>=2.10.0",
     "email-validator>=2.2.0",
-    # 智能体平台：pgvector 向量检索（SQLAlchemy Vector 类型）
-    "pgvector>=0.3.6",
-    # embedding 余弦相似度计算
-    "numpy>=1.26.0",
     # token 估算（agent 用量记账）
     "tiktoken>=0.8.0",
-    # RAG 文档上传解析：PDF / Word / Excel / HTML 文本抽取
+    # 工作空间文件解析：PDF / Word / Excel / HTML 文本抽取
     "pdfplumber>=0.11.0",
     "pypdf>=5.1.0",
     "python-docx>=1.1.0",
@@ -44,8 +40,6 @@ dependencies = [
     "openpyxl>=3.1.0",
     "python-pptx>=1.0.2",
     "Pillow>=11.0.0",
-    # Skill package frontmatter / manifest parsing
-    "PyYAML>=6.0.2",
     # Subsystem Action contracts are JSON Schema, not shallow required-field lists.
     "jsonschema>=4.23.0",
 ]

@@ -1,14 +1,13 @@
-"""Agent ORM model — reusable Assistant Core configuration."""
+"""Text-only reusable persona for the personal Assistant Core."""
 
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKeyMixin
 
 
 class Agent(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
-    """智能体配置：提示词、模型、工作空间、RAG、Skill 与可选业务页面。"""
+    """智能体只保存文本角色定义；能力与权限全部继承当前员工。"""
 
     __tablename__ = "agents"
     __table_args__ = (
@@ -18,41 +17,16 @@ class Agent(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     organization_id: Mapped[str] = mapped_column(
         ForeignKey("organizations.id", ondelete="RESTRICT"), nullable=False, index=True
     )
-    # 作用范围：organization / department / role / user；scope_id 为对应 id（org 级为 None）。
+    # 作用范围：organization / department / user；scope_id 为对应 id（org 级为 None）。
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False, default="organization")
     scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
-    # 创建者（终端用户 id）：admin / 历史数据为 None（与 SkillFolder/RagCollection 一致，纯字符串无 FK）。
+    # 创建者（终端用户 id）；管理员或历史数据为 None，纯字符串无 FK。
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    # 真实模型 id（如 glm-5.2 / claude-sonnet-4），或 "default" 走组织默认路由。
-    model_alias: Mapped[str] = mapped_column(String(255), nullable=False, default="default")
-
-    # 记忆配置：{"max_messages": int, "summarize": bool, ...}
-    memory_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-
-    workspace_id: Mapped[str | None] = mapped_column(
-        ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    # 绑定的 RAG 集合 ID 列表（复数，与 skill_ids 同范式）。
-    rag_collection_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-    # 绑定的技能 ID 列表（SkillFolder.id）。
-    skill_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-
-    # 可选的企业应用页面上下文。仅保存 Manifest 中的稳定标识；运行时仍需按
-    # 当前员工权限重新解析页面与 Action，绝不在 Agent 配置中保存业务令牌。
-    application_id: Mapped[str | None] = mapped_column(
-        ForeignKey("enterprise_applications.id", ondelete="SET NULL"), nullable=True, index=True
-    )
-    module_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    page_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
-
-    temperature: Mapped[float | None] = mapped_column(nullable=True)
-    max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
-
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 

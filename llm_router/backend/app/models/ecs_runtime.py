@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -41,6 +41,10 @@ class EcsModuleRelease(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint(
             "organization_id", "application_slug", name="uq_ecs_module_release_org_slug"
+        ),
+        CheckConstraint(
+            "status IN ('verifying','pending_review','healthy','failed')",
+            name="ck_ecs_module_release_status",
         ),
     )
 
