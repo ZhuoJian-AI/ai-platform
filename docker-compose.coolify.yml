@@ -63,7 +63,7 @@ services:
         limits: { cpus: "0.25", memory: 512M }
 
   tool-executor:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-tool-executor-app@sha256:08cac524b5a411eec2b7e0d6d8cfa265adb78427b63d64297e77a4b728a86e38
+    image: 127.0.0.1:5000/zhuojian/ai-platform-tool-executor-app@sha256:c4b62e92156bbaf5f5a7efd1dacfbcac49f6890400f662b4b4f7ae27de819f8b
     environment:
       TOOL_EXECUTOR_TOKEN: ${TOOL_EXECUTOR_TOKEN:?}
       # Standard Compose runtimes honor these empty overrides. The image
@@ -106,7 +106,7 @@ services:
         limits: { cpus: "1.50", memory: 3G, pids: 512 }
 
   backend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bca11b1e656032bd18ba249380ac391b8a1fa1fc8be292c3b5b40fb01d52cdef
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:99b5eb424fd65a7f64465f4f5a736e63dd7e6a13594de0aace41f44612be7fb1
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -197,7 +197,7 @@ services:
         limits: { cpus: "1.50", memory: 2560M }
 
   workspace-parser:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bca11b1e656032bd18ba249380ac391b8a1fa1fc8be292c3b5b40fb01d52cdef
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:99b5eb424fd65a7f64465f4f5a736e63dd7e6a13594de0aace41f44612be7fb1
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -248,7 +248,7 @@ services:
         limits: { cpus: "0.75", memory: 1536M }
 
   workspace-preview:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-workspace-preview-app@sha256:8b0de72d64704baa1c16343f706aba0d204d9fb477a12bbc1f3933584cf54921
+    image: 127.0.0.1:5000/zhuojian/ai-platform-workspace-preview-app@sha256:a2396127c47f714b10893f4d9b279cf19c1cc10d9ec10e1035b36855094cf0eb
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -299,7 +299,7 @@ services:
         limits: { cpus: "1.00", memory: 2G, pids: 256 }
 
   storage-lifecycle:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bca11b1e656032bd18ba249380ac391b8a1fa1fc8be292c3b5b40fb01d52cdef
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:99b5eb424fd65a7f64465f4f5a736e63dd7e6a13594de0aace41f44612be7fb1
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -351,7 +351,7 @@ services:
         limits: { cpus: "0.25", memory: 384M, pids: 128 }
 
   multimodal-worker:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:bca11b1e656032bd18ba249380ac391b8a1fa1fc8be292c3b5b40fb01d52cdef
+    image: 127.0.0.1:5000/zhuojian/ai-platform-backend-app@sha256:99b5eb424fd65a7f64465f4f5a736e63dd7e6a13594de0aace41f44612be7fb1
     environment:
       APP_ENV: production
       DEBUG: "false"
@@ -405,7 +405,7 @@ services:
         limits: { cpus: "1.00", memory: 1536M, pids: 256 }
 
   frontend:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:89a74d60eed20c220af7c9f9c08fb73e89d03023d21225d8b2288edc7eb0ca17
+    image: 127.0.0.1:5000/zhuojian/ai-platform-frontend-app@sha256:3443d271d9d8f26454a39ffb0607a22de7fba085aa8c8af3e5f8493364109125
     labels:
       # Coolify also attaches its public application network. Pin Traefik to
       # that network so it never selects the private Compose default network.
