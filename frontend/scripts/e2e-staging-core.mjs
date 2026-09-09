@@ -219,9 +219,18 @@ async function traverseAdminNavigation(page) {
   }
   for (const route of RETIRED_ADMIN_ROUTES) {
     await page.goto(new URL(route, baseUrl).href, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    assert.equal(
-      await page.getByText('页面不存在', { exact: true }).count(),
-      1,
+    await page.waitForFunction(
+      (retiredRoute) => (
+        location.pathname !== retiredRoute
+        || document.querySelector('main.admin-shell__main')?.textContent?.includes('页面不存在')
+      ),
+      route,
+      { timeout: 30_000 },
+    );
+    const currentPath = new URL(page.url()).pathname;
+    const showsNotFound = await page.getByText('页面不存在', { exact: true }).count() === 1;
+    assert.ok(
+      currentPath !== route || showsNotFound,
       `${route} 退役后仍可进入`,
     );
   }

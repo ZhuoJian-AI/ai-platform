@@ -1420,6 +1420,53 @@ async def test_module_permissions_and_high_risk_action_confirmation_are_replay_s
 
 
 @pytest.mark.asyncio
+async def test_listing_confirmations_expires_pending_request_without_async_lazy_load(db_session):
+    org, _, _, _, current = await _organization_tree(db_session)
+    application = await service.create_application(
+        db_session,
+        org.id,
+        EnterpriseApplicationCreate(
+            name="Expired Confirmation",
+            slug="expired-confirmation-list",
+            entry_url="https://expired.example.test/",
+        ),
+    )
+    action = EnterpriseApplicationAction(
+        application_id=application.id,
+        organization_id=org.id,
+        module_key="orders",
+        action_key="orders.expire",
+        name="过期操作",
+        operation="update",
+        ai_enabled=True,
+        requires_confirmation=True,
+        input_schema={"type": "object"},
+        result_schema={"type": "object"},
+    )
+    db_session.add(action)
+    await db_session.flush()
+    request_row = EnterpriseApplicationActionRequest(
+        application_id=application.id,
+        organization_id=org.id,
+        action_id=action.id,
+        user_id=current.id,
+        request_id="expired-confirmation-1",
+        module_key="orders",
+        status="pending",
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    db_session.add(request_row)
+    await db_session.flush()
+
+    rows = await action_service.list_confirmation_requests(db_session, current)
+
+    listed = next(row for row in rows if row["id"] == request_row.id)
+    assert listed["status"] == "expired"
+    assert listed["resolved_at"] is not None
+    assert listed["updated_at"] is not None
+
+
+@pytest.mark.asyncio
 async def test_cross_application_event_delivery_is_signed_and_idempotent(db_session, monkeypatch):
     org, _, department, _, _ = await _organization_tree(db_session)
     source = await service.create_application(
