@@ -30,6 +30,28 @@ Run frontend contract checks with the relevant `npm run test:*` script.
 - `docker-compose.coolify.yml`: Registry-first staging deployment manifest.
 - `llm_router/backend/alembic/versions/`: the single database migration chain.
 
+## Assistant execution model
+
+The LLM is the reasoning and orchestration brain. Do not require a perfect, oversized intent object before the model may use an authorized tool. The required loop is:
+
+```text
+用户自然表达
+→ LLM 主脑结合当前页面理解目标
+→ 从当前授权工具中选择工具
+→ SaaS 校验工具参数
+   ├─ 正确：执行
+   └─ 错误：把“哪里错、应该怎么填”返回给 LLM
+→ LLM 自动修正并再次调用
+→ 获得结果后继续决定是否调用下一个工具
+→ 最终回答用户
+```
+
+- Allow a bounded reasoning/tool loop and one or two corrective retries for protocol, parameter and tool errors. Return actionable structured errors to the LLM instead of immediately ending the turn.
+- Use current page context, conversation history and the authorized tool set to resolve ordinary business shorthand. Ask the user only when a required business fact is genuinely missing or multiple materially different choices remain.
+- A model/protocol validation failure is a platform failure, not evidence that the user's request is ambiguous. Never translate it into a generic clarification message.
+- Keep strict enforcement at the execution boundary: identity and permission intersection, application/module/page/Action target, closed input Schema, confirmation for side effects, idempotency, output validation and trustworthy Artifact delivery.
+- The LLM may reason, select, retry and compose tools, but it may never invent permissions, credentials, target URLs, successful tool results or completed files.
+
 ## Hard boundaries
 
 - SaaS owns identity, roles, authorization, model routing, workspaces and audited integration calls.
