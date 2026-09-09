@@ -9,10 +9,17 @@
 
 ## 候选发布映射
 
-- Source SHA：`1cbb6883cb1cb7d3ff9aa533149fdfb0477ef63a`
-- Backend / Workspace Parser / Storage Lifecycle / Multimodal Worker：`sha256:bad17a600eba22b06807c98c857ef985d73c079eb04e81a2ec05221c04bd8cd6`
+- Source SHA：`12c9425ac5a897eb93fb2463782caa279bd14d05`
+- Backend / Workspace Parser / Storage Lifecycle / Multimodal Worker：`sha256:c39897acf809843e69c04c1c672f4638b27a32530e7fbac78d58eeaf8f97f700`
 - Frontend：`sha256:b57754e1279b31785a7ca4e6cb40492d806c33bff1294ee4da421e2571892623`
 - Tool Executor 与 Workspace Preview 镜像不变。
+- 上一版 Backend 回切摘要：`sha256:bad17a600eba22b06807c98c857ef985d73c079eb04e81a2ec05221c04bd8cd6`。
+
+## Action 确认热修
+
+- PR `#76` 修复员工端轮询过期 Action 确认时触发 `MissingGreenlet` 并返回 500 的问题。
+- 后端全量测试 `501 passed`；企业应用测试 `29 passed`。
+- 前端 12 组专项回归与生产构建通过；真实 staging E2E 在旧镜像上准确复现了该 500，并将在新摘要部署后重跑。
 
 ## 已验证
 
