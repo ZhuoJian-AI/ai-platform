@@ -15,6 +15,7 @@ const [
   previewSession,
   workspaces,
   providers,
+  helpContent,
   pkgSource,
   nginxConfig,
 ] = await Promise.all([
@@ -28,6 +29,7 @@ const [
   read('src/components/files/WorkspacePreviewSessionView.tsx'),
   read('src/pages/agent/Workspaces.tsx'),
   read('src/pages/LlmProviders.tsx'),
+  read('src/help/content.ts'),
   read('package.json'),
   read('nginx.coolify.conf'),
 ]);
@@ -41,6 +43,7 @@ assert.doesNotMatch(uploadQueue, /WebOffice 协同编辑|workspace_file_active_e
 assert.doesNotMatch(applications, /七天|迁移观察|旧工具绑定/);
 assert.doesNotMatch(providers, /openai_embeddings|embedding_dimensions|Embedding/);
 assert.doesNotMatch(client, /\| 'embedding'|embedding_dimensions/);
+assert.doesNotMatch(helpContent, /openai_embeddings|embedding_dimensions|Embedding|向量维度|向量语义召回/);
 
 assert.match(app, /<Route path="\/\*" element=\{<NotFoundPage \/>\} \/>/);
 assert.match(app, /<Route path="\/:slug\/terminal\/\*" element=\{<NotFoundPage \/>\} \/>/);

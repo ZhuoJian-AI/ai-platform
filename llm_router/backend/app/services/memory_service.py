@@ -153,7 +153,7 @@ async def load_memory_for_scopes(
 ) -> list[dict]:
     """运行时载入：按 scope 分级取最近 N 条，返回 [{scope_type, scope_id, category, content}]。
 
-    v1 按 recency 取每级 top-N（向量语义召回留作扩展）。组织级 scope_id 为 None。
+    按 recency 取每级 top-N。组织级 scope_id 为 None。
     """
     rows = await list_memory_for_user(db, org_id, scopes)
     # 按 scope 分组取最近 N 条
