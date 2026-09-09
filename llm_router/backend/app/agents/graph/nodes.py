@@ -46,6 +46,8 @@ from app.services import (
     workspace_service,
 )
 from app.services import model_gateway as llm_client
+from app.services.assistant_tool_catalog import entry_tool_definitions
+from app.services.assistant_tool_protocol import tool_result_json
 from app.services.file_capability_registry import (
     FILE_CREATE_TOOL_NAMES,
     platform_tool_enabled,
@@ -1351,6 +1353,28 @@ async def _build_tools(
         # Do not return here.  A page turn is the same assistant as the global
         # surface, so it inherits the same platform/workspace/model capability
         # tools in addition to current-page Manifest Actions.
+    existing_tool_names = {
+        str(item.get("function", {}).get("name") or "")
+        for item in tools
+        if isinstance(item, dict)
+    }
+    for item in entry_tool_definitions():
+        name = str(item.get("function", {}).get("name") or "")
+        if name and name not in existing_tool_names:
+            tools.append(item)
+            existing_tool_names.add(name)
+    envelope = business_envelope if isinstance(business_envelope, dict) else {}
+    registry["enterprise_capability_search"] = {
+        "kind": "assistant_capability_search",
+        "application_id": application_id,
+        "candidate_pages": list(envelope.get("candidatePages") or []),
+        "authorized_actions": list(envelope.get("authorizedActions") or []),
+    }
+    registry["enterprise_navigate"] = {
+        "kind": "assistant_navigation",
+        "application_id": application_id,
+        "candidate_pages": list(envelope.get("candidatePages") or []),
+    }
     include_image_generation = False
     if workspace_id and user is not None:
         include_image_generation = (
@@ -1473,6 +1497,55 @@ async def _execute_tool_call(
     if entry.get("kind") == "memory":
         content, ok = await _execute_memory_tool(state, entry, params)
         return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
+
+    if entry.get("kind") == "assistant_navigation":
+        application_id = str(params.get("application_id") or "")
+        module_key = str(params.get("module_key") or "")
+        page_key = str(params.get("page_key") or "")
+        allowed_pages = [
+            item
+            for item in (entry.get("candidate_pages") or [])
+            if isinstance(item, dict)
+        ]
+        target = next(
+            (
+                item
+                for item in allowed_pages
+                if str(entry.get("application_id") or application_id) == application_id
+                and str(item.get("moduleKey") or "") == module_key
+                and str(item.get("pageKey") or "") == page_key
+            ),
+            None,
+        )
+        if target is None:
+            content = tool_result_json(
+                "retryable_error",
+                error={
+                    "code": "navigation_target_not_authorized",
+                    "messageZh": "目标页面不存在或当前角色无权访问",
+                    "correctionFields": [
+                        {
+                            "fields": ["application_id", "module_key", "page_key"],
+                            "hint": "请先调用企业能力搜索，并使用返回的已授权页面标识",
+                        }
+                    ],
+                    "retryable": True,
+                },
+            )
+            return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content, False)
+        ui_intent = {
+            "type": "navigate",
+            "applicationId": application_id,
+            "moduleKey": module_key,
+            "pageKey": page_key,
+            "businessObject": params.get("business_object") or None,
+        }
+        content = tool_result_json(
+            "completed",
+            data={"pageName": target.get("pageName") or page_key},
+            ui_intent=ui_intent,
+        )
+        return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content, True)
 
     if entry.get("kind") == "enterprise_export_file":
         user = deps.get("user")
@@ -1610,7 +1683,10 @@ _ASSISTANT_READ_ONLY_TOOL_NAMES = {
     "pdf_inspect",
     "text_inspect",
 }
-_ASSISTANT_READ_ONLY_REGISTRY_KINDS: set[str] = set()
+_ASSISTANT_READ_ONLY_REGISTRY_KINDS = {
+    "assistant_capability_search",
+    "assistant_navigation",
+}
 _ASSISTANT_LONG_RUNNING_TOOL_NAMES = {
     "web_tool",
     "image_generation_tool",
@@ -1675,13 +1751,36 @@ def _assistant_tool_metadata(name: str, entry: dict | None) -> dict:
         timeout_ms = ASSISTANT_TOOL_TIMEOUT_READ_MS
     else:
         timeout_ms = ASSISTANT_TOOL_TIMEOUT_DEFAULT_MS
+    requires_approval = _assistant_tool_requires_approval(name, entry)
+    model_capabilities = {
+        "image_tool": "vision",
+        "image_generation_tool": "image_generation",
+        "audio_transcribe": "speech_to_text",
+        "audio_understand": "audio_understanding",
+        "speech_synthesize": "text_to_speech",
+    }
+    if kind in {"enterprise_action", "enterprise_export_file"}:
+        required_context = "current_page"
+    elif name.startswith("workspace_") or name in STRICT_FILE_TOOL_NAMES | LEGACY_FILE_TOOL_NAMES:
+        required_context = "workspace"
+    else:
+        required_context = None
     metadata = {
         "kind": _assistant_tool_kind(name, entry),
         "timeout_ms": timeout_ms,
         "concurrency_safe": read_only,
         "max_model_chars": ASSISTANT_TOOL_MAX_MODEL_CHARS,
+        "risk_level": str((entry or {}).get("risk_level") or ("high" if requires_approval else "low")),
+        "required_role_permissions": list((entry or {}).get("required_role_permissions") or []),
+        "required_context": required_context,
+        "model_capability_binding": model_capabilities.get(name),
+        "idempotency_policy": "read_only" if read_only else "run_tool_call",
+        "confirmation_policy": "ask" if requires_approval else "never",
+        "artifact_policy": (
+            "required" if name in FILE_CREATE_TOOL_NAMES or kind == "enterprise_export_file" else "none"
+        ),
     }
-    if settings.assistant_tool_approval_enabled and _assistant_tool_requires_approval(name, entry):
+    if settings.assistant_tool_approval_enabled and requires_approval:
         metadata["approval"] = "ask"
     return metadata
 
@@ -1705,6 +1804,12 @@ def assistant_tool_specs(tools: list[dict], registry: dict[str, dict] | None = N
                 "name": name,
                 "description": str(function.get("description") or ""),
                 "input_schema": function.get("parameters") or {"type": "object", "properties": {}},
+                "output_schema": (
+                    getattr(entry.get("action"), "result_schema", None)
+                    if isinstance(entry, dict) and entry.get("action") is not None
+                    else function.get("outputSchema")
+                )
+                or {"type": "object"},
                 **_assistant_tool_metadata(name, entry),
             }
         )

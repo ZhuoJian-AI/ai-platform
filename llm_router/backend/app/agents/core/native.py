@@ -22,6 +22,8 @@ from app.agents.core import approval_registry
 from app.agents.graph.context import bind_runtime
 from app.agents.graph.nodes import _execute_tool_call
 from app.services import model_gateway
+from app.services.assistant_tool_catalog import search_tool_specs
+from app.services.assistant_tool_protocol import descriptor_from_spec, tool_result_json
 
 logger = structlog.get_logger()
 
@@ -68,16 +70,23 @@ def _failure_key(name: str, arguments: dict[str, Any]) -> str:
     return hashlib.sha256(material).hexdigest()
 
 
-def _tool_error(code: str, message: str, correction: str = "") -> str:
-    return json.dumps(
-        {
-            "status": "error",
+def _tool_error(
+    code: str,
+    message: str,
+    correction: str = "",
+    *,
+    retryable: bool = False,
+    correction_fields: list[dict[str, Any]] | None = None,
+) -> str:
+    return tool_result_json(
+        "retryable_error" if retryable else "failed",
+        error={
             "code": code,
             "messageZh": message,
-            "retryable": False,
-            "correctionHint": correction,
+            "correctionFields": list(correction_fields or []),
+            "retryable": retryable,
         },
-        ensure_ascii=False,
+        data={"correctionHint": correction} if correction else None,
     )
 
 
@@ -88,9 +97,19 @@ def _parse_and_validate_arguments(
     try:
         value = json.loads(raw) if isinstance(raw, str) else raw
     except (json.JSONDecodeError, TypeError):
-        return None, _tool_error("invalid_tool_arguments", "工具参数不是有效的 JSON", "请按工具参数结构重新提交")
+        return None, _tool_error(
+            "invalid_tool_arguments",
+            "工具参数不是有效的 JSON",
+            "请按工具参数结构重新提交",
+            retryable=True,
+        )
     if not isinstance(value, dict):
-        return None, _tool_error("invalid_tool_arguments", "工具参数必须是对象", "请使用字段名和值组成对象")
+        return None, _tool_error(
+            "invalid_tool_arguments",
+            "工具参数必须是对象",
+            "请使用字段名和值组成对象",
+            retryable=True,
+        )
     schema = spec.get("input_schema") or {"type": "object", "properties": {}}
     try:
         errors = sorted(Draft202012Validator(schema).iter_errors(value), key=lambda item: list(item.path))
@@ -105,6 +124,8 @@ def _parse_and_validate_arguments(
         "invalid_tool_arguments",
         f"工具参数校验失败：{location} {first.message}",
         "请根据工具字段类型、必填项和取值范围修正后重试",
+        retryable=True,
+        correction_fields=[{"field": location, "reason": first.message}],
     )
 
 
@@ -112,6 +133,52 @@ def _bounded_tool_content(content: str, limit: int) -> str:
     if limit <= 0 or len(content) <= limit:
         return content
     return content[:limit] + f"\n[工具结果已截断，共 {len(content)} 字符；如需更多内容请分页读取]"
+
+
+def _capability_search_result(
+    query: str,
+    lazy_specs: dict[str, dict[str, Any]],
+    business_catalog: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> tuple[str, list[str]]:
+    selected_specs = search_tool_specs(query, lazy_specs.values(), limit=limit)
+    activated = [
+        str(item.get("name") or "")
+        for item in selected_specs
+        if item.get("name")
+    ]
+    tool_candidates = [
+        {"kind": "tool", "descriptor": descriptor_from_spec(item)}
+        for item in selected_specs
+    ]
+    query_text = str(query or "").strip().lower()
+    page_candidates: list[dict[str, Any]] = []
+    for item in business_catalog:
+        search_text = " ".join(
+            str(value or "")
+            for key, value in item.items()
+            if key not in {"inputSchema", "outputSchema"}
+        ).lower()
+        if query_text and query_text not in search_text:
+            query_tokens = [token for token in query_text.split() if token]
+            if query_tokens and not any(token in search_text for token in query_tokens):
+                continue
+        page_candidates.append({"kind": "business", **item})
+        if len(page_candidates) >= limit:
+            break
+    candidates = [*page_candidates, *tool_candidates][:limit]
+    return (
+        tool_result_json(
+            "completed",
+            data={
+                "query": query,
+                "candidates": candidates,
+                "activatedTools": activated,
+            },
+        ),
+        activated,
+    )
 
 
 async def _iterate_with_runtime(source: Any, deps: dict[str, Any]):
@@ -242,6 +309,16 @@ async def stream_run(
 ) -> AsyncIterator[dict[str, Any]]:
     """Execute one run and yield the legacy-normalized runtime event protocol."""
     specs = {str(item.get("name") or ""): item for item in request.get("tools") or [] if item.get("name")}
+    lazy_specs = {
+        str(item.get("name") or ""): item
+        for item in request.get("lazy_tools") or []
+        if item.get("name")
+    }
+    business_catalog = [
+        dict(item)
+        for item in request.get("capability_catalog") or []
+        if isinstance(item, dict)
+    ]
     allowed_names = set(specs)
     model_tools = _platform_tools(list(specs.values()))
     messages = _model_messages(list(prepared.get("messages") or []))
@@ -342,7 +419,27 @@ async def stream_run(
                 else:
                     assert params is not None
                     call["arguments"] = _stable_json(params)
-                    if spec.get("approval") == "ask":
+                    if name == "enterprise_capability_search":
+                        content, activated_names = _capability_search_result(
+                            str(params.get("query") or ""),
+                            lazy_specs,
+                            business_catalog,
+                            limit=int(params.get("limit") or 8),
+                        )
+                        for activated_name in activated_names:
+                            activated_spec = lazy_specs.pop(activated_name, None)
+                            if activated_spec is not None:
+                                specs[activated_name] = activated_spec
+                                allowed_names.add(activated_name)
+                        model_tools = _platform_tools(list(specs.values()))
+                        ok = True
+                        yield {
+                            "type": "policy",
+                            "action": "tool_catalog_loaded",
+                            "tool": name,
+                            "detail": f"activated={len(activated_names)}",
+                        }
+                    elif spec.get("approval") == "ask":
                         approved, requested, decided = await _approval(
                             context=run_context,
                             spec=spec,

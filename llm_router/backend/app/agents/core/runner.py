@@ -42,6 +42,7 @@ from app.models.agent_run import AgentRun
 from app.models.task import TaskMessage
 from app.services import business_assistant_orchestration
 from app.services.agent_admission import agent_admission
+from app.services.assistant_tool_catalog import partition_tool_specs
 from app.services.file_capability_registry import FILE_CREATE_TOOL_NAMES, FILE_TOOL_OPERATIONS
 from app.services.message_verification import contains_unverified_tool_success_claim
 
@@ -604,6 +605,31 @@ async def _consume_native(
     # facts, repair invalid tool arguments, navigate when useful, or ask the user only
     # when the ambiguity genuinely cannot be resolved.
     _publish(handle, staged, {"type": "business_state", "status": "executing", "intent": intent.get("intent")})
+    tool_registry = prepared.get("registry") or state.get("_assistant_tool_registry") or {}
+    all_tool_specs = _tool_specs(prepared["tools"], tool_registry)
+    current_page_tool_names = {
+        str(name)
+        for name, entry in tool_registry.items()
+        if isinstance(entry, dict)
+        and entry.get("kind") in {"enterprise_action", "enterprise_export_file"}
+    }
+    visible_tool_specs, lazy_tool_specs = partition_tool_specs(
+        all_tool_specs,
+        current_page_tool_names=current_page_tool_names,
+    )
+    capability_entry = tool_registry.get("enterprise_capability_search") or {}
+    capability_application_id = str(capability_entry.get("application_id") or "")
+    capability_catalog = [
+        {
+            "applicationId": capability_application_id,
+            **item,
+        }
+        for item in [
+            *(capability_entry.get("candidate_pages") or []),
+            *(capability_entry.get("authorized_actions") or []),
+        ]
+        if isinstance(item, dict)
+    ]
     request = {
         "run_id": str(state["run_id"]),
         "user_id": str(state.get("user_id") or "platform-admin"),
@@ -619,10 +645,9 @@ async def _consume_native(
         },
         "memory_context": prepared.get("memory_context") or None,
         "exec_mode": state.get("exec_mode") or "craft",
-        "tools": _tool_specs(
-            prepared["tools"],
-            prepared.get("registry") or state.get("_assistant_tool_registry") or {},
-        ),
+        "tools": visible_tool_specs,
+        "lazy_tools": lazy_tool_specs,
+        "capability_catalog": capability_catalog,
         "max_steps": settings.agent_max_steps,
         # The native loop owns continuation nudges and repeat-failure blocking;
         # the coordinator never re-runs a request under a second id.
@@ -671,6 +696,21 @@ async def _consume_native(
             entry_kind = entry.get("kind")
             published_event = dict(event)
             published_event["tool_kind"] = entry_kind or ""
+            try:
+                tool_envelope = json.loads(str(event.get("content") or ""))
+            except (json.JSONDecodeError, TypeError):
+                tool_envelope = None
+            if isinstance(tool_envelope, dict) and isinstance(tool_envelope.get("uiIntent"), dict):
+                _publish(
+                    handle,
+                    staged,
+                    {
+                        "type": "ui_intent",
+                        "runId": str(state.get("run_id") or ""),
+                        "toolCallId": call_id,
+                        "intent": tool_envelope["uiIntent"],
+                    },
+                )
             if entry_kind == "enterprise_action":
                 enterprise_action_calls += 1
                 operation = _enterprise_operation(entry, name)

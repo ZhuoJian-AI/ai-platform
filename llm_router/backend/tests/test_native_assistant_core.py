@@ -183,8 +183,124 @@ async def test_native_core_rejects_json_string_for_array_field_before_execution(
     ]
     result = next(item for item in events if item["type"] == "tool_result")
     assert result["ok"] is False
-    assert "invalid_tool_arguments" in result["content"]
-    assert "校验失败" in result["content"]
+    envelope = json.loads(result["content"])
+    assert envelope["status"] == "retryable_error"
+    assert envelope["error"]["code"] == "invalid_tool_arguments"
+    assert "校验失败" in envelope["error"]["messageZh"]
+    assert envelope["error"]["correctionFields"][0]["field"] == "rows"
+
+
+@pytest.mark.asyncio
+async def test_native_core_discovers_then_loads_and_calls_a_lazy_tool(monkeypatch):
+    provider_tools: list[list[str]] = []
+    turns = [
+        [
+            (
+                "tool_calls",
+                [
+                    {
+                        "id": "search-1",
+                        "name": "enterprise_capability_search",
+                        "arguments": '{"query":"根据订单数据生成 Excel"}',
+                    }
+                ],
+                None,
+            )
+        ],
+        [
+            (
+                "tool_calls",
+                [
+                    {
+                        "id": "file-1",
+                        "name": "report_create",
+                        "arguments": '{"rows":[]}',
+                    }
+                ],
+                None,
+            )
+        ],
+        [("text", "文件已经保存到工作空间。", None)],
+    ]
+    cursor = {"value": 0}
+
+    def stream_chat(*_args, **kwargs):
+        provider_tools.append(
+            [
+                item["function"]["name"]
+                for item in (kwargs.get("tools") or [])
+            ]
+        )
+        index = cursor["value"]
+        cursor["value"] += 1
+
+        async def events():
+            for event in turns[index]:
+                yield event
+
+        return events()
+
+    monkeypatch.setattr(native.model_gateway, "stream_chat", stream_chat)
+    executed: list[str] = []
+
+    async def execute(_state, call, _registry):
+        executed.append(call["name"])
+        payload = json.dumps(
+            {"status": "completed", "artifacts": [{"fileId": "f1", "versionId": "v1"}]},
+            ensure_ascii=False,
+        )
+        return {"role": "tool", "tool_call_id": call["id"], "content": payload}, payload, True
+
+    monkeypatch.setattr(native, "_execute_tool_call", execute)
+    request = _request(require_file=True)
+    report_spec = request["tools"][0]
+    request["tools"] = [
+        {
+            "name": "enterprise_capability_search",
+            "description": "搜索当前角色可用能力",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "minLength": 1},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 12},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        }
+    ]
+    request["lazy_tools"] = [
+        {
+            **report_spec,
+            "description": "根据订单数据生成 Excel 工作簿并保存到工作空间",
+            "search_terms": ["订单", "Excel", "表格"],
+        }
+    ]
+    prepared = _prepared()
+    prepared["registry"]["enterprise_capability_search"] = {
+        "kind": "assistant_capability_search"
+    }
+
+    events = [
+        event
+        async for event in native.stream_run(
+            request,
+            state=_state(),
+            prepared=prepared,
+            deps={"db": object()},
+        )
+    ]
+
+    assert executed == ["report_create"]
+    assert provider_tools[0] == ["enterprise_capability_search"]
+    assert "report_create" in provider_tools[1]
+    search_result = next(
+        item
+        for item in events
+        if item["type"] == "tool_result" and item["name"] == "enterprise_capability_search"
+    )
+    assert json.loads(search_result["content"])["data"]["activatedTools"] == ["report_create"]
+    assert next(item for item in events if item["type"] == "done")["text"] == "文件已经保存到工作空间。"
 
 
 @pytest.mark.asyncio
