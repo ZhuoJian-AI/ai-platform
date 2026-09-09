@@ -1,8 +1,8 @@
-# AI Platform agent guide
+# AI Platform 开发代理指南
 
-## Product definition
+## 产品定义
 
-AI Platform is the enterprise AI control plane:
+AI Platform 是企业 AI 控制平面：
 
 ```text
 企业身份与角色鉴权
@@ -12,26 +12,26 @@ AI Platform is the enterprise AI control plane:
 + 企业子系统接入与业务 Action 执行
 ```
 
-It is not a standalone business application, a RAG product, or a plugin marketplace. Business records, workflows, forms and business to-dos remain in registered subsystems.
+它不是独立业务系统、RAG 产品或插件市场。业务记录、业务流程、业务表单和业务待办均保留在已登记的子系统中。
 
-The retained product capabilities are:
+平台保留以下能力：
 
-- Enterprise, department, employee, role and permission administration.
-- Model-provider and deployment management for LLM, vision/OCR, image generation, ASR, TTS, video and future model capabilities.
-- One user-visible AI assistant backed by one Assistant Core, with global orchestration and current-page execution modes.
-- Workspaces, file versions, controlled document/media tools, previews, downloads and trustworthy Artifact delivery.
-- Subsystem Runtime, Manifest, Action, Event, SSO, Bridge and ECS Publisher integration.
-- Conversations, tasks, bounded execution events, usage accounting, audit, security and lightweight operational monitoring.
+- 企业、部门、员工、角色和权限管理。
+- LLM、视觉/OCR、生图、ASR、TTS、视频及未来模型能力的供应商和模型部署管理。
+- 用户只感知一个统一 AI 助手；后端使用同一个 Assistant Core，并在全局编排模式和当前页面执行模式之间切换。
+- 工作空间、文件版本、受控文档与媒体工具、预览、下载和可信 Artifact 交付。
+- 子系统 Runtime、Manifest、Action、Event、SSO、Bridge 和 ECS Publisher 接入。
+- 对话、任务、有限执行事件、用量核算、审计、安全和轻量运维监控。
 
-The employee product surface stays small: the unified assistant, workspaces, authorized enterprise applications, conversations/tasks, files and optional lightweight text-persona presets. A text persona is configuration on the shared Assistant Core, never a separate runtime or a private tool stack.
+员工端产品入口保持精简，只包含统一 AI 助手、工作空间、已授权企业应用、对话与任务、文件，以及可选的轻量文本角色预设。文本角色只是共享 Assistant Core 的配置，不得拥有独立运行时或私有工具栈。
 
-## Start here
+## 开始工作
 
-- Read this file, `TASKS.md`, and the latest entries in `docs/handoff/` before editing.
-- Use one Git worktree per agent. Never work directly on `main`.
-- Claim a task in `TASKS.md` and commit the claim before changing product code.
+- 修改前完整阅读本文件、`TASKS.md` 和 `docs/handoff/` 中的最新交接记录。
+- 每个代理使用独立 Git worktree，禁止直接在 `main` 上工作。
+- 修改产品代码前，先在 `TASKS.md` 认领任务并提交该认领。
 
-## Commands
+## 常用命令
 
 ```text
 make setup
@@ -44,39 +44,40 @@ cd frontend && npm run lint
 docker compose -f docker-compose.coolify.yml config
 ```
 
-Run focused backend tests from `llm_router/backend` with `pytest tests/<file>.py -q`.
-Run frontend contract checks with the relevant `npm run test:*` script.
+在 `llm_router/backend` 目录使用 `pytest tests/<file>.py -q` 运行聚焦后端测试。
+使用对应的 `npm run test:*` 脚本运行前端契约测试。
 
-## Architecture
+## 架构目录
 
-- `llm_router/backend/app/`: shared FastAPI backend, authentication, permissions, model routing, agents, workspaces and integrations.
-- `frontend/src/`: React/TypeScript administrator and employee interfaces.
-- `tool_executor/`: isolated execution service for fixed, reviewed platform file tools; it never runs user code.
-- `docker-compose.coolify.yml`: Registry-first staging deployment manifest.
-- `llm_router/backend/alembic/versions/`: the single database migration chain.
+- `llm_router/backend/app/`：共享 FastAPI 后端，包含身份认证、角色权限、模型路由、助手、工作空间和子系统集成。
+- `frontend/src/`：React/TypeScript 管理员端和员工端。
+- `tool_executor/`：隔离执行已经审核的平台固定文件工具，禁止运行用户代码。
+- `docker-compose.coolify.yml`：Registry-first 的 staging 部署清单。
+- `llm_router/backend/alembic/versions/`：唯一数据库迁移链。
 
-## Authorization source of truth
+## 权限唯一事实来源
 
-- Authentication establishes which employee is present. Authorization is derived only from that employee's active role assignments and the permissions carried by those roles.
-- An employee may hold multiple roles; effective page, Action and workspace permissions are the union of those roles. Action permission and its data scope must remain paired to the role that grants them so scopes from different roles cannot be recombined into a wider privilege.
-- Department membership is organizational metadata. It must not implicitly grant SaaS pages, subsystem pages, Actions, business data or department-workspace access.
-- Do not implement direct per-user business grants, department-based authorization fallbacks or special username checks. User identity is used for login/session binding, audit attribution, ownership and the employee's personal workspace, not as a substitute permission source.
-- Enterprise administrator `*` and platform-super-administrator authority are role permissions, not hidden user or department exceptions. The permission UI must display their computed effective role permissions accurately.
-- SaaS endpoints, workspace APIs, Assistant tools, Manifest Action selection, SSO claims, Bridge context and subsystem authorization must all consume the same role-derived permission result. A subsystem must not infer access from department or user identity.
-- Role assignment or role-permission changes must advance `auth_epoch`; the next request must recompute effective permissions and reject stale claims or cached page state.
+- 身份认证只确定当前员工是谁。完成身份认证后，所有访问鉴权和授权只能来自该员工当前绑定的有效角色及角色所携带的权限。
+- 一个员工可以绑定多个角色；页面、Action 和工作空间的有效权限取多个角色的并集。Action 权限与其数据范围必须保持在授予它的同一角色内，禁止把角色甲的宽数据范围与角色乙的操作权限重新拼接成更大的权限。
+- 部门归属只是组织结构属性，不得自动授予 SaaS 页面、子系统页面、Action、业务数据或部门工作空间权限。
+- 禁止直接给用户授予业务权限，禁止使用部门兜底授权，禁止按用户名写特殊判断。用户身份只用于登录与会话绑定、审计归属和资源所有权，不得替代角色权限。
+- 个人工作空间通过用户身份确定资源归属，但访问能力仍必须由平台基线角色或系统角色授予，不得使用用户名特判。
+- 企业管理员的 `*` 与平台超级管理员权限也必须表达为角色权限，不能成为隐藏的用户或部门例外。权限界面必须准确展示根据角色计算出的最终有效权限。
+- SaaS 接口、工作空间接口、Assistant 工具、Manifest Action 选择、SSO claims、Bridge 上下文和子系统鉴权必须使用同一个角色权限计算结果。子系统不得根据部门或用户身份自行推断权限。
+- 员工角色绑定或角色权限变化时必须递增 `auth_epoch`；下一次请求必须重新计算有效权限，并拒绝旧 claims 与旧页面缓存继续访问。
 
-## Assistant execution model
+## 助手执行模型
 
-The LLM is the reasoning and orchestration brain. Keep the system prompt short: understand the user's goal from the current context, use tools for real data or effects, correct tool errors, and never claim success without a verified result. Do not encode every workflow, navigation decision or presentation rule in system-prompt prose, and do not require a perfect, oversized intent object before the model may use an authorized tool.
+LLM 是理解、推理和工具编排的主脑。系统提示词保持简短，只要求：结合当前上下文理解用户目标；需要真实数据或产生真实效果时调用工具；根据工具错误自行修正；没有可验证结果时不得宣称成功。禁止把每条工作流、导航判断和展示规则都写成长篇系统提示词，也禁止要求模型先生成一个庞大且完全正确的意图对象，才允许它使用已授权工具。
 
-The user experiences one continuous assistant and one conversation. The backend switches between two modes of the same Assistant Core:
+用户始终感知同一个连续助手和同一段对话。后端在同一个 Assistant Core 的两种模式之间切换：
 
-- **Global orchestration mode（总业务 AI）** knows the employee's role-authorized enterprise capability directory, uses shared platform tools, locates the correct application/module/page and hands off the unfinished goal. It does not preload every subsystem CRUD tool.
-- **Current-page execution mode（页面业务 AI）** receives the verified application/module/page/object context and loads only that page's role-authorized Manifest Actions plus the needed shared platform tools.
+- **全局编排模式（总业务 AI）**：了解员工角色已授权的企业能力目录，使用平台公共工具，定位正确的应用、模块和页面，并接力尚未完成的目标。禁止预先加载所有子系统的全部 CRUD 工具。
+- **当前页面执行模式（页面业务 AI）**：接收已经验证的应用、模块、页面和业务对象上下文，只加载当前员工角色在该页面获权的 Manifest Actions，以及本轮确实需要的平台公共工具。
 
-The modes share the Task/conversation, concise history, recognized entities, referenced files, Artifacts, completed steps and remaining goal. They do not share an unbounded prompt or every tool. A handoff must preserve the user's original request so the page assistant never asks the user to repeat it.
+两种模式共享 Task/对话、精简历史、已识别业务实体、引用文件、Artifacts、已完成步骤和剩余目标；不共享无限增长的提示词，也不共享全部工具。接力时必须保留用户原始需求，页面业务 AI 不得要求用户重新描述同一任务。
 
-The required tool loop is:
+必须使用以下工具循环：
 
 ```text
 用户自然表达
@@ -90,63 +91,63 @@ The required tool loop is:
 → 最终回答用户
 ```
 
-- Allow a bounded reasoning/tool loop and one or two corrective retries for protocol, parameter and tool errors. Return actionable structured errors to the LLM instead of immediately ending the turn.
-- Use current page context, conversation history and the authorized tool set to resolve ordinary business shorthand. Ask the user only when a required business fact is genuinely missing or multiple materially different choices remain.
-- A model/protocol validation failure is a platform failure, not evidence that the user's request is ambiguous. Never translate it into a generic clarification message.
-- Keep strict enforcement at the execution boundary: identity and permission intersection, application/module/page/Action target, closed input Schema, confirmation for side effects, idempotency, output validation and trustworthy Artifact delivery.
-- The LLM may reason, select, retry and compose tools, but it may never invent permissions, credentials, target URLs, successful tool results or completed files.
+- 协议、参数或工具错误允许在有限推理与工具循环中自动修正一至两次。错误必须以可操作的结构化信息返回 LLM，不能立即终止整轮任务。
+- 使用当前页面上下文、对话历史和已授权工具集合消除常见业务简称的歧义。只有确实缺少必需业务事实，或者仍存在多个实质不同的选择时，才向用户追问。
+- 模型或协议校验失败属于平台故障，不代表用户表达含糊。禁止把平台故障改写成笼统的“请补充业务目标”。
+- 严格校验只能放在执行边界：身份与角色权限交集、应用/模块/页面/Action 目标、封闭输入 Schema、副作用确认、幂等、输出校验和可信 Artifact 交付。
+- LLM 可以推理、选择、重试和组合工具，但不得编造权限、凭证、目标 URL、成功工具结果或已经完成的文件。
 
-Navigation is a tool, not a mandatory step. Complete safe background work in the conversation and offer an “打开查看” action; navigate when the user requests it or when page interaction/visual confirmation is genuinely required. Show verifiable progress, confirmation cards, before/after values, tool receipts and Artifacts to the user, but never expose private chain-of-thought.
+导航是一种工具，不是每轮必经步骤。能够安全后台完成的工作直接在对话中完成，并提供“打开查看”；用户明确要求跳转，或确实需要页面交互、视觉确认时才导航。向用户展示可验证的进度、确认卡片、修改前后值、工具回执和 Artifacts，但不得展示模型私有思维链。
 
-## Model and tool capabilities
+## 模型与工具能力
 
-- The LLM remains the main brain. Vision/OCR, image generation, ASR, TTS, video and other non-LLM model deployments are exposed to it as narrowly scoped, audited tools.
-- Use one capability registry shared by the global assistant and page assistant. Load only the capability group needed for the current turn instead of exposing a permanent large tool list.
-- Shared platform tools include workspace search/read/versioned write, controlled Excel/Word/PPT/PDF/Markdown/TXT processing, preview/download, Web, media understanding/generation and Artifact delivery.
-- Business tools come only from the current role-authorized Manifest Actions. Platform tools and subsystem Actions remain distinguishable in provenance and auditing.
-- Workspace files may be inspected directly through file tools when selected or referenced. Do not rebuild this as RAG or silently index all workspace content.
+- LLM 始终是主脑。视觉/OCR、生图、ASR、TTS、视频及其他非 LLM 模型部署，都封装为范围明确、可审计的工具供 LLM 调用。
+- 总业务 AI 与页面业务 AI 共享唯一能力注册表。每轮只加载当前任务需要的能力组，禁止永久暴露一个庞大的工具列表。
+- 平台公共工具包括工作空间搜索、读取、版本化写入，受控 Excel/Word/PPT/PDF/Markdown/TXT 处理，预览与下载，Web，媒体理解与生成，以及 Artifact 交付。
+- 业务工具只能来自当前员工角色获权的 Manifest Actions。平台工具与子系统 Actions 必须在来源记录和审计中保持可区分。
+- 用户选择或引用工作空间文件后，AI 可以通过文件工具直接检查内容。禁止把这条链路重新建设为 RAG，也禁止静默索引整个工作空间。
 
-## Subsystem integration boundary
+## 子系统接入边界
 
-- A subsystem owns its business UI, records, rules, forms, workflows, attachments, page semantics and real CRUD implementation.
-- SaaS owns identity, role-derived authorization, model providers, the LLM brain, tool orchestration, confirmation UI, navigation/handoff, shared model and file capabilities, workspaces, AI-generated Artifacts, audit and usage accounting.
-- `Manifest.aiSemantics` supplies a compact application/module/page capability directory for discovery and navigation. Exact execution comes from closed Action schemas and verified Action results, not from descriptions alone.
-- The external `aifabei-subsystem-builder` Codex Skill defines this integration contract. It is outside this repository and must never be conflated with the retired in-product user Skill feature.
+- 子系统负责业务界面、业务记录、业务规则、表单、流程、业务附件、页面语义和真实 CRUD 实现。
+- SaaS 负责身份、基于角色的授权、模型供应商、LLM 主脑、工具编排、确认界面、导航与接力、公共模型与文件能力、工作空间、AI 生成的 Artifacts、审计和用量核算。
+- `Manifest.aiSemantics` 提供精简的应用、模块和页面能力目录，用于发现与导航。精确执行必须依赖封闭 Action Schema 和经过验证的 Action 结果，不能只依赖文字描述。
+- 外部 `aifabei-subsystem-builder` Codex Skill 定义子系统接入契约。它不属于本仓库，不得与已经退役的平台内“用户 Skill”功能混为一谈。
 
-## Retired product paths
+## 已退役产品链路
 
-Do not restore, retain through compatibility aliases, or silently reintroduce these removed product paths without an explicit new product decision:
+没有新的明确产品决策时，禁止恢复、通过兼容别名保留或悄悄重新引入以下已删除产品链路：
 
-- Knowledge-base/RAG products, vector indexing, embedding and reranker model capabilities.
-- User Skill upload, installation and execution, arbitrary-code Skill Runner and per-agent Skill binding.
-- DSH Runtime, market, external extensions and extension builder.
-- Connector, Tool Endpoint, Data Interface/Data System and application tool-binding abstractions superseded by Manifest Actions.
-- Ontology, Judge, MCP/OAuth Skill Pack, Team and ScopeManager products.
-- Legacy module publisher and online Office collaborative editing.
-- Separate personal-assistant and business-assistant execution engines. They are modes of the one Assistant Core, not independent products.
+- 知识库/RAG 产品、向量索引、Embedding 和 Reranker 模型能力。
+- 用户 Skill 上传、安装与执行，任意代码 Skill Runner，以及智能体专属 Skill 绑定。
+- DSH Runtime、市场、外部扩展和扩展构建器。
+- 已被 Manifest Actions 取代的 Connector、Tool Endpoint、Data Interface/Data System 和应用工具绑定抽象。
+- Ontology、Judge、MCP/OAuth Skill Pack、Team 和 ScopeManager 产品。
+- 旧模块发布器和在线 Office 协作编辑。
+- 两套独立的个人助手与业务助手执行引擎。它们只能是同一个 Assistant Core 的两种模式，不能成为两个独立产品。
 
-## Hard boundaries
+## 硬边界
 
-- SaaS owns identity, role-derived authorization, model routing, workspaces and audited integration calls.
-- Business records, workflows and business to-dos remain in registered subsystems.
-- Never expose secrets, database ports, Docker APIs or unrestricted server paths.
-- Permission changes require denial tests as well as happy-path tests.
-- Database changes use expand/migrate/contract sequencing; verify the previous image remains compatible during rollout.
-- Do not edit image digests until the source commit is tested and the registry has returned the new digest.
-- Do not commit `.env`, tokens, keys, database backups, generated artifacts or local tool settings.
+- SaaS 负责身份、基于角色的授权、模型路由、工作空间和可审计的集成调用。
+- 业务记录、业务流程和业务待办保留在已登记子系统中。
+- 禁止暴露密钥、数据库端口、Docker API 或不受限制的服务器路径。
+- 权限变更必须同时测试允许路径和拒绝路径。
+- 数据库变更遵循 expand/migrate/contract 顺序；发布过程中必须验证上一版镜像仍然兼容。
+- 源码提交完成测试且 Registry 返回新 digest 前，禁止修改部署镜像 digest。
+- 禁止提交 `.env`、Token、密钥、数据库备份、生成产物或本地工具配置。
 
-## Standard change flow
+## 标准变更流程
 
-1. Fetch the latest `origin/main` and create a dedicated branch/worktree.
-2. Inspect the affected call chain and migrations before editing.
-3. Make the smallest coherent change and add focused tests.
-4. Run `git diff --check`, focused tests, backend lint and the frontend build as applicable.
-5. Write one handoff file under `docs/handoff/` and remove the completed task block from `TASKS.md`.
-6. Stage explicit files, review the staged diff, and commit with a conventional message plus `Co-Authored-By: Codex <codex@openai.com>`.
-7. Rebase or merge the latest `origin/main` without force-pushing, rerun tests, then publish.
+1. 获取最新 `origin/main`，创建专用分支和 worktree。
+2. 修改前检查受影响的调用链和数据库迁移。
+3. 完成最小且完整的一组修改，并增加聚焦测试。
+4. 按影响范围运行 `git diff --check`、聚焦测试、后端 lint 和前端构建。
+5. 在 `docs/handoff/` 写入一份交接文件，并从 `TASKS.md` 删除已经完成的任务块。
+6. 只暂存明确文件，审查暂存差异，再使用约定式提交信息并添加 `Co-Authored-By: Codex <codex@openai.com>`。
+7. 禁止强推；重新变基或合并最新 `origin/main`，重跑测试后再发布。
 
-## Collaboration
+## 并行协作
 
-- Migration chain, authentication, permissions and CI are single-flight areas owned by `@ZhuoJian-AI/developers`.
-- Preserve unrelated user changes. Never stash, discard, reset or clean another contributor's work.
-- A handoff must record the task, changed behavior, exact verification commands/results, remaining work, risks and decisions.
+- 数据库迁移链、身份认证、角色权限和 CI 属于 `@ZhuoJian-AI/developers` 管理的单航道区域，同一时刻只能由一个任务修改。
+- 保留所有无关用户修改，禁止 stash、丢弃、reset 或 clean 其他贡献者的工作。
+- 交接记录必须包含任务范围、行为变化、准确验证命令与结果、剩余工作、风险和已作决策。

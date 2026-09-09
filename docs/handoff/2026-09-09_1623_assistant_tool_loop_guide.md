@@ -1,22 +1,22 @@
-# Assistant tool-loop guide handoff
+# 助手工具循环规则交接记录
 
-## Scope
+## 范围
 
-- Branch: `docs/assistant-tool-loop-20260909`
-- Base: `7658fb1`
-- Documentation-only change; no product code, database, Skill, deployment or server state changed.
+- 分支：`docs/assistant-tool-loop-20260909`
+- 基线提交：`7658fb1`
+- 本次只修改项目说明文件；没有修改产品代码、数据库、Skill、部署或服务器状态。
 
-## Result
+## 结果
 
-- Added the required LLM-led assistant execution loop to the project `AGENTS.md`.
-- Defined the current slim product boundary, one user-visible assistant with global-orchestration and page-execution modes, the model/tool capability registry and subsystem/SaaS ownership split.
-- Established role assignments as the sole business-authorization source; departments and user identity cannot create implicit business access.
-- Recorded RAG, embedding/reranking, in-product user Skills, DSH and the other retired product paths as features that must not be silently restored.
-- Clarified that understanding, tool selection and bounded correction belong to the LLM loop.
-- Clarified that identity, authorization, Action targets, schemas, side effects, idempotency and Artifact truth remain strict SaaS execution boundaries.
-- Explicitly prohibited presenting model/protocol validation failures as user ambiguity.
+- 已在项目 `AGENTS.md` 中写明由 LLM 主导的助手工具执行循环。
+- 已定义当前精简产品边界、用户只感知一个统一助手、后端全局编排与当前页面执行两种模式、模型与工具能力注册表，以及子系统与 SaaS 的责任边界。
+- 已明确员工绑定角色，业务授权只以角色权限为依据；部门和用户身份都不能产生隐式业务权限。
+- 已记录 RAG、Embedding/Reranker、平台内用户 Skill、DSH 和其他退役产品链路，禁止在没有新产品决策时悄悄恢复。
+- 已明确理解需求、选择工具和有限次数的错误修正属于 LLM 工具循环。
+- 已明确身份、角色权限、Action 目标、Schema、副作用、幂等和 Artifact 真实性仍由 SaaS 在执行边界严格校验。
+- 已明确禁止把模型或协议校验失败解释成用户表达含糊。
 
-## Verification
+## 验证
 
-- `git diff --check`: passed.
-- Reviewed the complete `AGENTS.md` diff.
+- `git diff --check`：通过。
+- 已完整审查 `AGENTS.md` 差异。
