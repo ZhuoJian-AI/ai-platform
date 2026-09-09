@@ -38,6 +38,62 @@ def upgrade() -> None:
         """
     )
 
+    # Text personas no longer follow mutable RBAC role membership.  Preserve
+    # every historical prompt without making it visible to a wider audience:
+    # a role-scoped persona becomes personal to its valid creator.  Records
+    # without a valid creator remain available to administrators for recovery,
+    # but are disabled and moved to organization scope instead of being exposed.
+    # Resolve a possible slug collision before changing the unique scope key.
+    op.execute(
+        """
+        UPDATE agents AS legacy
+        SET slug = LEFT(legacy.slug, 78)
+            || '-legacy-'
+            || LEFT(REPLACE(legacy.id::text, '-', ''), 8)
+        WHERE legacy.scope_type = 'role'
+          AND legacy.created_by IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM users AS creator
+              WHERE creator.id::text = legacy.created_by
+                AND creator.organization_id = legacy.organization_id
+                AND creator.deleted_at IS NULL
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM agents AS existing
+              WHERE existing.id <> legacy.id
+                AND existing.organization_id = legacy.organization_id
+                AND existing.scope_type = 'user'
+                AND existing.scope_id = legacy.created_by
+                AND existing.slug = legacy.slug
+          )
+        """
+    )
+    op.execute(
+        """
+        UPDATE agents AS legacy
+        SET scope_type = 'user', scope_id = legacy.created_by
+        WHERE legacy.scope_type = 'role'
+          AND legacy.created_by IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM users AS creator
+              WHERE creator.id::text = legacy.created_by
+                AND creator.organization_id = legacy.organization_id
+                AND creator.deleted_at IS NULL
+          )
+        """
+    )
+    op.execute(
+        """
+        UPDATE agents
+        SET scope_type = 'organization', scope_id = NULL, is_active = FALSE
+        WHERE scope_type NOT IN ('organization', 'department', 'user')
+           OR (scope_type = 'organization' AND scope_id IS NOT NULL)
+           OR (scope_type IN ('department', 'user') AND scope_id IS NULL)
+        """
+    )
     # Execution rows go first. The remaining tables have a historical cycle
     # between skill_folders.active_version_id and skill_versions.
     op.execute("DROP TABLE IF EXISTS skill_executions CASCADE")
@@ -73,6 +129,4 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    raise RuntimeError(
-        "0076 已永久退役知识库和用户 Skill；请恢复迁移前数据库快照与匹配镜像"
-    )
+    raise RuntimeError("0076 已永久退役知识库和用户 Skill；请恢复迁移前数据库快照与匹配镜像")

@@ -23,9 +23,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 VERSIONS_DIR = BACKEND_DIR / "alembic" / "versions"
 BASELINE_MIGRATION = VERSIONS_DIR / "0075_retired_schema_contract.py"
 BASELINE_SQL = VERSIONS_DIR / "0075_schema_baseline.sql"
-DEFAULT_TEST_DATABASE_URL = (
-    "postgresql+asyncpg://ai_infra:ai_infra@127.0.0.1:5434/ai_infra_test"
-)
+DEFAULT_TEST_DATABASE_URL = "postgresql+asyncpg://ai_infra:ai_infra@127.0.0.1:5434/ai_infra_test"
 EXPECTED_SQL_SHA256 = "e2a69cdbed3cc7ab3b8dcb2cc32003c5a947e4a194263179ae9182ecbbea39f6"
 EXPECTED_SCHEMA_SHA256 = "cc0e33965fe10b6029e0356bd76401b62154e2fb8eb822262bbd3d07a6354cb1"
 EXPECTED_SCHEMA_CATEGORIES = {
@@ -66,20 +64,14 @@ SNAPSHOT = _load_snapshot_script()
 
 def _configured_database_url() -> tuple[URL, bool]:
     explicit = bool(os.getenv("MIGRATION_TEST_DATABASE_URL") or os.getenv("TEST_DATABASE_URL"))
-    raw_url = (
-        os.getenv("MIGRATION_TEST_DATABASE_URL")
-        or os.getenv("TEST_DATABASE_URL")
-        or DEFAULT_TEST_DATABASE_URL
-    )
+    raw_url = os.getenv("MIGRATION_TEST_DATABASE_URL") or os.getenv("TEST_DATABASE_URL") or DEFAULT_TEST_DATABASE_URL
     url = make_url(raw_url).set(drivername="postgresql+asyncpg")
     if url.get_backend_name() != "postgresql" or not url.database:
         pytest.fail("迁移回归测试只允许使用 PostgreSQL 测试数据库")
     if "test" not in url.database.lower():
         pytest.fail("迁移回归数据库名称必须包含 test，避免误连接业务数据库")
     host = (url.host or "").strip("[]").lower()
-    if host not in {"localhost", "127.0.0.1", "::1"} and os.getenv(
-        "MIGRATION_TEST_ALLOW_REMOTE"
-    ) != "1":
+    if host not in {"localhost", "127.0.0.1", "::1"} and os.getenv("MIGRATION_TEST_ALLOW_REMOTE") != "1":
         pytest.fail("远端迁移测试必须显式设置 MIGRATION_TEST_ALLOW_REMOTE=1")
     return url, explicit
 
@@ -133,9 +125,7 @@ async def migration_database_url() -> AsyncIterator[str]:
 
     quoted_database = '"' + database_name.replace('"', '""') + '"'
     try:
-        await maintenance.execute(
-            f"CREATE DATABASE {quoted_database} TEMPLATE template0 ENCODING 'UTF8'"
-        )
+        await maintenance.execute(f"CREATE DATABASE {quoted_database} TEMPLATE template0 ENCODING 'UTF8'")
     finally:
         await maintenance.close()
 
@@ -149,8 +139,7 @@ async def migration_database_url() -> AsyncIterator[str]:
         )
         try:
             await maintenance.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = $1 AND pid <> pg_backend_pid()",
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
                 database_name,
             )
             await maintenance.execute(f"DROP DATABASE IF EXISTS {quoted_database}")
@@ -164,7 +153,7 @@ def test_compact_baseline_and_retirement_contract_are_the_only_revisions() -> No
         "0076_retire_rag_and_user_skills.py",
     ]
     migration_source = BASELINE_MIGRATION.read_text(encoding="utf-8")
-    assert 'down_revision = None' in migration_source
+    assert "down_revision = None" in migration_source
     assert "Base.metadata" not in migration_source
     assert "create_all" not in migration_source
     assert hashlib.sha256(BASELINE_SQL.read_bytes()).hexdigest() == EXPECTED_SQL_SHA256
@@ -184,58 +173,67 @@ async def test_empty_postgresql_installs_exact_current_schema_and_remains_noop(
         assert await connection.fetchval("SELECT version_num FROM alembic_version") == (
             "0076_retire_rag_and_user_skills"
         )
-        assert await connection.fetchval(
-            "SELECT COUNT(*) FROM pg_extension WHERE extname = 'vector'"
-        ) == 0
-        assert await connection.fetchval(
-            "SELECT COUNT(*) FROM information_schema.tables "
-            "WHERE table_schema = 'public' AND table_name = ANY($1::text[])",
-            [
-                "rag_collections",
-                "rag_folders",
-                "rag_documents",
-                "rag_chunks",
-                "skill_folders",
-                "skill_files",
-                "skill_versions",
-                "skill_executions",
-            ],
-        ) == 0
-        assert await connection.fetchval(
-            "SELECT COUNT(*) FROM information_schema.columns "
-            "WHERE table_schema = 'public' AND "
-            "((table_name = 'agents' AND column_name = ANY($1::text[])) OR "
-            " (table_name = 'memories' AND column_name = 'embedding'))",
-            [
-                "model_alias",
-                "memory_config",
-                "workspace_id",
-                "rag_collection_ids",
-                "skill_ids",
-                "application_id",
-                "module_key",
-                "page_key",
-                "temperature",
-                "max_tokens",
-            ],
-        ) == 0
-        assert await connection.fetchval(
-            "SELECT to_regclass('public.ai_quota_monthly_rollups')::text"
-        ) == "ai_quota_monthly_rollups"
-        assert await connection.fetchval(
-            "SELECT COUNT(*) FROM pg_proc WHERE proname IN "
-            "('reject_ai_quota_event_mutation', 'reject_new_usd_budget_cap')"
-        ) == 2
-        assert await connection.fetchval(
-            "SELECT COUNT(*) FROM pg_trigger "
-            "WHERE tgname = 'trg_ai_quota_events_append_only' AND NOT tgisinternal"
-        ) == 1
+        assert await connection.fetchval("SELECT COUNT(*) FROM pg_extension WHERE extname = 'vector'") == 0
+        assert (
+            await connection.fetchval(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name = ANY($1::text[])",
+                [
+                    "rag_collections",
+                    "rag_folders",
+                    "rag_documents",
+                    "rag_chunks",
+                    "skill_folders",
+                    "skill_files",
+                    "skill_versions",
+                    "skill_executions",
+                ],
+            )
+            == 0
+        )
+        assert (
+            await connection.fetchval(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND "
+                "((table_name = 'agents' AND column_name = ANY($1::text[])) OR "
+                " (table_name = 'memories' AND column_name = 'embedding'))",
+                [
+                    "model_alias",
+                    "memory_config",
+                    "workspace_id",
+                    "rag_collection_ids",
+                    "skill_ids",
+                    "application_id",
+                    "module_key",
+                    "page_key",
+                    "temperature",
+                    "max_tokens",
+                ],
+            )
+            == 0
+        )
+        assert (
+            await connection.fetchval("SELECT to_regclass('public.ai_quota_monthly_rollups')::text")
+            == "ai_quota_monthly_rollups"
+        )
+        assert (
+            await connection.fetchval(
+                "SELECT COUNT(*) FROM pg_proc WHERE proname IN "
+                "('reject_ai_quota_event_mutation', 'reject_new_usd_budget_cap')"
+            )
+            == 2
+        )
+        assert (
+            await connection.fetchval(
+                "SELECT COUNT(*) FROM pg_trigger WHERE tgname = 'trg_ai_quota_events_append_only' AND NOT tgisinternal"
+            )
+            == 1
+        )
 
         fingerprint = await SNAPSHOT._schema_fingerprint(connection, "public")
         assert fingerprint["sha256"] == EXPECTED_SCHEMA_SHA256
         assert {
-            name: (details["count"], details["sha256"])
-            for name, details in fingerprint["categories"].items()
+            name: (details["count"], details["sha256"]) for name, details in fingerprint["categories"].items()
         } == EXPECTED_SCHEMA_CATEGORIES
         relation_storage_before = await connection.fetch(
             """
@@ -266,12 +264,107 @@ async def test_empty_postgresql_installs_exact_current_schema_and_remains_noop(
             """
         )
         assert relation_storage_after == relation_storage_before
-        assert (await SNAPSHOT._schema_fingerprint(connection, "public"))["sha256"] == (
-            EXPECTED_SCHEMA_SHA256
-        )
+        assert (await SNAPSHOT._schema_fingerprint(connection, "public"))["sha256"] == (EXPECTED_SCHEMA_SHA256)
     finally:
         await connection.close()
 
     checked = _invoke_alembic(migration_database_url, "check")
     assert checked.returncode == 0, f"{checked.stdout}\n{checked.stderr}"
     assert "No new upgrade operations detected" in f"{checked.stdout}\n{checked.stderr}"
+
+
+@pytest.mark.asyncio
+async def test_role_scoped_personas_become_private_without_losing_prompts(
+    migration_database_url: str,
+) -> None:
+    installed = _invoke_alembic(migration_database_url, "upgrade", "0075_retired_schema_contract")
+    assert installed.returncode == 0, f"{installed.stdout}\n{installed.stderr}"
+
+    raw_url = make_url(migration_database_url)
+    connect_kwargs = _asyncpg_connect_kwargs(raw_url, database=raw_url.database or "")
+    connection = await asyncpg.connect(**connect_kwargs, timeout=5)
+    organization_id = uuid4()
+    creator_id = uuid4()
+    role_id = uuid4()
+    private_agent_id = uuid4()
+    orphan_agent_id = uuid4()
+    existing_agent_id = uuid4()
+    try:
+        await connection.execute(
+            """
+            INSERT INTO organizations (id, name, slug, settings)
+            VALUES ($1, '迁移测试企业', $2, '{}'::jsonb)
+            """,
+            organization_id,
+            f"migration-{organization_id.hex[:8]}",
+        )
+        await connection.execute(
+            """
+            INSERT INTO users (id, organization_id, username, is_active)
+            VALUES ($1, $2, 'legacy-creator', TRUE)
+            """,
+            creator_id,
+            organization_id,
+        )
+        await connection.execute(
+            """
+            INSERT INTO roles (id, organization_id, name, code, data_scope)
+            VALUES ($1, $2, '旧角色', 'legacy-role', 'self')
+            """,
+            role_id,
+            organization_id,
+        )
+        await connection.execute(
+            """
+            INSERT INTO agents (
+                id, organization_id, name, slug, system_prompt, scope_type,
+                scope_id, created_by, is_active
+            ) VALUES
+                ($1, $2, '已有个人角色', 'shared-name', '已有提示词', 'user', $3, $3, TRUE),
+                ($4, $2, '旧角色智能体', 'shared-name', '必须保留的提示词', 'role', $5, $3, TRUE),
+                ($6, $2, '无创建者智能体', 'orphan', '孤儿提示词', 'role', $5, NULL, TRUE)
+            """,
+            existing_agent_id,
+            organization_id,
+            str(creator_id),
+            private_agent_id,
+            str(role_id),
+            orphan_agent_id,
+        )
+    finally:
+        await connection.close()
+
+    upgraded = _invoke_alembic(migration_database_url, "upgrade", "head")
+    assert upgraded.returncode == 0, f"{upgraded.stdout}\n{upgraded.stderr}"
+
+    connection = await asyncpg.connect(**connect_kwargs, timeout=5)
+    try:
+        private_agent = await connection.fetchrow(
+            """
+            SELECT scope_type, scope_id, slug, system_prompt, is_active
+            FROM agents WHERE id = $1
+            """,
+            private_agent_id,
+        )
+        assert private_agent is not None
+        assert private_agent["scope_type"] == "user"
+        assert private_agent["scope_id"] == str(creator_id)
+        assert private_agent["slug"].startswith("shared-name-legacy-")
+        assert private_agent["system_prompt"] == "必须保留的提示词"
+        assert private_agent["is_active"] is True
+
+        orphan_agent = await connection.fetchrow(
+            """
+            SELECT scope_type, scope_id, system_prompt, is_active
+            FROM agents WHERE id = $1
+            """,
+            orphan_agent_id,
+        )
+        assert orphan_agent is not None
+        assert orphan_agent["scope_type"] == "organization"
+        assert orphan_agent["scope_id"] is None
+        assert orphan_agent["system_prompt"] == "孤儿提示词"
+        assert orphan_agent["is_active"] is False
+        assert await connection.fetchval("SELECT COUNT(*) FROM agents WHERE scope_type = 'role'") == 0
+    finally:
+        await connection.close()

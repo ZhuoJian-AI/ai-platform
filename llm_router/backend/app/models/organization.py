@@ -3,7 +3,7 @@
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -12,6 +12,12 @@ from app.models.base import Base, SoftDeleteMixin, TimestampMixin, UUIDPrimaryKe
 
 class Organization(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     __tablename__ = "organizations"
+    __table_args__ = (
+        CheckConstraint(
+            "budget_cap_credits IS NULL OR budget_cap_credits >= 0",
+            name="ck_organizations_budget_cap_credits_nonnegative",
+        ),
+    )
 
     # name / slug 在平台内对未软删组织唯一；partial unique index 由迁移 0028 创建，
     # 软删组织不占用槽位。这里不再声明 unique=True（会生成非 partial 约束）。
