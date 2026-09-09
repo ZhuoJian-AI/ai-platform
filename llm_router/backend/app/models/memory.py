@@ -5,7 +5,6 @@
 由终端智能体经 ``extract_memory`` 节点自行沉淀。运行时 ``load_memory`` 按 4 级聚合注入。
 """
 
-from pgvector.sqlalchemy import Vector
 from sqlalchemy import ForeignKey, Index, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -36,5 +35,3 @@ class Memory(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
-    # 维度无关向量列（语义召回；v1 按 recency 载入，向量留作扩展）
-    embedding: Mapped[list | None] = mapped_column(Vector(None), nullable=True)

@@ -471,6 +471,5 @@ class EnterpriseApplicationOverviewRead(BaseModel):
     operation_counts: dict[str, int]
     active_capability_count: int
     direct_capability_count: int
-    skill_binding_count: int
     capabilities: list[EnterpriseApplicationCapabilityRead] = Field(default_factory=list)
     recent_calls: list[EnterpriseApplicationRecentCallRead] = Field(default_factory=list)

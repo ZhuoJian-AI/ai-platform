@@ -57,13 +57,8 @@ def test_read_only_and_ordinary_write_tools_never_ask():
         assert "approval" not in _spec(name), name
     assert "approval" not in _spec("write_memory", {"kind": "memory", "operation": "write"})
     assert "approval" not in _spec("read_memory", {"kind": "memory", "operation": "read"})
-    assert "approval" not in _spec("rag_search", {"kind": "rag_search", "collection_ids": []})
-    assert "approval" not in _spec("load_skill", {"kind": "load_skill"})
-    assert "approval" not in _spec("bank_flow", {"kind": "code"})
     for operation in ("query", "export"):
         assert "approval" not in _spec(f"crm_{operation}", _action(operation)), operation
-    # A read tool that happens to carry a manifest risk flag is still never gated.
-    assert "approval" not in _spec("rag_search", {"kind": "rag_search", "risk_level": "high"})
 
 
 def test_builtin_defs_only_gate_the_hard_delete():

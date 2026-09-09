@@ -1,7 +1,7 @@
 """Task & TaskMessage ORM models — 终端用户的通用智能体任务线程。
 
-一个 Task = 用户在终端创建的一次任务/对话线程，携带按任务装配的资源配置（workspace /
-skills / rag）。TaskMessage 为线程内逐轮消息（user/assistant/tool），
+一个 Task = 用户在终端创建的一次任务/对话线程，携带当前模型、工作空间与可选文本角色配置。
+TaskMessage 为线程内逐轮消息（user/assistant/tool），
 供 ``load_memory`` 载入本任务对话历史、前端渲染对话流。每次执行同时落一条 ``AgentRun``
 （agent_id 为空、task_id 非空）供监控台复用。
 """
@@ -30,8 +30,7 @@ class Task(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     message: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    # 任务装配配置：{workspace_id, skill_ids[], rag_collection_ids[],
-    #   model_alias}；空数组 = 该维度按用户权限自动匹配全集。
+    # 任务装配配置：{workspace_id, model_alias, template_agent_id, exec_mode}。
     #   长期记忆不在此配置：运行时按用户权限自动载入 4 级记忆全集。
     config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")  # active / archived

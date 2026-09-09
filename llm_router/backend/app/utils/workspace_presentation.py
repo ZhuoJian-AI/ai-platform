@@ -14,7 +14,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 MANAGED_OUTPUT_ROOTS = {
-    "技能输出": "skill",
+    "技能输出": "legacy_output",
     "平台工具输出": "platform_tool",
 }
 
@@ -72,9 +72,6 @@ def presentation_dict(
         "source_kind": source_kind,
         "source_task_id": task_id,
         "source_task_title": meta.get("source_task_title"),
-        "skill_id": meta.get("skill_id"),
-        "skill_display_name": meta.get("skill_display_name"),
-        "skill_version": meta.get("skill_version"),
         "created_at": created,
     }
 
@@ -91,8 +88,7 @@ def enrich_metadata(
     presentation = presentation_dict(path, merged, created_at=created_at)
     merged["display_name"] = presentation["display_name"]
     for key in (
-        "source_kind", "source_task_id", "source_task_title", "skill_id",
-        "skill_display_name", "skill_version", "source_created_at",
+        "source_kind", "source_task_id", "source_task_title", "source_created_at",
     ):
         presentation_key = "created_at" if key == "source_created_at" else key
         value = merged.get(key) if merged.get(key) is not None else presentation.get(presentation_key)
@@ -120,7 +116,6 @@ def artifacts_from_traces(
     *,
     task_id: str | None,
     task_title: str | None = None,
-    executed_skills: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract verified file outputs into assistant-message metadata.
 
@@ -129,7 +124,6 @@ def artifacts_from_traces(
     """
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
-    skill = (executed_skills or [])[-1] if executed_skills else {}
 
     def visit(value: Any, trace: dict[str, Any]) -> None:
         value = _decode_json(value)
@@ -146,7 +140,6 @@ def artifacts_from_traces(
             if marker not in seen:
                 seen.add(marker)
                 name = str(value.get("display_name") or value.get("name") or value.get("filename") or "")
-                source_kind = "skill" if skill or "skill" in str(trace.get("name") or "") else "platform_tool"
                 records.append({
                     "file_id": file_id or None,
                     "display_name": clean_display_name(path or name, {"name": name} if name else None),
@@ -154,12 +147,9 @@ def artifacts_from_traces(
                     "size": value.get("size"),
                     "parse_status": value.get("parse_status"),
                     "source": {
-                        "kind": source_kind,
+                        "kind": "platform_tool",
                         "task_id": task_id,
                         "task_title": task_title,
-                        "skill_id": skill.get("id"),
-                        "skill_display_name": skill.get("name"),
-                        "skill_version": skill.get("version_no"),
                     },
                     "workspace_path": path or None,
                 })

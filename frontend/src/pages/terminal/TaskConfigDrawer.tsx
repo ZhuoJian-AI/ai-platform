@@ -19,10 +19,7 @@ interface Props {
   onAgentChange: (id: string | null) => void;
 }
 
-/** 任务资源配置抽屉：工作空间 / 模型。
-
- * RAG 固定绑定在智能体；智能体 Skill 是默认推荐，聊天仍可按当前轮选择其他有权 Skill。
- */
+/** 任务资源配置抽屉：个人工作空间、模型和可选文本角色。 */
 export default function TaskConfigDrawer({ open, onApply, resources, config, models, modelCapabilities, visionFallbackAvailable, imageGenerationAvailable, agents, agentId, onAgentChange }: Props) {
   const [local, setLocal] = useState<TaskConfig>(config);
   const personalWorkspace = useMemo(() => (
@@ -55,7 +52,7 @@ export default function TaskConfigDrawer({ open, onApply, resources, config, mod
       styles={{ body: { padding: '18px 20px', background: '#fafafa' } }}
     >
       <Typography.Text>
-        工作空间与模型在这里选择；系统提示词和固定 RAG 由所选智能体决定。Skill 可来自智能体默认推荐，也可在聊天中仅对当前轮明确调用；长期记忆仍按你的权限自动装配。
+        工作空间与模型在这里选择；智能体只提供角色提示词。文件、Web、多模态和长期记忆能力始终按你的实时权限装配。
       </Typography.Text>
 
       <Divider orientation="left">工作空间</Divider>
@@ -96,8 +93,8 @@ export default function TaskConfigDrawer({ open, onApply, resources, config, mod
       />
       <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
         {agentId
-          ? '该次执行将使用所选智能体的系统提示词、固定 RAG 与默认推荐 Skill；聊天仍可临时调用其他有权 Skill。'
-          : `通用智能体不加载 RAG；仍可从 ${resources?.skills.length ?? 0} 个有权 Skill 中自动匹配或本轮明确调用。`}
+          ? '该次执行将加入所选文本角色的系统提示词，但不会获得额外工具或数据权限。'
+          : '通用个人助手不加入额外角色提示词。'}
       </Typography.Text>
     </Drawer>
   );

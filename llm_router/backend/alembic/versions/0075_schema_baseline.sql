@@ -4,9 +4,6 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
-CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public VERSION '0.8.2';
-
-
 --
 -- Name: reject_ai_quota_event_mutation(); Type: FUNCTION; Schema: public; Owner: -
 --
@@ -39,8 +36,6 @@ CREATE FUNCTION public.reject_new_usd_budget_cap() RETURNS trigger
             RETURN NEW;
         END;
         $$;
-
-
 
 
 --
@@ -164,16 +159,6 @@ CREATE TABLE public.agents (
     slug character varying(100) NOT NULL,
     description text,
     system_prompt text DEFAULT ''::text NOT NULL,
-    model_alias character varying(255) DEFAULT 'default'::character varying NOT NULL,
-    __baseline_dropped_8 text,
-    memory_config jsonb DEFAULT '{}'::jsonb NOT NULL,
-    __baseline_dropped_10 text,
-    workspace_id uuid,
-    __baseline_dropped_12 text,
-    __baseline_dropped_13 text,
-    skill_ids jsonb DEFAULT '[]'::jsonb NOT NULL,
-    temperature double precision,
-    max_tokens integer,
     is_active boolean DEFAULT true NOT NULL,
     version integer DEFAULT 1 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -181,16 +166,8 @@ CREATE TABLE public.agents (
     deleted_at timestamp with time zone,
     scope_type character varying(20) DEFAULT 'organization'::character varying NOT NULL,
     scope_id character varying(36),
-    created_by character varying(36),
-    rag_collection_ids jsonb DEFAULT '[]'::jsonb NOT NULL,
-    application_id uuid,
-    module_key character varying(128),
-    page_key character varying(128)
+    created_by character varying(36)
 );
-ALTER TABLE ONLY public.agents DROP COLUMN __baseline_dropped_8;
-ALTER TABLE ONLY public.agents DROP COLUMN __baseline_dropped_10;
-ALTER TABLE ONLY public.agents DROP COLUMN __baseline_dropped_12;
-ALTER TABLE ONLY public.agents DROP COLUMN __baseline_dropped_13;
 
 
 --
@@ -720,7 +697,6 @@ CREATE TABLE public.memories (
     source character varying(20) DEFAULT 'manual'::character varying NOT NULL,
     created_by uuid,
     metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
-    embedding public.vector,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone
@@ -827,87 +803,6 @@ CREATE TABLE public.organizations (
 
 
 --
--- Name: rag_chunks; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.rag_chunks (
-    id uuid NOT NULL,
-    collection_id uuid NOT NULL,
-    document_id uuid,
-    content text DEFAULT ''::text NOT NULL,
-    embedding public.vector,
-    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: rag_collections; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.rag_collections (
-    id uuid NOT NULL,
-    organization_id uuid NOT NULL,
-    name character varying(255) NOT NULL,
-    slug character varying(100) NOT NULL,
-    description text,
-    embedding_model character varying(255) DEFAULT 'text-embedding-3-small'::character varying NOT NULL,
-    embedding_dim integer,
-    chunk_size integer DEFAULT 800 NOT NULL,
-    chunk_overlap integer DEFAULT 100 NOT NULL,
-    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    deleted_at timestamp with time zone,
-    scope_type character varying(20) DEFAULT 'organization'::character varying NOT NULL,
-    scope_id character varying(36),
-    created_by character varying(36),
-    purge_after timestamp with time zone
-);
-
-
---
--- Name: rag_documents; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.rag_documents (
-    id uuid NOT NULL,
-    collection_id uuid NOT NULL,
-    source character varying(512) NOT NULL,
-    title character varying(512),
-    content text DEFAULT ''::text NOT NULL,
-    doc_hash character varying(128),
-    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    deleted_at timestamp with time zone,
-    folder_path character varying(1024) DEFAULT ''::character varying NOT NULL,
-    created_by character varying(36),
-    status character varying(20) DEFAULT 'ready'::character varying NOT NULL,
-    progress integer DEFAULT 100 NOT NULL,
-    parse_error text,
-    purge_after timestamp with time zone
-);
-
-
---
--- Name: rag_folders; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.rag_folders (
-    id uuid NOT NULL,
-    collection_id uuid NOT NULL,
-    path character varying(1024) NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    deleted_at timestamp with time zone,
-    created_by character varying(36),
-    purge_after timestamp with time zone
-);
-
-
---
 -- Name: role_data_departments; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -969,114 +864,6 @@ CREATE TABLE public.routing_policies (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     deleted_at timestamp with time zone
-);
-
-
---
--- Name: skill_executions; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.skill_executions (
-    id bigint NOT NULL,
-    organization_id uuid NOT NULL,
-    user_id uuid,
-    task_id uuid,
-    agent_id uuid,
-    skill_folder_id uuid NOT NULL,
-    skill_version_id uuid NOT NULL,
-    input_file_ids jsonb DEFAULT '[]'::jsonb NOT NULL,
-    output_file_ids jsonb DEFAULT '[]'::jsonb NOT NULL,
-    params jsonb DEFAULT '{}'::jsonb NOT NULL,
-    status character varying(20) DEFAULT 'running'::character varying NOT NULL,
-    latency_ms integer,
-    error text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: skill_executions_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.skill_executions_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: skill_executions_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.skill_executions_id_seq OWNED BY public.skill_executions.id;
-
-
---
--- Name: skill_files; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.skill_files (
-    id uuid NOT NULL,
-    skill_folder_id uuid NOT NULL,
-    path character varying(1024) NOT NULL,
-    size bigint DEFAULT '0'::bigint NOT NULL,
-    content_hash character varying(128),
-    content text,
-    metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    deleted_at timestamp with time zone,
-    purge_after timestamp with time zone
-);
-
-
---
--- Name: skill_folders; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.skill_folders (
-    id uuid NOT NULL,
-    organization_id uuid NOT NULL,
-    scope_type character varying(20) DEFAULT 'organization'::character varying NOT NULL,
-    scope_id character varying(36),
-    name character varying(255) NOT NULL,
-    slug character varying(100) NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    deleted_at timestamp with time zone,
-    created_by character varying(36),
-    is_active boolean DEFAULT true NOT NULL,
-    active_version_id uuid,
-    purge_after timestamp with time zone
-);
-
-
---
--- Name: skill_versions; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.skill_versions (
-    skill_folder_id uuid NOT NULL,
-    version_no integer NOT NULL,
-    package_hash character varying(64) NOT NULL,
-    manifest jsonb NOT NULL,
-    archive bytea,
-    runtime character varying(20) DEFAULT 'prompt'::character varying NOT NULL,
-    entrypoint character varying(1024),
-    is_executable boolean DEFAULT false NOT NULL,
-    install_status character varying(20) DEFAULT 'pending'::character varying NOT NULL,
-    install_error text,
-    id uuid NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    archive_ref text,
-    archive_size bigint DEFAULT '0'::bigint NOT NULL,
-    storage_status character varying(20) DEFAULT 'inline'::character varying NOT NULL,
-    purge_after timestamp with time zone,
-    archive_purged_at timestamp with time zone
 );
 
 
@@ -1494,13 +1281,6 @@ ALTER TABLE ONLY public.audit_logs ALTER COLUMN id SET DEFAULT nextval('public.a
 
 
 --
--- Name: skill_executions id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_executions ALTER COLUMN id SET DEFAULT nextval('public.skill_executions_id_seq'::regclass);
-
-
---
 -- Name: workspace_audit_events id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -1739,38 +1519,6 @@ ALTER TABLE ONLY public.organizations
 
 
 --
--- Name: rag_chunks rag_chunks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.rag_chunks
-    ADD CONSTRAINT rag_chunks_pkey PRIMARY KEY (id);
-
-
---
--- Name: rag_collections rag_collections_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.rag_collections
-    ADD CONSTRAINT rag_collections_pkey PRIMARY KEY (id);
-
-
---
--- Name: rag_documents rag_documents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.rag_documents
-    ADD CONSTRAINT rag_documents_pkey PRIMARY KEY (id);
-
-
---
--- Name: rag_folders rag_folders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.rag_folders
-    ADD CONSTRAINT rag_folders_pkey PRIMARY KEY (id);
-
-
---
 -- Name: role_permissions role_permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1792,38 +1540,6 @@ ALTER TABLE ONLY public.roles
 
 ALTER TABLE ONLY public.routing_policies
     ADD CONSTRAINT routing_policies_pkey PRIMARY KEY (id);
-
-
---
--- Name: skill_executions skill_executions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_executions
-    ADD CONSTRAINT skill_executions_pkey PRIMARY KEY (id);
-
-
---
--- Name: skill_files skill_files_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_files
-    ADD CONSTRAINT skill_files_pkey PRIMARY KEY (id);
-
-
---
--- Name: skill_folders skill_folders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_folders
-    ADD CONSTRAINT skill_folders_pkey PRIMARY KEY (id);
-
-
---
--- Name: skill_versions skill_versions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_versions
-    ADD CONSTRAINT skill_versions_pkey PRIMARY KEY (id);
 
 
 --
@@ -2019,22 +1735,6 @@ ALTER TABLE ONLY public.organization_slug_aliases
 
 
 --
--- Name: rag_collections uq_ragcoll_org_slug; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.rag_collections
-    ADD CONSTRAINT uq_ragcoll_org_slug UNIQUE (organization_id, slug);
-
-
---
--- Name: rag_folders uq_ragfolder_path; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.rag_folders
-    ADD CONSTRAINT uq_ragfolder_path UNIQUE (collection_id, path);
-
-
---
 -- Name: role_data_departments uq_role_data_department; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2064,22 +1764,6 @@ ALTER TABLE ONLY public.roles
 
 ALTER TABLE ONLY public.role_permissions
     ADD CONSTRAINT uq_role_permission_code UNIQUE (role_id, permission_code);
-
-
---
--- Name: skill_versions uq_skill_version_hash; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_versions
-    ADD CONSTRAINT uq_skill_version_hash UNIQUE (skill_folder_id, package_hash);
-
-
---
--- Name: skill_versions uq_skill_version_number; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_versions
-    ADD CONSTRAINT uq_skill_version_number UNIQUE (skill_folder_id, version_no);
 
 
 --
@@ -2345,13 +2029,6 @@ CREATE INDEX ix_agent_runs_user_id ON public.agent_runs USING btree (user_id);
 
 
 --
--- Name: ix_agents_application_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_agents_application_id ON public.agents USING btree (application_id);
-
-
---
 -- Name: ix_agents_created_by; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2370,13 +2047,6 @@ CREATE INDEX ix_agents_organization_id ON public.agents USING btree (organizatio
 --
 
 CREATE INDEX ix_agents_scope_id ON public.agents USING btree (scope_id);
-
-
---
--- Name: ix_agents_workspace_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_agents_workspace_id ON public.agents USING btree (workspace_id);
 
 
 --
@@ -2849,83 +2519,6 @@ CREATE INDEX ix_organization_slug_aliases_organization_id ON public.organization
 
 
 --
--- Name: ix_rag_chunks_collection_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_rag_chunks_collection_id ON public.rag_chunks USING btree (collection_id);
-
-
---
--- Name: ix_rag_collections_created_by; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_rag_collections_created_by ON public.rag_collections USING btree (created_by);
-
-
---
--- Name: ix_rag_collections_organization_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_rag_collections_organization_id ON public.rag_collections USING btree (organization_id);
-
-
---
--- Name: ix_rag_collections_purge_after; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_rag_collections_purge_after ON public.rag_collections USING btree (purge_after);
-
-
---
--- Name: ix_rag_collections_scope_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_rag_collections_scope_id ON public.rag_collections USING btree (scope_id);
-
-
---
--- Name: ix_rag_documents_collection_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_rag_documents_collection_id ON public.rag_documents USING btree (collection_id);
-
-
---
--- Name: ix_rag_documents_created_by; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_rag_documents_created_by ON public.rag_documents USING btree (created_by);
-
-
---
--- Name: ix_rag_documents_purge_after; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_rag_documents_purge_after ON public.rag_documents USING btree (purge_after);
-
-
---
--- Name: ix_rag_folders_collection_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_rag_folders_collection_id ON public.rag_folders USING btree (collection_id);
-
-
---
--- Name: ix_rag_folders_created_by; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_rag_folders_created_by ON public.rag_folders USING btree (created_by);
-
-
---
--- Name: ix_rag_folders_purge_after; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_rag_folders_purge_after ON public.rag_folders USING btree (purge_after);
-
-
---
 -- Name: ix_role_permissions_permission_code; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2944,125 +2537,6 @@ CREATE INDEX ix_role_permissions_role_id ON public.role_permissions USING btree 
 --
 
 CREATE INDEX ix_roles_organization_id ON public.roles USING btree (organization_id);
-
-
---
--- Name: ix_skill_executions_agent_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_executions_agent_id ON public.skill_executions USING btree (agent_id);
-
-
---
--- Name: ix_skill_executions_organization_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_executions_organization_id ON public.skill_executions USING btree (organization_id);
-
-
---
--- Name: ix_skill_executions_skill_folder_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_executions_skill_folder_id ON public.skill_executions USING btree (skill_folder_id);
-
-
---
--- Name: ix_skill_executions_skill_version_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_executions_skill_version_id ON public.skill_executions USING btree (skill_version_id);
-
-
---
--- Name: ix_skill_executions_status; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_executions_status ON public.skill_executions USING btree (status);
-
-
---
--- Name: ix_skill_executions_task_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_executions_task_id ON public.skill_executions USING btree (task_id);
-
-
---
--- Name: ix_skill_executions_user_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_executions_user_id ON public.skill_executions USING btree (user_id);
-
-
---
--- Name: ix_skill_files_folder; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_files_folder ON public.skill_files USING btree (skill_folder_id);
-
-
---
--- Name: ix_skill_files_purge_after; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_files_purge_after ON public.skill_files USING btree (purge_after);
-
-
---
--- Name: ix_skill_folders_active_version; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_folders_active_version ON public.skill_folders USING btree (active_version_id);
-
-
---
--- Name: ix_skill_folders_created_by; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_folders_created_by ON public.skill_folders USING btree (created_by);
-
-
---
--- Name: ix_skill_folders_org_scope; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_folders_org_scope ON public.skill_folders USING btree (organization_id, scope_type, scope_id);
-
-
---
--- Name: ix_skill_folders_purge_after; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_folders_purge_after ON public.skill_folders USING btree (purge_after);
-
-
---
--- Name: ix_skill_versions_folder; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_versions_folder ON public.skill_versions USING btree (skill_folder_id);
-
-
---
--- Name: ix_skill_versions_purge_after; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_versions_purge_after ON public.skill_versions USING btree (purge_after);
-
-
---
--- Name: ix_skill_versions_status; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_versions_status ON public.skill_versions USING btree (install_status);
-
-
---
--- Name: ix_skill_versions_storage_status; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX ix_skill_versions_storage_status ON public.skill_versions USING btree (storage_status);
 
 
 --
@@ -3451,20 +2925,6 @@ CREATE UNIQUE INDEX uq_organizations_slug_active ON public.organizations USING b
 
 
 --
--- Name: uq_skill_file_path_live; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_skill_file_path_live ON public.skill_files USING btree (skill_folder_id, path) WHERE (deleted_at IS NULL);
-
-
---
--- Name: uq_skill_folder_scope_slug_live; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX uq_skill_folder_scope_slug_live ON public.skill_folders USING btree (organization_id, scope_type, COALESCE(scope_id, ''::character varying), slug) WHERE (deleted_at IS NULL);
-
-
---
 -- Name: uq_workspace_org_slug_active; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3531,27 +2991,11 @@ ALTER TABLE ONLY public.agent_runs
 
 
 --
--- Name: agents agents_application_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agents
-    ADD CONSTRAINT agents_application_id_fkey FOREIGN KEY (application_id) REFERENCES public.enterprise_applications(id) ON DELETE SET NULL;
-
-
---
 -- Name: agents agents_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.agents
     ADD CONSTRAINT agents_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
-
-
---
--- Name: agents agents_workspace_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agents
-    ADD CONSTRAINT agents_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES public.workspaces(id) ON DELETE SET NULL;
 
 
 --
@@ -3907,14 +3351,6 @@ ALTER TABLE ONLY public.enterprise_application_event_routes
 
 
 --
--- Name: skill_folders fk_skill_folder_active_version; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_folders
-    ADD CONSTRAINT fk_skill_folder_active_version FOREIGN KEY (active_version_id) REFERENCES public.skill_versions(id) ON DELETE SET NULL;
-
-
---
 -- Name: users fk_users_department_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4051,46 +3487,6 @@ ALTER TABLE ONLY public.organization_slug_aliases
 
 
 --
--- Name: rag_chunks rag_chunks_collection_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.rag_chunks
-    ADD CONSTRAINT rag_chunks_collection_id_fkey FOREIGN KEY (collection_id) REFERENCES public.rag_collections(id) ON DELETE CASCADE;
-
-
---
--- Name: rag_chunks rag_chunks_document_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.rag_chunks
-    ADD CONSTRAINT rag_chunks_document_id_fkey FOREIGN KEY (document_id) REFERENCES public.rag_documents(id) ON DELETE SET NULL;
-
-
---
--- Name: rag_collections rag_collections_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.rag_collections
-    ADD CONSTRAINT rag_collections_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
-
-
---
--- Name: rag_documents rag_documents_collection_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.rag_documents
-    ADD CONSTRAINT rag_documents_collection_id_fkey FOREIGN KEY (collection_id) REFERENCES public.rag_collections(id) ON DELETE CASCADE;
-
-
---
--- Name: rag_folders rag_folders_collection_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.rag_folders
-    ADD CONSTRAINT rag_folders_collection_id_fkey FOREIGN KEY (collection_id) REFERENCES public.rag_collections(id) ON DELETE CASCADE;
-
-
---
 -- Name: role_data_departments role_data_departments_department_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4128,78 +3524,6 @@ ALTER TABLE ONLY public.roles
 
 ALTER TABLE ONLY public.routing_policies
     ADD CONSTRAINT routing_policies_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
-
-
---
--- Name: skill_executions skill_executions_agent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_executions
-    ADD CONSTRAINT skill_executions_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES public.agents(id) ON DELETE SET NULL;
-
-
---
--- Name: skill_executions skill_executions_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_executions
-    ADD CONSTRAINT skill_executions_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
-
-
---
--- Name: skill_executions skill_executions_skill_folder_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_executions
-    ADD CONSTRAINT skill_executions_skill_folder_id_fkey FOREIGN KEY (skill_folder_id) REFERENCES public.skill_folders(id) ON DELETE RESTRICT;
-
-
---
--- Name: skill_executions skill_executions_skill_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_executions
-    ADD CONSTRAINT skill_executions_skill_version_id_fkey FOREIGN KEY (skill_version_id) REFERENCES public.skill_versions(id) ON DELETE RESTRICT;
-
-
---
--- Name: skill_executions skill_executions_task_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_executions
-    ADD CONSTRAINT skill_executions_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE SET NULL;
-
-
---
--- Name: skill_executions skill_executions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_executions
-    ADD CONSTRAINT skill_executions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
-
-
---
--- Name: skill_files skill_files_skill_folder_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_files
-    ADD CONSTRAINT skill_files_skill_folder_id_fkey FOREIGN KEY (skill_folder_id) REFERENCES public.skill_folders(id) ON DELETE CASCADE;
-
-
---
--- Name: skill_folders skill_folders_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_folders
-    ADD CONSTRAINT skill_folders_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE RESTRICT;
-
-
---
--- Name: skill_versions skill_versions_skill_folder_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.skill_versions
-    ADD CONSTRAINT skill_versions_skill_folder_id_fkey FOREIGN KEY (skill_folder_id) REFERENCES public.skill_folders(id) ON DELETE CASCADE;
 
 
 --

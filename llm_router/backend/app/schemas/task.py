@@ -17,8 +17,6 @@ class TaskConfig(BaseModel):
     """
 
     workspace_id: str | None = None
-    skill_ids: list[str] = Field(default_factory=list)
-    rag_collection_ids: list[str] = Field(default_factory=list)
     model_alias: str | None = None
     # 执行模式：craft（自主多步执行）/ ask（只读单轮问答）/ plan（出方案不执行）
     exec_mode: str = "craft"
@@ -63,9 +61,6 @@ class TaskRunRequest(BaseModel):
     # 客户端为一次用户提交生成的稳定标识。断线重试复用它；同一 Task 的不同提交
     # 必须使用不同标识，避免把第二条消息误接到仍在执行的上一轮。
     client_request_id: str | None = Field(default=None, min_length=8, max_length=128)
-    # 当前轮由用户明确选择的 Skill。只影响本次运行，不写回 Task.config，发送后由前端清空。
-    # /slug 仍由运行时解析以兼容历史和手动输入，但选择器必须传真实 UUID，避免同名 slug 歧义。
-    invoked_skill_ids: list[UUID] = Field(default_factory=list, max_length=20)
     # 聊天输入框拖入/选择的工作空间文件。与正文中的历史 ``@UUID`` 引用并行兼容；
     # 端点按 file_id 解析真实所属空间并实时校验 read 权限；解析状态不是引用前置条件。
     attachment_file_ids: list[UUID] = Field(default_factory=list, max_length=10)
@@ -75,7 +70,7 @@ class TaskRunRequest(BaseModel):
     file_refs_v1: list[TaskFileRefV1] = Field(default_factory=list, max_length=20)
     # 逐次运行覆盖（不落库）：
     #   字段未传 → 沿用 task.config.template_agent_id（向后兼容 demo 旧 /run 调用）
-    #   显式传 UUID → 该次用此智能体（load_config 拼 persona + 继承 skill_ids/model_alias）
+    #   显式传 UUID → 该次只注入此智能体的文本角色提示词
     #   显式传 null/空 → 强制通用智能体（不绑模板，纯 GENERAL_SYSTEM_PROMPT）
     template_agent_id: str | None = None
     # 业务小助手 Task 首次绑定应用后不可切换；经过服务端重新鉴权的最后页面上下文

@@ -40,7 +40,6 @@ def test_completion_policy_requires_an_explicit_artifact_request(request_text, e
         "exec_mode": "craft",
         "request": request_text,
         "attachment_files": [{"file_id": "file-1"}],
-        "invoked_skill_ids": ["skill-1"],
     }
 
     policy = runner._completion_policy(state)
@@ -57,24 +56,22 @@ def test_completion_policy_never_arms_outside_craft_mode():
         assert policy["require_file_output"] is False
 
 
-def test_completion_policy_lists_executable_skill_tools_from_the_registry():
+def test_completion_policy_adds_only_trusted_composite_export_tools():
     state = {
         "exec_mode": "craft",
         "request": "你好",
         "_assistant_tool_registry": {
-            "bank_flow": {"kind": "code"},
-            "run_skill_script": {"kind": "run_skill_script"},
-            "load_skill": {"kind": "load_skill"},
-            "rag_search": {"kind": "rag_search"},
+            "business_export_to_workspace_file": {"kind": "enterprise_export_file"},
+            "orders_query": {"kind": "enterprise_action"},
+            "untrusted_runtime_tool": {"kind": "external_tool"},
         },
     }
 
     tools = runner._completion_policy(state)["file_output_tools"]
 
-    assert "bank_flow" in tools
-    assert tools.count("run_skill_script") == 1
-    assert "load_skill" not in tools
-    assert "rag_search" not in tools
+    assert tools.count("business_export_to_workspace_file") == 1
+    assert "orders_query" not in tools
+    assert "untrusted_runtime_tool" not in tools
     assert {"workspace_write_file", "document_tool", "image_generation_tool"} <= set(tools)
 
 
@@ -84,7 +81,7 @@ def test_completion_policy_lists_executable_skill_tools_from_the_registry():
 @pytest.mark.asyncio
 async def test_policy_continuation_retracts_the_half_answer_streamed_so_far(monkeypatch):
     async def stream_run(_request, **_kwargs):
-        yield {"type": "text_delta", "delta": "我先加载技能"}
+        yield {"type": "text_delta", "delta": "我先准备文件"}
         yield {"type": "text_delta", "delta": "，稍等。"}
         yield {"type": "policy", "action": "continuation", "nudge": 1}
         yield {
@@ -111,7 +108,7 @@ async def test_policy_continuation_retracts_the_half_answer_streamed_so_far(monk
     await runner._consume_native(state, {"system_prompt": "", "tools": []}, "run-token", handle, staged, {})
 
     retracts = [event for event in staged if event.get("type") == "text_retract"]
-    assert retracts == [{"type": "text_retract", "chars": len("我先加载技能，稍等。")}]
+    assert retracts == [{"type": "text_retract", "chars": len("我先准备文件，稍等。")}]
     # The retract is ordered after the half answer and before the continued answer.
     kinds = [event["type"] for event in staged]
     assert kinds.index("text_retract") > kinds.index("text")
@@ -133,11 +130,11 @@ async def test_policy_blocks_and_timeouts_are_recorded_without_retracting_text(m
             "tool": "spreadsheet_tool",
             "detail": "identical arguments failed twice",
         }
-        yield {"type": "policy", "action": "tool_timeout", "tool": "run_skill_script", "detail": "300000ms"}
-        yield {"type": "done", "text": "尝试读取。脚本超时，已如实说明。", "steps": 3, "tool_calls": 2}
+        yield {"type": "policy", "action": "tool_timeout", "tool": "document_create", "detail": "300000ms"}
+        yield {"type": "done", "text": "尝试生成。文件工具超时，已如实说明。", "steps": 3, "tool_calls": 2}
 
     monkeypatch.setattr(runner.native_core, "stream_run", stream_run)
-    state = {"run_id": 8, "request": "跑一下脚本", "messages": [], "steps": [], "traces": []}
+    state = {"run_id": 8, "request": "生成一份文档", "messages": [], "steps": [], "traces": []}
     staged: list[dict] = []
 
     await runner._consume_native(state, {"system_prompt": "", "tools": []}, "run-token", None, staged, {})
@@ -150,7 +147,7 @@ async def test_policy_blocks_and_timeouts_are_recorded_without_retracting_text(m
             "tool": "spreadsheet_tool",
             "detail": "identical arguments failed twice",
         },
-        {"step": "policy", "action": "tool_timeout", "tool": "run_skill_script", "detail": "300000ms"},
+        {"step": "policy", "action": "tool_timeout", "tool": "document_create", "detail": "300000ms"},
     ]
     policy_traces = [trace for trace in state["traces"] if trace.get("category") == "policy"]
     assert [trace["action"] for trace in policy_traces] == ["repeat_failure_block", "tool_timeout"]
@@ -159,7 +156,7 @@ async def test_policy_blocks_and_timeouts_are_recorded_without_retracting_text(m
     assert [event["action"] for event in forwarded] == ["repeat_failure_block", "tool_timeout"]
     assert forwarded[1]["title"] == "工具超时"
     assert not any(event.get("type") == "text_retract" for event in staged)
-    assert state["assistant_final"] == "尝试读取。脚本超时，已如实说明。"
+    assert state["assistant_final"] == "尝试生成。文件工具超时，已如实说明。"
 
 
 @pytest.mark.asyncio
@@ -240,15 +237,10 @@ def test_builtin_tool_specs_carry_runtime_metadata():
 
 def test_registry_backed_tool_specs_are_classified_by_kind():
     registry = {
-        "run_skill_script": {"kind": "run_skill_script"},
-        "load_skill": {"kind": "load_skill"},
-        "read_skill_resource": {"kind": "read_skill_resource"},
-        "load_bank_flow": {"kind": "prompt"},
-        "bank_flow": {"kind": "code"},
-        "rag_search": {"kind": "rag_search", "collection_ids": []},
         "crm_create_order": {"kind": "enterprise_action"},
         "read_memory": {"kind": "memory", "operation": "read"},
         "write_memory": {"kind": "memory", "operation": "write"},
+        "business_export_to_workspace_file": {"kind": "enterprise_export_file"},
     }
     tools = [
         {
@@ -269,15 +261,15 @@ def test_registry_backed_tool_specs_are_classified_by_kind():
         assert specs[name]["timeout_ms"] == timeout_ms, name
         assert specs[name]["concurrency_safe"] is concurrency_safe, name
 
-    check("run_skill_script", "skill", nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS, False)
-    check("bank_flow", "skill", nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS, False)
-    check("load_skill", "skill", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
-    check("read_skill_resource", "skill", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
-    check("load_bank_flow", "skill", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
-    check("rag_search", "rag", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
     check("crm_create_order", "enterprise_action", nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS, False)
     check("read_memory", "memory", nodes.ASSISTANT_TOOL_TIMEOUT_READ_MS, True)
     check("write_memory", "memory", nodes.ASSISTANT_TOOL_TIMEOUT_DEFAULT_MS, False)
+    check(
+        "business_export_to_workspace_file",
+        "enterprise_export_file",
+        nodes.ASSISTANT_TOOL_TIMEOUT_LONG_MS,
+        False,
+    )
     check("node_ext_lookup", "external_tool", nodes.ASSISTANT_TOOL_TIMEOUT_DEFAULT_MS, False)
 
 
@@ -330,10 +322,8 @@ def _craft_state(**overrides) -> dict:
         "request": "记住我偏好账期长的供应商",
         "referenced_file_ids": [],
         "file_refs_v1": [],
-        "skill_ids": [],
         "exec_mode": "craft",
         "memory_context": [],
-        "rag_context": [],
         "steps": [],
         "traces": [],
         "usage": {},
@@ -345,7 +335,6 @@ def _craft_state(**overrides) -> dict:
 def _patch_prepare_dependencies(monkeypatch, principal):
     async def fake_build_tools(
         _db,
-        _skill_ids,
         _workspace_id,
         _user=None,
         *,

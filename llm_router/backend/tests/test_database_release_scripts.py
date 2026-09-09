@@ -74,13 +74,13 @@ def test_release_inventory_keeps_core_data_and_conditional_history_explicit() ->
     assert {
         "workspace_files",
         "workspace_file_versions",
-        "rag_documents",
         "task_messages",
         "agent_run_events",
-        "skill_versions",
         "enterprise_applications",
         "ecs_runtimes",
     }.issubset(set(SNAPSHOT.PROTECTED_TABLES))
     assert "teams" in PREFLIGHT.RETIRED_TABLES
+    assert "rag_documents" in PREFLIGHT.RETIRED_TABLES
+    assert "skill_versions" in PREFLIGHT.RETIRED_TABLES
     assert "enterprise_application_tool_bindings" in PREFLIGHT.RETIRED_TABLES
     assert PREFLIGHT.CONDITIONAL_RETIRED_TABLES == ("tool_call_logs",)

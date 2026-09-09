@@ -24,8 +24,7 @@ class AgentState(TypedDict, total=False):
     user_id: str | None
     department_id: str | None
     exec_mode: str  # "craft"（自主执行）/ "ask"（只读问答）/ "plan"（出方案不执行）
-    # general 模式：可选引用一个 Agent 行作「场景模板」，其 system_prompt 作为
-    # persona/policy 前缀拼到 GENERAL_SYSTEM_PROMPT 之前（load_config 解析填充 base_prompt）。
+    # general 模式：可选引用一个文本 Agent 角色，其 system_prompt 作为 persona 前缀。
     template_agent_id: str | None
     application_id: str | None
     page_context: dict
@@ -40,25 +39,9 @@ class AgentState(TypedDict, total=False):
     system_prompt: str
     model_alias: str
     memory_config: dict
-    skill_ids: list[str]
-    # 当前用户本轮可用的 Skill 精简目录；顺序为：明确调用、智能体默认、其他有权 Skill。
-    skill_catalog: list[dict]
-    # 智能体固定配置中的默认推荐 Skill（不构成排他白名单）。
-    default_skills: list[dict]
-    # 用户本轮通过选择器或唯一 /slug 明确调用的 Skill 快照。
-    invoked_skill_ids: list[str]
-    invoked_skills: list[dict]
-    skill_slug_ambiguities: list[str]
-    # 本轮模型实际载入说明与实际执行脚本/API 的记录，随 assistant 消息 metadata 持久化。
-    loaded_skills: list[dict]
-    executed_skills: list[dict]
     temperature: float | None
     max_tokens: int | None
     workspace_id: str | None
-    # general 模式多资源装配（空数组 = 按用户权限自动匹配全集，由 load_config 解析填充）
-    rag_collection_ids: list[str]
-    # general 模式：当前轮明确调用的技能（结构化 UUID 优先，唯一 /slug 兼容）。
-    referenced_skills: list[dict]
     # general 模式：用户在消息中以 @<file_id> 引用的工作空间文件 id（load_config 解析填充）。
     # Turn preparation reads these references; binary files are never inlined as text.
     referenced_file_ids: list[str]
@@ -77,12 +60,11 @@ class AgentState(TypedDict, total=False):
     # ── 对话 ──
     request: str  # 本轮用户输入
     messages: list[dict]  # OpenAI 风格消息序列（含历史 + 本轮）
-    rag_context: list[dict]  # 检索命中的文本块
     memory_context: list[dict]  # 4 级长期记忆条目（general 模式 load_memory 填充）
     assistant_final: str  # 最终回复文本
 
     # ── 执行轨迹与用量 ──
-    steps: list[dict]  # 逐步轨迹（llm 调用、工具调用、rag 命中等）
+    steps: list[dict]  # 逐步轨迹（模型调用、平台工具和 Manifest Action）
     usage: dict  # {"input_tokens": int, "output_tokens": int}
     tool_results: list[dict]
     # Full, structured identities for files actually read or written by tools.
@@ -90,9 +72,8 @@ class AgentState(TypedDict, total=False):
     # so persistence never has to reverse-parse truncated JSON.
     tool_file_refs: list[dict]
     file_accesses_v1: list[dict]
-    # 平台资源调用痕迹（skill/rag/memory/Manifest Action），按执行顺序追加；
-    # 经 stream_writer 下发 ``trace`` 事件实时展示，并随 save_memory 落 assistant
-    # TaskMessage.metadata_ 供历史回放还原。技能仅在此落库、不重复发 trace 事件。
+    # 平台资源调用痕迹（memory/Manifest Action/文件工具），按执行顺序追加；
+    # 经 stream_writer 下发 ``trace`` 事件实时展示，并随 save_memory 落 assistant 消息。
     traces: list[dict]
     # The coordinator records whether this run persisted memory itself so the
     # extraction pass can avoid duplicating the same fact.

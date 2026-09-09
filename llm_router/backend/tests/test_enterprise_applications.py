@@ -697,7 +697,6 @@ async def test_application_overview_uses_manifest_actions_and_action_requests(db
 
     assert overview["operation_counts"]["query"] == 4
     assert overview["direct_capability_count"] == 4
-    assert overview["skill_binding_count"] == 0
     assert len(overview["capabilities"]) == 4
     assert {item["target_type"] for item in overview["capabilities"]} == {"manifest_action"}
     assert overview["recent_calls"][0]["capability_name"] == actions[0].name

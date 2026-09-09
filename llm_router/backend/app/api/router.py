@@ -20,11 +20,8 @@ from app.api.memory import router as memory_router
 from app.api.monitor import router as monitor_router
 from app.api.multimodal import router as multimodal_router
 from app.api.organizations import router as org_router
-from app.api.rag import router as rag_router
 from app.api.roles import router as role_router
 from app.api.routing_policies import router as routing_router
-from app.api.skill_packages import router as skill_package_router
-from app.api.skills import router as skill_router
 from app.api.storage_lifecycle import router as storage_lifecycle_router
 from app.api.subsystem_ai import router as subsystem_ai_router
 from app.api.terminal import router as terminal_router
@@ -48,9 +45,6 @@ api_router.include_router(user_router, tags=["users"])
 api_router.include_router(role_router, tags=["roles"])
 api_router.include_router(workspace_router, tags=["workspaces"])
 api_router.include_router(agent_router, tags=["agents"])
-api_router.include_router(rag_router, tags=["rag"])
-api_router.include_router(skill_router, tags=["skills"])
-api_router.include_router(skill_package_router, tags=["skill-packages"])
 api_router.include_router(api_key_router, tags=["api-keys"])
 api_router.include_router(provider_router, tags=["llm-providers"])
 api_router.include_router(dlp_router, tags=["dlp-rules"])

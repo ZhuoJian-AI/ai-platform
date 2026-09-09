@@ -43,16 +43,11 @@ class Settings(BaseSettings):
     ai_quota_default_max_output_tokens: int = 4096
     ai_quota_reservation_ttl_seconds: int = 40 * 24 * 60 * 60
 
-    # Executable Skill runner (internal network only)
-    code_skills_enabled: bool = False
-    agent_skills_org_allowlist: str = ""
-    skill_runner_url: str = "http://localhost:8020"
-    skill_runner_token: str = "skill-runner-dev-token-change-in-production"
-    skill_runner_timeout_seconds: int = 120
-    skill_runner_queue_wait_seconds: int = 300
-    skill_package_max_bytes: int = 100 * 1024 * 1024
-    skill_package_expanded_max_bytes: int = 500 * 1024 * 1024
-    skill_package_max_files: int = 1000
+    # Platform-owned file/media executor (internal network only).
+    tool_executor_url: str = "http://localhost:8020"
+    tool_executor_token: str = "tool-executor-dev-token-change-in-production"
+    tool_executor_timeout_seconds: int = 120
+    tool_executor_queue_wait_seconds: int = 300
     storage_lifecycle_interval_seconds: int = 60 * 60
     storage_orphan_grace_days: int = 7
 
@@ -155,25 +150,6 @@ class Settings(BaseSettings):
             if value.strip()
         }
         return not allowed or self._canonical_org_identity(organization_slug) in allowed
-
-    def agent_skills_enabled_for(
-        self,
-        organization_slug: str,
-        *,
-        organization_id: object | None = None,
-    ) -> bool:
-        """Gate the new Agent Skill host independently per staging tenant."""
-        if not self.code_skills_enabled:
-            return False
-        allowed = {
-            self._canonical_org_identity(value)
-            for value in self.agent_skills_org_allowlist.split(",")
-            if value.strip()
-        }
-        identities = {self._canonical_org_identity(organization_slug)}
-        if organization_id is not None:
-            identities.add(str(organization_id).lower())
-        return not allowed or bool(allowed & identities)
 
     @staticmethod
     def _org_feature_enabled(

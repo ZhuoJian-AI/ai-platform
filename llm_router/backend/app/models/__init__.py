@@ -24,10 +24,8 @@ from app.models.llm_provider import LlmProvider, ModelDeployment
 from app.models.memory import Memory
 from app.models.multimodal import MultimodalJob, VoiceAuthorizationRecord, VoiceProfile, VoiceProfileGrant
 from app.models.organization import Organization, OrganizationSlugAlias
-from app.models.rag import RagChunk, RagCollection, RagDocument, RagFolder
 from app.models.role import Role, RoleDataDepartment, RolePermission, UserRole
 from app.models.routing_policy import RoutingPolicy
-from app.models.skill import SkillExecution, SkillFile, SkillFolder, SkillVersion
 from app.models.task import Task, TaskFileRef, TaskMessage
 from app.models.user import User
 from app.models.workspace import (
@@ -85,14 +83,6 @@ __all__ = [
     "Agent",
     "AgentRun",
     "AgentRunEvent",
-    "RagCollection",
-    "RagDocument",
-    "RagFolder",
-    "RagChunk",
-    "SkillFolder",
-    "SkillFile",
-    "SkillVersion",
-    "SkillExecution",
     # 终端用户端
     "Task",
     "TaskFileRef",

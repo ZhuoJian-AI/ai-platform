@@ -21,7 +21,7 @@ from app.services.organization_service import (
     get_org_name_slug_by_id,
 )
 from app.services.role_service import BUILTIN_MEMBER, ensure_builtin_roles, replace_user_roles
-from app.services.skill_scope_service import validate_user_departments, validate_user_membership
+from app.services.scope_service import validate_user_departments, validate_user_membership
 from app.services.workspace_lifecycle import (
     ensure_node_workspace,
     soft_delete_node_workspace,
@@ -177,7 +177,6 @@ async def update_user(
     values = data.model_dump(exclude_unset=True)
     # password 不是列，需单独哈希处理
     password = values.pop("password", None)
-    values.pop("manager_scopes", None)
     requested_role_ids = values.pop("role_ids", None)
     department_ids_were_set = "department_ids" in data.model_fields_set
     requested_department_ids = values.pop("department_ids", None)

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
-import { Form, Input, InputNumber, Select, Switch, Tag, Typography, message, Empty, Spin } from 'antd';
+import { Form, Input, Switch, Tag, Typography, message, Empty, Spin } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, RobotOutlined,
   BankOutlined, ApartmentOutlined, UserOutlined, FolderOutlined,
@@ -7,13 +7,13 @@ import {
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  terminal, type Agent, type KbNode,
+  terminal, type Agent, type ScopeNode,
 } from '../../api/client';
 import { ApiError } from '../../api/client';
 import { useUserAuth } from '../../context/UserAuthContext';
 import ConfirmModal from '../../components/finder/ConfirmModal';
 
-/** WorkBuddy 配色（与 KnowledgeBaseView / SkillManagerView 一致）。 */
+/** WorkBuddy 配色。 */
 const WB = {
   primary: '#6366F1', sidebar: '#F5F5F7', hover: '#ECECEF', border: '#E5E7EB',
   activeBg: '#E8EAFE', text: '#1d1d1f', textAux: '#86868b',
@@ -36,8 +36,8 @@ interface TreeNode {
   children?: TreeNode[];
 }
 
-/** 把后端单链 KbNode[] 组装成 企业→部门→个人 嵌套树（每级至多一个）。 */
-function buildTree(nodes: KbNode[]): TreeNode[] {
+/** 把后端单链 ScopeNode[] 组装成 企业→部门→个人 嵌套树（每级至多一个）。 */
+function buildTree(nodes: ScopeNode[]): TreeNode[] {
   let child: TreeNode | null = null;
   for (let i = nodes.length - 1; i >= 0; i--) {
     const n = nodes[i];
@@ -51,7 +51,7 @@ function buildTree(nodes: KbNode[]): TreeNode[] {
   return child ? [child] : [];
 }
 
-/** 终端「智能体」视图：用户级智能体管理（参照 SkillManagerView 自包含范式）。
+/** 终端「智能体」视图：用户级文本角色管理。
  *  左栏：用户可见作用域单链（企业/部门/个人）。
  *  中栏：选中 scope 下的智能体列表。
  *  右栏：选中智能体的编辑表单。
@@ -72,30 +72,24 @@ export default function AgentManagerView() {
   const [createForm] = Form.useForm();
   const [dirty, setDirty] = useState(false);
 
-  // 左栏 scope 链（与知识库/技能同源）
-  const { data: kbNodes, isLoading: nodesLoading } = useQuery({
-    queryKey: ['kb-nodes'], queryFn: () => terminal.kbNodes(),
+  // 左栏是当前用户实时可见的作用域链。
+  const { data: scopeNodes, isLoading: nodesLoading } = useQuery({
+    queryKey: ['terminal-scope-nodes'], queryFn: () => terminal.scopeNodes(),
   });
-  const treeData = useMemo(() => buildTree(kbNodes ?? []), [kbNodes]);
+  const treeData = useMemo(() => buildTree(scopeNodes ?? []), [scopeNodes]);
 
   // 默认选中个人节点
   useEffect(() => {
-    if (scope || !kbNodes?.length) return;
-    const userNode = kbNodes.find((n) => n.scope_type === 'user');
+    if (scope || !scopeNodes?.length) return;
+    const userNode = scopeNodes.find((n) => n.scope_type === 'user');
     if (userNode) setScope({ type: userNode.scope_type, id: userNode.scope_id, name: userNode.name });
-  }, [kbNodes, scope]);
+  }, [scopeNodes, scope]);
 
   // 中栏：选中 scope 下的智能体
   const { data: agents, isLoading: agentsLoading } = useQuery({
     queryKey: ['terminal-agents', scope?.type, scope?.id],
     queryFn: () => terminal.listAgents({ scope_type: scope!.type, scope_id: scope!.id }),
     enabled: !!scope,
-  });
-
-  // 智能体可绑定用户继承到的全部资源，而非只看当前树节点的直接资源。
-  // 后端只返回已安装成功的 Skill，企业/部门来源在选项中显式标注。
-  const { data: resources } = useQuery({
-    queryKey: ['terminal-resources'], queryFn: () => terminal.resources(),
   });
 
   const isOwner = (created_by: string | null) => !!myId && created_by === myId;
@@ -107,10 +101,6 @@ export default function AgentManagerView() {
         name: selectedAgent.name,
         description: selectedAgent.description ?? '',
         system_prompt: selectedAgent.system_prompt ?? '',
-        rag_collection_ids: selectedAgent.rag_collection_ids ?? [],
-        skill_ids: selectedAgent.skill_ids ?? [],
-        temperature: selectedAgent.temperature ?? null,
-        max_tokens: selectedAgent.max_tokens ?? null,
         is_active: selectedAgent.is_active,
       });
       setDirty(false);
@@ -166,11 +156,6 @@ export default function AgentManagerView() {
     ? (agents ?? []).filter((a) => a.name.toLowerCase().includes(kw) || a.slug.toLowerCase().includes(kw))
     : (agents ?? []);
   const canCreate = !!scope && scope.type !== 'organization';
-
-  const ragOptions = (resources?.rags ?? []).map((c) => ({ value: c.id, label: c.name }));
-  const skillOptions = (resources?.skills ?? []).map((s) => ({
-    value: s.id, label: `${s.name}（${SCOPE_LABEL[s.scope_type] ?? s.scope_type}）`,
-  }));
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, fontFamily: WB_FONT, background: '#fff' }}>
@@ -250,7 +235,7 @@ export default function AgentManagerView() {
                         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</span>
                         {owner && <span style={minePillStyle}>我创建</span>}
                       </div>
-                      <div style={{ fontSize: 11, color: WB.textAux, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.slug} · {r.model_alias}</div>
+                      <div style={{ fontSize: 11, color: WB.textAux, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.slug} · 文本角色</div>
                     </div>
                     {!r.is_active && <Tag color="red" style={{ marginInlineEnd: 0, fontSize: 10, lineHeight: '16px', padding: '0 4px' }}>停用</Tag>}
                   </div>
@@ -310,20 +295,8 @@ export default function AgentManagerView() {
                   <Form.Item name="system_prompt" label="系统提示词" rules={[{ required: true }]}>
                     <TextArea rows={10} style={{ fontFamily: 'monospace' }} />
                   </Form.Item>
-                  <Form.Item name="rag_collection_ids" label="绑定 RAG 集合（可多选，仅此智能体使用）">
-                    <Select mode="multiple" allowClear showSearch placeholder="无" optionFilterProp="label" options={ragOptions} />
-                  </Form.Item>
-                  <Form.Item name="skill_ids" label="默认推荐技能（模型可自动调用，聊天中仍可临时调用其他有权技能）">
-                    <Select mode="multiple" allowClear showSearch placeholder="无" optionFilterProp="label" options={skillOptions} />
-                  </Form.Item>
-                  <Typography.Text type="secondary" style={{ display: 'block', marginTop: -16, marginBottom: 16, fontSize: 12 }}>
-                    此处用于设定智能体的默认能力，不构成排他白名单；用户在聊天中可按当前轮选择其他有权技能。
-                  </Typography.Text>
-                  <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
-                    <Form.Item name="temperature" label="Temperature"><InputNumber min={0} max={2} step={0.1} /></Form.Item>
-                    <Form.Item name="max_tokens" label="Max Tokens"><InputNumber min={1} /></Form.Item>
-                    <Form.Item name="is_active" label="启用" valuePropName="checked"><Switch /></Form.Item>
-                  </div>
+                  <Form.Item name="is_active" label="启用" valuePropName="checked"><Switch /></Form.Item>
+                  <Typography.Text type="secondary">文本角色与个人助手使用相同的模型选择、工作空间、文件、Web、多模态和长期记忆能力，角色提示词不会扩大权限。</Typography.Text>
                 </Form>
               </>
             )}
@@ -342,7 +315,7 @@ export default function AgentManagerView() {
           <Form
             form={createForm} layout="vertical"
             onFinish={(v) => create.mutate(v)}
-            initialValues={{ is_active: true, system_prompt: '', rag_collection_ids: [], skill_ids: [] }}
+            initialValues={{ is_active: true, system_prompt: '' }}
           >
             <Form.Item name="name" label="名称" rules={[{ required: true }]}>
               <Input placeholder="智能体名称" />
@@ -351,12 +324,7 @@ export default function AgentManagerView() {
             <Form.Item name="system_prompt" label="系统提示词" rules={[{ required: true }]}>
               <TextArea rows={6} style={{ fontFamily: 'monospace' }} />
             </Form.Item>
-            <Form.Item name="rag_collection_ids" label="绑定 RAG 集合（可多选）">
-              <Select mode="multiple" allowClear showSearch placeholder="无" optionFilterProp="label" options={ragOptions} />
-            </Form.Item>
-            <Form.Item name="skill_ids" label="默认推荐技能（可多选）">
-              <Select mode="multiple" allowClear showSearch placeholder="无" optionFilterProp="label" options={skillOptions} />
-            </Form.Item>
+            <Typography.Text type="secondary">这里只保存文本角色。模型与平台固定能力由每次个人助手会话决定。</Typography.Text>
           </Form>
         </CreateModal>
       )}

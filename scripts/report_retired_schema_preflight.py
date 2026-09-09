@@ -42,7 +42,15 @@ RETIRED_TABLES = (
     "platform_extension_release_events",
     "platform_extension_releases",
     "platform_extension_sources",
+    "rag_chunks",
+    "rag_collections",
+    "rag_documents",
+    "rag_folders",
     "scope_manager_assignments",
+    "skill_executions",
+    "skill_files",
+    "skill_folders",
+    "skill_versions",
     "skills",
     "teams",
     "tool_connectors",
@@ -50,8 +58,7 @@ RETIRED_TABLES = (
     "user_department_memberships",
 )
 
-# Tool-call history may only be retired after Skill monitoring has moved to
-# skill_executions.  Keep it visible but separate from unconditional targets.
+# Tool-call history remains a separately audited retirement target.
 CONDITIONAL_RETIRED_TABLES = ("tool_call_logs",)
 
 
@@ -410,31 +417,6 @@ async def build_report(connection: asyncpg.Connection, *, schema: str) -> dict[s
                 }
             )
 
-    invalid_agent_skills = 0
-    if (
-        await _table_exists(connection, schema, "agents")
-        and await _table_exists(connection, schema, "skill_folders")
-        and await _column_exists(connection, schema, "agents", "skill_ids")
-    ):
-        invalid_agent_skills = await _count(
-            connection,
-            f"""
-            SELECT COUNT(*)
-            FROM {_quote_ident(schema)}.agents AS agent
-            CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(agent.skill_ids, '[]'::jsonb)) skill_id(value)
-            LEFT JOIN {_quote_ident(schema)}.skill_folders AS folder ON folder.id::text = skill_id.value
-            WHERE agent.deleted_at IS NULL AND (folder.id IS NULL OR folder.deleted_at IS NOT NULL)
-            """,
-        )
-    if invalid_agent_skills:
-        hard_blockers.append(
-            {
-                "code": "invalid_agent_skill_references",
-                "messageZh": "自定义智能体仍引用不存在或已删除的 SkillFolder。",
-                "count": invalid_agent_skills,
-            }
-        )
-
     legacy_agent_payloads = {
         column: await _legacy_payload_count(connection, schema, "agents", column)
         for column in ("workflow", "judge_config", "rag_collection_id", "judge_template_id")
@@ -528,7 +510,6 @@ async def build_report(connection: asyncpg.Connection, *, schema: str) -> dict[s
             "teamScopeReferences": team_scope_references,
             "activeUsersWithoutValidRole": users_without_roles,
             "legacyUserRoleValues": legacy_role_values,
-            "invalidActiveAgentSkillReferences": invalid_agent_skills,
             "legacyAgentPayloads": legacy_agent_payloads,
             "legacyAgentRunPayloads": legacy_run_payloads,
             "platformExtensionObjectReferences": extension_object_references,
@@ -539,8 +520,8 @@ async def build_report(connection: asyncpg.Connection, *, schema: str) -> dict[s
         "manualChecks": [
             "在写 contract 迁移前，用代码搜索确认 ORM、API、后台任务和工具注册均不再引用待退役对象。",
             "对所有非空退役表生成独立归档并记录行数与 SHA-256；本脚本不会把非空表当作可直接删除。",
-            "导出 platform_extension_sources.artifact_ref 对象清单，确认与 Workspace/Skill OSS 引用无交集。",
-            "确认 tool_call_logs 的 Skill 监控消费者已迁移到 skill_executions 后再退役该条件表。",
+            "导出 platform_extension_sources.artifact_ref 对象清单，确认与工作空间 OSS 引用无交集。",
+            "确认 tool_call_logs 不再被已退役的产品监控消费，再退役该条件表。",
             "保存受保护数据快照、Schema 指纹、pg_dump 校验值和对应不可变镜像 digest。",
         ],
     }

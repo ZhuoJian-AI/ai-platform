@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
-  Modal, Form, Input, InputNumber, Space, Select, Switch, Tag, Typography, message,
+  Modal, Form, Input, Switch, Tag, Typography, message,
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, EditOutlined, RobotOutlined,
   BankOutlined, ApartmentOutlined, UserOutlined, FolderOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { agents, rag, skillStore } from '../../api/client';
+import { agents } from '../../api/client';
 import type { Agent, AgentScope } from '../../api/client';
 import { ApiError } from '../../api/client';
 import OrgSelect from '../../components/OrgSelect';
@@ -57,8 +57,6 @@ export default function Agents() {
   const [createForm] = Form.useForm();
   const [confirm, setConfirm] = useState<{ id: string; name: string } | null>(null);
 
-  const orgId = scope?.orgId;
-
   // 仅展示当前选中组织的子树
   const treeDataScoped = useMemo(() => {
     if (!selectedOrgId) return [];
@@ -98,58 +96,10 @@ export default function Agents() {
     enabled: !!scope,
   });
 
-  // 右栏绑定选项：只载入「所选节点 scope + 组织级」可见的 RAG / 技能
-  // （组织级对全员可见；所选节点 scope 覆盖该节点下 agent 常绑的本级资源，使已选项能解析出名称）。
-  type ScRef = { scope_type: 'organization' | 'department' | 'user'; scope_id: string | null };
-  const ORG_SCOPE: ScRef = { scope_type: 'organization', scope_id: null };
-  const nodeScope: ScRef | null = scope
-    ? { scope_type: scope.scope_type, scope_id: scope.scope_id ?? null }
-    : null;
-  const nodeIsOrg = !nodeScope || nodeScope.scope_type === 'organization';
-
-  const { data: ragOrg } = useQuery({
-    queryKey: ['admin-rag', orgId, 'organization'],
-    queryFn: () => rag.listCollections(orgId!, ORG_SCOPE),
-    enabled: !!orgId,
-  });
-  const { data: ragNode } = useQuery({
-    queryKey: ['admin-rag', orgId, nodeScope?.scope_type, nodeScope?.scope_id],
-    queryFn: () => rag.listCollections(orgId!, nodeScope!),
-    enabled: !!orgId && !nodeIsOrg,
-  });
-  const ragList = useMemo(() => {
-    const map = new Map<string, { id: string; name: string }>();
-    for (const c of [...(ragOrg ?? []), ...(ragNode ?? [])]) map.set(c.id, { id: c.id, name: c.name });
-    return [...map.values()];
-  }, [ragOrg, ragNode]);
-
-  const { data: skillOrg } = useQuery({
-    queryKey: ['admin-skill-folders', orgId, 'organization'],
-    queryFn: () => skillStore.listFolders(orgId!, ORG_SCOPE),
-    enabled: !!orgId,
-  });
-  const { data: skillNode } = useQuery({
-    queryKey: ['admin-skill-folders', orgId, nodeScope?.scope_type, nodeScope?.scope_id],
-    queryFn: () => skillStore.listFolders(orgId!, nodeScope!),
-    enabled: !!orgId && !nodeIsOrg,
-  });
-  const skillList = useMemo(() => {
-    const map = new Map<string, { id: string; name: string; slug: string; scope_type: string }>();
-    for (const s of [...(skillOrg ?? []), ...(skillNode ?? [])]) {
-      if (!s.is_installed) continue;
-      map.set(s.id, s);
-    }
-    return [...map.values()];
-  }, [skillOrg, skillNode]);
-
   // 选中 agent → 同步表单
   useEffect(() => {
     if (selectedAgent) {
-      form.setFieldsValue({
-        ...selectedAgent,
-        rag_collection_ids: selectedAgent.rag_collection_ids ?? [],
-        skill_ids: selectedAgent.skill_ids ?? [],
-      });
+      form.setFieldsValue(selectedAgent);
       setDirty(false);
     } else {
       form.resetFields();
@@ -256,7 +206,7 @@ export default function Agents() {
                     <RobotOutlined style={{ fontSize: 15, color: active ? WB.primary : '#722ed1', flex: '0 0 auto' }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.name}</div>
-                      <div style={{ fontSize: FS.micro, color: WB.textAux, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.slug} · {r.model_alias}</div>
+                      <div style={{ fontSize: FS.micro, color: WB.textAux, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.slug} · 文本角色</div>
                     </div>
                     {!r.is_active && <Tag color="red" style={{ marginInlineEnd: 0, fontSize: FS.micro, lineHeight: '16px', padding: '0 4px' }}>停用</Tag>}
                   </div>
@@ -301,25 +251,8 @@ export default function Agents() {
                 <Form.Item name="system_prompt" label="系统提示词" rules={[{ required: true }]}>
                   <TextArea rows={10} style={{ fontFamily: 'monospace' }} />
                 </Form.Item>
-                <Form.Item name="rag_collection_ids" label="绑定 RAG 集合（可多选，仅此智能体使用）">
-                  <Select
-                    mode="multiple" allowClear showSearch placeholder="无"
-                    optionFilterProp="label"
-                    options={ragList?.map((c) => ({ value: c.id, label: c.name })) ?? []}
-                  />
-                </Form.Item>
-                <Form.Item name="skill_ids" label="默认推荐技能（模型可自动调用，聊天中仍可临时调用其他有权技能）">
-                  <Select
-                    mode="multiple" allowClear showSearch placeholder="无"
-                    optionFilterProp="label"
-                    options={skillList.map((s) => ({ value: s.id, label: `${s.name}（${SCOPE_LABEL[s.scope_type] ?? s.scope_type}）` }))}
-                  />
-                </Form.Item>
-                <Space>
-                  <Form.Item name="temperature" label="Temperature"><InputNumber min={0} max={2} step={0.1} /></Form.Item>
-                  <Form.Item name="max_tokens" label="Max Tokens"><InputNumber min={1} /></Form.Item>
-                  <Form.Item name="is_active" label="启用" valuePropName="checked"><Switch /></Form.Item>
-                </Space>
+                <Form.Item name="is_active" label="启用" valuePropName="checked"><Switch /></Form.Item>
+                <Typography.Text type="secondary">文本角色继承个人助手当前模型、工作空间、文件、Web、多模态和长期记忆能力，不拥有独立资源或额外权限。</Typography.Text>
               </Form>
             )}
           </div>
@@ -345,20 +278,7 @@ export default function Agents() {
           <Form.Item name="system_prompt" label="系统提示词" rules={[{ required: true }]}>
             <TextArea rows={6} style={{ fontFamily: 'monospace' }} />
           </Form.Item>
-          <Form.Item name="rag_collection_ids" label="绑定 RAG 集合（可多选）">
-            <Select
-              mode="multiple" allowClear showSearch placeholder="无"
-              optionFilterProp="label"
-              options={ragList?.map((c) => ({ value: c.id, label: c.name })) ?? []}
-            />
-          </Form.Item>
-          <Form.Item name="skill_ids" label="默认推荐技能（可多选）">
-            <Select
-              mode="multiple" allowClear showSearch placeholder="无"
-              optionFilterProp="label"
-              options={skillList.map((s) => ({ value: s.id, label: `${s.name}（${SCOPE_LABEL[s.scope_type] ?? s.scope_type}）` }))}
-            />
-          </Form.Item>
+          <Typography.Text type="secondary">智能体仅保存名称、说明和角色提示词；运行时使用用户本轮选择的模型与个人助手固定能力。</Typography.Text>
         </Form>
       </Modal>
 

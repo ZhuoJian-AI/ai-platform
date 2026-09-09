@@ -3,7 +3,7 @@ import {
   Button, Input, Popover, Select, Spin, Tag, Tooltip, Typography, message,
 } from 'antd';
 import {
-  AudioOutlined, BookOutlined, CheckCircleOutlined, CloseOutlined, DatabaseOutlined,
+  AudioOutlined, CheckCircleOutlined, CloseOutlined, DatabaseOutlined,
   DownloadOutlined, DownOutlined, EyeOutlined, FileTextOutlined, LoadingOutlined,
   PictureOutlined, RightOutlined, SafetyOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
@@ -591,7 +591,7 @@ const FILE_WRITE_TOOLS = new Set([
   'presentation_create', 'presentation_edit', 'presentation_convert',
   'pdf_create', 'pdf_merge', 'pdf_split', 'pdf_extract', 'pdf_convert',
   'text_create', 'text_edit', 'text_convert', 'business_export_to_workspace_file',
-  'image_generation_tool', 'run_skill_script',
+  'image_generation_tool',
 ]);
 
 function extractFileChanges(blocks?: Block[]): { path: string; generated: boolean }[] {
@@ -741,27 +741,23 @@ function ToolCard({ b }: { b: Extract<Block, { kind: 'tool_call' }> }) {
 }
 
 // ── 原生 Assistant Core 资源调用痕迹 ──────────────────────────────────
-// 与正文(text)和技能(ToolCard)都做区分：轻量单行 + 左侧主色竖条 + 类别图标，可展开看明细。
+// 与正文和工具卡片区分：轻量单行 + 左侧主色竖条 + 类别图标，可展开看明细。
 
 const TRACE_META: Record<TraceCategory, { icon: ReactNode; color: string; label: string }> = {
-  rag: { icon: <BookOutlined />, color: '#0ea5e9', label: '知识库' },
   memory: { icon: <DatabaseOutlined />, color: '#f59e0b', label: '记忆' },
   file: { icon: <FileTextOutlined />, color: '#0ea5e9', label: '文件' },
-  skill: { icon: <ThunderboltOutlined />, color: WB.primary, label: '技能' },
   policy: { icon: <SafetyOutlined />, color: '#f97316', label: '策略' },
 };
 
 function TraceChip({ b }: { b: Extract<Block, { kind: 'trace' }> }) {
   const [open, setOpen] = useState(false);
-  const meta = TRACE_META[b.category] ?? TRACE_META.rag;
+  const meta = TRACE_META[b.category] ?? TRACE_META.file;
   // 把 detail 里的数值字段拼成一行摘要（如 命中 3 条 / 注入 2 个），无则只显标题
   const d = (b.detail ?? {}) as Record<string, unknown>;
   const summaryBits: string[] = [];
   const pushNum = (key: string, label: string) => {
     if (typeof d[key] === 'number') summaryBits.push(`${label} ${d[key]}`);
   };
-  pushNum('hits', '命中');
-  pushNum('collections', '库');
   pushNum('facts', '条');
   pushNum('history', '历史');
   pushNum('files', '文件');

@@ -26,13 +26,14 @@ Run frontend contract checks with the relevant `npm run test:*` script.
 
 - `llm_router/backend/app/`: shared FastAPI backend, authentication, permissions, model routing, agents, workspaces and integrations.
 - `frontend/src/`: React/TypeScript administrator and employee interfaces.
-- `skill_runner/`: isolated execution service for user-uploaded Skills and trusted file tools.
+- `tool_executor/`: isolated execution service for fixed, reviewed platform file tools; it never runs user code.
 - `docker-compose.coolify.yml`: Registry-first staging deployment manifest.
 - `llm_router/backend/alembic/versions/`: the single database migration chain.
 
 ## Hard boundaries
 
 - SaaS owns identity, roles, authorization, model routing, workspaces and audited integration calls.
+- The external `aifabei-subsystem-builder` Codex Skill is a subsystem contract and is outside this repository; never conflate it with the retired in-product user Skill feature.
 - Business records, workflow and business to-dos remain in registered subsystems.
 - Never expose secrets, database ports, Docker APIs or unrestricted server paths.
 - Permission changes require denial tests as well as happy-path tests.

@@ -1,7 +1,7 @@
-"""Capability-aware model gateway used by Agent Runtime and RAG.
+"""Capability-aware model gateway used by the Assistant Core and public model APIs.
 
 The gateway owns provider/deployment selection and wire-protocol adaptation.  It
-does not plan agent work, execute Skills, or persist workspace files.  Existing
+does not plan agent work, execute tools, or persist workspace files. Existing
 providers without explicit deployments remain available through the legacy
 client so the rollout is backwards compatible.
 """

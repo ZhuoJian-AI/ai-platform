@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
@@ -12,7 +13,6 @@ const [
   applicationView,
   uploadQueue,
   previewSession,
-  skills,
   workspaces,
   pkgSource,
   nginxConfig,
@@ -25,7 +25,6 @@ const [
   read('src/pages/terminal/EnterpriseApplicationView.tsx'),
   read('src/components/files/WorkspaceUploadQueue.tsx'),
   read('src/components/files/WorkspacePreviewSessionView.tsx'),
-  read('src/pages/tools/Skills.tsx'),
   read('src/pages/agent/Workspaces.tsx'),
   read('package.json'),
   read('nginx.coolify.conf'),
@@ -50,8 +49,11 @@ assert.match(applicationDetail, /Manifest Action 能力/);
 assert.match(applicationDetail, /actionsQuery\.data/);
 assert.match(applications, /业务小助手仅使用已审核的 Manifest Action/);
 
-// The cleanup must not remove current user Skills, workspaces, or read-only Office preview.
-assert.match(skills, /skillStore\.importPackage/);
+// User-uploaded Skills are retired, while workspaces and read-only Office preview remain.
+assert.equal(existsSync(resolve('src/pages/tools/Skills.tsx')), false);
+assert.equal(existsSync(resolve('src/pages/agent/Rag.tsx')), false);
+assert.equal(existsSync(resolve('src/pages/terminal/KnowledgeBaseView.tsx')), false);
+assert.equal(existsSync(resolve('src/pages/terminal/SkillManagerView.tsx')), false);
 assert.match(workspaces, /BrowserDrawer/);
 assert.match(previewSession, /data-testid="weboffice-preview"/);
 

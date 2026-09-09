@@ -1,4 +1,4 @@
-"""RAG / 工作空间共享文档解析器。
+"""工作空间文档解析器。
 
 按扩展名 / Content-Type 分派到对应解析库（惰性 import，避免无解析任务时强依赖）：
 - txt / md / csv：编码探测后解码
@@ -9,8 +9,7 @@
 - pptx：逐幻灯片标题、正文、表格与备注
 - 旧版、模板、宏和 OpenDocument 变体：LibreOffice headless 转为现代格式后解析
 
-调用方（``rag_service.ingest_uploaded_file``）在请求线程内同步调用本模块完成文本
-抽取，结果立即落库为 ``RagDocument.content``；分块与嵌入在后台任务中异步进行。
+工作空间解析 worker 调用本模块抽取文本，供用户明确引用文件时读取。
 """
 
 from __future__ import annotations

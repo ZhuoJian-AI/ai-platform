@@ -5,10 +5,9 @@ Revises: None
 Create Date: 2026-09-09
 
 Existing databases already stamped at this revision execute no migration. New
-installations execute the adjacent, checksummed SQL captured from the audited
-0001-to-0075 migration result. The SQL is intentionally independent from the
-runtime ORM so a future model change cannot rewrite historical installation
-semantics.
+installations execute the adjacent, checksummed final baseline. Retired RAG,
+user-Skill and pgvector objects are intentionally absent so a fresh install
+does not provision deleted products before 0076 runs.
 """
 
 from __future__ import annotations
@@ -24,9 +23,8 @@ branch_labels = None
 depends_on = None
 
 _BASELINE_FILE = Path(__file__).with_name("0075_schema_baseline.sql")
-_BASELINE_SHA256 = "e2cc9449c01eb17fb64987d5202498365962578889a73cfc195f7512e06d92a3"
+_BASELINE_SHA256 = "e2a69cdbed3cc7ab3b8dcb2cc32003c5a947e4a194263179ae9182ecbbea39f6"
 _REQUIRED_MARKERS = (
-    "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public VERSION '0.8.2'",
     "CREATE FUNCTION public.reject_ai_quota_event_mutation()",
     "CREATE MATERIALIZED VIEW public.ai_quota_monthly_rollups AS",
     "CREATE TRIGGER trg_ai_quota_events_append_only",

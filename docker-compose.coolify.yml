@@ -62,10 +62,10 @@ services:
       resources:
         limits: { cpus: "0.25", memory: 512M }
 
-  skill-runner:
-    image: 127.0.0.1:5000/zhuojian/ai-platform-skill-runner-app@sha256:08cac524b5a411eec2b7e0d6d8cfa265adb78427b63d64297e77a4b728a86e38
+  tool-executor:
+    image: 127.0.0.1:5000/zhuojian/ai-platform-tool-executor-app@sha256:08cac524b5a411eec2b7e0d6d8cfa265adb78427b63d64297e77a4b728a86e38
     environment:
-      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
+      TOOL_EXECUTOR_TOKEN: ${TOOL_EXECUTOR_TOKEN:?}
       # Standard Compose runtimes honor these empty overrides. The image
       # entrypoint also rebuilds PID 1's environment for platforms that inject
       # application variables after Compose merging.
@@ -79,21 +79,12 @@ services:
       MASTER_ENCRYPTION_KEY: ""
       STORAGE_GATEWAY_URL: ""
       STORAGE_PROJECT_TOKEN: ""
-      SKILL_CACHE_ROOT: /cache
-      SKILL_RUNNER_MAX_CONCURRENCY: "${SKILL_RUNNER_MAX_CONCURRENCY:-4}"
-      SKILL_RUNNER_MAX_QUEUE: "${SKILL_RUNNER_MAX_QUEUE:-100}"
-      SKILL_RUNNER_QUEUE_WAIT_SECONDS: "${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}"
-      SKILL_RUNNER_OFFICE_CONCURRENCY: "${SKILL_RUNNER_OFFICE_CONCURRENCY:-1}"
-      SKILL_PACKAGE_MAX_BYTES: "${SKILL_PACKAGE_MAX_BYTES:-104857600}"
-      SKILL_PACKAGE_EXPANDED_MAX_BYTES: "${SKILL_PACKAGE_EXPANDED_MAX_BYTES:-524288000}"
-      SKILL_PACKAGE_MAX_FILES: "${SKILL_PACKAGE_MAX_FILES:-1000}"
-      SKILL_CACHE_RETENTION_SECONDS: "${SKILL_CACHE_RETENTION_SECONDS:-604800}"
-      SKILL_CACHE_MAX_BYTES: "${SKILL_CACHE_MAX_BYTES:-10737418240}"
-      SKILL_FAILED_TEMP_RETENTION_SECONDS: "${SKILL_FAILED_TEMP_RETENTION_SECONDS:-3600}"
+      TOOL_EXECUTOR_MAX_CONCURRENCY: "${TOOL_EXECUTOR_MAX_CONCURRENCY:-4}"
+      TOOL_EXECUTOR_MAX_QUEUE: "${TOOL_EXECUTOR_MAX_QUEUE:-100}"
+      TOOL_EXECUTOR_QUEUE_WAIT_SECONDS: "${TOOL_EXECUTOR_QUEUE_WAIT_SECONDS:-300}"
+      TOOL_EXECUTOR_OFFICE_CONCURRENCY: "${TOOL_EXECUTOR_OFFICE_CONCURRENCY:-1}"
     expose:
       - "8020"
-    volumes:
-      - skill_cache:/cache
     read_only: true
     tmpfs:
       - /tmp:size=1073741824,mode=1777
@@ -128,12 +119,10 @@ services:
       TRUSTED_PROXY_CIDRS: "${TRUSTED_PROXY_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
       API_KEY_CACHE_TTL: "${API_KEY_CACHE_TTL:-60}"
       DLP_EXPOSE_MATCHES_IN_ERROR: "${DLP_EXPOSE_MATCHES_IN_ERROR:-false}"
-      CODE_SKILLS_ENABLED: "${CODE_SKILLS_ENABLED:-true}"
-      AGENT_SKILLS_ORG_ALLOWLIST: "${AGENT_SKILLS_ORG_ALLOWLIST:-alphabet}"
-      SKILL_RUNNER_URL: http://skill-runner:8020
-      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
-      SKILL_RUNNER_TIMEOUT_SECONDS: "${SKILL_RUNNER_TIMEOUT_SECONDS:-120}"
-      SKILL_RUNNER_QUEUE_WAIT_SECONDS: "${SKILL_RUNNER_QUEUE_WAIT_SECONDS:-300}"
+      TOOL_EXECUTOR_URL: http://tool-executor:8020
+      TOOL_EXECUTOR_TOKEN: ${TOOL_EXECUTOR_TOKEN:?}
+      TOOL_EXECUTOR_TIMEOUT_SECONDS: "${TOOL_EXECUTOR_TIMEOUT_SECONDS:-120}"
+      TOOL_EXECUTOR_QUEUE_WAIT_SECONDS: "${TOOL_EXECUTOR_QUEUE_WAIT_SECONDS:-300}"
       AGENT_GLOBAL_CONCURRENCY: "${AGENT_GLOBAL_CONCURRENCY:-12}"
       AGENT_USER_CONCURRENCY: "${AGENT_USER_CONCURRENCY:-2}"
       AGENT_QUEUE_MAX: "${AGENT_QUEUE_MAX:-100}"
@@ -188,7 +177,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      skill-runner:
+      tool-executor:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
@@ -325,8 +314,8 @@ services:
       STORAGE_INTERNAL_ENDPOINT: "${STORAGE_INTERNAL_ENDPOINT:-https://oss-cn-hongkong-internal.aliyuncs.com}"
       STORAGE_GATEWAY_TIMEOUT_SECONDS: "${STORAGE_GATEWAY_TIMEOUT_SECONDS:-60}"
       STORAGE_LIFECYCLE_INTERVAL_SECONDS: "${STORAGE_LIFECYCLE_INTERVAL_SECONDS:-3600}"
-      SKILL_RUNNER_URL: http://skill-runner:8020
-      SKILL_RUNNER_TOKEN: ${SKILL_RUNNER_TOKEN:?}
+      TOOL_EXECUTOR_URL: http://tool-executor:8020
+      TOOL_EXECUTOR_TOKEN: ${TOOL_EXECUTOR_TOKEN:?}
     command: ["python", "-m", "app.workers.storage_lifecycle"]
     extra_hosts:
       - "postgres:${DATA_PLANE_PREFIX:-10.0.10}.10"
@@ -334,7 +323,7 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-      skill-runner:
+      tool-executor:
         condition: service_healthy
     healthcheck:
       test:
@@ -444,10 +433,9 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  skill_cache:
 
 networks:
-  # PostgreSQL and Redis are invisible to executable Skills.  Backend and the
+  # PostgreSQL and Redis are invisible to fixed platform tools. Backend and the
   # trusted workers bridge this internal network to the application network.
   data_plane:
     internal: true

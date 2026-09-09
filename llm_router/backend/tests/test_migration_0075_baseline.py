@@ -1,4 +1,4 @@
-"""Real PostgreSQL verification for the post-0075 single schema baseline."""
+"""Real PostgreSQL verification for the compact 0075/0076 schema baseline."""
 
 from __future__ import annotations
 
@@ -26,15 +26,15 @@ BASELINE_SQL = VERSIONS_DIR / "0075_schema_baseline.sql"
 DEFAULT_TEST_DATABASE_URL = (
     "postgresql+asyncpg://ai_infra:ai_infra@127.0.0.1:5434/ai_infra_test"
 )
-EXPECTED_SQL_SHA256 = "e2cc9449c01eb17fb64987d5202498365962578889a73cfc195f7512e06d92a3"
-EXPECTED_SCHEMA_SHA256 = "4017e5852a530337ea57e100e80f015f2bbb9f4a0cbf73a58c1be15476a03b95"
+EXPECTED_SQL_SHA256 = "e2a69cdbed3cc7ab3b8dcb2cc32003c5a947e4a194263179ae9182ecbbea39f6"
+EXPECTED_SCHEMA_SHA256 = "cc0e33965fe10b6029e0356bd76401b62154e2fb8eb822262bbd3d07a6354cb1"
 EXPECTED_SCHEMA_CATEGORIES = {
-    "columns": (789, "873eda2fe857526750b9c6670cbb1ac825c9eef91223bb1e0a786460a4ef979c"),
-    "constraints": (782, "ac5e48a20fb06557e1e9489a7da14ce3947a101e26a418998ee1506358ad83bf"),
-    "extensions": (2, "2d29096ae21245c2136f56a31947310cd97b240039f2a73aab7f0e4b753df2b3"),
-    "functions": (116, "23630527f75fd6f268b3e197f88316a0217d63b721ad55270970702c3c74e669"),
-    "indexes": (268, "884637396008bcc46f8f57f58e42a8ffa798bcaed1990e5a6c268454b23c947b"),
-    "relations": (63, "5514ddeb2b97d8e59361a22e239c583ac0dfcb387d811d49c49de2a691105fae"),
+    "columns": (672, "232db02b65059a29ffcf14ed05dd10ae1f40f5f92577593b96a4a37fb3ba2258"),
+    "constraints": (680, "034b93267f8ad5e44d56fa539e2baea2f87a943d59bcac444a1d9591be5c27a8"),
+    "extensions": (1, "c9462b51547b30b2988ac202f0f666df58a79ca58f1468921122f4505ad7a3d3"),
+    "functions": (2, "91b13a067d341bd9df13a123070fe64327a24a6ab4e5745ea80b3d3005b02108"),
+    "indexes": (224, "aff5de8092ff1d37ff2c6178b50cafb381af8af9d244f3339ed47e30450d3502"),
+    "relations": (54, "81599bdbd94a2c55d5e47621ed74731c21bdfd2df20470e1f51dd6045d70d840"),
     "row_security_policies": (
         0,
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -158,9 +158,10 @@ async def migration_database_url() -> AsyncIterator[str]:
             await maintenance.close()
 
 
-def test_baseline_is_the_only_static_checksummed_revision() -> None:
+def test_compact_baseline_and_retirement_contract_are_the_only_revisions() -> None:
     assert sorted(path.name for path in VERSIONS_DIR.glob("*.py")) == [
-        "0075_retired_schema_contract.py"
+        "0075_retired_schema_contract.py",
+        "0076_retire_rag_and_user_skills.py",
     ]
     migration_source = BASELINE_MIGRATION.read_text(encoding="utf-8")
     assert 'down_revision = None' in migration_source
@@ -170,7 +171,7 @@ def test_baseline_is_the_only_static_checksummed_revision() -> None:
 
 
 @pytest.mark.asyncio
-async def test_empty_postgresql_installs_exact_0075_schema_and_remains_noop(
+async def test_empty_postgresql_installs_exact_current_schema_and_remains_noop(
     migration_database_url: str,
 ) -> None:
     installed = _invoke_alembic(migration_database_url, "upgrade", "head")
@@ -181,11 +182,43 @@ async def test_empty_postgresql_installs_exact_0075_schema_and_remains_noop(
     connection = await asyncpg.connect(**connect_kwargs, timeout=5)
     try:
         assert await connection.fetchval("SELECT version_num FROM alembic_version") == (
-            "0075_retired_schema_contract"
+            "0076_retire_rag_and_user_skills"
         )
         assert await connection.fetchval(
-            "SELECT extversion FROM pg_extension WHERE extname = 'vector'"
-        ) == "0.8.2"
+            "SELECT COUNT(*) FROM pg_extension WHERE extname = 'vector'"
+        ) == 0
+        assert await connection.fetchval(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = ANY($1::text[])",
+            [
+                "rag_collections",
+                "rag_folders",
+                "rag_documents",
+                "rag_chunks",
+                "skill_folders",
+                "skill_files",
+                "skill_versions",
+                "skill_executions",
+            ],
+        ) == 0
+        assert await connection.fetchval(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND "
+            "((table_name = 'agents' AND column_name = ANY($1::text[])) OR "
+            " (table_name = 'memories' AND column_name = 'embedding'))",
+            [
+                "model_alias",
+                "memory_config",
+                "workspace_id",
+                "rag_collection_ids",
+                "skill_ids",
+                "application_id",
+                "module_key",
+                "page_key",
+                "temperature",
+                "max_tokens",
+            ],
+        ) == 0
         assert await connection.fetchval(
             "SELECT to_regclass('public.ai_quota_monthly_rollups')::text"
         ) == "ai_quota_monthly_rollups"

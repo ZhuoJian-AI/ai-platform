@@ -220,8 +220,7 @@ _RESERVED_FILE_METADATA_KEYS = {
     "storage_version_id", "etag", "integrity_algorithm", "integrity_value",
     "artifact_format_verified", "detected_artifact_format",
     "content_hash", "size", "task_id", "generated_by", "source_kind",
-    "source_task_id", "source_task_title", "skill_id", "skill_display_name",
-    "skill_version", "source_created_at",
+    "source_task_id", "source_task_title", "source_created_at",
 }
 
 

@@ -4,58 +4,32 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
-class _AgentApplicationContextMixin(BaseModel):
-    application_id: UUID | None = None
-    module_key: str | None = Field(None, min_length=1, max_length=128)
-    page_key: str | None = Field(None, min_length=1, max_length=128)
+class AgentCreate(BaseModel):
+    model_config = {"extra": "forbid"}
 
-    @model_validator(mode="after")
-    def complete_application_context(self):
-        values = (self.application_id, self.module_key, self.page_key)
-        if any(value is not None for value in values) and not all(value is not None for value in values):
-            raise ValueError("application_id、module_key 和 page_key 必须同时提供")
-        return self
-
-
-class AgentCreate(_AgentApplicationContextMixin):
     name: str = Field(..., max_length=255)
     # slug 可不填：未提供时由 service 按编码规则自动生成（名称派生 + 同 scope 内唯一）。
     slug: str | None = Field(None, max_length=100, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     description: str | None = None
-    # 作用域：organization / department / user / role；scope_id 为对应 id（org 级为 None）
-    scope_type: Literal["organization", "department", "user", "role"] = "organization"
+    # 作用域：organization / department / user；scope_id 为对应 id（org 级为 None）
+    scope_type: Literal["organization", "department", "user"] = "organization"
     scope_id: UUID | None = None
     system_prompt: str = Field(..., min_length=1)
-    model_alias: str = "default"
-    memory_config: dict = Field(default_factory=dict)
-    workspace_id: UUID | None = None
-    rag_collection_ids: list[str] = Field(default_factory=list)
-    skill_ids: list[str] = Field(default_factory=list)
-    temperature: float | None = None
-    max_tokens: int | None = None
     is_active: bool = True
 
 
 class AgentUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+
     name: str | None = Field(None, max_length=255)
     description: str | None = None
     system_prompt: str | None = Field(None, min_length=1)
-    model_alias: str | None = None
-    memory_config: dict | None = None
-    workspace_id: UUID | None = None
-    rag_collection_ids: list[str] | None = None
-    skill_ids: list[str] | None = None
-    application_id: UUID | None = None
-    module_key: str | None = Field(None, min_length=1, max_length=128)
-    page_key: str | None = Field(None, min_length=1, max_length=128)
-    temperature: float | None = None
-    max_tokens: int | None = None
     is_active: bool | None = None
     # 终端/管理端允许迁移 agent 所属 scope；None=不改动，空串=置 org 级。
-    scope_type: Literal["organization", "department", "user", "role"] | None = None
+    scope_type: Literal["organization", "department", "user"] | None = None
     scope_id: UUID | None = None
 
 
@@ -69,16 +43,6 @@ class AgentRead(BaseModel):
     slug: str
     description: str | None
     system_prompt: str
-    model_alias: str
-    memory_config: dict
-    workspace_id: UUID | None
-    rag_collection_ids: list[str]
-    skill_ids: list[str]
-    application_id: UUID | None
-    module_key: str | None
-    page_key: str | None
-    temperature: float | None
-    max_tokens: int | None
     is_active: bool
     version: int
     created_at: datetime

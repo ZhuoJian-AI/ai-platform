@@ -60,18 +60,12 @@ export default function AgentMonitor() {
               </Card>
 
               {components && (
-                <Card title="组件使用（工作空间 / RAG知识库 / 长期记忆）">
+                <Card title="组件使用（工作空间 / 长期记忆）">
                   <Space size="large" align="start" style={{ flexWrap: 'wrap' }}>
                     <Card size="small" title="工作空间" style={{ minWidth: 220 }}>
                       <Space direction="vertical" size="small" style={{ width: '100%' }}>
                         <Statistic title="使用运行数" value={components.workspace.runs} />
                         <Statistic title="文件操作次数" value={components.workspace.ops} />
-                      </Space>
-                    </Card>
-                    <Card size="small" title="RAG 知识库" style={{ minWidth: 220 }}>
-                      <Space direction="vertical" size="small" style={{ width: '100%' }}>
-                        <Statistic title="检索运行数" value={components.rag.runs} />
-                        <Statistic title="命中片段数" value={components.rag.hits} />
                       </Space>
                     </Card>
                     <Card size="small" title="长期记忆" style={{ minWidth: 220 }}>

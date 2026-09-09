@@ -510,7 +510,6 @@ async def test_only_trusted_same_org_live_tool_files_become_artifacts(monkeypatc
         None,
         task_id=str(uuid4()),
         task_title="测试",
-        executed_skills=[],
     )
     assert len(verified) == 1
     assert len(artifacts) == 1
@@ -602,7 +601,6 @@ async def test_copy_replay_card_keeps_original_result_without_later_move_leak(mo
         None,
         task_id=str(uuid4()),
         task_title="测试",
-        executed_skills=[],
     )
     assert verified[0]["workspace_id"] == str(original_workspace_id)
     assert verified[0]["canonical_path"] == "技术部:/原始/交付.txt"

@@ -37,9 +37,9 @@ Path 留空。不要给 PostgreSQL、Redis 或 backend 配置公网域名或宿�
 - `REDIS_URL=redis://:<URL编码后的Redis密码>@redis:6379/0`
 - `SECRET_KEY=<随机长字符串>`
 - `MASTER_ENCRYPTION_KEY=<Fernet key>`
-- `CODE_SKILLS_ENABLED=true`
-- `SKILL_RUNNER_TOKEN=<随机长字符串>`
-- `SKILL_RUNNER_TIMEOUT_SECONDS=120`
+- `TOOL_EXECUTOR_TOKEN=<随机长字符串>`
+- `TOOL_EXECUTOR_TIMEOUT_SECONDS=120`
+- `TOOL_EXECUTOR_QUEUE_WAIT_SECONDS=300`
 - `WORKSPACE_OBJECT_STORAGE_ENABLED=true`
 - `STORAGE_GATEWAY_URL=https://storage.staging.zhuojianai.com`
 - `STORAGE_PROJECT_TOKEN=<由平台 Provisioner 按仓库签发的项目令牌>`
@@ -72,7 +72,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 验收要求：
 
-1. `postgres`、`redis`、`skill-runner`、`backend`、`workspace-parser`、`workspace-preview`、
+1. `postgres`、`redis`、`tool-executor`、`backend`、`workspace-parser`、`workspace-preview`、
    `storage-lifecycle`、`multimodal-worker`、`frontend` 均健康；
 2. `https://ai-platform.staging.zhuojianai.com/health` 返回 HTTP 200；
 3. 管理员入口 `/login` 可以打开并登录；

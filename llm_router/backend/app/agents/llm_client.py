@@ -2,7 +2,7 @@
 
 复用模型路由器的 provider 解析、密钥解密与协议适配能力，但**不走** /v1 HTTP 代理端点：
 直接用解析后的 provider + 解密 key 经 httpx 调上游 chat / embeddings。这样 agent 运行时
-与 RAG 嵌入共享同一套 org 作用域模型解析，且无需自建 API Key 调用本机代理。
+与其他模型能力共享同一套组织作用域模型解析，且无需自建 API Key 调用本机代理。
 
 - ``chat``  / ``stream_chat``：消息 → assistant 文本 + tool_calls + usage（OpenAI/Anthropic 双协议）
 - ``embed``：文本列表 → 嵌入向量列表（OpenAI 兼容 /embeddings 端点）

@@ -1,6 +1,6 @@
 """Monitor aggregation helpers — org-scoped time-bucketed metrics.
 
-复用 audit_logs（路由器）、agent_runs（智能体）、SkillExecution 与 ActionRequest，
+复用 audit_logs（路由器）、agent_runs（智能体）与 Manifest ActionRequest，
 按 budget.py 的实时聚合范式统计。所有查询按 organization_id 作用域过滤。
 """
 
@@ -19,7 +19,6 @@ from app.models.enterprise_application import (
     EnterpriseApplicationActionRequest,
 )
 from app.models.llm_provider import LlmProvider
-from app.models.skill import SkillExecution, SkillFile, SkillFolder
 
 
 def default_window() -> tuple[datetime, datetime]:
@@ -178,7 +177,7 @@ async def agent_metrics(
 async def _component_usage(
     db: AsyncSession, org_id: str, start: datetime, end: datetime,
 ) -> dict:
-    """Aggregate workspace, RAG and memory usage from durable run events.
+    """Aggregate workspace and memory usage from durable run events.
 
     ``AgentRun.steps`` was a duplicate runtime snapshot and is no longer
     written. ``AgentRunEvent`` is the single replay and monitoring source.
@@ -198,12 +197,6 @@ async def _component_usage(
             count(*) FILTER (
                 WHERE elem->>'type' = 'tool_result' AND (elem->>'name') LIKE 'workspace_%'
             ) AS workspace_ops,
-            count(DISTINCT CASE
-                WHEN elem->>'type' = 'trace' AND elem->>'category' = 'rag' THEN id
-            END) AS rag_runs,
-            coalesce(sum((elem->>'hits')::int) FILTER (
-                WHERE elem->>'type' = 'trace' AND elem->>'category' = 'rag'
-            ), 0) AS rag_hits,
             count(DISTINCT CASE
                 WHEN elem->>'type' = 'trace' AND elem->>'category' = 'memory'
                     AND elem->>'subtype' = 'load' THEN id
@@ -227,7 +220,6 @@ async def _component_usage(
     row = (await db.execute(sql, {"org": org_id, "s": start, "e": end})).one()
     return {
         "workspace": {"runs": int(row.workspace_runs or 0), "ops": int(row.workspace_ops or 0)},
-        "rag": {"runs": int(row.rag_runs or 0), "hits": int(row.rag_hits or 0)},
         "memory": {
             "load_runs": int(row.memory_load_runs or 0),
             "facts_loaded": int(row.memory_facts_loaded or 0),
@@ -237,55 +229,7 @@ async def _component_usage(
     }
 
 
-# ── Tool (Skill executions + Manifest Action requests) ────────────────
-
-async def _tool_by_skill(
-    db: AsyncSession,
-    org_id: UUID,
-    start: datetime,
-    end: datetime,
-) -> list[dict]:
-    """按技能（SkillFolder.id）聚合：调用/错误/延迟 + 技能名/作用域。"""
-    rows = (await db.execute(
-        select(
-            SkillExecution.skill_folder_id,
-            func.count().label("calls"),
-            func.sum(case((SkillExecution.status == "failed", 1), else_=0)).label("errors"),
-            func.coalesce(func.avg(SkillExecution.latency_ms), 0).label("avg_lat"),
-        ).where(
-            SkillExecution.organization_id == str(org_id),
-            SkillExecution.created_at >= start,
-            SkillExecution.created_at < end,
-        ).group_by(SkillExecution.skill_folder_id)
-    )).all()
-    skill_ids = {str(r.skill_folder_id) for r in rows if r.skill_folder_id}
-    meta: dict[str, SkillFolder] = {}
-    if skill_ids:
-        got = (await db.execute(
-            select(SkillFolder).where(
-                SkillFolder.id.in_([UUID(s) for s in skill_ids]),
-                SkillFolder.deleted_at.is_(None),
-            )
-        )).scalars().all()
-        meta = {str(s.id): s for s in got}
-    out = []
-    for r in rows:
-        sid = str(r.skill_folder_id)
-        sf = meta.get(sid)
-        calls = int(r.calls)
-        errs = int(r.errors or 0)
-        out.append({
-            "skill_id": sid,
-            "skill_name": sf.name if sf else "(已删除)",
-            "scope_type": sf.scope_type if sf else None,
-            "scope_id": str(sf.scope_id) if (sf and sf.scope_id) else None,
-            "calls": calls,
-            "error_count": errs,
-            "error_rate": round(errs / calls, 4) if calls else 0.0,
-            "avg_latency_ms": round(float(r.avg_lat), 2),
-        })
-    out.sort(key=lambda x: x["calls"], reverse=True)
-    return out
+# ── Tool (Manifest Action requests) ───────────────────────────────────
 
 
 async def _tool_by_action(
@@ -346,48 +290,10 @@ async def _tool_by_action(
     return out
 
 
-async def _tool_inventory(db: AsyncSession, org_id: UUID) -> dict:
-    """Retained user Skill inventory for the active Assistant Core."""
-    org = str(org_id)
-    sf_total = (await db.execute(
-        select(func.count()).select_from(SkillFolder)
-        .where(SkillFolder.organization_id == org, SkillFolder.deleted_at.is_(None))
-    )).scalar() or 0
-    sfile_total = (await db.execute(
-        select(func.count()).select_from(SkillFile).join(SkillFolder, SkillFile.skill_folder_id == SkillFolder.id)
-        .where(SkillFolder.organization_id == org, SkillFile.deleted_at.is_(None))
-    )).scalar() or 0
-
-    return {
-        "skills": {"folders_total": int(sf_total), "files_total": int(sfile_total)},
-    }
-
-
 async def tool_metrics(
     db: AsyncSession, org_id: UUID, start: datetime | None, end: datetime | None,
 ) -> dict:
     s, e = _window(start, end)
-    skill_base = [
-        SkillExecution.organization_id == str(org_id),
-        SkillExecution.created_at >= s,
-        SkillExecution.created_at < e,
-    ]
-    skill_total = (await db.execute(
-        select(func.count()).select_from(SkillExecution).where(*skill_base)
-    )).scalar() or 0
-    skill_errors = (await db.execute(
-        select(func.count()).select_from(SkillExecution).where(
-            *skill_base,
-            SkillExecution.status == "failed",
-        )
-    )).scalar() or 0
-    skill_latency = (await db.execute(
-        select(
-            func.count(SkillExecution.latency_ms),
-            func.coalesce(func.sum(SkillExecution.latency_ms), 0),
-        ).where(*skill_base, SkillExecution.latency_ms.is_not(None))
-    )).one()
-
     action_base = [
         EnterpriseApplicationActionRequest.organization_id == str(org_id),
         EnterpriseApplicationActionRequest.created_at >= s,
@@ -413,22 +319,19 @@ async def tool_metrics(
         ).where(*action_base, EnterpriseApplicationActionRequest.resolved_at.is_not(None))
     )).one()
 
-    by_skill = await _tool_by_skill(db, org_id, s, e)
     by_action = await _tool_by_action(db, org_id, s, e)
-    inventory = await _tool_inventory(db, org_id)
-    combined_total = int(skill_total) + int(action_total)
-    combined_errors = int(skill_errors) + int(action_errors)
-    latency_count = int(skill_latency[0] or 0) + int(action_latency[0] or 0)
-    latency_sum = float(skill_latency[1] or 0) + float(action_latency[1] or 0)
+    combined_total = int(action_total)
+    combined_errors = int(action_errors)
+    latency_count = int(action_latency[0] or 0)
+    latency_sum = float(action_latency[1] or 0)
     return {
         "calls": combined_total,
         "success_count": combined_total - combined_errors,
         "error_count": combined_errors,
         "error_rate": round(combined_errors / combined_total, 4) if combined_total else 0.0,
         "avg_latency_ms": round(latency_sum / latency_count, 2) if latency_count else 0.0,
-        "by_skill": by_skill,
         "by_action": by_action,
-        "inventory": inventory,
+        "inventory": {},
     }
 
 

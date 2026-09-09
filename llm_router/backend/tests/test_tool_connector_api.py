@@ -22,6 +22,8 @@ def test_all_retired_product_routes_are_absent_from_openapi():
         "/teams",
         "/office-edit",
         "/scope-manager",
+        "/rag",
+        "/skills",
     )
     assert not any(fragment in path for path in paths for fragment in retired_fragments)
 
@@ -65,7 +67,11 @@ async def test_ontology_surface_is_retired(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_old_definition_skill_is_retired_without_affecting_skill_packages(client: AsyncClient):
+async def test_platform_rag_and_user_skill_products_are_retired(client: AsyncClient):
     org_id = await _make_org(client, "retired-definition-skill")
-    response = await client.get(f"/api/v1/organizations/{org_id}/skills")
-    assert response.status_code == 404
+    responses = [
+        await client.get(f"/api/v1/organizations/{org_id}/skills"),
+        await client.get(f"/api/v1/organizations/{org_id}/rag"),
+        await client.get("/api/v1/terminal/rag"),
+    ]
+    assert {response.status_code for response in responses} == {404}

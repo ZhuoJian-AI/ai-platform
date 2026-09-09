@@ -9,13 +9,6 @@ from pydantic import BaseModel, Field, model_validator
 from app.schemas.role import EffectiveDataScopeRead, RoleSummary
 
 
-class ManagerScopeGrant(BaseModel):
-    """Deprecated compatibility shape; delegated Skill management is retired."""
-
-    scope_type: Literal["department"]
-    scope_id: UUID
-
-
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=1, max_length=320)
     display_name: str | None = Field(None, max_length=255)
@@ -25,13 +18,17 @@ class UserCreate(BaseModel):
     department_id: UUID | None = None
     is_active: bool = True
     password: str = Field(..., min_length=8, max_length=128)
-    manager_scopes: list[ManagerScopeGrant] = Field(default_factory=list)
     role_ids: list[UUID] | None = Field(None, max_length=100)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_retired_manager_scopes(cls, data: object) -> object:
+        if isinstance(data, dict) and "manager_scopes" in data:
+            raise ValueError("部门 Skill 管理委派已停用")
+        return data
 
     @model_validator(mode="after")
     def validate_single_department(self) -> "UserCreate":
-        if self.manager_scopes:
-            raise ValueError("部门 Skill 管理委派已停用；员工只能管理自己的个人 Skill")
         legacy_department_id = self.department_ids[0] if self.department_ids else None
         if self.department_id and legacy_department_id and self.department_id != legacy_department_id:
             raise ValueError("department_id and department_ids must identify the same department")
@@ -49,13 +46,17 @@ class UserUpdate(BaseModel):
     department_id: UUID | None = None
     is_active: bool | None = None
     password: str | None = Field(None, min_length=8, max_length=128)
-    manager_scopes: list[ManagerScopeGrant] | None = None
     role_ids: list[UUID] | None = Field(None, max_length=100)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_retired_manager_scopes(cls, data: object) -> object:
+        if isinstance(data, dict) and "manager_scopes" in data:
+            raise ValueError("部门 Skill 管理委派已停用")
+        return data
 
     @model_validator(mode="after")
     def validate_single_department(self) -> "UserUpdate":
-        if self.manager_scopes:
-            raise ValueError("部门 Skill 管理委派已停用；员工只能管理自己的个人 Skill")
         if "department_ids" not in self.model_fields_set or "department_id" not in self.model_fields_set:
             return self
         legacy_department_id = self.department_ids[0] if self.department_ids else None
@@ -97,7 +98,6 @@ class UserRead(BaseModel):
     department_id: UUID | None = None
     is_active: bool
     must_change_password: bool = False
-    manager_scopes: list[ManagerScopeGrant] = Field(default_factory=list)
     role_ids: list[UUID] = Field(default_factory=list)
     roles: list[RoleSummary] = Field(default_factory=list)
     permission_codes: list[str] = Field(default_factory=list)

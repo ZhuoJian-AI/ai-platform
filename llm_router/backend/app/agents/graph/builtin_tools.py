@@ -32,8 +32,8 @@ from app.services import model_gateway as llm_client
 from app.services import (
     multimodal_service,
     scope_service,
-    skill_runner_client,
     storage_gateway_service,
+    tool_executor_client,
     workspace_governance_service,
     workspace_permission_service,
     workspace_service,
@@ -373,7 +373,7 @@ def _builtin_tool_defs(
             "type": "function",
             "function": {
                 "name": "spreadsheet_tool",
-                "description": "检查、创建、编辑或转换 Excel/CSV/TSV/ODS 表格。没有专业 Skill 时使用此通用工具。",
+                "description": "检查、创建、编辑或转换 Excel/CSV/TSV/ODS 表格。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -548,7 +548,7 @@ def _builtin_tool_defs(
                 "name": "web_tool",
                 "description": (
                     "搜索公开网页、提取指定网页正文，或把公开 URL 下载到工作空间。"
-                    "禁止访问 localhost、内网与云元数据地址；涉及专业流程时仍优先使用已绑定 Skill。"
+                    "禁止访问 localhost、内网与云元数据地址。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -973,7 +973,7 @@ def _remember_structured_tool_result(
         candidates.append(payload)
     outputs = payload.get("outputs")
     if isinstance(outputs, list) and (
-        tool_name in PLATFORM_TOOL_NAMES or tool_name in {"image_generation_tool", "run_skill_script"}
+        tool_name in PLATFORM_TOOL_NAMES or tool_name == "image_generation_tool"
     ):
         candidates.extend(item for item in outputs if isinstance(item, dict))
     operation = direct_operations.get(tool_name, "output")
@@ -996,7 +996,6 @@ async def _verified_tool_file_records(
     *,
     task_id: str,
     task_title: str | None,
-    executed_skills: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Re-resolve server-recorded tool files before persisting refs/cards.
 
@@ -1007,11 +1006,10 @@ async def _verified_tool_file_records(
     """
     db = get_deps()["db"]
     principal = await _fresh_user_principal(db, user)
-    trusted_tools = BUILTIN_TOOL_NAMES | LEGACY_BUILTIN_TOOL_NAMES | {"run_skill_script"}
+    trusted_tools = BUILTIN_TOOL_NAMES | LEGACY_BUILTIN_TOOL_NAMES
     verified: list[dict[str, Any]] = []
     artifacts: list[dict[str, Any]] = []
     seen: set[tuple[str, str | None, str]] = set()
-    skill = executed_skills[-1] if executed_skills else {}
     for candidate in records:
         if not isinstance(candidate, dict):
             continue
@@ -1145,9 +1143,6 @@ async def _verified_tool_file_records(
                 "application_id": state.get("application_id"),
                 "module_key": (state.get("page_context") or {}).get("module_key"),
                 "page_key": (state.get("page_context") or {}).get("page_key"),
-                "skill_id": skill.get("id") or presentation["skill_id"],
-                "skill_display_name": skill.get("name") or presentation["skill_display_name"],
-                "skill_version": skill.get("version_no") or presentation["skill_version"],
                 **dict((state.get("business_action_provenance") or [{}])[-1]),
             },
         }
@@ -1344,7 +1339,7 @@ async def _execute_platform_file_tool(
         }
     }
     try:
-        result, latency = await skill_runner_client.execute_builtin(
+        result, latency = await tool_executor_client.execute_builtin(
             tool_kind=tool_kind,
             action=action,
             params=runner_params,

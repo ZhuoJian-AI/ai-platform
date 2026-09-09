@@ -1,5 +1,5 @@
-ARG AI_PLATFORM_SKILL_RUNNER_DEPS_BASE
-FROM ${AI_PLATFORM_SKILL_RUNNER_DEPS_BASE}
+ARG AI_PLATFORM_TOOL_EXECUTOR_DEPS_BASE
+FROM ${AI_PLATFORM_TOOL_EXECUTOR_DEPS_BASE}
 
 ARG SOURCE_COMMIT=unknown
 ARG SOURCE_REPOSITORY=https://github.com/ZhuoJian-AI/ai-platform
@@ -11,10 +11,10 @@ WORKDIR /app
 USER root
 COPY app.py .
 COPY builtin_tools.py .
-COPY --chmod=755 entrypoint.sh /usr/local/bin/skill-runner-entrypoint
-RUN sed -i 's/\r$//' /usr/local/bin/skill-runner-entrypoint
+COPY --chmod=755 entrypoint.sh /usr/local/bin/tool-executor-entrypoint
+RUN sed -i 's/\r$//' /usr/local/bin/tool-executor-entrypoint
 USER 10001:10001
 
 EXPOSE 8020
-ENTRYPOINT ["/usr/local/bin/skill-runner-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/tool-executor-entrypoint"]
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8020"]
