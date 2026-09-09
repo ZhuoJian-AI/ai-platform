@@ -222,6 +222,7 @@ async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
     assert result["artifacts"][0]["version_id"] == str(version_id)
     assert called["synthesize"]["model_alias"] == "default"
     assert called["ingest"]["content_type"] == "audio/mpeg"
+    assert called["ingest"]["created_by_user_id"] == principal.id
     assert db.added
 
 

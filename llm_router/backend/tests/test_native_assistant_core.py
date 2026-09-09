@@ -139,7 +139,10 @@ async def test_native_core_reuses_duplicate_side_effect_in_one_model_turn(monkey
 
     async def execute(_state, call, _registry):
         calls.append(call["id"])
-        payload = json.dumps({"status": "success", "file_id": "f1"}, ensure_ascii=False)
+        payload = json.dumps(
+            {"status": "success", "file_id": "f1", "version_id": "v1"},
+            ensure_ascii=False,
+        )
         return {"role": "tool", "tool_call_id": call["id"], "content": payload}, payload, True
 
     monkeypatch.setattr(native, "_execute_tool_call", execute)
@@ -156,6 +159,53 @@ async def test_native_core_reuses_duplicate_side_effect_in_one_model_turn(monkey
     assert results[0]["content"] == results[1]["content"]
     assert any(item.get("action") == "duplicate_side_effect_reused" for item in events)
     assert next(item for item in events if item["type"] == "done")["text"] == "文件已生成。"
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"status": "completed", "artifacts": [{"fileId": "f1", "versionId": "v1"}]}, True),
+        ({"status": "success", "outputs": [{"file_id": "f1", "version_id": "v1"}]}, True),
+        ({"status": "success", "file_id": "f1", "version_id": "v1"}, True),
+        ({"status": "success", "path": "/tmp/report.xlsx"}, False),
+        ({"status": "success", "url": "https://example.invalid/report.xlsx"}, False),
+        ({"status": "success", "file_id": "f1"}, False),
+        ("文件已生成", False),
+    ],
+)
+def test_file_delivery_requires_a_stable_workspace_artifact_identity(payload, expected):
+    content = payload if isinstance(payload, str) else json.dumps(payload)
+    assert native._tool_result_has_trusted_artifact(content) is expected
+
+
+@pytest.mark.asyncio
+async def test_native_core_nudges_when_file_tool_returns_only_a_server_path(monkeypatch):
+    monkeypatch.setattr(
+        native.model_gateway,
+        "stream_chat",
+        _scripted_stream(
+            [
+                [("tool_calls", [{"id": "c1", "name": "report_create", "arguments": '{"rows":[]}'}], None)],
+                [("text", "文件已经生成。", None)],
+                [("text", "文件生成失败，未交付到工作空间。", None)],
+            ]
+        ),
+    )
+
+    async def execute(_state, call, _registry):
+        payload = json.dumps({"status": "success", "path": "/tmp/report.xlsx"})
+        return {"role": "tool", "tool_call_id": call["id"], "content": payload}, payload, True
+
+    monkeypatch.setattr(native, "_execute_tool_call", execute)
+    events = [
+        event
+        async for event in native.stream_run(
+            _request(require_file=True), state=_state(), prepared=_prepared(), deps={"db": object()}
+        )
+    ]
+
+    assert any(item.get("action") == "continuation" for item in events)
+    assert next(item for item in events if item["type"] == "done")["text"] == "文件生成失败，未交付到工作空间。"
 
 
 @pytest.mark.asyncio

@@ -634,6 +634,7 @@ async def _synthesize(
         filename=filename,
         content_type=mime_type,
         raw=raw,
+        created_by_user_id=principal.id,
     )
     source = await task_source()
     saved.metadata_ = enrich_metadata(

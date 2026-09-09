@@ -56,6 +56,34 @@ def test_completion_policy_never_arms_outside_craft_mode():
         assert policy["require_file_output"] is False
 
 
+def test_artifact_completion_guard_applies_to_the_global_assistant():
+    state = {
+        "request": "根据当前数据生成一份 Excel",
+        "assistant_final": "已经生成，下载地址是 /tmp/report.xlsx",
+        "application_id": None,
+    }
+
+    completed = nodes._apply_artifact_completion_guard(state, [])
+
+    assert completed is False
+    assert state["error"] == "assistant artifact delivery failed"
+    assert "工作空间确认的有效文件" in state["assistant_final"]
+    assert "/tmp/report.xlsx" not in state["assistant_final"]
+
+
+def test_artifact_completion_guard_accepts_verified_workspace_artifacts():
+    state = {"request": "导出 PDF", "assistant_final": "文件已生成"}
+
+    completed = nodes._apply_artifact_completion_guard(
+        state,
+        [{"file_id": "file-1", "version_id": "version-1"}],
+    )
+
+    assert completed is True
+    assert state["assistant_final"] == "文件已生成"
+    assert "error" not in state
+
+
 def test_completion_policy_adds_only_trusted_composite_export_tools():
     state = {
         "exec_mode": "craft",

@@ -135,6 +135,44 @@ def _bounded_tool_content(content: str, limit: int) -> str:
     return content[:limit] + f"\n[工具结果已截断，共 {len(content)} 字符；如需更多内容请分页读取]"
 
 
+def _tool_result_has_trusted_artifact(content: str | dict[str, Any]) -> bool:
+    """Only a stable workspace file/version identity counts as delivery.
+
+    A tool name, server path, URL, or free-form success message is not proof that
+    the workspace transaction committed.  Both the native continuation policy
+    and the final persistence guard use this same minimum identity contract.
+    """
+
+    value: Any = content
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return False
+    if not isinstance(value, dict):
+        return False
+
+    def has_identity(item: Any) -> bool:
+        if not isinstance(item, dict):
+            return False
+        file_id = item.get("file_id") or item.get("fileId")
+        version_id = item.get("version_id") or item.get("versionId")
+        return bool(file_id and version_id)
+
+    if has_identity(value):
+        return True
+    containers = [value]
+    data = value.get("data")
+    if isinstance(data, dict):
+        containers.append(data)
+    for container in containers:
+        for key in ("artifacts", "outputs", "files"):
+            candidates = container.get(key)
+            if isinstance(candidates, list) and any(has_identity(item) for item in candidates):
+                return True
+    return False
+
+
 def _capability_search_result(
     query: str,
     lazy_specs: dict[str, dict[str, Any]],
@@ -489,7 +527,9 @@ async def stream_run(
                     last_failure_key = failure_key
                     if dedupe_side_effect:
                         successful_side_effects.setdefault(failure_key, content)
-                    delivered = delivered or name in file_tools
+                    delivered = delivered or (
+                        name in file_tools and _tool_result_has_trusted_artifact(content)
+                    )
                 else:
                     consecutive_failures = consecutive_failures + 1 if failure_key == last_failure_key else 1
                     last_failure_key = failure_key

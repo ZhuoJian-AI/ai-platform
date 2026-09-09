@@ -175,6 +175,27 @@ def _requires_file_artifact(request: str) -> bool:
     return bool(file_kind and delivery)
 
 
+def _apply_artifact_completion_guard(state: AgentState, artifacts: list[dict[str, Any]]) -> bool:
+    """Prevent every assistant view from claiming a file that was not committed."""
+
+    from app.services.business_assistant_orchestration import intent_requires_artifact
+
+    business_intent = state.get("business_turn_intent") or {}
+    requires_artifact = (
+        intent_requires_artifact(business_intent)
+        if business_intent
+        else _requires_file_artifact(str(state.get("request") or ""))
+    )
+    if not requires_artifact or artifacts:
+        return True
+    state["assistant_final"] = (
+        "文件生成未完成：本轮没有得到平台工作空间确认的有效文件，"
+        "因此不会把文字、服务器路径或下载地址冒充为已交付文件。请稍后重试。"
+    )
+    state["error"] = "assistant artifact delivery failed"
+    return False
+
+
 def _emit(event: dict) -> None:
     """经 stream_writer 下发事件（流式分支；非流式分支 writer 为 no-op）。"""
     try:
@@ -2187,20 +2208,7 @@ async def save_memory(state: AgentState) -> dict:
             task_title=task.title if task is not None else None,
         )
         streamed_final = str(state.get("assistant_final") or "")
-        from app.services.business_assistant_orchestration import intent_requires_artifact
-
-        business_intent = state.get("business_turn_intent") or {}
-        requires_artifact = (
-            intent_requires_artifact(business_intent)
-            if business_intent
-            else _requires_file_artifact(str(state.get("request") or ""))
-        )
-        if state.get("application_id") and requires_artifact and not artifacts:
-            state["assistant_final"] = (
-                "文件生成未完成：本轮没有得到平台文件服务确认的有效文件，"
-                "因此不会把文字结果冒充为已交付文件。请检查业务 Action 或文件生成工具后重试。"
-            )
-            state["error"] = "business assistant artifact delivery failed"
+        _apply_artifact_completion_guard(state, artifacts)
         state["artifacts"] = artifacts
         if state.get("application_id"):
             _emit({"type": "business_state", "status": "committing"})
