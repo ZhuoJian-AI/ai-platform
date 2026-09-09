@@ -242,7 +242,7 @@ async def test_model_deployment_endpoint(
             "invalid_credentials_or_permission": "凭证无效，或该 Key 没有模型访问权限",
             "model_not_found": "模型 ID 不存在，或当前地域/业务空间不可用",
             "quota_or_rate_limit": "余额或配额不足，或请求被限流",
-            "capability_mismatch": "模型能力、向量维度或生图参数与部署配置不匹配",
+            "capability_mismatch": "模型能力或多模态参数与部署配置不匹配",
             "network_timeout": "供应商响应超时，请检查端点、地域或稍后重试",
             "network_failure": "无法连接供应商，请检查 Base URL 和网络",
             "provider_service_unavailable": "供应商服务暂不可用",
