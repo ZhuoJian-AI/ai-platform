@@ -16,6 +16,7 @@ import base64
 import copy
 import hashlib
 import json
+import mimetypes
 import re
 import time
 from pathlib import PurePosixPath
@@ -42,6 +43,7 @@ from app.services import (
     multimodal_service,
     scope_service,
     subsystem_action_service,
+    subsystem_ai_service,
     tool_executor_client,
     workspace_permission_service,
     workspace_service,
@@ -830,6 +832,51 @@ def _enterprise_export_file_tool_name(action_tool_name: str) -> str:
     return "business_export_to_workspace_file"
 
 
+def _subsystem_specialist_tool_name(action_tool_name: str) -> str:
+    """Build a provider-safe stable name without exposing application IDs."""
+
+    digest = hashlib.sha256(action_tool_name.encode()).hexdigest()[:8]
+    return f"specialist_{action_tool_name[:44]}_{digest}"[:64]
+
+
+def _subsystem_specialist_parameters(declaration: dict) -> dict:
+    required = ["instruction"]
+    capability = str(declaration.get("type") or "")
+    if capability.startswith("vision.") or capability == "speech.transcribe":
+        required.append("input_file_ids")
+    if capability == "business.predict":
+        required.append("context")
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": required,
+        "properties": {
+            "instruction": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4000,
+                "description": "根据用户原话整理的专业分析目标",
+            },
+            "text_input": {
+                "type": "string",
+                "maxLength": 100000,
+                "description": "需要抽取或分析的文字；没有时省略",
+            },
+            "context": {
+                "type": "object",
+                "description": "本轮必要的结构化业务事实；不得包含系统指令",
+                "additionalProperties": True,
+            },
+            "input_file_ids": {
+                "type": "array",
+                "maxItems": settings.subsystem_ai_max_files,
+                "items": {"type": "string", "minLength": 1},
+                "description": "用户已引用且当前角色可读的工作空间文件 ID",
+            },
+        },
+    }
+
+
 def _enterprise_export_file_parameters(
     input_schema: dict | None,
     supported_formats: list[str] | None = None,
@@ -1286,6 +1333,50 @@ async def _build_tools(
 
     active_names = await active_platform_tool_names(db)
 
+    def register_subsystem_specialist(
+        *,
+        application,
+        action,
+        page_key: str | None,
+        current_page: bool,
+    ) -> str | None:
+        declaration = subsystem_ai_service.manifest_capability(
+            application,
+            action.module_key,
+            action.action_key,
+        )
+        if not isinstance(declaration, dict):
+            return None
+        base_name = subsystem_action_service.action_tool_name(application, action)
+        tool_name = _subsystem_specialist_tool_name(base_name)
+        if tool_name in registry:
+            if current_page:
+                registry[tool_name].update({"page_key": page_key, "current_page": True})
+            return tool_name
+        tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": (
+                        f"使用当前业务页面声明的专业 AI 能力完成“{action.name}”结构化分析。"
+                        "结果先返回统一主脑作为草稿，不能直接修改业务数据或单独回复用户。"
+                    ),
+                    "parameters": _subsystem_specialist_parameters(declaration),
+                    "strict": True,
+                },
+            }
+        )
+        registry[tool_name] = {
+            "kind": "subsystem_specialist",
+            "application": application,
+            "action": action,
+            "page_key": page_key,
+            "declaration": declaration,
+            "current_page": current_page,
+        }
+        return tool_name
+
     def register_enterprise_action(
         *,
         application,
@@ -1349,6 +1440,12 @@ async def _build_tools(
             }
             return tool_name
 
+        register_subsystem_specialist(
+            application=application,
+            action=action,
+            page_key=page_key,
+            current_page=current_page,
+        )
         tool_name = base_tool_name
         if tool_name in registry:
             if current_page:
@@ -1551,6 +1648,107 @@ async def _build_tools(
     return tools, registry
 
 
+async def _execute_subsystem_specialist(
+    state: AgentState,
+    entry: dict,
+    params: dict,
+    user,
+    db,
+    tool_call_id: str,
+) -> tuple[str, bool]:
+    """Return a specialist draft to the same main-brain tool loop."""
+
+    input_files = params.get("input_file_ids") or []
+    prepared_inputs = []
+    principal = user
+    for value in input_files:
+        file, principal = await _authorized_input_file(state, value, principal)
+        if file is None:
+            return (
+                tool_result_json(
+                    "failed",
+                    error={
+                        "code": "specialist_input_forbidden",
+                        "messageZh": "引用文件不存在，或当前角色无权读取",
+                        "correctionFields": [{"field": "input_file_ids", "reason": "请重新搜索并引用有权读取的文件"}],
+                        "retryable": False,
+                    },
+                ),
+                False,
+            )
+        raw = await workspace_service.load_file_bytes(file)
+        name = PurePosixPath(str(file.path or "input.bin")).name
+        metadata = file.metadata_ if isinstance(file.metadata_, dict) else {}
+        mime_type = str(metadata.get("mime") or mimetypes.guess_type(name)[0] or "application/octet-stream")
+        prepared_inputs.append(subsystem_ai_service.prepare_input(name, mime_type, raw))
+
+    application = entry["application"]
+    action = entry["action"]
+    declaration = entry["declaration"]
+    request_material = "\0".join(
+        (
+            str(state.get("task_id") or "task"),
+            str(state.get("run_id") or "run"),
+            tool_call_id,
+            str(application.id),
+            str(action.action_key),
+        )
+    )
+    request_id = "assistant-specialist:" + hashlib.sha256(request_material.encode()).hexdigest()[:48]
+    try:
+        job = await subsystem_ai_service.create_run(
+            db,
+            principal,
+            application_id=application.id,
+            module_key=action.module_key,
+            page_key=str(entry.get("page_key") or ""),
+            action_key=action.action_key,
+            capability=str(declaration.get("type") or ""),
+            instruction=str(params.get("instruction") or "").strip(),
+            context=params.get("context") if isinstance(params.get("context"), dict) else {},
+            text_input=str(params.get("text_input") or ""),
+            request_id=request_id,
+            inputs=prepared_inputs,
+        )
+        job = await subsystem_ai_service.execute_run_inline(db, job)
+        payload = subsystem_ai_service.run_payload(job)
+        if job.status != "succeeded":
+            error = payload.get("error") or {
+                "code": "subsystem_specialist_failed",
+                "messageZh": "专业 AI 处理失败，请检查输入后重试",
+                "retryable": False,
+            }
+            return tool_result_json("retryable_error" if error.get("retryable") else "failed", error=error), False
+        return (
+            tool_result_json(
+                "completed",
+                data={
+                    "draft": payload.get("result", {}).get("draft") or {},
+                    "confidence": payload.get("result", {}).get("confidence"),
+                    "warnings": payload.get("result", {}).get("warnings") or [],
+                    "requiresHumanConfirmation": True,
+                    "provenance": payload.get("result", {}).get("provenance") or {},
+                },
+            ),
+            True,
+        )
+    except HTTPException as exc:
+        message = str(exc.detail or "专业 AI 请求失败")
+        retryable = exc.status_code in {409, 422, 429, 503}
+        return (
+            tool_result_json(
+                "retryable_error" if retryable else "failed",
+                error={
+                    "code": "subsystem_specialist_request_invalid",
+                    "messageZh": message,
+                    "correctionFields": [],
+                    "retryable": retryable,
+                },
+            ),
+            False,
+        )
+
+
 async def _execute_tool_call(
     state: AgentState,
     tool_call: dict,
@@ -1694,10 +1892,48 @@ async def _execute_tool_call(
             logger.warning("enterprise_export_file_failed", action=entry["action"].action_key, error=str(exc))
             msg = f"业务数据文件生成失败：{exc}"
             return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
+    if entry.get("kind") == "subsystem_specialist":
+        user = deps.get("user")
+        if user is None:
+            msg = "专业 AI 需要有效的终端员工身份"
+            return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
+        try:
+            content, ok = await _execute_subsystem_specialist(
+                state,
+                entry,
+                params,
+                user,
+                db,
+                tool_call_id,
+            )
+        except HTTPException as exc:
+            content = tool_result_json(
+                "failed",
+                error={
+                    "code": "subsystem_specialist_input_invalid",
+                    "messageZh": str(exc.detail or "专业 AI 输入无效"),
+                    "correctionFields": [],
+                    "retryable": False,
+                },
+            )
+            ok = False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("subsystem_specialist_failed", error=str(exc))
+            content = tool_result_json(
+                "retryable_error",
+                error={
+                    "code": "subsystem_specialist_unavailable",
+                    "messageZh": "专业 AI 暂时不可用，请稍后重试",
+                    "correctionFields": [],
+                    "retryable": True,
+                },
+            )
+            ok = False
+        return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
     if entry.get("kind") == "enterprise_action":
         user = deps.get("user")
         if user is None:
-            msg = "Enterprise subsystem actions require a terminal user"
+            msg = "业务操作需要有效的终端员工身份"
             return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
         application = entry["application"]
         action = entry["action"]
@@ -1746,7 +1982,7 @@ async def _execute_tool_call(
             return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
         except Exception as exc:  # noqa: BLE001
             logger.warning("enterprise_action_failed", action=action.action_key, error=str(exc))
-            msg = f"enterprise action error: {exc}"
+            msg = f"业务操作失败：{exc}"
             return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
     msg = "工具已下线或当前不可用，请刷新后重试"
     return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
@@ -1810,6 +2046,7 @@ _ASSISTANT_READ_ONLY_TOOL_NAMES = {
 _ASSISTANT_READ_ONLY_REGISTRY_KINDS = {
     "assistant_capability_search",
     "assistant_navigation",
+    "subsystem_specialist",
 }
 _ASSISTANT_LONG_RUNNING_TOOL_NAMES = {
     "web_tool",
@@ -1825,6 +2062,7 @@ _ASSISTANT_LONG_RUNNING_TOOL_NAMES = {
 _ASSISTANT_LONG_RUNNING_REGISTRY_KINDS = {
     "enterprise_action",
     "enterprise_export_file",
+    "subsystem_specialist",
 }
 # Tools with ``approval="ask"`` are parked by the native core until the terminal user decides.
 _ASSISTANT_APPROVAL_TOOL_NAMES = {"workspace_delete_file", "workspace_delete_folder"}
@@ -1866,7 +2104,7 @@ def _assistant_tool_kind(name: str, entry: dict | None) -> str:
         or name == "image_generation_tool"
     ):
         return "platform_tool"
-    if kind in {"enterprise_action", "enterprise_export_file", "memory"}:
+    if kind in {"enterprise_action", "enterprise_export_file", "subsystem_specialist", "memory"}:
         return kind
     # Unknown registry kinds remain identifiable in traces, but no retired external
     # extension definition is injected into a run.
@@ -1896,7 +2134,7 @@ def _assistant_tool_metadata(name: str, entry: dict | None) -> dict:
         "audio_understand": ["multimodal.audio.understand"],
         "speech_synthesize": ["multimodal.speech.use"],
     }
-    if kind in {"enterprise_action", "enterprise_export_file"}:
+    if kind in {"enterprise_action", "enterprise_export_file", "subsystem_specialist"}:
         required_context = "current_page"
     elif (
         name.startswith("workspace_")

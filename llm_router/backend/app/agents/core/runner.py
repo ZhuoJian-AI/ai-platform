@@ -612,7 +612,7 @@ async def _consume_native(
         str(name)
         for name, entry in tool_registry.items()
         if isinstance(entry, dict)
-        and entry.get("kind") in {"enterprise_action", "enterprise_export_file"}
+        and entry.get("kind") in {"enterprise_action", "enterprise_export_file", "subsystem_specialist"}
         and bool(entry.get("current_page", True))
     }
     visible_tool_specs, lazy_tool_specs = partition_tool_specs(
