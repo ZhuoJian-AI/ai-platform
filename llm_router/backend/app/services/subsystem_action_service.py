@@ -634,6 +634,11 @@ async def list_confirmation_requests(db: AsyncSession, user: CurrentUser) -> lis
             row.status = "expired"
             row.params_encrypted = None
             row.resolved_at = now
+            # TimestampMixin uses a server-side ``onupdate`` expression.  Without
+            # an explicit value SQLAlchemy expires this attribute after flush,
+            # and reading it below would attempt an async lazy load from regular
+            # Python code (MissingGreenlet).  Keep the response self-contained.
+            row.updated_at = now
     await db.flush()
     result: list[dict] = []
     for row in rows:

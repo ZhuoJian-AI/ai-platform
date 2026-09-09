@@ -33,7 +33,11 @@ async function login(page, url, username, password) {
   await usernameInput.fill(username);
   await passwordInput.fill(`${password}-E2E-错误`);
   await page.getByRole('button', { name: /登\s*录/ }).click();
-  await page.waitForTimeout(600);
+  await page.waitForFunction(
+    () => /密码|错误|失败|不正确|无效/.test(document.body.innerText),
+    undefined,
+    { timeout: 10_000 },
+  ).catch(() => undefined);
   const rejectedText = await page.locator('body').innerText();
   assert(/密码|错误|失败|不正确|无效/.test(rejectedText), `${url} 错误密码没有中文提示`);
   await passwordInput.fill(password);
@@ -165,8 +169,19 @@ async function employeeFlow(browser) {
   const observed = diagnostics(page);
   await login(page, '/alphabet/terminal/login', employeeUsername, employeePassword);
 
+  const currentUser = await page.evaluate(async () => {
+    const token = sessionStorage.getItem('ai_infra_user_token');
+    const response = await fetch('/api/v1/terminal/me', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    const body = await response.json().catch(() => null);
+    return { status: response.status, username: body?.user?.username };
+  });
   const homeText = await page.locator('body').innerText();
-  assert(homeText.includes(employeeUsername), '员工端没有显示当前员工');
+  assert(
+    currentUser.status === 200 && currentUser.username === employeeUsername,
+    `员工会话身份校验失败：${JSON.stringify(currentUser)}`,
+  );
   assert(homeText.includes('工作空间'), '员工端缺少工作空间');
   assert(homeText.includes('智能体'), '员工端缺少智能体');
   assert(!homeText.includes('知识库'), '员工端仍显示知识库');
