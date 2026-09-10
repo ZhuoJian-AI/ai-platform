@@ -82,6 +82,77 @@ def _scripted_stream(turns):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("batch", [False, True])
+async def test_changed_arguments_cannot_bypass_tool_retry_budget(monkeypatch, batch):
+    calls = [
+        {"id": f"c{i}", "name": "report_create", "arguments": json.dumps({"rows": [{"i": i}]})}
+        for i in range(4 if batch else 3)
+    ]
+    turns = (
+        [[("tool_calls", calls, None)]] if batch
+        else [[("tool_calls", [call], None)] for call in calls]
+    ) + [[("text", "当前工具失败，未生成文件。", None)]]
+    scripted = _scripted_stream(turns)
+    visible_tools = []
+    provider_messages = []
+
+    def stream(*args, **kwargs):
+        visible_tools.append([item["function"]["name"] for item in kwargs.get("tools") or []])
+        provider_messages.append([dict(item) for item in args[3]])
+        return scripted(*args, **kwargs)
+
+    executed = []
+
+    async def execute(_state, call, _registry):
+        executed.append(call["id"])
+        payload = native._tool_error("upstream_failed", "依赖不可用", retryable=True)
+        return {"content": payload}, payload, False
+
+    monkeypatch.setattr(native.model_gateway, "stream_chat", stream)
+    monkeypatch.setattr(native, "_execute_tool_call", execute)
+    request = _request()
+    request["tools"].append({"name": "other_query", "input_schema": {"type": "object"}})
+    events = [event async for event in native.stream_run(
+        request, state=_state(), prepared=_prepared(), deps={"db": object()},
+    )]
+    assert executed == ["c0", "c1", "c2"]
+    assert visible_tools[-1] == ["other_query"]
+    assert len([e for e in events if e.get("action") == "tool_retry_exhausted"]) == 1
+    assert next(e for e in events if e["type"] == "done")["text"] == "当前工具失败，未生成文件。"
+    if batch:
+        results = [e for e in events if e["type"] == "tool_result"]
+        assert len(results) == 4
+        assert json.loads(results[-1]["content"])["error"]["code"] == "tool_retry_exhausted"
+        replay = provider_messages[-1]
+        tool_turn = next(i for i, message in enumerate(replay) if message.get("tool_calls"))
+        assert [message["role"] for message in replay[tool_turn + 1:tool_turn + 5]] == ["tool"] * 4
+
+
+@pytest.mark.asyncio
+async def test_success_resets_own_tool_retry_budget(monkeypatch):
+    outcomes = [False, False, True, False, False, True]
+    turns = [[("tool_calls", [{
+        "id": f"c{i}", "name": "report_create",
+        "arguments": json.dumps({"rows": [{"i": i}]}),
+    }], None)] for i in range(len(outcomes))] + [[("text", "操作完成。", None)]]
+    executed = []
+
+    async def execute(_state, call, _registry):
+        ok = outcomes[len(executed)]
+        executed.append(call["id"])
+        payload = json.dumps({"ok": ok})
+        return {"content": payload}, payload, ok
+
+    monkeypatch.setattr(native.model_gateway, "stream_chat", _scripted_stream(turns))
+    monkeypatch.setattr(native, "_execute_tool_call", execute)
+    events = [event async for event in native.stream_run(
+        _request(), state=_state(), prepared=_prepared(), deps={"db": object()},
+    )]
+    assert len(executed) == 6
+    assert not any(e.get("action") == "tool_retry_exhausted" for e in events)
+
+
+@pytest.mark.asyncio
 async def test_native_core_executes_authorized_tool_and_preserves_event_contract(monkeypatch):
     monkeypatch.setattr(
         native.model_gateway,
