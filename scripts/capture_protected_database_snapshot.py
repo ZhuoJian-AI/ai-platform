@@ -102,6 +102,12 @@ _SCHEMA_QUERIES = {
         JOIN pg_class AS rel ON rel.oid = constraint_row.conrelid
         JOIN pg_namespace AS namespace ON namespace.oid = rel.relnamespace
         WHERE namespace.nspname = $1
+          -- PostgreSQL 18 exposes NOT NULL entries in pg_constraint while
+          -- older supported versions do not. Column nullability is already
+          -- fingerprinted through information_schema.columns, so excluding
+          -- them here avoids counting the same invariant twice and keeps the
+          -- protected snapshot stable across PostgreSQL 16-18.
+          AND constraint_row.contype <> 'n'
         ORDER BY rel.relname, constraint_row.conname
     """,
     "indexes": """
