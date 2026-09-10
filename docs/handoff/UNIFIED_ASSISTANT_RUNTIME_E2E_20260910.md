@@ -1,5 +1,13 @@
 # 统一助手运行验收续接
 
+## 管理员语音验证与交付复用解码器（本地，未发布）
+
+- 将语音完整解码校验移至 `app/services/audio_validation.py`，管理员部署能力测试与助手文件交付共用；不新增依赖或服务。
+- 管理员标准 TTS、音色设计和克隆的共同输出分支改为严格 Base64 解码及完整 WAV 解码，不能仅凭非空字节宣布 verified。
+- 新增标准 TTS、音色设计的真实 WAV 和伪 RIFF 容器对照测试；供应商仍为测试替身，解码使用本地 FFmpeg。克隆共享代码路径，但本次未新增克隆正向端到端证据。
+- 复测 `pytest tests/test_model_gateway_contract.py tests/test_model_capability_tools.py tests/test_native_assistant_core.py tests/test_assistant_policy.py -q --tb=short`：87 passed；`ruff check app/ tests/` 与 `git diff --check` 通过。
+- 尚未部署。已记录的线上 verified 响应仍来自旧校验代码，不能反推完整音频或员工工作空间交付已经通过。下一步必须继续发布门禁和真实音频 Artifact 验收。
+
 ## 已核实
 
 - 基线为 `df2301c`，独立分支 `fix/unified-assistant-runtime-e2e-20260910`。

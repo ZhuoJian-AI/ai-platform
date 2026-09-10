@@ -1,5 +1,6 @@
 """Pure model-gateway contracts that do not require PostgreSQL."""
 
+import base64
 import json
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -17,6 +18,28 @@ from app.services.llm_provider_service import provider_base_url
 @pytest.fixture(autouse=True)
 def db_engine():
     yield
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capability", ["text_to_speech", "voice_design"])
+@pytest.mark.parametrize("valid", [True, False])
+async def test_speech_verification_requires_decodable_audio(monkeypatch, capability, valid):
+    provider = SimpleNamespace(id=uuid4(), organization_id=uuid4())
+    deployment = SimpleNamespace(model_id="speech-model", config={})
+    raw = model_gateway._test_wav_bytes() if valid else b"RIFF\x04\x00\x00\x00WAVE"
+
+    async def reply(_provider, _deployment, body):
+        assert body["audio"]["format"] == "wav"
+        return {"choices": [{"message": {"audio": {"data": base64.b64encode(raw).decode()}}}]}
+
+    monkeypatch.setattr(model_gateway, "effective_provider", lambda provider, _: provider)
+    monkeypatch.setattr(model_gateway, "_post_chat_json", reply)
+    if valid:
+        result = await model_gateway.test_deployment(object(), provider, deployment, capability)
+        assert result["bytes"] == len(raw)
+    else:
+        with pytest.raises(model_gateway.GatewayError, match="invalid_provider_response"):
+            await model_gateway.test_deployment(object(), provider, deployment, capability)
 
 
 @pytest.fixture(autouse=True)

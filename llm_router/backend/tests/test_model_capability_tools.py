@@ -12,6 +12,7 @@ import pytest
 from PIL import Image
 
 from app.agents.graph import model_capability_tools as capability_tools
+from app.services import audio_validation
 
 
 @pytest.fixture(autouse=True)
@@ -76,7 +77,7 @@ async def test_audio_validation_reaps_decoder_on_interrupt(monkeypatch, error_ty
         assert kwargs["stderr"] == asyncio.subprocess.DEVNULL
         return Decoder()
 
-    monkeypatch.setattr(capability_tools.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(audio_validation.asyncio, "create_subprocess_exec", spawn)
     with pytest.raises(error_type):
         await capability_tools._validate_audio_output(b"ID3test", "mp3")
     assert calls == ["kill", "wait"]

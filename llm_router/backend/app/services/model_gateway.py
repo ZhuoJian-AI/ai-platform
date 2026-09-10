@@ -33,6 +33,7 @@ from app.services.ai_quota_service import (
     reserve_ai_quota,
     settle_ai_quota,
 )
+from app.services.audio_validation import validate_audio_output
 from app.services.llm_provider_service import effective_provider, get_decrypted_api_key
 
 LlmResult = legacy_client.LlmResult
@@ -1696,9 +1697,11 @@ async def _test_deployment_unmetered(
         data = await _post_chat_json(effective, deployment, body)
         message, usage = _message_content(data)
         audio_payload = message.get("audio") or {}
-        raw = base64.b64decode(str(audio_payload.get("data") or ""))
-        if not raw:
-            raise GatewayError("invalid_provider_response")
+        try:
+            raw = base64.b64decode(str(audio_payload.get("data") or ""), validate=True)
+            await validate_audio_output(raw, "wav")
+        except (ValueError, TypeError, OSError, TimeoutError) as exc:
+            raise GatewayError("invalid_provider_response") from exc
         return {"bytes": len(raw), "usage": usage}
     raise ValueError(f"unsupported capability: {capability}")
 
