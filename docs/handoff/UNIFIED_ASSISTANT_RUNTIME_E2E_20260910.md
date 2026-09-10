@@ -129,3 +129,11 @@
 - 初次执行 203 passed / 1 failed：审批事件测试将全部 trace 当作 policy，读取新增工具目录事件缺少的 action 字段。修正为按 category=policy 筛选，继续核对请求/决定顺序，并新增转发结果的拒绝值和 approval_id 断言，未修改产品审批逻辑。
 - 同一集合重跑 204 passed，1.17 秒；全后端 `ruff check app/ tests/` 通过（仅修正 test_coolify_compose_contract.py 多余空行）。
 - 上述使用单元/契约替身，不代表真实 PostgreSQL 全接口、供应商、OSS 或浏览器 E2E。当前仍禁止宣称全量验收通过；未改工作流、线上配置或部署。
+
+## 2026-09-10 管理员浏览器实际模型测试复核
+
+- 复用当前仍有效的 root 管理员浏览器会话，经过模型提供商导航、爱法贝组织节点和 MiMo 展开行，点击真实测试按钮；未注入认证、未修改密钥/模型配置。
+- 捕获到实际 POST 响应：`/api/v1/providers/0add79cb-b400-46fc-aa9e-0e909494087c/models/1543aaa4-9420-440e-aa5c-c337b1e64726/test/text_to_speech` 返回 200 verified（mimo-v2.5-tts）；ASR 部署 0428e10a-b871-4d1c-bbe1-218b15c6b241 的 `/test/speech_to_text` 返回 200 verified；设计部署 2df02441-cb26-4398-9175-115adb3d7986 的 `/test/voice_design` 返回 200 verified。
+- 这些是部署能力测试接口的当前响应，不是员工助手、完整音频内容质量或工作空间 Artifact 的交付验收。页面声音克隆仍为待验证，没有将其标为通过。
+- 自动化定位曾因控件可访问名称不匹配及错误等待 `/verify` 路径超时；改为观察实际 POST `/test/<capability>` 后捕获响应。部分较早点击的响应未保存，不纳入成功统计，也未将观察超时当作供应商失败。
+- 本轮未部署源码，未更改组织语音开关和角色。下一步仍须处理员工工具可用性和真实工作空间交付，不能只凭供应商测试返回成功宣称整体完成。
