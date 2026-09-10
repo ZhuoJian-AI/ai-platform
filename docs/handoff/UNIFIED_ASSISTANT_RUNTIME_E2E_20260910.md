@@ -113,3 +113,11 @@
 - 新增对两处规则一致性和无产物最终拒绝的回归。普通音频问答仍不强制生成文件。
 - `pytest tests/test_assistant_policy.py tests/test_native_assistant_core.py tests/test_message_verification.py -q`：66 passed。四个受影响 Python 文件 Ruff 通过。
 - 这仍是保守的显式请求检测，不证明完整自然语言理解，也没有解决 TXT 替代 MP3 的目标格式一致性；该项及真实语音/OSS/双端 E2E 继续保留为未完成。未部署。
+
+## 辅助意图不能取消交付要求（本地，未发布）
+
+- 新增八个回归场景：总入口/页面上下文，辅助 expectedOutput 为 text/data/navigation 时明确 MP3 生成请求仍需产物；artifact 分类可为没有格式关键词的上下文请求补充交付要求。
+- 修改前新测试 7 failed / 1 passed：runner 在页面有分类时忽略原请求，全局又忽略 artifact 分类；最终 nodes 检查也会被非 artifact 分类取消。
+- 改为请求与 artifact 意图取并集，两处行为一致，不依据 application_id 切换交付语义。未增加前置意图门禁，不改权限、工具选择或供应商配置。
+- `pytest tests/test_assistant_policy.py tests/test_native_assistant_core.py tests/test_message_verification.py -q`：74 passed；三个受影响 Python 文件 Ruff 通过。
+- 仍未解决目标格式一致性与完整语义验收，未执行真实模型/OSS/浏览器正向交付，未部署；不能据此标记整体目标完成。

@@ -286,15 +286,12 @@ def _completion_policy(state: dict) -> dict[str, Any]:
     The native runtime enforces it (nudging the model at most ``max_nudges`` times when no
     file-producing tool succeeded); Python only reports the resulting ``policy`` events.
     """
-    if state.get("application_id"):
-        intent = state.get("business_turn_intent") or {}
-        require_file = (
-            business_assistant_orchestration.intent_requires_artifact(intent)
-            if intent
-            else _requests_file_delivery(str(state.get("request") or ""))
-        )
-    else:
-        require_file = _requests_file_delivery(str(state.get("request") or ""))
+    # Auxiliary intent may recognize contextual delivery ("按刚才的规格来一份"),
+    # but a non-artifact label must not cancel an explicit user request.
+    require_file = (
+        business_assistant_orchestration.intent_requires_artifact(state.get("business_turn_intent"))
+        or _requests_file_delivery(str(state.get("request") or ""))
+    )
     require_file = (state.get("exec_mode") or "craft") == "craft" and require_file
     return {
         "require_file_output": require_file,

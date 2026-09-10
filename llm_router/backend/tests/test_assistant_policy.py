@@ -70,6 +70,33 @@ def test_completion_policy_never_arms_outside_craft_mode():
         assert policy["require_file_output"] is False
 
 
+@pytest.mark.parametrize("application_id", [None, "application-1"])
+@pytest.mark.parametrize("expected_output", ["text", "data", "navigation"])
+def test_auxiliary_intent_cannot_cancel_explicit_file_delivery(application_id, expected_output):
+    state = {
+        "application_id": application_id,
+        "exec_mode": "craft",
+        "request": "请生成 MP3 音频",
+        "business_turn_intent": {"intent": "general", "expectedOutput": expected_output},
+        "assistant_final": "已经生成",
+    }
+    assert runner._completion_policy(state)["require_file_output"] is True
+    assert nodes._apply_artifact_completion_guard(state, []) is False
+
+
+@pytest.mark.parametrize("application_id", [None, "application-1"])
+def test_artifact_intent_can_require_delivery_without_keyword_match(application_id):
+    state = {
+        "application_id": application_id,
+        "exec_mode": "craft",
+        "request": "按刚才的规格来一份",
+        "business_turn_intent": {"intent": "file_operation", "expectedOutput": "artifact"},
+        "assistant_final": "已经生成",
+    }
+    assert runner._completion_policy(state)["require_file_output"] is True
+    assert nodes._apply_artifact_completion_guard(state, []) is False
+
+
 def test_artifact_completion_guard_applies_to_the_global_assistant():
     state = {
         "request": "根据当前数据生成一份 Excel",

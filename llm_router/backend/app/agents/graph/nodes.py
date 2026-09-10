@@ -184,8 +184,7 @@ def _apply_artifact_completion_guard(state: AgentState, artifacts: list[dict[str
     business_intent = state.get("business_turn_intent") or {}
     requires_artifact = (
         intent_requires_artifact(business_intent)
-        if business_intent
-        else _requires_file_artifact(str(state.get("request") or ""))
+        or _requires_file_artifact(str(state.get("request") or ""))
     )
     if not requires_artifact or artifacts:
         return True
