@@ -494,6 +494,8 @@ async def stream_run(
                             "action": "tool_catalog_loaded",
                             "tool": name,
                             "detail": f"activated={len(activated_names)}",
+                            "activatedTools": activated_names,
+                            "visibleTools": sorted(allowed_names),
                         }
                     elif spec.get("approval") == "ask":
                         approved, requested, decided = await _approval(

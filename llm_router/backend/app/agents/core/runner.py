@@ -564,7 +564,7 @@ async def _prepare(
         ]
         tool_trace = {
             "category": "business_orchestration",
-            "title": "本轮授权工具集合",
+            "title": "本轮获权工具目录（含待加载工具）",
             "intent": (state.get("business_turn_intent") or {}).get("intent") or "legacy",
             "tools": selected_tools,
         }
@@ -619,6 +619,14 @@ async def _consume_native(
         all_tool_specs,
         current_page_tool_names=current_page_tool_names,
     )
+    visibility_trace = {
+        "category": "business_orchestration",
+        "title": "主脑首次请求的实际工具集合",
+        "tools": [str(spec.get("name") or "") for spec in visible_tool_specs],
+        "deferredToolCount": len(lazy_tool_specs),
+    }
+    state.setdefault("traces", []).append(visibility_trace)
+    _publish(handle, staged, {"type": "trace", **visibility_trace})
     capability_entry = tool_registry.get("enterprise_capability_search") or {}
     capability_application_id = str(capability_entry.get("application_id") or "")
     capability_catalog = [

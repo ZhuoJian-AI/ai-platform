@@ -415,6 +415,9 @@ async def test_native_core_discovers_then_loads_and_calls_a_lazy_tool(monkeypatc
     assert executed == ["report_create"]
     assert provider_tools[0] == ["enterprise_capability_search"]
     assert "report_create" in provider_tools[1]
+    activation = next(item for item in events if item.get("action") == "tool_catalog_loaded")
+    assert activation["activatedTools"] == ["report_create"]
+    assert activation["visibleTools"] == sorted(provider_tools[1])
     search_result = next(
         item
         for item in events
