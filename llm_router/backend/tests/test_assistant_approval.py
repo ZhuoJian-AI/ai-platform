@@ -352,9 +352,15 @@ async def test_runtime_approval_policy_events_are_traced_like_other_policies(mon
         "step": "policy", "action": "approval_decided", "tool": "workspace_delete_file", "approval_id": "ap-1",
         "outcome": "rejected", "decided_by": "user",
     } in state["steps"]
-    assert [event["action"] for event in staged if event.get("type") == "trace"] == [
+    policy_events = [
+        event for event in staged
+        if event.get("type") == "trace" and event.get("category") == "policy"
+    ]
+    assert [event["action"] for event in policy_events] == [
         "approval_requested", "approval_decided",
     ]
+    assert policy_events[1]["outcome"] == "rejected"
+    assert policy_events[1]["approval_id"] == "ap-1"
     assert state["assistant_final"] == "已按你的要求放弃删除。"
 
 

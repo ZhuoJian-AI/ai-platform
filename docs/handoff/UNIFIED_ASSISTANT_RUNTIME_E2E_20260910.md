@@ -121,3 +121,11 @@
 - 改为请求与 artifact 意图取并集，两处行为一致，不依据 application_id 切换交付语义。未增加前置意图门禁，不改权限、工具选择或供应商配置。
 - `pytest tests/test_assistant_policy.py tests/test_native_assistant_core.py tests/test_message_verification.py -q`：74 passed；三个受影响 Python 文件 Ruff 通过。
 - 仍未解决目标格式一致性与完整语义验收，未执行真实模型/OSS/浏览器正向交付，未部署；不能据此标记整体目标完成。
+
+## 扩大跨模块集成检查（本地，未发布）
+
+- 当前仓库不存在 .github/workflows，不能假设推送 PR 会自动执行完整 CI；本轮未 push 或创建 PR。
+- 聚焦集合扩大至 14 个测试模块：assistant_runner、assistant_approval、assistant_policy、assistant_tool_catalog、native_assistant_core、enterprise_action_hardening、enterprise_application_navigation、subsystem_ai、model_gateway_contract、model_capability_tools、message_verification、storage_gateway_service、task_file_refs_pure、platform_file_contracts_pure（均对应 tests/test_*.py）。
+- 初次执行 203 passed / 1 failed：审批事件测试将全部 trace 当作 policy，读取新增工具目录事件缺少的 action 字段。修正为按 category=policy 筛选，继续核对请求/决定顺序，并新增转发结果的拒绝值和 approval_id 断言，未修改产品审批逻辑。
+- 同一集合重跑 204 passed，1.17 秒；全后端 `ruff check app/ tests/` 通过（仅修正 test_coolify_compose_contract.py 多余空行）。
+- 上述使用单元/契约替身，不代表真实 PostgreSQL 全接口、供应商、OSS 或浏览器 E2E。当前仍禁止宣称全量验收通过；未改工作流、线上配置或部署。
