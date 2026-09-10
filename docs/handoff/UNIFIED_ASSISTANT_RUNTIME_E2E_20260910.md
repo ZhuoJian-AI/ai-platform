@@ -24,6 +24,7 @@
 - 已修复能力测试失败状态回滚：负面验证返回 HTTP 400 响应而不抛出事务异常，保留失败状态及脱敏错误分类。新增测试经过真实 `get_db` 生命周期，但事务存储为测试替身，仍需 PostgreSQL/HTTP 端到端复验。
 - 聊天验证预算由 128 调整为 512，与视觉验证一致；没有最终正文仍拒绝验证。
 - 聚焦网关、原生循环和目录测试：25 passed。当前 Docker Desktop 引擎未运行，尚未重跑 PostgreSQL 集成测试。
+- 新增 `test_failed_verification_survives_http_request_and_new_db_session`：使用真实 HTTP、生产事务依赖和新数据库会话校验状态持久化。实际执行在 fixture 建连阶段因 WinError 1225 失败，未到测试正文，不计通过。尝试启动 Docker Desktop 后引擎仍不可用；`docker pull postgres:16` 也因 Linux engine 管道不存在而失败。下一轮先恢复一次性 PostgreSQL 环境或使用已授权隔离测试数据库，再执行该测试。
 
 - 核对模型能力测试失败状态持久化、MiMo 多轮调用和全部语音模式。
 - 完成真实管理员与员工双端、OSS 文件交付、权限撤销、确认取消和跨视图接力测试。
