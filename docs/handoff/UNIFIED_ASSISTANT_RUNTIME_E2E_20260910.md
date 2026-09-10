@@ -89,3 +89,11 @@
 - 扩展单元测试为正常提交及三条拒绝路径。该测试模块全部使用显式服务替身，因此隔离掉无关的自动 PostgreSQL fixture；不将这些测试报告为真实数据库/OSS 验收。
 - `pytest tests/test_model_capability_tools.py tests/test_native_assistant_core.py tests/test_assistant_policy.py -q`：53 passed。对应代码 Ruff 通过。
 - 仍需真实撤权 E2E；音频字节当前仅检查文件头，完整解码校验、目标格式交付约束仍待补齐。本轮不部署。
+
+## 音频完整解码校验（本地，未发布）
+
+- 后端两个 Dockerfile 已包含 FFmpeg，因此复用现有程序，不增加依赖或服务。语音工具在写入前以指定 MP3/WAV demuxer 完整解码，要求成功退出且存在正时长输出，不再仅凭 ID3/RIFF 头判断。
+- 仅允许 pipe 协议，不写临时文件，不访问外部 URL；30 秒超时，取消/异常时 kill 并 wait 回收进程。解码失败返回可纠正错误且不调用 ingest，不生成 Artifact。
+- 测试使用标准库生成真实 WAV，并通过实际 FFmpeg 编码 MP3，替换以前的伪音频正向样本。覆盖两种真实格式、三个伪文件头、生成工具拒绝损坏输出、超时及取消回收。
+- `pytest tests/test_model_capability_tools.py tests/test_native_assistant_core.py tests/test_assistant_policy.py tests/test_message_verification.py -q`：72 passed；对应 Python Ruff 通过。
+- 文件格式与用户目标的一致性仍是独立待办，不能用本次字节合法性校验代替；MiMo、阿里云和双端真实交付尚需继续。本轮未部署。
