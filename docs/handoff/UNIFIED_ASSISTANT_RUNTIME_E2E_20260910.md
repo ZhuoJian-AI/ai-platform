@@ -29,3 +29,13 @@
 - 核对模型能力测试失败状态持久化、MiMo 多轮调用和全部语音模式。
 - 完成真实管理员与员工双端、OSS 文件交付、权限撤销、确认取消和跨视图接力测试。
 - 平台完整目标尚未完成；禁止仅凭本次测试发布完成结论。
+
+## 2026-09-10 19:24 真实员工语音负面验收
+
+- 通过员工登录表单认证，未伪造 Token/Cookie；创建专用任务 `71b072f1-1d5a-4299-af3a-dc1651d50092`，要求生成个人空间 MP3。
+- 实际运行进行了多轮能力搜索，没有调用 `speech_synthesize`，最终创建 `E2E-20260910-voice-配音脚本.txt`，界面显示“部分完成”。本项 MP3 交付验收失败，文本不是用户要求的音频。
+- 使用登录后会话只读查询 `/api/v1/terminal/me`：当前角色并集不含 `multimodal.speech.use`、`multimodal.audio.transcribe` 或 `multimodal.audio.understand`。源代码 `model_capability_availability` 要求对应权限后才装配工具，因此不能根据搜索失败断言平台没有 TTS。
+- 待修复/复验：不可用能力的解释不能误报为平台未接入；不能主动用无关文本文件替代 MP3；需要管理员临时测试角色授权后的成功路径与撤权拒绝路径。该任务生成的测试文本和测试记忆须在验收结束清理，不清理用户其他文件或记忆。
+- 同次重新执行聚焦测试：`pytest tests/test_model_gateway_contract.py tests/test_native_assistant_core.py tests/test_assistant_tool_catalog.py -q`，25 passed。
+- 本地 PostgreSQL 仍未启动：Docker Desktop 日志明确为残留 `dockerInference` reparse 节点不可访问导致 Inference manager 初始化失败。尝试可恢复移动该单一节点被 Windows 拒绝，没有删除任何节点、容器、数据卷或重置 Docker。下一步可使用独立 PostgreSQL 运行环境，不必继续重复启动失败的 Docker。
+- 部署规则重新获取为 `c948cd2`；本轮没有部署。
