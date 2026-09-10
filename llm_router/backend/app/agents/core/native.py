@@ -22,6 +22,7 @@ from app.agents.core import approval_registry
 from app.agents.graph.context import bind_runtime
 from app.agents.graph.nodes import _execute_tool_call
 from app.services import model_gateway
+from app.services.assistant_delivery_policy import explicit_output_formats, missing_output_formats
 from app.services.assistant_tool_catalog import search_business_capabilities, search_tool_specs
 from app.services.assistant_tool_protocol import descriptor_from_spec, tool_result_json
 
@@ -139,7 +140,7 @@ def _bounded_tool_content(content: str, limit: int) -> str:
     return content[:limit] + f"\n[工具结果已截断，共 {len(content)} 字符；如需更多内容请分页读取]"
 
 
-def _tool_result_has_trusted_artifact(content: str | dict[str, Any]) -> bool:
+def _tool_result_artifacts(content: str | dict[str, Any]) -> list[dict[str, Any]]:
     """Only a stable workspace file/version identity counts as delivery.
 
     A tool name, server path, URL, or free-form success message is not proof that
@@ -152,9 +153,9 @@ def _tool_result_has_trusted_artifact(content: str | dict[str, Any]) -> bool:
         try:
             value = json.loads(value)
         except (json.JSONDecodeError, TypeError):
-            return False
+            return []
     if not isinstance(value, dict):
-        return False
+        return []
 
     def has_identity(item: Any) -> bool:
         if not isinstance(item, dict):
@@ -163,8 +164,7 @@ def _tool_result_has_trusted_artifact(content: str | dict[str, Any]) -> bool:
         version_id = item.get("version_id") or item.get("versionId")
         return bool(file_id and version_id)
 
-    if has_identity(value):
-        return True
+    artifacts = [value] if has_identity(value) else []
     containers = [value]
     data = value.get("data")
     if isinstance(data, dict):
@@ -172,9 +172,13 @@ def _tool_result_has_trusted_artifact(content: str | dict[str, Any]) -> bool:
     for container in containers:
         for key in ("artifacts", "outputs", "files"):
             candidates = container.get(key)
-            if isinstance(candidates, list) and any(has_identity(item) for item in candidates):
-                return True
-    return False
+            if isinstance(candidates, list):
+                artifacts.extend(item for item in candidates if has_identity(item))
+    return artifacts
+
+
+def _tool_result_has_trusted_artifact(content: str | dict[str, Any]) -> bool:
+    return bool(_tool_result_artifacts(content))
 
 
 def _capability_search_result(
@@ -386,6 +390,8 @@ async def stream_run(
     file_tools = {str(item) for item in policy.get("file_output_tools") or []}
     max_nudges = max(0, min(int(policy.get("max_nudges") or 0), 3))
     delivered = False
+    required_formats = explicit_output_formats(str(state.get("request") or ""))
+    delivered_artifacts: list[dict[str, Any]] = []
     nudges = 0
     visible_text = ""
     last_failure_key = ""
@@ -560,8 +566,10 @@ async def stream_run(
                     last_failure_key = failure_key
                     if dedupe_side_effect:
                         successful_side_effects.setdefault(failure_key, content)
-                    delivered = delivered or (
-                        name in file_tools and _tool_result_has_trusted_artifact(content)
+                    if name in file_tools:
+                        delivered_artifacts.extend(_tool_result_artifacts(content))
+                    delivered = bool(delivered_artifacts) and not missing_output_formats(
+                        required_formats, delivered_artifacts,
                     )
                 else:
                     tool_failures[name] = tool_failures.get(name, 0) + 1
@@ -618,7 +626,11 @@ async def stream_run(
             }
             visible_text = ""
             messages.append({"role": "assistant", "content": text})
-            messages.append({"role": "user", "content": str(policy.get("nudge_text") or _DEFAULT_COMPLETION_NUDGE)})
+            missing = missing_output_formats(required_formats, delivered_artifacts)
+            correction = str(policy.get("nudge_text") or _DEFAULT_COMPLETION_NUDGE)
+            if missing:
+                correction += " 尚未交付要求的格式：" + "、".join(sorted(missing)) + "；其他格式不能替代。"
+            messages.append({"role": "user", "content": correction})
             continue
 
         if policy.get("require_file_output") and not delivered:

@@ -108,7 +108,7 @@ def test_artifact_completion_guard_applies_to_the_global_assistant():
 
     assert completed is False
     assert state["error"] == "assistant artifact delivery failed"
-    assert "工作空间确认的有效文件" in state["assistant_final"]
+    assert "工作空间确认且符合要求格式的有效文件" in state["assistant_final"]
     assert "/tmp/report.xlsx" not in state["assistant_final"]
 
 
@@ -117,7 +117,7 @@ def test_artifact_completion_guard_accepts_verified_workspace_artifacts():
 
     completed = nodes._apply_artifact_completion_guard(
         state,
-        [{"file_id": "file-1", "version_id": "version-1"}],
+        [{"file_id": "file-1", "version_id": "version-1", "mime_type": "application/pdf"}],
     )
 
     assert completed is True

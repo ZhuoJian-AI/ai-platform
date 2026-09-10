@@ -179,6 +179,7 @@ def _requires_file_artifact(request: str) -> bool:
 def _apply_artifact_completion_guard(state: AgentState, artifacts: list[dict[str, Any]]) -> bool:
     """Prevent every assistant view from claiming a file that was not committed."""
 
+    from app.services.assistant_delivery_policy import explicit_output_formats, missing_output_formats
     from app.services.business_assistant_orchestration import intent_requires_artifact
 
     business_intent = state.get("business_turn_intent") or {}
@@ -186,10 +187,11 @@ def _apply_artifact_completion_guard(state: AgentState, artifacts: list[dict[str
         intent_requires_artifact(business_intent)
         or _requires_file_artifact(str(state.get("request") or ""))
     )
-    if not requires_artifact or artifacts:
+    missing = missing_output_formats(explicit_output_formats(str(state.get("request") or "")), artifacts)
+    if not requires_artifact or (artifacts and not missing):
         return True
     state["assistant_final"] = (
-        "文件生成未完成：本轮没有得到平台工作空间确认的有效文件，"
+        "文件生成未完成：本轮没有得到平台工作空间确认且符合要求格式的有效文件，"
         "因此不会把文字、服务器路径或下载地址冒充为已交付文件。请稍后重试。"
     )
     state["error"] = "assistant artifact delivery failed"

@@ -7,8 +7,58 @@ import json
 import pytest
 
 from app.agents.core import native
+from app.agents.graph.nodes import _apply_artifact_completion_guard
+from app.services.assistant_delivery_policy import explicit_output_formats
 
 ORG_ID = "00000000-0000-0000-0000-000000000001"
+
+
+@pytest.mark.parametrize(("request_text", "formats"), [
+    ("生成一份MP3音频", {"mp3"}),
+    ("请把原来的 XLSX 转成 CSV", {"csv"}),
+    ("读取附件 voice.mp3 并分析", set()),
+    ("生成一份报告", set()),
+    ("生成一份介绍MP3的报告", set()),
+    ("create a PDF", {"pdf"}),
+])
+def test_explicit_output_format_is_not_input_file_routing(request_text, formats):
+    assert explicit_output_formats(request_text) == formats
+
+
+@pytest.mark.parametrize(("mime", "expected"), [("text/plain", False), ("audio/mpeg", True)])
+def test_final_guard_requires_requested_audio_format(mime, expected):
+    state = {"request": "生成一份MP3音频"}
+    artifact = {"fileId": "f1", "versionId": "v1", "mimeType": mime}
+    assert _apply_artifact_completion_guard(state, [artifact]) is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrected", [False, True])
+async def test_native_loop_rejects_txt_substitute_for_mp3(monkeypatch, corrected):
+    call = {"id": "c1", "name": "report_create", "arguments": '{"rows":[]}'}
+    turns = [
+        [("tool_calls", [call], None)],
+        [("text", "已生成", None)],
+    ]
+    if corrected:
+        turns.append([("tool_calls", [{**call, "id": "c2", "arguments": '{"rows":[{}]}'}], None)])
+    turns.append([("text", "已生成", None)])
+    monkeypatch.setattr(native.model_gateway, "stream_chat", _scripted_stream(turns))
+
+    async def execute(_state, tool_call, _registry):
+        mime = "audio/mpeg" if tool_call["id"] == "c2" else "text/plain"
+        content = json.dumps({"artifacts": [{"fileId": tool_call["id"], "versionId": "v1", "mimeType": mime}]})
+        return {"content": content}, content, True
+
+    monkeypatch.setattr(native, "_execute_tool_call", execute)
+    state = {**_state(), "request": "生成一份MP3音频"}
+    events = [event async for event in native.stream_run(
+        _request(require_file=True), state=state, prepared=_prepared(), deps={"db": object()},
+    )]
+    assert any(event.get("action") == "continuation" for event in events)
+    assert any(event["type"] == "done" for event in events) is corrected
+    if not corrected:
+        assert events[-1]["code"] == "ARTIFACT_DELIVERY_FAILED"
 
 
 @pytest.fixture(autouse=True)

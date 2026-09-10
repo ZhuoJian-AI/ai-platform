@@ -1,5 +1,12 @@
 # 统一助手运行验收续接
 
+## 明确输出格式的完成保护（本地，未发布）
+
+- 真实调用现有两个校验函数复现：`生成一份MP3音频` 配上 `text/plain` 文件时均返回 True。修复后原生循环累积可信文件工具的文件记录，用共享 MIME 匹配校验决定是否需要纠正；最终保存对数据库重新解析的 Artifact 使用相同校验。
+- 只识别紧邻生成/导出/转成等输出声明的明确格式，不用于工具选择或执行门禁。输入文件名、关于 MP3 的介绍报告、未指定格式不据此推断；自然语言隐含格式、跨轮交付要求和完整内容语义仍待主脑结构化要求补齐，不能把此保护当成完整解决方案。
+- 新测试覆盖 TXT 替代 MP3 被拒绝、自动纠正后交付 MP3 可完成、PDF 正向 MIME、输入 XLSX 转成 CSV 的目标识别。旧 PDF 正向夹具补齐 MIME（不是 MP3 夹具）。最终 Artifact 的 MIME 来自 `_verified_tool_file_records` 查询到的版本元数据，不来自模型正文。
+- `pytest tests/test_native_assistant_core.py tests/test_assistant_policy.py tests/test_message_verification.py -q --tb=short`：84 passed；全后端 Ruff 通过。供应商/数据库在该组使用替身，未通过真实音频交付验收，未部署。
+
 ## 管理员语音验证与交付复用解码器（本地，未发布）
 
 - 将语音完整解码校验移至 `app/services/audio_validation.py`，管理员部署能力测试与助手文件交付共用；不新增依赖或服务。

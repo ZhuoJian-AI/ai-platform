@@ -5,6 +5,50 @@ It does not choose tools, reject natural-language requests, or prove that an
 artifact meets the user's content and format requirements.
 """
 
+import re
+
+_OUTPUT_MIME_TYPES = {
+    "mp3": {"audio/mpeg", "audio/mp3"},
+    "wav": {"audio/wav", "audio/x-wav", "audio/wave"},
+    "xlsx": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    "docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    "pptx": {"application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+    "pdf": {"application/pdf"},
+    "csv": {"text/csv"},
+    "txt": {"text/plain"},
+    "markdown": {"text/markdown", "text/x-markdown"},
+}
+_EXPLICIT_OUTPUT = re.compile(
+    r"(?:生成|创建|制作|导出(?:为)?|输出(?:为)?|另存为|保存为|转换为|转成|转为|"
+    r"\b(?:generate|create|produce|export|save as|convert to)\b)"
+    r"(?:\s|一份|一个|一段|可下载的|真正的|a\s|an\s)*(?<![a-z0-9])"
+    r"(mp3|wav|xlsx|docx|pptx|pdf|csv|txt|markdown)(?![a-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def explicit_output_formats(request: str) -> set[str]:
+    """Extract literal output declarations only; never choose or deny tools.
+
+    This is a completion backstop, not general semantic intent resolution.
+    Input filenames and unspecified/contextual formats are not inferred here.
+    """
+    return {match.group(1).lower() for match in _EXPLICIT_OUTPUT.finditer(str(request or ""))}
+
+
+def missing_output_formats(formats: set[str], artifacts: list[dict]) -> set[str]:
+    delivered_types = {
+        str(item.get("mimeType") or item.get("mime_type") or "").split(";", 1)[0].strip().lower()
+        for item in artifacts
+        if isinstance(item, dict)
+        and (item.get("fileId") or item.get("file_id"))
+        and (item.get("versionId") or item.get("version_id"))
+    }
+    return {
+        name for name in formats
+        if not (_OUTPUT_MIME_TYPES.get(name, set()) & delivered_types)
+    }
+
 FILE_PRODUCTION_VERBS = (
     "生成", "创建", "制作", "导出", "转换", "转成", "转为", "保存", "另存",
     "输出", "做一份", "做成", "写一份", "整理成", "汇总成", "编辑", "修改",
