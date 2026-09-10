@@ -30,7 +30,7 @@ def test_execution_verification_uses_real_tool_traces(traces, expected):
     assert result["status"] == expected
 
 
-def test_execution_verification_marks_a_delivered_fallback_as_recovered():
+def test_execution_verification_does_not_infer_goal_recovery_from_artifacts():
     result = classify_execution_verification(
         "处理完成",
         {
@@ -44,7 +44,29 @@ def test_execution_verification_marks_a_delivered_fallback_as_recovered():
     )
 
     assert result is not None
-    assert result == {"status": "recovered", "tool_calls": 3, "succeeded": 2, "failed": 1}
+    assert result == {"status": "partial", "tool_calls": 3, "succeeded": 2, "failed": 1}
+
+
+def test_reloaded_message_does_not_promote_text_substitute_to_audio_completion():
+    now = datetime.now(UTC)
+    message = TaskMessageRead.model_validate({
+        "id": uuid4(), "task_id": uuid4(), "role": "assistant",
+        "content": "未能生成 MP3，仅保存了配音文本。",
+        "metadata": {
+            "traces": [
+                {"name": "speech_synthesize", "ok": False},
+                {"name": "text_create", "ok": True},
+                {"name": "workspace_read_file", "ok": True},
+            ],
+            "artifacts": [{
+                "fileId": str(uuid4()), "versionId": str(uuid4()),
+                "name": "script.txt", "mimeType": "text/plain",
+            }],
+        },
+        "created_at": now, "updated_at": now,
+    })
+    assert message.execution_verification is not None
+    assert message.execution_verification.status == "partial"
 
 
 def test_execution_verification_keeps_a_terminal_failure_partial():

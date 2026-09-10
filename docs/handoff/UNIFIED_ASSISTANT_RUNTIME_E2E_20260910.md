@@ -56,3 +56,11 @@
 - 同一模型批次中已经排队的后续调用也会收到 `tool_retry_exhausted`，不会继续触发执行器。动态能力加载重建工具集合时继续排除已停用工具。
 - 批量工具结果全部追加完毕后才追加恢复提示，避免在 assistant tool_calls 与尚未返回的 tool 消息之间插入 user 消息导致供应商协议错误。
 - 新增改变参数、批量绕过、成功清零与批量消息顺序测试。聚焦测试 28 passed；Ruff 通过。此结果为模拟网关单元测试，不替代待完成的线上复验。
+
+## 文件交付状态误报修复（本地，未发布）
+
+- 服务端历史消息分类和前端即时分类不再通过“任意 Artifact + 失败后任意成功工具”推断 recovered。工具调用统计只能证明执行记录，不能证明用户要求的文件已交付。
+- 新增 TaskMessageRead 回归：语音失败、文本创建成功和读取成功，即使存在稳定 TXT 文件版本，刷新后的分类仍为 partial，不升级为完成。
+- `pytest tests/test_message_verification.py tests/test_native_assistant_core.py tests/test_assistant_tool_catalog.py -q`：35 passed；对应 Python 文件 Ruff 通过。
+- 安装当前工作树锁定依赖后，`npm run build` 通过；保留现有大 chunk 与 stream externalized 构建警告。`npm run test:file-ui`、`npm run test:presentation` 通过。
+- 此修复只消除缺少证明时的完成推断。运行时 `_tool_result_has_trusted_artifact` 仍只验证稳定文件/版本身份，尚未校验请求目标格式；下一步必须补齐目标交付约束和最终持久化状态，再完成真实 MP3 正向交付、历史恢复以及完整模型验收。不得将本次聚焦测试当作全目标完成。

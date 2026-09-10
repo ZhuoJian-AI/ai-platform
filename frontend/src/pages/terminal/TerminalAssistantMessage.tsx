@@ -70,13 +70,10 @@ function verificationFromBlocks(blocks?: Block[]): ExecutionVerification | null 
   if (!calls.length) return null;
   const succeeded = calls.filter((call) => call.result?.ok !== false).length;
   const failed = calls.length - succeeded;
-  let lastFailedIndex = -1;
-  calls.forEach((call, index) => { if (call.result?.ok === false) lastFailedIndex = index; });
-  const recovered = failed > 0
-    && extractArtifacts(blocks).length > 0
-    && calls.slice(lastFailedIndex + 1).some((call) => call.result?.ok !== false);
+  // Tool traces and arbitrary artifacts do not prove the requested deliverable
+  // was produced. Keep the same conservative classification as history replay.
   return {
-    status: failed === 0 ? 'verified' : recovered ? 'recovered' : succeeded ? 'partial' : 'failed',
+    status: failed === 0 ? 'verified' : succeeded ? 'partial' : 'failed',
     tool_calls: calls.length,
     succeeded,
     failed,
