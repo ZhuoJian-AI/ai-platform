@@ -831,6 +831,12 @@ const adminContext = await browser.newContext({ viewport: desktopViewport });
 const employeeContext = await browser.newContext({ acceptDownloads: true, viewport: desktopViewport });
 const adminPage = await adminContext.newPage();
 const employeePage = await employeeContext.newPage();
+const viewTransitions = [];
+employeePage.on('framenavigated', (frame) => {
+  if (frame !== employeePage.mainFrame()) return;
+  const url = new URL(frame.url());
+  viewTransitions.push({ path: url.pathname, view: url.searchParams.get('view'), hasConversation: url.searchParams.has('conversation') });
+});
 const adminDiagnostics = diagnosticsFor(adminPage);
 const employeeDiagnostics = diagnosticsFor(employeePage);
 let artifactState = {};
@@ -901,6 +907,7 @@ try {
     path: safePath(employeePage.url()),
     dialogs: await employeePage.getByRole('dialog').count().catch(() => -1),
     artifactSections: await employeePage.locator('section[aria-label="本轮交付文件"]').count().catch(() => -1),
+    transitions: viewTransitions.slice(-12),
   }));
   throw new Error(redact(error instanceof Error ? error.message : error));
 } finally {

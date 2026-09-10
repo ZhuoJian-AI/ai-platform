@@ -890,12 +890,13 @@ def _enterprise_export_file_parameters(
     properties.pop("nextCursor", None)
     properties["output_name"] = {
         "type": "string",
-        "description": "交付到当前选定工作空间的文件名，建议以 .xlsx 或 .csv 结尾",
+        "description": "交付到当前选定工作空间的文件名，扩展名必须匹配 target_format；Excel 默认使用 .xlsx。",
     }
     properties["target_format"] = {
         "type": "string",
         "enum": supported_formats or ["xlsx", "csv"],
         "default": "xlsx",
+        "description": "用户要求 Excel 时使用 xlsx；只有用户明确要求 CSV 时才使用 csv。",
     }
     required = [item for item in parameters.get("required", []) if item not in {"snapshotId", "nextCursor"}]
     if "output_name" not in required:

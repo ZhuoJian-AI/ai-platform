@@ -18,11 +18,12 @@ _OUTPUT_MIME_TYPES = {
     "txt": {"text/plain"},
     "markdown": {"text/markdown", "text/x-markdown"},
 }
+_OUTPUT_FORMAT_ALIASES = {"excel": "xlsx", "word": "docx", "ppt": "pptx"}
 _EXPLICIT_OUTPUT = re.compile(
     r"(?:生成|创建|制作|导出(?:为)?|输出(?:为)?|另存为|保存为|转换为|转成|转为|"
     r"\b(?:generate|create|produce|export|save as|convert to)\b)"
     r"(?:\s|一份|一个|一段|可下载的|真正的|a\s|an\s)*(?<![a-z0-9])"
-    r"(mp3|wav|xlsx|docx|pptx|pdf|csv|txt|markdown)(?![a-z0-9])",
+    r"(mp3|wav|xlsx|docx|pptx|pdf|csv|txt|markdown|excel|word|ppt)(?![a-z0-9])",
     re.IGNORECASE,
 )
 
@@ -33,7 +34,8 @@ def explicit_output_formats(request: str) -> set[str]:
     This is a completion backstop, not general semantic intent resolution.
     Input filenames and unspecified/contextual formats are not inferred here.
     """
-    return {match.group(1).lower() for match in _EXPLICIT_OUTPUT.finditer(str(request or ""))}
+    formats = {match.group(1).lower() for match in _EXPLICIT_OUTPUT.finditer(str(request or ""))}
+    return {_OUTPUT_FORMAT_ALIASES.get(name, name) for name in formats}
 
 
 def missing_output_formats(formats: set[str], artifacts: list[dict]) -> set[str]:
