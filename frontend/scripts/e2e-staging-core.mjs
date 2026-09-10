@@ -647,7 +647,12 @@ async function generateAndVerifyArtifact(page, applicationId, cleanupState) {
   await drawer.getByRole('button', { name: /在当前页面执行/ }).click();
 
   const deadline = Date.now() + artifactTimeoutMs;
-  while (await deliveredSections.count() <= baselineArtifactCount) {
+  while (
+    await deliveredSections.count() <= baselineArtifactCount
+    || await drawer.getByRole('button', { name: /在当前页面执行/ }).evaluate(
+      (element) => element.classList.contains('ant-btn-loading'),
+    )
+  ) {
     if (Date.now() >= deadline) throw new Error('业务助手在限定时间内没有交付文件卡片');
     const drawerText = await drawer.innerText();
     if (drawerText.includes('执行未完成，请查看下方原因')) {
@@ -665,6 +670,7 @@ async function generateAndVerifyArtifact(page, applicationId, cleanupState) {
   const localPath = path.join(outputDir, path.basename(suggestedName));
   await download.saveAs(localPath);
   const bytes = fs.readFileSync(localPath);
+  console.log('E2E 下载产物格式', JSON.stringify({ extension: path.extname(suggestedName).toLowerCase(), sizeBytes: bytes.length }));
   assert.match(suggestedName.toLowerCase(), /\.xlsx$/, '业务助手交付物不是 XLSX');
   assert.ok(bytes.length > 100 && bytes.readUInt16LE(0) === 0x4b50, '下载文件不是有效 ZIP 容器');
   const entries = new Set(zipEntries(bytes));
@@ -762,6 +768,28 @@ async function cleanupBusinessRun(page, state) {
   });
 }
 
+async function verifySharedTaskViews(page, application, state) {
+  const before = await listBusinessTaskIds(page, application.id);
+  await page.goto(new URL(`/${orgSlug}/terminal/tasks/${state.taskId}`, baseUrl).href, {
+    waitUntil: 'domcontentloaded', timeout: 60_000,
+  });
+  const main = page.locator('main.terminal-shell__main');
+  await main.getByText(runMarker, { exact: false }).first().waitFor({ timeout: 30_000 });
+  await main.locator('section[aria-label="本轮交付文件"]').first().waitFor({ timeout: 30_000 });
+  assert.equal(new URL(page.url()).pathname, `/${orgSlug}/terminal/tasks/${state.taskId}`);
+  await page.locator('aside').first().locator('button').filter({ hasText: application.name }).first().click();
+  await page.getByRole('button', { name: /灼见助手/ }).waitFor({ timeout: 30_000 });
+  await page.getByRole('button', { name: /灼见助手/ }).click();
+  const drawer = page.getByRole('dialog');
+  await drawer.getByText(runMarker, { exact: false }).first().waitFor({ timeout: 30_000 });
+  await drawer.locator('section[aria-label="本轮交付文件"]').first().waitFor({ timeout: 30_000 });
+  const after = await listBusinessTaskIds(page, application.id);
+  assert.deepEqual([...after].sort(), [...before].sort(), '切换助手视图意外创建了任务');
+  const restored = await findRunArtifact(page, application.id, new Set(state.baselineTaskIds), runMarker);
+  assert.equal(restored.taskId, state.taskId, '切换视图后任务 ID 发生变化');
+  assert.deepEqual(restored.artifact, state.artifact, '切换视图后文件版本引用发生变化');
+}
+
 async function logoutFromUi(page, { endpoint, expectedPath, roleLabel }) {
   const openDrawer = page.locator('.ant-drawer-open').last();
   if (await openDrawer.count()) {
@@ -846,6 +874,9 @@ try {
   console.log('E2E 业务助手 Excel Artifact：开始');
   artifactState = await generateAndVerifyArtifact(employeePage, application.id, artifactState);
   console.log('E2E 业务助手 Excel Artifact：通过');
+  console.log('E2E 同一任务总入口与页面侧栏：开始');
+  await verifySharedTaskViews(employeePage, application, artifactState);
+  console.log('E2E 同一任务总入口与页面侧栏：通过');
   cleanupResult = await cleanupBusinessRun(employeePage, artifactState);
   artifactState = null;
   assert.equal(cleanupResult.failures.length, 0, cleanupResult.failures.join('；'));
@@ -866,10 +897,16 @@ try {
   console.log('E2E 双端退出登录与会话撤销：通过');
   console.log('E2E PASS：管理员与员工 staging 核心回归全部通过');
 } catch (error) {
+  console.log('E2E failure location', JSON.stringify({
+    path: safePath(employeePage.url()),
+    dialogs: await employeePage.getByRole('dialog').count().catch(() => -1),
+    artifactSections: await employeePage.locator('section[aria-label="本轮交付文件"]').count().catch(() => -1),
+  }));
   throw new Error(redact(error instanceof Error ? error.message : error));
 } finally {
   if (artifactState) {
     cleanupResult = await cleanupBusinessRun(employeePage, artifactState).catch(() => null);
+    console.log('E2E failure cleanup', JSON.stringify(cleanupResult));
   }
   if (modelGrantState) {
     await restoreModelGrant(adminPage, modelGrantState).catch(() => null);
