@@ -97,3 +97,12 @@
 - 测试使用标准库生成真实 WAV，并通过实际 FFmpeg 编码 MP3，替换以前的伪音频正向样本。覆盖两种真实格式、三个伪文件头、生成工具拒绝损坏输出、超时及取消回收。
 - `pytest tests/test_model_capability_tools.py tests/test_native_assistant_core.py tests/test_assistant_policy.py tests/test_message_verification.py -q`：72 passed；对应 Python Ruff 通过。
 - 文件格式与用户目标的一致性仍是独立待办，不能用本次字节合法性校验代替；MiMo、阿里云和双端真实交付尚需继续。本轮未部署。
+
+## 2026-09-10 20:15 集成回归与主分支复核
+
+- 完整重新读取目标文件，目标第一行要求文档之后继续实施；未把任务缩减为文档交付或局部单元测试。
+- 经代理获取最新 origin/main，仍为 df2301c；当前实现提交 b455718 相对主分支领先 12 个提交、落后 0 个，测试前后无产品文件脏改动。本轮没有合并、推送或部署。
+- 后端执行 `pytest tests/test_model_capability_tools.py tests/test_native_assistant_core.py tests/test_assistant_policy.py tests/test_message_verification.py tests/test_assistant_tool_catalog.py tests/test_model_gateway_contract.py -q`：82 passed，0.81 秒。语音样本校验使用实际本地 FFmpeg；模型、数据库及 OSS 的替身测试不算真实供应商交付通过。
+- 前端逐项运行 package.json 中全部 11 个非 `test:e2e:*` 测试脚本：presentation、file-links、file-events、csv-document、file-ui、subsystem-bridge、admin-session、login-feedback、responsive、admin-quota、retired-frontend 全部 exit 0。responsive 输出 `RESPONSIVE_ACCEPTANCE_OK engines=chromium viewports=8`。
+- 未执行 staging-core 或 attachments 线上 E2E，因此不能据本轮结果宣称管理员/员工端到端全量通过。仍需解决请求目标格式匹配、音频启用配置与真实模型/工作空间交付，再进行完整发布门禁。
+- 部署规则已重新获取，版本仍为 c948cd2；本轮只使用其协作规则，没有改线上配置、镜像 digest、Skill 或子系统。
