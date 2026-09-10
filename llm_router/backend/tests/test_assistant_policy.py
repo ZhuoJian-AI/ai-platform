@@ -180,7 +180,7 @@ async def test_policy_blocks_and_timeouts_are_recorded_without_retracting_text(m
     policy_traces = [trace for trace in state["traces"] if trace.get("category") == "policy"]
     assert [trace["action"] for trace in policy_traces] == ["repeat_failure_block", "tool_timeout"]
     assert all(trace.get("ok") is None for trace in policy_traces)  # never counted as a tool call
-    forwarded = [event for event in staged if event.get("type") == "trace"]
+    forwarded = [event for event in staged if event.get("type") == "trace" and event.get("category") == "policy"]
     assert [event["action"] for event in forwarded] == ["repeat_failure_block", "tool_timeout"]
     assert forwarded[1]["title"] == "工具超时"
     assert not any(event.get("type") == "text_retract" for event in staged)

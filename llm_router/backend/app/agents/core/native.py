@@ -621,6 +621,14 @@ async def stream_run(
             messages.append({"role": "user", "content": str(policy.get("nudge_text") or _DEFAULT_COMPLETION_NUDGE)})
             continue
 
+        if policy.get("require_file_output") and not delivered:
+            yield {
+                "type": "error",
+                "code": "ARTIFACT_DELIVERY_FAILED",
+                "message": "文件生成未完成：未取得工作空间确认的文件版本，不能宣称交付成功。",
+            }
+            return
+
         if not text:
             raise RuntimeError("模型服务没有返回有效的最终响应")
         messages.append({"role": "assistant", "content": text})

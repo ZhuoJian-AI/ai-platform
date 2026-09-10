@@ -64,3 +64,11 @@
 - `pytest tests/test_message_verification.py tests/test_native_assistant_core.py tests/test_assistant_tool_catalog.py -q`：35 passed；对应 Python 文件 Ruff 通过。
 - 安装当前工作树锁定依赖后，`npm run build` 通过；保留现有大 chunk 与 stream externalized 构建警告。`npm run test:file-ui`、`npm run test:presentation` 通过。
 - 此修复只消除缺少证明时的完成推断。运行时 `_tool_result_has_trusted_artifact` 仍只验证稳定文件/版本身份，尚未校验请求目标格式；下一步必须补齐目标交付约束和最终持久化状态，再完成真实 MP3 正向交付、历史恢复以及完整模型验收。不得将本次聚焦测试当作全目标完成。
+
+## 原生循环无产物终止语义（本地，未发布）
+
+- 发现 completion policy 重试用尽后仍可 yield done，即使没有 fileId/versionId。现在文件任务无交付时直接返回 ARTIFACT_DELIVERY_FAILED；runner 已将 error 事件转换为 AssistantRunError，进入现有失败持久化路径。
+- 新增零、一、两次纠正预算测试，断言无产物绝不发出 done。修正旧正向测试夹具：只有 file_id 没有 version_id 不是真实交付，正向夹具补齐版本；服务器路径负向测试改为断言明确失败。
+- 同跑发现 policy 测试误把新增工具目录 trace 当作 policy trace，已按 category 筛选，仍核对全部 policy 事件及顺序。
+- `pytest tests/test_native_assistant_core.py tests/test_assistant_policy.py tests/test_message_verification.py -q`：56 passed。对应三个 Python 文件 Ruff 通过。
+- 目标格式匹配、成功交付验证和 staging 双端全量回归仍未完成。本轮不部署，不修改 Skill、业务子系统或配置。

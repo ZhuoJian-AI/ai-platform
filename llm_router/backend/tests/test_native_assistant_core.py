@@ -321,6 +321,23 @@ def test_file_delivery_requires_a_stable_workspace_artifact_identity(payload, ex
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("max_nudges", [0, 1, 2])
+async def test_file_request_never_finishes_successfully_without_delivery(monkeypatch, max_nudges):
+    monkeypatch.setattr(
+        native.model_gateway, "stream_chat",
+        _scripted_stream([[("text", "文件已生成。", None)]] * (max_nudges + 1)),
+    )
+    request = _request(require_file=True)
+    request["completion_policy"]["max_nudges"] = max_nudges
+    events = [event async for event in native.stream_run(
+        request, state=_state(), prepared=_prepared(), deps={"db": object()},
+    )]
+    assert sum(event.get("action") == "continuation" for event in events) == max_nudges
+    assert not any(event["type"] == "done" for event in events)
+    assert events[-1]["code"] == "ARTIFACT_DELIVERY_FAILED"
+
+
+@pytest.mark.asyncio
 async def test_native_core_nudges_when_file_tool_returns_only_a_server_path(monkeypatch):
     monkeypatch.setattr(
         native.model_gateway,
@@ -347,7 +364,8 @@ async def test_native_core_nudges_when_file_tool_returns_only_a_server_path(monk
     ]
 
     assert any(item.get("action") == "continuation" for item in events)
-    assert next(item for item in events if item["type"] == "done")["text"] == "文件生成失败，未交付到工作空间。"
+    assert not any(item["type"] == "done" for item in events)
+    assert next(item for item in events if item["type"] == "error")["code"] == "ARTIFACT_DELIVERY_FAILED"
 
 
 @pytest.mark.asyncio
@@ -513,7 +531,7 @@ async def test_native_core_nudges_until_a_real_file_tool_succeeds(monkeypatch):
     )
 
     async def execute(_state, call, _registry):
-        payload = json.dumps({"status": "success", "file_id": "f2"}, ensure_ascii=False)
+        payload = json.dumps({"status": "success", "file_id": "f2", "version_id": "v2"}, ensure_ascii=False)
         return {"role": "tool", "tool_call_id": call["id"], "content": payload}, payload, True
 
     monkeypatch.setattr(native, "_execute_tool_call", execute)
