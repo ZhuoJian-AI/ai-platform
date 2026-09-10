@@ -1583,11 +1583,9 @@ async def _test_deployment_unmetered(
                 {"type": "text", "text": "Do not explain. Reply exactly with OK."},
                 {"type": "image_url", "image_url": {"url": _TEST_IMAGE_DATA_URL}},
             ]
-        # Vision-capable reasoning models can spend the small verification
-        # budget entirely on hidden reasoning and return no final text.  Keep
-        # ordinary chat checks cheap while leaving vision enough room to emit
-        # the requested answer.
-        verification_max_tokens = 512 if capability == "vision" else 128
+        # Both chat and vision reasoning models need room for a final answer;
+        # hidden reasoning alone is still not a successful capability test.
+        verification_max_tokens = 512
         result = await _chat_with_deployment(
             db,
             provider.organization_id,
