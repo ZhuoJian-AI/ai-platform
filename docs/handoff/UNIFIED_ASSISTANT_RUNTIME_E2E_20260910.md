@@ -72,3 +72,12 @@
 - 同跑发现 policy 测试误把新增工具目录 trace 当作 policy trace，已按 category 筛选，仍核对全部 policy 事件及顺序。
 - `pytest tests/test_native_assistant_core.py tests/test_assistant_policy.py tests/test_message_verification.py -q`：56 passed。对应三个 Python 文件 Ruff 通过。
 - 目标格式匹配、成功交付验证和 staging 双端全量回归仍未完成。本轮不部署，不修改 Skill、业务子系统或配置。
+
+## 2026-09-10 19:58 隔离 PostgreSQL 与实际配置复核
+
+- 依据部署规则 c948cd2，只读核对当前 SaaS 主栈：9 个服务 healthy。当前 backend 的 MULTIMODAL_AUDIO_ENABLED 实际为 false，allowlist 为爱法贝组织 UUID；未修改这些配置。
+- 本地 Docker 故障不再阻挡数据库验证：在 SaaS 主机创建本任务专用临时 PostgreSQL 容器 ai-platform-e2e-pg-20260910，复用已缓存 PostgreSQL 镜像；仅绑定 127.0.0.1:55439，经 SSH 隧道访问，内存盘保存纯测试数据，不挂载 staging 数据卷。
+- TEST_DATABASE_URL 和 DATABASE_URL 均显式指向隔离测试库。执行 `pytest tests/test_model_gateway.py::test_failed_verification_survives_http_request_and_new_db_session -q`，1 passed，112.64 秒，含建表和清理。
+- 此项证明真实 PostgreSQL、HTTP 请求和新事务会话下，失败能力验证状态能够持久化；上游仍为测试替身，不能当作 MiMo 或全模型 E2E 验收通过。
+- 测试结束后核对容器任务标签，停止并自动删除该临时容器及内存盘，终止 SSH 隧道；未删除真实文件、数据库或其他项目资源。源码未部署。
+- 后续大量数据库用例宜在隔离环境本机执行，避免每次 ORM 建表/清表通过公网隧道造成延迟。仍须补齐格式交付、实际模型与双端完整验收。
