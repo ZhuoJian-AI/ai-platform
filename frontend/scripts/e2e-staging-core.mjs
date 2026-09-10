@@ -772,6 +772,15 @@ async function cleanupBusinessRun(page, state) {
 
 async function verifySharedTaskViews(page, application, state) {
   const before = await listBusinessTaskIds(page, application.id);
+  assert.equal(new URL(page.url()).searchParams.get('conversation'), state.taskId,
+    '新建侧栏任务未写入地址，刷新将丢失当前会话');
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await page.getByRole('button', { name: /灼见助手/ }).waitFor({ timeout: 30_000 });
+  await page.getByRole('button', { name: /灼见助手/ }).click();
+  const reloadedDrawer = page.getByRole('dialog');
+  await reloadedDrawer.getByText(runMarker, { exact: false }).first().waitFor({ timeout: 30_000 });
+  await reloadedDrawer.locator('section[aria-label="本轮交付文件"]').first().waitFor({ timeout: 30_000 });
+  assert.equal(new URL(page.url()).searchParams.get('conversation'), state.taskId);
   await page.goto(new URL(`/${orgSlug}/terminal/tasks/${state.taskId}`, baseUrl).href, {
     waitUntil: 'domcontentloaded', timeout: 60_000,
   });

@@ -1580,6 +1580,15 @@ export default function Terminal() {
                     activeTaskId = created.id;
                     setSelectedId(created.id);
                     setComposerOpen(false);
+                    // Persist a newly created sidebar conversation before streaming.
+                    // The route-to-state guard cannot infer this state-only selection.
+                    const params = new URLSearchParams(location.search);
+                    params.set('view', 'application');
+                    params.set('app', selectedApplication.id);
+                    if (selectedApplicationModuleKey) params.set('module', selectedApplicationModuleKey);
+                    if (selectedApplicationPageKey) params.set('page', selectedApplicationPageKey);
+                    params.set('conversation', created.id);
+                    navigate(`${terminalBasePath}?${params.toString()}`, { replace: true });
                     qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
                   }
                   const controller = new AbortController();

@@ -226,6 +226,11 @@ try {
   const applicationAssistantSource = terminalSource.slice(terminalSource.indexOf('onAskAI={async'));
   assert.match(
     applicationAssistantSource,
+    /params\.set\('conversation', created\.id\);\s*navigate\([\s\S]*replace: true/,
+    'a new sidebar task must persist its conversation id in the URL before streaming for reload recovery',
+  );
+  assert.match(
+    applicationAssistantSource,
     /terminal\.runTaskStream\(/,
     'business assistant must consume the real task event stream',
   );
