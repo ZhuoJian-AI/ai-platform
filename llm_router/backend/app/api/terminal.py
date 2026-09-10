@@ -650,8 +650,8 @@ async def get_task_endpoint(
     cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db),
 ):
     task = await _get_owned_task(db, task_id, cu)
-    if application_id is not None and str((task.config or {}).get("application_id") or "") != str(application_id):
-        raise HTTPException(status_code=404, detail="该对话不属于当前应用")
+    # ``application_id`` 仅保留给旧前端兼容。Task 属于用户而不是应用；
+    # 应用、页面和业务对象是逐轮上下文，不能阻止同一对话跨页面继续。
     data = TaskReadWithMessages.model_validate(task)
     # 该任务最新 run 状态：前端据此决定是否调 GET /stream 重连（detach 执行刷新不丢）。
     run_status = (await db.execute(
@@ -677,15 +677,14 @@ async def update_task_endpoint(
     task = await _get_owned_task(db, task_id, cu)
     if data.config is not None:
         existing_application_id = str((task.config or {}).get("application_id") or "")
-        requested_application_id = str(data.config.application_id or "")
-        if existing_application_id:
-            if requested_application_id and requested_application_id != existing_application_id:
-                raise HTTPException(status_code=409, detail="业务助手对话已绑定其他应用，请新建对话")
-            data.config.application_id = UUID(existing_application_id)
-        elif data.config.application_id:
+        if data.config.application_id:
             await enterprise_application_service.assert_application_permission(
                 db, data.config.application_id, cu, "view",
             )
+        elif existing_application_id:
+            # 配置抽屉提交的是完整 TaskConfig；没有显式选择新应用时保留最后上下文，
+            # 避免普通模型/工作空间调整意外清空业务页面。
+            data.config.application_id = UUID(existing_application_id)
         data.config.workspace_id = (await _user_defaults(db, cu))["workspace_id"]
     await task_service.update_task(db, task, data)
     await db.commit()
@@ -723,19 +722,19 @@ def _merge_application_run_context(
     application_id: UUID | None,
     page_context: dict,
 ) -> dict:
-    """Keep the last verified business page context for follow-up turns.
+    """Merge one turn's application context without permanently binding the Task.
 
-    A business Task is permanently bound to its first application. An empty
-    context for the same application means "continue this business task", not
-    "drop page authorization".
+    Empty context for the same application continues the current page. Switching
+    applications without a page payload clears the previous page so stale context
+    can never authorize a tool in the new application.
     """
     cfg = dict(task_config or {})
     previous_application_id = str(cfg.get("application_id") or "")
     if application_id_provided:
         next_application_id = str(application_id) if application_id else ""
-        if previous_application_id and next_application_id != previous_application_id:
-            raise HTTPException(status_code=409, detail="业务助手对话已绑定其他应用，请新建对话")
         cfg["application_id"] = next_application_id or None
+        if next_application_id != previous_application_id and not page_context:
+            cfg["page_context"] = {}
     if page_context:
         cfg["page_context"] = dict(page_context)
     else:

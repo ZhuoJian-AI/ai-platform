@@ -52,7 +52,7 @@ class SubsystemAiInput:
     sha256: str
 
 
-def _manifest_capability(
+def manifest_capability(
     application: EnterpriseApplication,
     module_key: str,
     action_key: str,
@@ -122,7 +122,7 @@ async def authorize_run(
         "ai_query",
     ):
         raise HTTPException(status_code=403, detail="当前员工无权在此页面使用该专业 AI 操作")
-    declaration = _manifest_capability(application, module_key, action_key)
+    declaration = manifest_capability(application, module_key, action_key)
     if not declaration or declaration.get("type") != capability:
         raise HTTPException(status_code=409, detail="子系统专业 AI 声明与请求不一致")
     if declaration.get("humanConfirmation") != "required":
@@ -350,6 +350,50 @@ async def create_run(
     db.add(job)
     await db.flush()
     await db.refresh(job)
+    return job
+
+
+async def execute_run_inline(db: AsyncSession, job: MultimodalJob) -> MultimodalJob:
+    """Execute one queued specialist draft inside the unified Assistant Core run.
+
+    The ordinary iframe API remains asynchronous and is still consumed by the
+    multimodal worker.  The unified assistant needs the specialist observation
+    back in the same model loop, so it executes the same worker implementation
+    inline before the surrounding transaction becomes visible to another worker.
+    """
+    if job.status in {"succeeded", "failed", "cancelled"}:
+        return job
+    if job.status not in {"queued", "processing"}:
+        raise HTTPException(status_code=409, detail="专业 AI 任务状态无效")
+
+    import tempfile
+    from pathlib import Path
+
+    from app.services import model_gateway
+    from app.workers import multimodal_worker
+
+    job.status = "processing"
+    job.started_at = job.started_at or datetime.now(UTC)
+    try:
+        with tempfile.TemporaryDirectory(prefix="zhuojian-specialist-") as raw_dir:
+            payload = await multimodal_worker._process_specialist(db, job, Path(raw_dir))
+        job.result = payload["result"]
+        job.usage = payload.get("usage") or {}
+        job.status = "succeeded"
+        job.finished_at = datetime.now(UTC)
+        job.error_category = None
+        job.error_detail = None
+    except Exception as exc:
+        category = model_gateway.classify_gateway_error(exc)
+        if isinstance(exc, (ValueError, json.JSONDecodeError)):
+            category = "invalid_structured_result"
+        job.status = "failed"
+        job.finished_at = datetime.now(UTC)
+        job.error_category = category
+        job.error_detail = multimodal_worker._specialist_error_zh(category)
+    finally:
+        await purge_inputs(job)
+        await db.flush()
     return job
 
 

@@ -168,6 +168,46 @@ async def test_empty_success_is_not_misreported_as_max_steps(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("intent_name", ["clarify", "navigate"])
+async def test_business_routing_hint_never_short_circuits_the_main_llm(monkeypatch, intent_name):
+    captured_requests = []
+
+    async def stream_run(request, **_kwargs):
+        captured_requests.append(request)
+        yield {"type": "done", "text": "主脑已结合当前页面理解并完成回答。"}
+
+    monkeypatch.setattr(runner.native_core, "stream_run", stream_run)
+    state = {
+        "run_id": 21,
+        "request": "调用204A231款资料",
+        "application_id": "app-1",
+        "business_turn_intent": {
+            "intent": intent_name,
+            "clarificationQuestion": "分类器认为需要补充信息",
+        },
+        "messages": [],
+        "steps": [],
+    }
+
+    await runner._consume_native(
+        state,
+        {"system_prompt": "结合页面理解用户自然表达", "tools": []},
+        "run-token",
+        None,
+        [],
+        {},
+    )
+
+    assert len(captured_requests) == 1
+    assert captured_requests[0]["message"] == "调用204A231款资料"
+    assert state["assistant_final"] == "主脑已结合当前页面理解并完成回答。"
+    assert not any(
+        step.get("step") in {"awaiting_clarification", "navigation_required"}
+        for step in state["steps"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_max_steps_uses_the_structured_error_code(monkeypatch):
     async def stream_run(_request, **_kwargs):
         yield {"type": "error", "message": "MAX_STEPS_EXCEEDED", "code": "MAX_STEPS_EXCEEDED"}

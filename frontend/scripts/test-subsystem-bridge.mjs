@@ -186,7 +186,7 @@ try {
   assert.match(applicationViewSource, /setActiveFrameIndex\(nextIndex\)/);
   assert.match(
     applicationViewSource,
-    /aria-label="选择业务小助手模型"[\s\S]*placeholder="请选择模型"/,
+    /aria-label="选择灼见助手模型"[\s\S]*placeholder="请选择模型"/,
     'business assistant must expose the selected model instead of silently choosing one',
   );
   assert.match(
@@ -196,7 +196,7 @@ try {
   );
   assert.match(
     applicationViewSource,
-    /aria-label="业务小助手实时执行过程"/,
+    /aria-label="灼见助手实时执行过程"/,
     'business assistant must show accessible live execution progress instead of a spinner-only state',
   );
   assert.doesNotMatch(
@@ -206,7 +206,23 @@ try {
   );
 
   const terminalSource = await readFile(resolve('src/pages/terminal/Terminal.tsx'), 'utf8');
+  const apiClientSource = await readFile(resolve('src/api/client.ts'), 'utf8');
   const terminalStreamSource = await readFile(resolve('src/pages/terminal/terminalConversationModel.ts'), 'utf8');
+  assert.match(
+    terminalSource,
+    /case 'ui_intent':[\s\S]*navigateToEnterpriseIntent/,
+    'a trusted navigation intent must move the same assistant conversation into the authorized application view',
+  );
+  assert.match(
+    terminalSource,
+    /pageKey=\{selectedApplicationPageKey\}[\s\S]*assistantOpenRequestKey=\{assistantOpenRequestKey\}/,
+    'assistant navigation must preserve the exact page target and keep the assistant visible',
+  );
+  assert.match(
+    apiClientSource,
+    /if \(pageKey\) params\.set\('page_key', pageKey\)/,
+    'the launch request must send the exact page key for server-side role authorization',
+  );
   const applicationAssistantSource = terminalSource.slice(terminalSource.indexOf('onAskAI={async'));
   assert.match(
     applicationAssistantSource,

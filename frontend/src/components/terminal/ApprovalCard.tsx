@@ -15,6 +15,8 @@ export interface ApprovalCardData {
   tool: string;
   reason: string;
   argumentsPreview: string;
+  displayTitle?: string;
+  summaryFields?: Array<{ label: string; value: string }>;
   /** ISO8601（UTC）；已过期且无 outcome 时按拒绝处理、不可操作。 */
   expiresAt: string;
   runId?: number;
@@ -129,8 +131,9 @@ export default function ApprovalCard({ b, taskId }: { b: ApprovalCardData; taskI
     }
   };
 
-  const showArgs = argsOpen ?? actionable;   // 待决时默认展开参数，决定后默认收起
+  const showArgs = argsOpen ?? false;
   const hasArgs = !!b.argumentsPreview && b.argumentsPreview.trim().length > 0;
+  const summaryFields = Array.isArray(b.summaryFields) ? b.summaryFields : [];
   const urgent = actionable && msLeft <= 30_000;
 
   const accent = actionable ? COLORS.amber : resolved.tone === 'ok' ? COLORS.green : resolved.tone === 'bad' ? COLORS.red : COLORS.gray;
@@ -157,10 +160,7 @@ export default function ApprovalCard({ b, taskId }: { b: ApprovalCardData; taskI
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', flexWrap: 'wrap' }}>
         {headerIcon}
         <SafetyOutlined style={{ color: COLORS.primary }} />
-        <span style={{ fontWeight: 500, color: COLORS.text }}>高风险操作需要你确认</span>
-        <code style={{ fontFamily: "'SF Mono', 'Fira Code', 'Menlo', monospace", fontSize: 11.5, color: COLORS.text, background: '#fff', border: `1px solid ${COLORS.border}`, borderRadius: 4, padding: '0 5px' }}>
-          {b.tool || '(工具)'}
-        </code>
+        <span style={{ fontWeight: 600, color: COLORS.text }}>{b.displayTitle || '请确认本次操作'}</span>
         <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           {actionable ? (
             <span style={{ color: urgent ? COLORS.red : COLORS.amber, fontVariantNumeric: 'tabular-nums' }} title={`到期时间 ${b.expiresAt}`}>
@@ -179,6 +179,16 @@ export default function ApprovalCard({ b, taskId }: { b: ApprovalCardData; taskI
       </div>
 
       <div style={{ padding: '0 10px 10px' }}>
+        {summaryFields.length > 0 && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', gap: '5px 12px', margin: '3px 0 8px' }}>
+            {summaryFields.map((field, index) => (
+              <div key={`${field.label}-${index}`} style={{ display: 'contents' }}>
+                <span style={{ color: COLORS.muted }}>{field.label}</span>
+                <span style={{ color: COLORS.text, overflowWrap: 'anywhere' }}>{field.value}</span>
+              </div>
+            ))}
+          </div>
+        )}
         {b.reason && (
           <div style={{ color: COLORS.text, lineHeight: 1.6 }}>
             <span style={{ color: COLORS.muted }}>原因：</span>{b.reason}
@@ -194,7 +204,7 @@ export default function ApprovalCard({ b, taskId }: { b: ApprovalCardData; taskI
               onClick={() => setArgsOpen(!showArgs)}
               style={{ color: COLORS.gray, cursor: 'pointer', userSelect: 'none' }}
             >
-              {showArgs ? '收起参数' : '查看参数'}{' '}
+              {showArgs ? '收起技术参数' : '查看技术参数'}{' '}
               <DownOutlined style={{ fontSize: 9, transform: showArgs ? 'rotate(180deg)' : 'none' }} />
             </span>
             {showArgs && (
@@ -213,7 +223,7 @@ export default function ApprovalCard({ b, taskId }: { b: ApprovalCardData; taskI
               disabled={inFlight || !taskId}
               onClick={() => decide('allow')}
             >
-              允许本次
+              确认操作
             </Button>
             <Button
               size="small"
@@ -222,7 +232,7 @@ export default function ApprovalCard({ b, taskId }: { b: ApprovalCardData; taskI
               disabled={inFlight || !taskId}
               onClick={() => decide('reject')}
             >
-              拒绝
+              取消
             </Button>
             <span style={{ color: COLORS.muted }}>
               {inFlight ? '提交中…' : '不处理将在倒计时结束后按拒绝处理'}

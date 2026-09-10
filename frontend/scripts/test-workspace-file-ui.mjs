@@ -111,9 +111,18 @@ try {
   assert(box && box.width > 320 && box.height > 80, `unexpected spreadsheet stage bounds: ${JSON.stringify(box)}`);
   await page.mouse.move(box.x + 90, box.y + 48);
   await page.mouse.down();
-  await page.mouse.move(box.x + 310, box.y + 108, { steps: 8 });
+  // End inside the rendered D-column rather than in the blank canvas area;
+  // this verifies the same A1:D4 drag gesture without relying on intermediate
+  // mousemove sampling to land on the final cell.
+  await page.mouse.move(box.x + 210, box.y + 108, { steps: 8 });
   await page.mouse.up();
   await page.getByTestId('spreadsheet-copy-selection').click();
+  // The renderer writes both text/plain and text/html asynchronously. Wait
+  // for the browser clipboard commit instead of racing the promise started by
+  // the toolbar command on slower Windows/CI hosts.
+  await page.waitForFunction(async () => (await navigator.clipboard.readText()).length > 0, null, {
+    timeout: 5_000,
+  });
   const copied = await page.evaluate(() => navigator.clipboard.readText());
   assert.match(copied, /\t|\n/, 'drag selection must copy more than one spreadsheet cell');
   assert.match(copied, /月份|部门|1月|设计部/, 'copied selection must contain visible workbook data');

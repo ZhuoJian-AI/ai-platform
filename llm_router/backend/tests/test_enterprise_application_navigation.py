@@ -3,7 +3,9 @@
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
+from app.api.enterprise_applications import _authorized_launch_route
 from app.auth.user_auth import CurrentUser
 from app.services import enterprise_application_service as service
 
@@ -98,6 +100,34 @@ def test_legacy_integrations_do_not_create_native_child_module_navigation():
     )
 
     assert service.visible_manifest_modules(application, _current_user()) == []
+
+
+def test_exact_page_launch_uses_only_role_authorized_manifest_route():
+    module = {
+        "moduleKey": "style_profile",
+        "route": "/?view=overview",
+        "pages": [
+            {"pageKey": "style_profile.overview", "routePattern": "/?view=overview"},
+            {"pageKey": "style_profile.images", "routePattern": "/?view=images"},
+            {"pageKey": "style_profile.admin", "routePattern": "/?view=admin"},
+        ],
+    }
+
+    route, page_keys = _authorized_launch_route(
+        module,
+        {"style_profile.overview": {}, "style_profile.images": {}},
+        "style_profile.images",
+    )
+
+    assert route == "/?view=images"
+    assert page_keys == ["style_profile.images", "style_profile.overview"]
+    with pytest.raises(HTTPException) as error:
+        _authorized_launch_route(
+            module,
+            {"style_profile.overview": {}, "style_profile.images": {}},
+            "style_profile.admin",
+        )
+    assert error.value.status_code == 403
 
 
 def test_contract_v24_ignores_department_grants_and_uses_role_grants():

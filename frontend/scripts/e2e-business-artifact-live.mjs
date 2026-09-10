@@ -53,7 +53,7 @@ try {
 
   const applicationUrl = `${baseUrl}/${orgSlug}/terminal?view=application&app=${applicationId}&module=${moduleKey}`;
   await page.goto(applicationUrl, { waitUntil: 'commit', timeout: 60_000 });
-  await page.getByRole('button', { name: /业务小助手/ }).waitFor({ timeout: 60_000 });
+  await page.getByRole('button', { name: /灼见助手/ }).waitFor({ timeout: 60_000 });
   const applicationFrameElement = page.locator('iframe.enterprise-app-view__frame');
   await applicationFrameElement.waitFor({ timeout: 60_000 });
   const applicationFrameHandle = await applicationFrameElement.elementHandle();
@@ -72,11 +72,11 @@ try {
     throw new Error(`业务应用 iframe 加载失败：${embeddedText.slice(0, 160)}`);
   }
   console.log(`E2E application:rendered ${embeddedText.slice(0, 100)}`);
-  await page.getByRole('button', { name: /业务小助手/ }).click();
+  await page.getByRole('button', { name: /灼见助手/ }).click();
   const drawer = page.getByRole('dialog');
   await drawer.getByText(/已连接当前模块：/).waitFor({ timeout: 30_000 });
-  const modelSelect = drawer.getByRole('combobox', { name: '选择业务小助手模型' });
-  const workspaceSelect = drawer.getByRole('combobox', { name: '选择业务小助手文件保存位置' });
+  const modelSelect = drawer.getByRole('combobox', { name: '选择灼见助手模型' });
+  const workspaceSelect = drawer.getByRole('combobox', { name: '选择灼见助手文件保存位置' });
   await modelSelect.waitFor({ timeout: 30_000 });
   await workspaceSelect.waitFor({ timeout: 30_000 });
   const modelText = await modelSelect.locator('xpath=../..').textContent();
@@ -87,7 +87,7 @@ try {
   // already contain artifact cards, so the E2E must wait for the card created
   // by this turn instead of accepting (or blocking on) stale history.
   await page.waitForTimeout(1_000);
-  const progressRuns = drawer.getByLabel('业务小助手实时执行过程');
+  const progressRuns = drawer.getByLabel('灼见助手实时执行过程');
   const deliveredSections = drawer.locator('section[aria-label="本轮交付文件"]');
   const baselineProgressCount = await progressRuns.count();
   const baselineArtifactCount = await deliveredSections.count();

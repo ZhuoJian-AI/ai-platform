@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.schemas.task import TaskRunRequest
@@ -181,7 +180,7 @@ def test_iframe_bridge_page_context_validation() -> None:
         TaskRunRequest(message="bad", page_context={"bridge_version": 1, "data_version": float("nan")})
 
 
-def test_business_page_context_survives_follow_up_and_rejects_application_switch() -> None:
+def test_business_page_context_survives_follow_up_and_allows_verified_application_switch() -> None:
     from app.api.terminal import _merge_application_run_context
 
     application_id = uuid4()
@@ -204,15 +203,36 @@ def test_business_page_context_survives_follow_up_and_rejects_application_switch
     )
     assert follow_up["page_context"] == initial["page_context"]
 
-    for attempted_application_id in (other_application_id, None):
-        with pytest.raises(HTTPException, match="业务助手对话已绑定其他应用，请新建对话") as exc_info:
-            _merge_application_run_context(
-                follow_up,
-                application_id_provided=True,
-                application_id=attempted_application_id,
-                page_context={},
-            )
-        assert exc_info.value.status_code == 409
+    switched = _merge_application_run_context(
+        follow_up,
+        application_id_provided=True,
+        application_id=other_application_id,
+        page_context={
+            "application_id": str(other_application_id),
+            "module_key": "orders",
+            "page_key": "orders.list",
+        },
+    )
+    assert switched["application_id"] == str(other_application_id)
+    assert switched["page_context"]["page_key"] == "orders.list"
+
+    switched_without_page = _merge_application_run_context(
+        follow_up,
+        application_id_provided=True,
+        application_id=other_application_id,
+        page_context={},
+    )
+    assert switched_without_page["application_id"] == str(other_application_id)
+    assert switched_without_page["page_context"] == {}
+
+    global_turn = _merge_application_run_context(
+        switched,
+        application_id_provided=True,
+        application_id=None,
+        page_context={},
+    )
+    assert global_turn["application_id"] is None
+    assert global_turn["page_context"] == {}
 
 
 def test_business_page_context_uses_manifest_verified_page_name() -> None:

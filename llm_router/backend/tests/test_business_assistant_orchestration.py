@@ -99,6 +99,100 @@ def _tool_result(arguments: dict):
 
 
 @pytest.mark.asyncio
+async def test_enterprise_capability_index_is_role_filtered_and_compact(monkeypatch):
+    application_id = uuid4()
+    action = SimpleNamespace(
+        id=uuid4(),
+        action_key="style_profile.query",
+        name="查询款号图片资料",
+        description="按款号查询款式图片和基础资料",
+        operation="query",
+        requires_confirmation=False,
+    )
+    application = SimpleNamespace(
+        id=application_id,
+        slug="garment-production-collaboration",
+        name="爱法贝生产协同",
+        description="服装生产协同系统",
+        assistant_enabled=True,
+        admin_disabled=False,
+        integration=SimpleNamespace(
+            protocol_version=2,
+            manifest={
+                "modules": [
+                    {
+                        "moduleKey": "style_profile",
+                        "name": "款号资料中心",
+                        "pages": [
+                            {
+                                "pageKey": "style_profile.main",
+                                "name": "款号资料中心",
+                                "routePattern": "/?view=styleProfile",
+                                "aiSemantics": {
+                                    "purpose": "查询款号、图片和工艺资料",
+                                    "businessTerms": [{"term": "款图", "meaning": "款式图片"}],
+                                },
+                            },
+                            {
+                                "pageKey": "style_profile.admin",
+                                "name": "款号管理",
+                                "routePattern": "/?view=styleAdmin",
+                            },
+                        ],
+                    }
+                ]
+            },
+        ),
+    )
+
+    async def fake_list_applications(_db, _user):
+        return [(application, {"view"})]
+
+    async def fake_list_actions(_db, _application, _user, *, module_key=None, page_key=None):
+        assert module_key == "style_profile"
+        return [action] if page_key == "style_profile.main" else []
+
+    monkeypatch.setattr(
+        orchestration.enterprise_application_service,
+        "list_applications_for_user",
+        fake_list_applications,
+    )
+    monkeypatch.setattr(
+        orchestration.enterprise_application_service,
+        "visible_manifest_modules",
+        lambda _application, _user: [{"module_key": "style_profile", "name": "款号资料中心"}],
+    )
+    monkeypatch.setattr(
+        orchestration.enterprise_application_service,
+        "effective_page_permissions",
+        lambda _application, _user, _module, page: {"view"} if page == "style_profile.main" else set(),
+    )
+    monkeypatch.setattr(
+        orchestration.subsystem_action_service,
+        "list_actions_for_user",
+        fake_list_actions,
+    )
+    monkeypatch.setattr(
+        orchestration.subsystem_action_service,
+        "action_requires_confirmation",
+        lambda _action: False,
+    )
+
+    index = await orchestration.build_enterprise_capability_index(
+        db=object(),
+        user=SimpleNamespace(),
+    )
+
+    assert len(index["pages"]) == 1
+    assert index["pages"][0]["applicationId"] == str(application_id)
+    assert index["pages"][0]["pageKey"] == "style_profile.main"
+    assert len(index["actions"]) == 1
+    assert index["actions"][0]["actionKey"] == "style_profile.query"
+    assert "inputSchema" not in index["actions"][0]
+    assert index["bindings"][0]["action"] is action
+
+
+@pytest.mark.asyncio
 async def test_structured_query_intent_is_validated_and_keeps_current_page(monkeypatch):
     async def fake_chat(*args, **kwargs):
         assert kwargs["tool_choice"] == "classify_business_turn"

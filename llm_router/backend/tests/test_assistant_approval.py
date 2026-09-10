@@ -41,6 +41,29 @@ def _action(operation: str, requires_confirmation: bool = False) -> dict:
     }
 
 
+def test_enterprise_action_approval_has_plain_business_labels():
+    entry = {
+        "kind": "enterprise_action",
+        "application": object(),
+        "action": SimpleNamespace(
+            operation="update",
+            requires_confirmation=True,
+            name="修改订单负责人",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "order_no": {"type": "string", "title": "订单"},
+                    "new_assignee": {"type": "string", "title": "新负责人"},
+                },
+            },
+            result_schema={"type": "object"},
+        ),
+    }
+    spec = _spec("order_update_assignee", entry)
+    assert spec["display_title"] == "修改订单负责人"
+    assert spec["confirmation_field_labels"] == {"order_no": "订单", "new_assignee": "新负责人"}
+
+
 # ── ToolSpec.approval ────────────────────────────────────────────────────
 
 
@@ -128,6 +151,7 @@ async def test_user_allow_round_trip_publishes_request_then_decision():
         assert live[0] == {
             "type": "approval_request", "approval_id": "ap-1", "tool": "workspace_delete_file", "call_id": "call-9",
             "reason": "硬删除文件", "arguments_preview": '{"file_id":"f-1"}', "expires_at": live[0]["expires_at"],
+            "display_title": "确认本次操作", "summary_fields": [],
             "run_id": 42,
         }
         assert live[0]["expires_at"].endswith("Z") and "T" in live[0]["expires_at"]
@@ -145,6 +169,8 @@ async def test_user_allow_round_trip_publishes_request_then_decision():
             "callId": "call-9",
             "reason": "硬删除文件",
             "argumentsPreview": '{"file_id":"f-1"}',
+            "displayTitle": "确认本次操作",
+            "summaryFields": [],
             "expiresAt": context.state["business_approvals"][0]["expiresAt"],
             "runId": 42,
             "outcome": "allowed-once",

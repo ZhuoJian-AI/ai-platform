@@ -21,6 +21,7 @@ from uuid import UUID, uuid4
 import structlog
 from sqlalchemy import select
 
+from app.agents.graph import model_capability_tools
 from app.agents.graph.context import get_deps as _context_get_deps
 from app.agents.graph.state import AgentState
 from app.auth.user_auth import current_user_for_user
@@ -80,6 +81,7 @@ PLATFORM_TOOL_NAMES = {
     "archive_tool",
     "web_tool",
 }
+MODEL_CAPABILITY_TOOL_NAMES = set(model_capability_tools.MODEL_CAPABILITY_TOOL_NAMES)
 ALWAYS_AVAILABLE_TOOL_NAMES = {"web_tool"}
 BUSINESS_ASSISTANT_FILE_TOOL_NAMES = {
     "workspace_list",
@@ -111,6 +113,7 @@ BUILTIN_TOOL_NAMES = {
     "workspace_list_versions",
     "workspace_restore_version",
     *PLATFORM_TOOL_NAMES,
+    *MODEL_CAPABILITY_TOOL_NAMES,
     "image_generation_tool",
 }
 # Kept executable for old persisted calls, but no longer advertised to new LLM rounds.
@@ -121,6 +124,8 @@ def _builtin_tool_defs(
     *,
     include_workspace: bool = True,
     include_image_generation: bool = False,
+    include_image_understanding: bool = False,
+    model_capability_availability: dict[str, Any] | None = None,
 ) -> list[dict]:
     """内置工作空间文件工具的 OpenAI function-tool 定义。"""
     tools = [
@@ -508,7 +513,15 @@ def _builtin_tool_defs(
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["inspect", "convert", "resize", "crop", "compress", "ocr"],
+                            "enum": [
+                                "inspect",
+                                "convert",
+                                "resize",
+                                "crop",
+                                "compress",
+                                "ocr",
+                                *(["understand"] if include_image_understanding else []),
+                            ],
                         },
                         "input_file_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
                         "output_name": {"type": "string"},
@@ -520,6 +533,12 @@ def _builtin_tool_defs(
                         "box": {"type": "array", "items": {"type": "integer"}, "minItems": 4, "maxItems": 4},
                         "language": {"type": "string", "description": "Tesseract 语言，如 chi_sim+eng"},
                         "max_pages": {"type": "integer", "minimum": 1, "maximum": 20},
+                        "question": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 4000,
+                            "description": "understand 时必填：希望视觉模型回答的问题",
+                        },
                     },
                     "required": ["action", "input_file_ids"],
                 },
@@ -571,6 +590,7 @@ def _builtin_tool_defs(
         item for item in tools if str((item.get("function") or {}).get("name") or "") not in LEGACY_FILE_TOOL_NAMES
     ]
     tools.extend(file_tool_definitions())
+    tools.extend(model_capability_tools.model_capability_tool_definitions(model_capability_availability))
     if include_image_generation:
         tools.append(
             {
@@ -612,6 +632,7 @@ def _builtin_tool_defs(
             "image_tool",
             "archive_tool",
             "web_tool",
+            "speech_synthesize",
         }:
             properties["target_workspace_id"] = {
                 "type": "string",
@@ -967,15 +988,24 @@ def _remember_structured_tool_result(
         "workspace_copy_file": "copy",
         "workspace_restore_version": "restore",
         "image_generation_tool": "create",
+        "speech_synthesize": "create",
     }
     candidates: list[dict] = []
     if tool_name in direct_operations and payload.get("file_id"):
         candidates.append(payload)
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
     outputs = payload.get("outputs")
+    if not isinstance(outputs, list):
+        outputs = data.get("outputs")
     if isinstance(outputs, list) and (
-        tool_name in PLATFORM_TOOL_NAMES or tool_name == "image_generation_tool"
+        tool_name in PLATFORM_TOOL_NAMES
+        or tool_name in MODEL_CAPABILITY_TOOL_NAMES
+        or tool_name == "image_generation_tool"
     ):
         candidates.extend(item for item in outputs if isinstance(item, dict))
+    artifacts = payload.get("artifacts")
+    if isinstance(artifacts, list) and tool_name in MODEL_CAPABILITY_TOOL_NAMES:
+        candidates.extend(item for item in artifacts if isinstance(item, dict))
     operation = direct_operations.get(tool_name, "output")
     for candidate in candidates:
         _remember_tool_file(
@@ -1702,6 +1732,50 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
     # （仅在 save_memory 里 flush 未提交）被一并回滚，「任务回复消失」。
     try:
         async with db.begin_nested():
+            if name in MODEL_CAPABILITY_TOOL_NAMES:
+                capability_state = dict(state)
+                capability_state["tool_call_id"] = params.get("_tool_call_id")
+
+                async def authorize_input(value, principal):
+                    return await _authorized_input_file(capability_state, value, principal)
+
+                async def resolve_output_workspace(values, principal):
+                    return await _resolve_tool_workspace(
+                        capability_state,
+                        values,
+                        principal,
+                        capability="create",
+                        parameter="target_workspace_id",
+                    )
+
+                async def task_source():
+                    return await _task_source_fields(db, capability_state)
+
+                return await model_capability_tools.execute_audio_tool(
+                    db=db,
+                    state=capability_state,
+                    name=name,
+                    params=params,
+                    user=user,
+                    authorize_input=authorize_input,
+                    resolve_output_workspace=resolve_output_workspace,
+                    task_source=task_source,
+                    file_identity=_workspace_file_identity,
+                )
+            if name == "image_tool" and str(params.get("action") or "").strip().lower() == "understand":
+                capability_state = dict(state)
+                capability_state["tool_call_id"] = params.get("_tool_call_id")
+
+                async def authorize_image(value, principal):
+                    return await _authorized_input_file(capability_state, value, principal)
+
+                return await model_capability_tools.execute_image_understanding(
+                    db=db,
+                    state=capability_state,
+                    params=params,
+                    user=user,
+                    authorize_input=authorize_image,
+                )
             if name == "image_generation_tool":
                 if state.get("exec_mode") != "craft":
                     return json.dumps({"status": "error", "error": "请切换到 Craft 模式执行生图"}, ensure_ascii=False)

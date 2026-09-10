@@ -42,6 +42,7 @@ from app.models.agent_run import AgentRun
 from app.models.task import TaskMessage
 from app.services import business_assistant_orchestration
 from app.services.agent_admission import agent_admission
+from app.services.assistant_tool_catalog import partition_tool_specs
 from app.services.file_capability_registry import FILE_CREATE_TOOL_NAMES, FILE_TOOL_OPERATIONS
 from app.services.message_verification import contains_unverified_tool_success_claim
 
@@ -74,6 +75,7 @@ _FILE_OUTPUT_TOOL_NAMES = tuple(
             "workspace_copy_file",
             "workspace_restore_version",
             "image_generation_tool",
+            "speech_synthesize",
         }
     )
 )
@@ -507,7 +509,7 @@ async def _prepare(
             })
             trace = {
                 "category": "business_orchestration",
-                "title": "业务意图与页面路由",
+                "title": "业务路由提示（非执行门禁）",
                 "intent": intent.intent,
                 "targetPage": intent.target.page_key,
                 "attempts": attempts,
@@ -598,24 +600,38 @@ async def _consume_native(
     deps: dict,
 ) -> None:
     intent = state.get("business_turn_intent") or {}
-    if intent.get("intent") == "clarify":
-        text = str(intent.get("clarificationQuestion") or "请补充要处理的业务对象和期望结果。")
-        _publish(handle, staged, {"type": "text", "delta": text})
-        state["assistant_final"] = text
-        state.setdefault("messages", []).append({"role": "assistant", "content": text})
-        state.setdefault("steps", []).append({"step": "awaiting_clarification"})
-        return
-    if intent.get("intent") == "navigate":
-        suggestion = state.get("business_navigation_suggestion") or {}
-        page_name = str(suggestion.get("pageName") or intent.get("target", {}).get("pageKey") or "目标页面")
-        text = f"这个操作需要先进入“{page_name}”。我已为你准备好页面跳转建议，进入后再确认执行。"
-        _publish(handle, staged, {"type": "navigation_suggestion", "suggestion": suggestion})
-        _publish(handle, staged, {"type": "text", "delta": text})
-        state["assistant_final"] = text
-        state.setdefault("messages", []).append({"role": "assistant", "content": text})
-        state.setdefault("steps", []).append({"step": "navigation_required", "suggestion": suggestion})
-        return
+    # The classifier is a retrieval hint only.  It may suggest clarification or a
+    # target page, but it must never short-circuit the main LLM before the LLM sees
+    # the current context and authorized tools.  The main loop can query for missing
+    # facts, repair invalid tool arguments, navigate when useful, or ask the user only
+    # when the ambiguity genuinely cannot be resolved.
     _publish(handle, staged, {"type": "business_state", "status": "executing", "intent": intent.get("intent")})
+    tool_registry = prepared.get("registry") or state.get("_assistant_tool_registry") or {}
+    all_tool_specs = _tool_specs(prepared["tools"], tool_registry)
+    current_page_tool_names = {
+        str(name)
+        for name, entry in tool_registry.items()
+        if isinstance(entry, dict)
+        and entry.get("kind") in {"enterprise_action", "enterprise_export_file", "subsystem_specialist"}
+        and bool(entry.get("current_page", True))
+    }
+    visible_tool_specs, lazy_tool_specs = partition_tool_specs(
+        all_tool_specs,
+        current_page_tool_names=current_page_tool_names,
+    )
+    capability_entry = tool_registry.get("enterprise_capability_search") or {}
+    capability_application_id = str(capability_entry.get("application_id") or "")
+    capability_catalog = [
+        {
+            "applicationId": capability_application_id,
+            **item,
+        }
+        for item in [
+            *(capability_entry.get("candidate_pages") or []),
+            *(capability_entry.get("authorized_actions") or []),
+        ]
+        if isinstance(item, dict)
+    ]
     request = {
         "run_id": str(state["run_id"]),
         "user_id": str(state.get("user_id") or "platform-admin"),
@@ -631,10 +647,9 @@ async def _consume_native(
         },
         "memory_context": prepared.get("memory_context") or None,
         "exec_mode": state.get("exec_mode") or "craft",
-        "tools": _tool_specs(
-            prepared["tools"],
-            prepared.get("registry") or state.get("_assistant_tool_registry") or {},
-        ),
+        "tools": visible_tool_specs,
+        "lazy_tools": lazy_tool_specs,
+        "capability_catalog": capability_catalog,
         "max_steps": settings.agent_max_steps,
         # The native loop owns continuation nudges and repeat-failure blocking;
         # the coordinator never re-runs a request under a second id.
@@ -683,6 +698,24 @@ async def _consume_native(
             entry_kind = entry.get("kind")
             published_event = dict(event)
             published_event["tool_kind"] = entry_kind or ""
+            try:
+                tool_envelope = json.loads(str(event.get("content") or ""))
+            except (json.JSONDecodeError, TypeError):
+                tool_envelope = None
+            if isinstance(tool_envelope, dict) and isinstance(tool_envelope.get("uiIntent"), dict):
+                ui_intent = dict(tool_envelope["uiIntent"])
+                if ui_intent.get("type") == "navigate":
+                    state["business_navigation_suggestion"] = ui_intent
+                _publish(
+                    handle,
+                    staged,
+                    {
+                        "type": "ui_intent",
+                        "runId": str(state.get("run_id") or ""),
+                        "toolCallId": call_id,
+                        "intent": ui_intent,
+                    },
+                )
             if entry_kind == "enterprise_action":
                 enterprise_action_calls += 1
                 operation = _enterprise_operation(entry, name)

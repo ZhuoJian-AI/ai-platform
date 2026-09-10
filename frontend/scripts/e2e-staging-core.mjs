@@ -380,7 +380,7 @@ async function selectBusinessApplication(page) {
 }
 
 async function verifyEmbeddedApplication(page) {
-  await page.getByRole('button', { name: /业务小助手/ }).waitFor({ timeout: 60_000 });
+  await page.getByRole('button', { name: /灼见助手/ }).waitFor({ timeout: 60_000 });
   const iframe = page.locator('iframe.enterprise-app-view__frame--active');
   await iframe.waitFor({ state: 'visible', timeout: 60_000 });
   const handle = await iframe.elementHandle();
@@ -613,12 +613,12 @@ async function generateAndVerifyArtifact(page, applicationId, cleanupState) {
     baselineTaskIds: [...baselineTaskIds],
     runMarker,
   });
-  const assistantButton = page.getByRole('button', { name: /业务小助手/ });
+  const assistantButton = page.getByRole('button', { name: /灼见助手/ });
   await assistantButton.click();
   const drawer = page.getByRole('dialog');
   await drawer.getByText(/已连接当前模块：/).waitFor({ timeout: 30_000 });
-  const modelSelect = drawer.getByRole('combobox', { name: '选择业务小助手模型' });
-  const workspaceSelect = drawer.getByRole('combobox', { name: '选择业务小助手文件保存位置' });
+  const modelSelect = drawer.getByRole('combobox', { name: '选择灼见助手模型' });
+  const workspaceSelect = drawer.getByRole('combobox', { name: '选择灼见助手文件保存位置' });
   await modelSelect.waitFor({ timeout: 30_000 });
   await workspaceSelect.waitFor({ timeout: 30_000 });
   if (modelAliasOverride) {

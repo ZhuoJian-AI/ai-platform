@@ -220,6 +220,71 @@ def _deployment(provider: LlmProvider, *, model_id: str, adapter: str, capabilit
     )
 
 
+@pytest.mark.parametrize(
+    ("design_prompt", "clone_audio", "expected_capability"),
+    [
+        (None, None, "text_to_speech"),
+        ("清晰沉稳的品牌女声", None, "voice_design"),
+        (None, b"RIFF\x00\x00\x00\x00WAVEsample", "voice_clone"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_speech_synthesis_routes_each_mode_by_stable_capability(
+    monkeypatch,
+    design_prompt,
+    clone_audio,
+    expected_capability,
+):
+    provider = _provider()
+    deployment = _deployment(
+        provider,
+        model_id=f"mimo-v2.5-tts-{expected_capability}",
+        adapter="openai_audio_synthesis_chat",
+        capabilities=[expected_capability],
+    )
+    routed: list[str] = []
+    request_bodies: list[dict] = []
+
+    async def resolve(_db, _org_id, _model_alias, capability, **_kwargs):
+        routed.append(capability)
+        return provider, deployment
+
+    async def post(_provider, _deployment, body):
+        request_bodies.append(body)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "audio": {
+                            "data": base64.b64encode(b"RIFF\x00\x00\x00\x00WAVEoutput").decode(),
+                            "voice": "provider-voice",
+                        }
+                    }
+                }
+            ],
+            "usage": {},
+        }
+
+    monkeypatch.setattr(model_gateway, "resolve_deployment", resolve)
+    monkeypatch.setattr(model_gateway, "_post_chat_json", post)
+
+    result = await model_gateway._synthesize_audio_unmetered(
+        object(),
+        provider.organization_id,
+        text="请播报生产进度",
+        audio_format="wav",
+        design_prompt=design_prompt,
+        clone_audio=clone_audio,
+        clone_format="wav",
+    )
+
+    assert routed == [expected_capability]
+    assert result["capability"] == expected_capability
+    assert request_bodies[0]["model"] == deployment.model_id
+    assert "provider" not in request_bodies[0]
+    assert "api_key" not in request_bodies[0]
+
+
 @pytest.mark.asyncio
 async def test_mock_gateway_chat_vision_image_and_stream(monkeypatch, db_session):
     _FakeClient.calls = []

@@ -73,8 +73,8 @@ class TaskRunRequest(BaseModel):
     #   显式传 UUID → 该次只注入此智能体的文本角色提示词
     #   显式传 null/空 → 强制通用智能体（不绑模板，纯 GENERAL_SYSTEM_PROMPT）
     template_agent_id: str | None = None
-    # 业务小助手 Task 首次绑定应用后不可切换；经过服务端重新鉴权的最后页面上下文
-    # 会留在任务配置中供同一应用的后续轮次使用。
+    # 同一助手 Task 可以在总界面与不同业务页面之间连续使用。这里保存的是
+    # “本轮所在应用”，不是永久绑定；服务端会在每一轮重新校验应用、页面和角色权限。
     application_id: UUID | None = None
     page_context: dict = Field(default_factory=dict)
     # 文件产物唯一使用这一参数命名。省略时由服务端绑定当前员工个人空间；

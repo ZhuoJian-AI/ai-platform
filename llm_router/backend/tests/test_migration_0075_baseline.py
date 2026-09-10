@@ -25,10 +25,13 @@ BASELINE_MIGRATION = VERSIONS_DIR / "0075_retired_schema_contract.py"
 BASELINE_SQL = VERSIONS_DIR / "0075_schema_baseline.sql"
 DEFAULT_TEST_DATABASE_URL = "postgresql+asyncpg://ai_infra:ai_infra@127.0.0.1:5434/ai_infra_test"
 EXPECTED_SQL_SHA256 = "b0fc1bc253ad9734d68f561b0c15368a05787eb9e86ba5c6b49de367337c4a38"
-EXPECTED_SCHEMA_SHA256 = "eb3ceb8802daf268996c81007fa2b8d34d6bd3c0f8b49e6981dc18ba0ec14033"
+EXPECTED_SCHEMA_SHA256 = "0754078683e2c4928a8a9b3be2a956ba56532ca9c01577836724c56c1fe3796e"
 EXPECTED_SCHEMA_CATEGORIES = {
     "columns": (671, "e71d9a8c44d0de62a0c69ddaae03b8c3d2b7c900df6eaf8ba88c43f09c96c553"),
-    "constraints": (680, "034b93267f8ad5e44d56fa539e2baea2f87a943d59bcac444a1d9591be5c27a8"),
+    # NOT NULL is covered by the columns fingerprint. PostgreSQL 18 also
+    # exposes it via pg_constraint, unlike the PostgreSQL 16 deployment, so
+    # the constraint query intentionally excludes contype='n'.
+    "constraints": (224, "6cdcde7d140a8521825bb43bc5973a134db05371a7e73e5869e7f01db3eb4ec3"),
     "extensions": (1, "c9462b51547b30b2988ac202f0f666df58a79ca58f1468921122f4505ad7a3d3"),
     "functions": (2, "91b13a067d341bd9df13a123070fe64327a24a6ab4e5745ea80b3d3005b02108"),
     "indexes": (224, "aff5de8092ff1d37ff2c6178b50cafb381af8af9d244f3339ed47e30450d3502"),

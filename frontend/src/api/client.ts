@@ -2131,10 +2131,16 @@ export const terminal = {
   models: () => userRequest<TerminalModels>('/api/v1/terminal/models'),
   agents: () => userRequest<{ agents: TerminalAgent[] }>('/api/v1/terminal/agents'),
   applications: () => userRequest<TerminalEnterpriseApplication[]>('/api/v1/terminal/applications'),
-  launchApplication: (id: string, moduleKey?: string) => userRequest<EnterpriseApplicationLaunch>(
-    `/api/v1/terminal/applications/${id}/launch${moduleKey ? `?module_key=${encodeURIComponent(moduleKey)}` : ''}`,
-    { method: 'POST', cache: 'no-store' },
-  ),
+  launchApplication: (id: string, moduleKey?: string, pageKey?: string) => {
+    const params = new URLSearchParams();
+    if (moduleKey) params.set('module_key', moduleKey);
+    if (pageKey) params.set('page_key', pageKey);
+    const query = params.toString();
+    return userRequest<EnterpriseApplicationLaunch>(
+      `/api/v1/terminal/applications/${id}/launch${query ? `?${query}` : ''}`,
+      { method: 'POST', cache: 'no-store' },
+    );
+  },
   invokeApplicationAction: (
     id: string, actionKey: string, data: { module_key: string; params: Record<string, unknown>; request_id?: string },
   ) => userRequest<EnterpriseApplicationActionResult>(

@@ -22,6 +22,8 @@ from app.agents.core import approval_registry
 from app.agents.graph.context import bind_runtime
 from app.agents.graph.nodes import _execute_tool_call
 from app.services import model_gateway
+from app.services.assistant_tool_catalog import search_business_capabilities, search_tool_specs
+from app.services.assistant_tool_protocol import descriptor_from_spec, tool_result_json
 
 logger = structlog.get_logger()
 
@@ -55,7 +57,11 @@ def _platform_tools(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _model_messages(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop platform-only history annotations before calling a provider."""
-    allowed = {"role", "content", "tool_calls", "tool_call_id", "name"}
+    # OpenAI-compatible reasoning models such as MiMo require an assistant
+    # tool-call turn's ``reasoning_content`` to be passed back verbatim on the
+    # following request.  It remains provider-facing metadata and is never
+    # emitted as user-visible progress or stored as chat prose.
+    allowed = {"role", "content", "reasoning_content", "tool_calls", "tool_call_id", "name"}
     return [{key: value for key, value in row.items() if key in allowed} for row in rows]
 
 
@@ -68,16 +74,23 @@ def _failure_key(name: str, arguments: dict[str, Any]) -> str:
     return hashlib.sha256(material).hexdigest()
 
 
-def _tool_error(code: str, message: str, correction: str = "") -> str:
-    return json.dumps(
-        {
-            "status": "error",
+def _tool_error(
+    code: str,
+    message: str,
+    correction: str = "",
+    *,
+    retryable: bool = False,
+    correction_fields: list[dict[str, Any]] | None = None,
+) -> str:
+    return tool_result_json(
+        "retryable_error" if retryable else "failed",
+        error={
             "code": code,
             "messageZh": message,
-            "retryable": False,
-            "correctionHint": correction,
+            "correctionFields": list(correction_fields or []),
+            "retryable": retryable,
         },
-        ensure_ascii=False,
+        data={"correctionHint": correction} if correction else None,
     )
 
 
@@ -88,9 +101,19 @@ def _parse_and_validate_arguments(
     try:
         value = json.loads(raw) if isinstance(raw, str) else raw
     except (json.JSONDecodeError, TypeError):
-        return None, _tool_error("invalid_tool_arguments", "工具参数不是有效的 JSON", "请按工具参数结构重新提交")
+        return None, _tool_error(
+            "invalid_tool_arguments",
+            "工具参数不是有效的 JSON",
+            "请按工具参数结构重新提交",
+            retryable=True,
+        )
     if not isinstance(value, dict):
-        return None, _tool_error("invalid_tool_arguments", "工具参数必须是对象", "请使用字段名和值组成对象")
+        return None, _tool_error(
+            "invalid_tool_arguments",
+            "工具参数必须是对象",
+            "请使用字段名和值组成对象",
+            retryable=True,
+        )
     schema = spec.get("input_schema") or {"type": "object", "properties": {}}
     try:
         errors = sorted(Draft202012Validator(schema).iter_errors(value), key=lambda item: list(item.path))
@@ -105,6 +128,8 @@ def _parse_and_validate_arguments(
         "invalid_tool_arguments",
         f"工具参数校验失败：{location} {first.message}",
         "请根据工具字段类型、必填项和取值范围修正后重试",
+        retryable=True,
+        correction_fields=[{"field": location, "reason": first.message}],
     )
 
 
@@ -112,6 +137,79 @@ def _bounded_tool_content(content: str, limit: int) -> str:
     if limit <= 0 or len(content) <= limit:
         return content
     return content[:limit] + f"\n[工具结果已截断，共 {len(content)} 字符；如需更多内容请分页读取]"
+
+
+def _tool_result_has_trusted_artifact(content: str | dict[str, Any]) -> bool:
+    """Only a stable workspace file/version identity counts as delivery.
+
+    A tool name, server path, URL, or free-form success message is not proof that
+    the workspace transaction committed.  Both the native continuation policy
+    and the final persistence guard use this same minimum identity contract.
+    """
+
+    value: Any = content
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return False
+    if not isinstance(value, dict):
+        return False
+
+    def has_identity(item: Any) -> bool:
+        if not isinstance(item, dict):
+            return False
+        file_id = item.get("file_id") or item.get("fileId")
+        version_id = item.get("version_id") or item.get("versionId")
+        return bool(file_id and version_id)
+
+    if has_identity(value):
+        return True
+    containers = [value]
+    data = value.get("data")
+    if isinstance(data, dict):
+        containers.append(data)
+    for container in containers:
+        for key in ("artifacts", "outputs", "files"):
+            candidates = container.get(key)
+            if isinstance(candidates, list) and any(has_identity(item) for item in candidates):
+                return True
+    return False
+
+
+def _capability_search_result(
+    query: str,
+    lazy_specs: dict[str, dict[str, Any]],
+    business_catalog: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> tuple[str, list[str]]:
+    selected_specs = search_tool_specs(query, lazy_specs.values(), limit=limit)
+    activated = [
+        str(item.get("name") or "")
+        for item in selected_specs
+        if item.get("name")
+    ]
+    tool_candidates = [
+        {"kind": "tool", "descriptor": descriptor_from_spec(item)}
+        for item in selected_specs
+    ]
+    page_candidates = [
+        {"kind": "business", **item}
+        for item in search_business_capabilities(query, business_catalog, limit=limit)
+    ]
+    candidates = [*page_candidates, *tool_candidates][:limit]
+    return (
+        tool_result_json(
+            "completed",
+            data={
+                "query": query,
+                "candidates": candidates,
+                "activatedTools": activated,
+            },
+        ),
+        activated,
+    )
 
 
 async def _iterate_with_runtime(source: Any, deps: dict[str, Any]):
@@ -139,9 +237,10 @@ async def _model_turn(
     deps: dict[str, Any],
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
-) -> tuple[str, list[dict[str, Any]], dict[str, int]]:
+) -> tuple[str, list[dict[str, Any]], dict[str, int], str | None]:
     text = ""
     calls: list[dict[str, Any]] = []
+    reasoning_parts: list[str] = []
     usage = {"input_tokens": 0, "output_tokens": 0}
     stream = model_gateway.stream_chat(
         deps["db"],
@@ -161,11 +260,14 @@ async def _model_turn(
             text += str(payload or "")
         elif kind == "tool_calls":
             calls = list(payload or [])
+        elif kind == "reasoning_content" and payload:
+            reasoning_parts.append(str(payload))
         elif kind == "usage" and isinstance(extra, dict):
             usage["input_tokens"] += int(extra.get("input_tokens") or 0)
             usage["output_tokens"] += int(extra.get("output_tokens") or 0)
     if text or calls:
-        return text, calls, usage
+        reasoning_content = "".join(reasoning_parts) or None
+        return text, calls, usage, reasoning_content
 
     # Some OpenAI-compatible providers omit tool calls from their streaming response.
     # A non-streaming retry is safe because no text/tool side effect was emitted.
@@ -185,7 +287,12 @@ async def _model_turn(
         )
     usage["input_tokens"] += int((result.usage or {}).get("input_tokens") or 0)
     usage["output_tokens"] += int((result.usage or {}).get("output_tokens") or 0)
-    return str(result.content or ""), list(result.tool_calls or []), usage
+    return (
+        str(result.content or ""),
+        list(result.tool_calls or []),
+        usage,
+        str(result.reasoning_content) if result.reasoning_content else None,
+    )
 
 
 async def _approval(
@@ -211,6 +318,19 @@ async def _approval(
         preview = _stable_json(arguments)
         if len(preview) > _MAX_APPROVAL_PREVIEW_CHARS:
             preview = preview[: _MAX_APPROVAL_PREVIEW_CHARS - 3] + "..."
+        labels = spec.get("confirmation_field_labels")
+        labels = labels if isinstance(labels, dict) else {}
+        summary_fields = []
+        for field, value in arguments.items():
+            rendered = _stable_json(value) if isinstance(value, (dict, list)) else str(value)
+            if len(rendered) > 160:
+                rendered = rendered[:157] + "..."
+            summary_fields.append(
+                {
+                    "label": str(labels.get(field) or field),
+                    "value": rendered,
+                }
+            )
         result = await approval_registry.await_approval(
             context,
             approval_id=approval_id,
@@ -218,6 +338,8 @@ async def _approval(
             call_id=call_id,
             reason=f"{name} 会产生业务或文件副作用，需要用户确认",
             arguments_preview=preview,
+            display_title=str(spec.get("display_title") or "确认本次操作"),
+            summary_fields=summary_fields,
             timeout_ms=int(spec.get("approval_timeout_ms") or 120_000),
         )
     decided = {
@@ -242,6 +364,16 @@ async def stream_run(
 ) -> AsyncIterator[dict[str, Any]]:
     """Execute one run and yield the legacy-normalized runtime event protocol."""
     specs = {str(item.get("name") or ""): item for item in request.get("tools") or [] if item.get("name")}
+    lazy_specs = {
+        str(item.get("name") or ""): item
+        for item in request.get("lazy_tools") or []
+        if item.get("name")
+    }
+    business_catalog = [
+        dict(item)
+        for item in request.get("capability_catalog") or []
+        if isinstance(item, dict)
+    ]
     allowed_names = set(specs)
     model_tools = _platform_tools(list(specs.values()))
     messages = _model_messages(list(prepared.get("messages") or []))
@@ -262,7 +394,7 @@ async def stream_run(
 
     for step_index in range(max_steps):
         yield {"type": "phase", "phase": "llm", "index": step_index}
-        text, calls, usage = await _model_turn(
+        text, calls, usage, reasoning_content = await _model_turn(
             state=state,
             prepared=prepared,
             deps=deps,
@@ -286,11 +418,10 @@ async def stream_run(
                 raise RuntimeError("模型请求了本轮未授权的工具，已拒绝执行")
 
         if authorized_calls:
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": text,
-                    "tool_calls": [
+            assistant_tool_turn = {
+                "role": "assistant",
+                "content": text,
+                "tool_calls": [
                         {
                             "id": str(call.get("id") or f"native-{step_index}-{index}"),
                             "type": "function",
@@ -301,8 +432,10 @@ async def stream_run(
                         }
                         for index, call in enumerate(authorized_calls)
                     ],
-                }
-            )
+            }
+            if reasoning_content:
+                assistant_tool_turn["reasoning_content"] = reasoning_content
+            messages.append(assistant_tool_turn)
             for index, original in enumerate(authorized_calls):
                 call = dict(original)
                 call["id"] = str(call.get("id") or f"native-{step_index}-{index}")
@@ -342,7 +475,27 @@ async def stream_run(
                 else:
                     assert params is not None
                     call["arguments"] = _stable_json(params)
-                    if spec.get("approval") == "ask":
+                    if name == "enterprise_capability_search":
+                        content, activated_names = _capability_search_result(
+                            str(params.get("query") or ""),
+                            lazy_specs,
+                            business_catalog,
+                            limit=int(params.get("limit") or 8),
+                        )
+                        for activated_name in activated_names:
+                            activated_spec = lazy_specs.pop(activated_name, None)
+                            if activated_spec is not None:
+                                specs[activated_name] = activated_spec
+                                allowed_names.add(activated_name)
+                        model_tools = _platform_tools(list(specs.values()))
+                        ok = True
+                        yield {
+                            "type": "policy",
+                            "action": "tool_catalog_loaded",
+                            "tool": name,
+                            "detail": f"activated={len(activated_names)}",
+                        }
+                    elif spec.get("approval") == "ask":
                         approved, requested, decided = await _approval(
                             context=run_context,
                             spec=spec,
@@ -392,7 +545,9 @@ async def stream_run(
                     last_failure_key = failure_key
                     if dedupe_side_effect:
                         successful_side_effects.setdefault(failure_key, content)
-                    delivered = delivered or name in file_tools
+                    delivered = delivered or (
+                        name in file_tools and _tool_result_has_trusted_artifact(content)
+                    )
                 else:
                     consecutive_failures = consecutive_failures + 1 if failure_key == last_failure_key else 1
                     last_failure_key = failure_key
