@@ -129,6 +129,7 @@ function diagnosticsFor(page) {
   });
 
   return {
+    snapshot() { return { consoleErrors: [...consoleErrors], serverErrors: [...serverErrors], authorizationErrors: [...authorizationErrors] }; },
     authenticated(value = true) { authenticated = value; },
     reset() {
       consoleErrors.length = 0;
@@ -642,7 +643,8 @@ async function generateAndVerifyArtifact(page, applicationId, cleanupState) {
 
   const deliveredSections = drawer.locator('section[aria-label="本轮交付文件"]');
   const baselineArtifactCount = await deliveredSections.count();
-  const prompt = `${runMarker}：根据当前业务数据生成一份 Excel，并把真实文件保存到我的个人工作空间。`;
+  const formatRequest = process.env.E2E_EXPLICIT_XLSX === '1' ? 'Excel（.xlsx）' : 'Excel';
+  const prompt = `${runMarker}：根据当前业务数据生成一份 ${formatRequest}，并把真实文件保存到我的个人工作空间。`;
   await drawer.getByPlaceholder('描述你要查询或执行的业务任务…').fill(prompt);
   await drawer.getByRole('button', { name: /在当前页面执行/ }).click();
 
@@ -777,11 +779,31 @@ async function verifySharedTaskViews(page, application, state) {
   await main.getByText(runMarker, { exact: false }).first().waitFor({ timeout: 30_000 });
   await main.locator('section[aria-label="本轮交付文件"]').first().waitFor({ timeout: 30_000 });
   assert.equal(new URL(page.url()).pathname, `/${orgSlug}/terminal/tasks/${state.taskId}`);
+  const followUp = `${runMarker}-续问：刚才生成的文件是什么格式？只回答格式，不要创建或修改文件。`;
+  const composer = main.locator('[contenteditable="true"][data-placeholder^="追加消息"]');
+  await composer.fill(followUp);
+  await composer.press('Enter');
+  const deadline = Date.now() + artifactTimeoutMs;
+  let continued = false;
+  while (Date.now() < deadline) {
+    const task = await userJson(page, `/api/v1/terminal/tasks/${state.taskId}`);
+    const index = task.messages.findIndex((item) => item.role === 'user' && item.content === followUp);
+    const reply = index < 0 ? null : task.messages.slice(index + 1).find((item) => item.role === 'assistant');
+    if (reply && !['queued', 'running'].includes(task.run_status)) {
+      assert.notEqual(task.run_status, 'error', '总入口续问执行失败');
+      assert.match(reply.content, /xlsx|excel/i, '总入口续问未识别刚才交付的文件格式');
+      continued = true;
+      break;
+    }
+    await page.waitForTimeout(1_000);
+  }
+  assert.ok(continued, '总入口续问没有在原任务完成');
   await page.locator('aside').first().locator('button').filter({ hasText: application.name }).first().click();
   await page.getByRole('button', { name: /灼见助手/ }).waitFor({ timeout: 30_000 });
   await page.getByRole('button', { name: /灼见助手/ }).click();
   const drawer = page.getByRole('dialog');
   await drawer.getByText(runMarker, { exact: false }).first().waitFor({ timeout: 30_000 });
+  await drawer.getByText(followUp, { exact: true }).waitFor({ timeout: 30_000 });
   await drawer.locator('section[aria-label="本轮交付文件"]').first().waitFor({ timeout: 30_000 });
   const after = await listBusinessTaskIds(page, application.id);
   assert.deepEqual([...after].sort(), [...before].sort(), '切换助手视图意外创建了任务');
@@ -908,6 +930,11 @@ try {
     dialogs: await employeePage.getByRole('dialog').count().catch(() => -1),
     artifactSections: await employeePage.locator('section[aria-label="本轮交付文件"]').count().catch(() => -1),
     transitions: viewTransitions.slice(-12),
+    diagnostics: employeeDiagnostics.snapshot(),
+    viewStatus: await employeePage.evaluate(() => {
+      const text = document.querySelector('main')?.textContent || '';
+      return ['正在校验应用权限', '应用入口不可用', '应用加载失败', '应用未授权或已停用'].filter((label) => text.includes(label));
+    }).catch(() => []),
   }));
   throw new Error(redact(error instanceof Error ? error.message : error));
 } finally {
