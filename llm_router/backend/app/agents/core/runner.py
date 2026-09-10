@@ -42,6 +42,10 @@ from app.models.agent_run import AgentRun
 from app.models.task import TaskMessage
 from app.services import business_assistant_orchestration
 from app.services.agent_admission import agent_admission
+from app.services.assistant_delivery_policy import (
+    FILE_ARTIFACT_NOUNS as _FILE_ARTIFACT_NOUNS,
+)
+from app.services.assistant_delivery_policy import requests_file_delivery as _requests_file_delivery
 from app.services.assistant_tool_catalog import partition_tool_specs
 from app.services.file_capability_registry import FILE_CREATE_TOOL_NAMES, FILE_TOOL_OPERATIONS
 from app.services.message_verification import contains_unverified_tool_success_claim
@@ -81,73 +85,6 @@ _FILE_OUTPUT_TOOL_NAMES = tuple(
 )
 # Registry kinds whose dynamically named tools materialize Runner outputs as workspace files.
 _FILE_OUTPUT_REGISTRY_KINDS = {"enterprise_export_file"}
-# A file-delivery request needs BOTH an explicit production verb AND an artifact noun
-# (audit M4): "处理一下" + attachment or "看看这个表里合计多少" must not arm the policy.
-_FILE_PRODUCTION_VERBS = (
-    "生成",
-    "创建",
-    "制作",
-    "导出",
-    "转换",
-    "转成",
-    "转为",
-    "保存",
-    "另存",
-    "输出",
-    "做一份",
-    "做成",
-    "写一份",
-    "整理成",
-    "汇总成",
-    "编辑",
-    "修改",
-    "新建",
-    "产出",
-    "交付",
-    "generate",
-    "create",
-    "make",
-    "produce",
-    "export",
-    "convert",
-    "save",
-    "write",
-    "build",
-    "deliver",
-)
-_FILE_ARTIFACT_NOUNS = (
-    "文件",
-    "表格",
-    "excel",
-    "xlsx",
-    "xls",
-    "csv",
-    "word",
-    "docx",
-    "文档",
-    "ppt",
-    "pptx",
-    "幻灯片",
-    "演示文稿",
-    "pdf",
-    "报告",
-    "报表",
-    "压缩包",
-    "zip",
-    "附件",
-    "产物",
-    "交付物",
-    "spreadsheet",
-    "sheet",
-    "document",
-    "report",
-    "slide",
-    "deck",
-    "presentation",
-    "archive",
-    "deliverable",
-    "file",
-)
 _CURRENT_BUSINESS_DATA_TERMS = (
     "当前",
     "现在",
@@ -272,16 +209,6 @@ def _tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -> l
     return assistant_tool_specs(tools, registry or {})
 
 
-def _requests_file_delivery(request: str) -> bool:
-    """Return whether the user explicitly asked for a file / document / table deliverable."""
-    text = (request or "").lower()
-    return (
-        bool(text)
-        and any(verb in text for verb in _FILE_PRODUCTION_VERBS)
-        and any(noun in text for noun in _FILE_ARTIFACT_NOUNS)
-    )
-
-
 def _requests_current_business_data(state: dict) -> bool:
     """Identify business-assistant requests that require a live subsystem Action result."""
 
@@ -359,15 +286,12 @@ def _completion_policy(state: dict) -> dict[str, Any]:
     The native runtime enforces it (nudging the model at most ``max_nudges`` times when no
     file-producing tool succeeded); Python only reports the resulting ``policy`` events.
     """
-    if state.get("application_id"):
-        intent = state.get("business_turn_intent") or {}
-        require_file = (
-            business_assistant_orchestration.intent_requires_artifact(intent)
-            if intent
-            else _requests_file_delivery(str(state.get("request") or ""))
-        )
-    else:
-        require_file = _requests_file_delivery(str(state.get("request") or ""))
+    # Auxiliary intent may recognize contextual delivery ("按刚才的规格来一份"),
+    # but a non-artifact label must not cancel an explicit user request.
+    require_file = (
+        business_assistant_orchestration.intent_requires_artifact(state.get("business_turn_intent"))
+        or _requests_file_delivery(str(state.get("request") or ""))
+    )
     require_file = (state.get("exec_mode") or "craft") == "craft" and require_file
     return {
         "require_file_output": require_file,
@@ -564,7 +488,7 @@ async def _prepare(
         ]
         tool_trace = {
             "category": "business_orchestration",
-            "title": "本轮授权工具集合",
+            "title": "本轮获权工具目录（含待加载工具）",
             "intent": (state.get("business_turn_intent") or {}).get("intent") or "legacy",
             "tools": selected_tools,
         }
@@ -619,6 +543,14 @@ async def _consume_native(
         all_tool_specs,
         current_page_tool_names=current_page_tool_names,
     )
+    visibility_trace = {
+        "category": "business_orchestration",
+        "title": "主脑首次请求的实际工具集合",
+        "tools": [str(spec.get("name") or "") for spec in visible_tool_specs],
+        "deferredToolCount": len(lazy_tool_specs),
+    }
+    state.setdefault("traces", []).append(visibility_trace)
+    _publish(handle, staged, {"type": "trace", **visibility_trace})
     capability_entry = tool_registry.get("enterprise_capability_search") or {}
     capability_application_id = str(capability_entry.get("application_id") or "")
     capability_catalog = [

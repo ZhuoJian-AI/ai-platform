@@ -7,8 +7,58 @@ import json
 import pytest
 
 from app.agents.core import native
+from app.agents.graph.nodes import _apply_artifact_completion_guard
+from app.services.assistant_delivery_policy import explicit_output_formats
 
 ORG_ID = "00000000-0000-0000-0000-000000000001"
+
+
+@pytest.mark.parametrize(("request_text", "formats"), [
+    ("生成一份MP3音频", {"mp3"}),
+    ("请把原来的 XLSX 转成 CSV", {"csv"}),
+    ("读取附件 voice.mp3 并分析", set()),
+    ("生成一份报告", set()),
+    ("生成一份介绍MP3的报告", set()),
+    ("create a PDF", {"pdf"}),
+])
+def test_explicit_output_format_is_not_input_file_routing(request_text, formats):
+    assert explicit_output_formats(request_text) == formats
+
+
+@pytest.mark.parametrize(("mime", "expected"), [("text/plain", False), ("audio/mpeg", True)])
+def test_final_guard_requires_requested_audio_format(mime, expected):
+    state = {"request": "生成一份MP3音频"}
+    artifact = {"fileId": "f1", "versionId": "v1", "mimeType": mime}
+    assert _apply_artifact_completion_guard(state, [artifact]) is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrected", [False, True])
+async def test_native_loop_rejects_txt_substitute_for_mp3(monkeypatch, corrected):
+    call = {"id": "c1", "name": "report_create", "arguments": '{"rows":[]}'}
+    turns = [
+        [("tool_calls", [call], None)],
+        [("text", "已生成", None)],
+    ]
+    if corrected:
+        turns.append([("tool_calls", [{**call, "id": "c2", "arguments": '{"rows":[{}]}'}], None)])
+    turns.append([("text", "已生成", None)])
+    monkeypatch.setattr(native.model_gateway, "stream_chat", _scripted_stream(turns))
+
+    async def execute(_state, tool_call, _registry):
+        mime = "audio/mpeg" if tool_call["id"] == "c2" else "text/plain"
+        content = json.dumps({"artifacts": [{"fileId": tool_call["id"], "versionId": "v1", "mimeType": mime}]})
+        return {"content": content}, content, True
+
+    monkeypatch.setattr(native, "_execute_tool_call", execute)
+    state = {**_state(), "request": "生成一份MP3音频"}
+    events = [event async for event in native.stream_run(
+        _request(require_file=True), state=state, prepared=_prepared(), deps={"db": object()},
+    )]
+    assert any(event.get("action") == "continuation" for event in events)
+    assert any(event["type"] == "done" for event in events) is corrected
+    if not corrected:
+        assert events[-1]["code"] == "ARTIFACT_DELIVERY_FAILED"
 
 
 @pytest.fixture(autouse=True)
@@ -79,6 +129,77 @@ def _scripted_stream(turns):
         return events()
 
     return stream_chat
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch", [False, True])
+async def test_changed_arguments_cannot_bypass_tool_retry_budget(monkeypatch, batch):
+    calls = [
+        {"id": f"c{i}", "name": "report_create", "arguments": json.dumps({"rows": [{"i": i}]})}
+        for i in range(4 if batch else 3)
+    ]
+    turns = (
+        [[("tool_calls", calls, None)]] if batch
+        else [[("tool_calls", [call], None)] for call in calls]
+    ) + [[("text", "当前工具失败，未生成文件。", None)]]
+    scripted = _scripted_stream(turns)
+    visible_tools = []
+    provider_messages = []
+
+    def stream(*args, **kwargs):
+        visible_tools.append([item["function"]["name"] for item in kwargs.get("tools") or []])
+        provider_messages.append([dict(item) for item in args[3]])
+        return scripted(*args, **kwargs)
+
+    executed = []
+
+    async def execute(_state, call, _registry):
+        executed.append(call["id"])
+        payload = native._tool_error("upstream_failed", "依赖不可用", retryable=True)
+        return {"content": payload}, payload, False
+
+    monkeypatch.setattr(native.model_gateway, "stream_chat", stream)
+    monkeypatch.setattr(native, "_execute_tool_call", execute)
+    request = _request()
+    request["tools"].append({"name": "other_query", "input_schema": {"type": "object"}})
+    events = [event async for event in native.stream_run(
+        request, state=_state(), prepared=_prepared(), deps={"db": object()},
+    )]
+    assert executed == ["c0", "c1", "c2"]
+    assert visible_tools[-1] == ["other_query"]
+    assert len([e for e in events if e.get("action") == "tool_retry_exhausted"]) == 1
+    assert next(e for e in events if e["type"] == "done")["text"] == "当前工具失败，未生成文件。"
+    if batch:
+        results = [e for e in events if e["type"] == "tool_result"]
+        assert len(results) == 4
+        assert json.loads(results[-1]["content"])["error"]["code"] == "tool_retry_exhausted"
+        replay = provider_messages[-1]
+        tool_turn = next(i for i, message in enumerate(replay) if message.get("tool_calls"))
+        assert [message["role"] for message in replay[tool_turn + 1:tool_turn + 5]] == ["tool"] * 4
+
+
+@pytest.mark.asyncio
+async def test_success_resets_own_tool_retry_budget(monkeypatch):
+    outcomes = [False, False, True, False, False, True]
+    turns = [[("tool_calls", [{
+        "id": f"c{i}", "name": "report_create",
+        "arguments": json.dumps({"rows": [{"i": i}]}),
+    }], None)] for i in range(len(outcomes))] + [[("text", "操作完成。", None)]]
+    executed = []
+
+    async def execute(_state, call, _registry):
+        ok = outcomes[len(executed)]
+        executed.append(call["id"])
+        payload = json.dumps({"ok": ok})
+        return {"content": payload}, payload, ok
+
+    monkeypatch.setattr(native.model_gateway, "stream_chat", _scripted_stream(turns))
+    monkeypatch.setattr(native, "_execute_tool_call", execute)
+    events = [event async for event in native.stream_run(
+        _request(), state=_state(), prepared=_prepared(), deps={"db": object()},
+    )]
+    assert len(executed) == 6
+    assert not any(e.get("action") == "tool_retry_exhausted" for e in events)
 
 
 @pytest.mark.asyncio
@@ -250,6 +371,23 @@ def test_file_delivery_requires_a_stable_workspace_artifact_identity(payload, ex
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("max_nudges", [0, 1, 2])
+async def test_file_request_never_finishes_successfully_without_delivery(monkeypatch, max_nudges):
+    monkeypatch.setattr(
+        native.model_gateway, "stream_chat",
+        _scripted_stream([[("text", "文件已生成。", None)]] * (max_nudges + 1)),
+    )
+    request = _request(require_file=True)
+    request["completion_policy"]["max_nudges"] = max_nudges
+    events = [event async for event in native.stream_run(
+        request, state=_state(), prepared=_prepared(), deps={"db": object()},
+    )]
+    assert sum(event.get("action") == "continuation" for event in events) == max_nudges
+    assert not any(event["type"] == "done" for event in events)
+    assert events[-1]["code"] == "ARTIFACT_DELIVERY_FAILED"
+
+
+@pytest.mark.asyncio
 async def test_native_core_nudges_when_file_tool_returns_only_a_server_path(monkeypatch):
     monkeypatch.setattr(
         native.model_gateway,
@@ -276,7 +414,8 @@ async def test_native_core_nudges_when_file_tool_returns_only_a_server_path(monk
     ]
 
     assert any(item.get("action") == "continuation" for item in events)
-    assert next(item for item in events if item["type"] == "done")["text"] == "文件生成失败，未交付到工作空间。"
+    assert not any(item["type"] == "done" for item in events)
+    assert next(item for item in events if item["type"] == "error")["code"] == "ARTIFACT_DELIVERY_FAILED"
 
 
 @pytest.mark.asyncio
@@ -415,6 +554,9 @@ async def test_native_core_discovers_then_loads_and_calls_a_lazy_tool(monkeypatc
     assert executed == ["report_create"]
     assert provider_tools[0] == ["enterprise_capability_search"]
     assert "report_create" in provider_tools[1]
+    activation = next(item for item in events if item.get("action") == "tool_catalog_loaded")
+    assert activation["activatedTools"] == ["report_create"]
+    assert activation["visibleTools"] == sorted(provider_tools[1])
     search_result = next(
         item
         for item in events
@@ -439,7 +581,7 @@ async def test_native_core_nudges_until_a_real_file_tool_succeeds(monkeypatch):
     )
 
     async def execute(_state, call, _registry):
-        payload = json.dumps({"status": "success", "file_id": "f2"}, ensure_ascii=False)
+        payload = json.dumps({"status": "success", "file_id": "f2", "version_id": "v2"}, ensure_ascii=False)
         return {"role": "tool", "tool_call_id": call["id"], "content": payload}, payload, True
 
     monkeypatch.setattr(native, "_execute_tool_call", execute)

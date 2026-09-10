@@ -129,6 +129,7 @@ function diagnosticsFor(page) {
   });
 
   return {
+    snapshot() { return { consoleErrors: [...consoleErrors], serverErrors: [...serverErrors], authorizationErrors: [...authorizationErrors] }; },
     authenticated(value = true) { authenticated = value; },
     reset() {
       consoleErrors.length = 0;
@@ -642,12 +643,18 @@ async function generateAndVerifyArtifact(page, applicationId, cleanupState) {
 
   const deliveredSections = drawer.locator('section[aria-label="本轮交付文件"]');
   const baselineArtifactCount = await deliveredSections.count();
-  const prompt = `${runMarker}：根据当前业务数据生成一份 Excel，并把真实文件保存到我的个人工作空间。`;
+  const formatRequest = process.env.E2E_EXPLICIT_XLSX === '1' ? 'Excel（.xlsx）' : 'Excel';
+  const prompt = `${runMarker}：根据当前业务数据生成一份 ${formatRequest}，并把真实文件保存到我的个人工作空间。`;
   await drawer.getByPlaceholder('描述你要查询或执行的业务任务…').fill(prompt);
   await drawer.getByRole('button', { name: /在当前页面执行/ }).click();
 
   const deadline = Date.now() + artifactTimeoutMs;
-  while (await deliveredSections.count() <= baselineArtifactCount) {
+  while (
+    await deliveredSections.count() <= baselineArtifactCount
+    || await drawer.getByRole('button', { name: /在当前页面执行/ }).evaluate(
+      (element) => element.classList.contains('ant-btn-loading'),
+    )
+  ) {
     if (Date.now() >= deadline) throw new Error('业务助手在限定时间内没有交付文件卡片');
     const drawerText = await drawer.innerText();
     if (drawerText.includes('执行未完成，请查看下方原因')) {
@@ -665,6 +672,7 @@ async function generateAndVerifyArtifact(page, applicationId, cleanupState) {
   const localPath = path.join(outputDir, path.basename(suggestedName));
   await download.saveAs(localPath);
   const bytes = fs.readFileSync(localPath);
+  console.log('E2E 下载产物格式', JSON.stringify({ extension: path.extname(suggestedName).toLowerCase(), sizeBytes: bytes.length }));
   assert.match(suggestedName.toLowerCase(), /\.xlsx$/, '业务助手交付物不是 XLSX');
   assert.ok(bytes.length > 100 && bytes.readUInt16LE(0) === 0x4b50, '下载文件不是有效 ZIP 容器');
   const entries = new Set(zipEntries(bytes));
@@ -762,6 +770,57 @@ async function cleanupBusinessRun(page, state) {
   });
 }
 
+async function verifySharedTaskViews(page, application, state) {
+  const before = await listBusinessTaskIds(page, application.id);
+  assert.equal(new URL(page.url()).searchParams.get('conversation'), state.taskId,
+    '新建侧栏任务未写入地址，刷新将丢失当前会话');
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 });
+  await page.getByRole('button', { name: /灼见助手/ }).waitFor({ timeout: 30_000 });
+  await page.getByRole('button', { name: /灼见助手/ }).click();
+  const reloadedDrawer = page.getByRole('dialog');
+  await reloadedDrawer.getByText(runMarker, { exact: false }).first().waitFor({ timeout: 30_000 });
+  await reloadedDrawer.locator('section[aria-label="本轮交付文件"]').first().waitFor({ timeout: 30_000 });
+  assert.equal(new URL(page.url()).searchParams.get('conversation'), state.taskId);
+  await page.goto(new URL(`/${orgSlug}/terminal/tasks/${state.taskId}`, baseUrl).href, {
+    waitUntil: 'domcontentloaded', timeout: 60_000,
+  });
+  const main = page.locator('main.terminal-shell__main');
+  await main.getByText(runMarker, { exact: false }).first().waitFor({ timeout: 30_000 });
+  await main.locator('section[aria-label="本轮交付文件"]').first().waitFor({ timeout: 30_000 });
+  assert.equal(new URL(page.url()).pathname, `/${orgSlug}/terminal/tasks/${state.taskId}`);
+  const followUp = `${runMarker}-续问：刚才生成的文件是什么格式？只回答格式，不要创建或修改文件。`;
+  const composer = main.locator('[contenteditable="true"][data-placeholder^="追加消息"]');
+  await composer.fill(followUp);
+  await composer.press('Enter');
+  const deadline = Date.now() + artifactTimeoutMs;
+  let continued = false;
+  while (Date.now() < deadline) {
+    const task = await userJson(page, `/api/v1/terminal/tasks/${state.taskId}`);
+    const index = task.messages.findIndex((item) => item.role === 'user' && item.content === followUp);
+    const reply = index < 0 ? null : task.messages.slice(index + 1).find((item) => item.role === 'assistant');
+    if (reply && !['queued', 'running'].includes(task.run_status)) {
+      assert.notEqual(task.run_status, 'error', '总入口续问执行失败');
+      assert.match(reply.content, /xlsx|excel/i, '总入口续问未识别刚才交付的文件格式');
+      continued = true;
+      break;
+    }
+    await page.waitForTimeout(1_000);
+  }
+  assert.ok(continued, '总入口续问没有在原任务完成');
+  await page.locator('aside').first().locator('button').filter({ hasText: application.name }).first().click();
+  await page.getByRole('button', { name: /灼见助手/ }).waitFor({ timeout: 30_000 });
+  await page.getByRole('button', { name: /灼见助手/ }).click();
+  const drawer = page.getByRole('dialog');
+  await drawer.getByText(runMarker, { exact: false }).first().waitFor({ timeout: 30_000 });
+  await drawer.getByText(followUp, { exact: true }).waitFor({ timeout: 30_000 });
+  await drawer.locator('section[aria-label="本轮交付文件"]').first().waitFor({ timeout: 30_000 });
+  const after = await listBusinessTaskIds(page, application.id);
+  assert.deepEqual([...after].sort(), [...before].sort(), '切换助手视图意外创建了任务');
+  const restored = await findRunArtifact(page, application.id, new Set(state.baselineTaskIds), runMarker);
+  assert.equal(restored.taskId, state.taskId, '切换视图后任务 ID 发生变化');
+  assert.deepEqual(restored.artifact, state.artifact, '切换视图后文件版本引用发生变化');
+}
+
 async function logoutFromUi(page, { endpoint, expectedPath, roleLabel }) {
   const openDrawer = page.locator('.ant-drawer-open').last();
   if (await openDrawer.count()) {
@@ -801,8 +860,36 @@ const browser = await chromium.launch({
 const desktopViewport = { width: 1920, height: 1080 };
 const adminContext = await browser.newContext({ viewport: desktopViewport });
 const employeeContext = await browser.newContext({ acceptDownloads: true, viewport: desktopViewport });
+// Optional pre-deployment frontend verification. API, login, model and storage
+// requests stay live; only this browser's static application assets are local.
+if (process.env.E2E_LOCAL_FRONTEND === '1') {
+  const distRoot = fs.realpathSync(path.resolve('dist'));
+  assert.ok(fs.existsSync(path.join(distRoot, 'index.html')), '先构建本地前端');
+  for (const context of [adminContext, employeeContext]) {
+    await context.route(`${baseUrl.origin}/**`, async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      if (request.method() !== 'GET' || /^\/(api|v1)(\/|$)/.test(pathname)) return route.continue();
+      const candidate = path.resolve(distRoot, `.${decodeURIComponent(pathname)}`);
+      if (candidate !== distRoot && !candidate.startsWith(`${distRoot}${path.sep}`)) return route.abort();
+      const file = fs.existsSync(candidate) && fs.statSync(candidate).isFile()
+        ? fs.realpathSync(candidate)
+        : request.isNavigationRequest() ? path.join(distRoot, 'index.html') : null;
+      if (!file) return route.continue();
+      if (!file.startsWith(`${distRoot}${path.sep}`)) return route.abort();
+      return route.fulfill({ path: file });
+    });
+  }
+  console.log('E2E 模式：本地构建前端＋真实 staging 接口（非已部署前端验收）');
+}
 const adminPage = await adminContext.newPage();
 const employeePage = await employeeContext.newPage();
+const viewTransitions = [];
+employeePage.on('framenavigated', (frame) => {
+  if (frame !== employeePage.mainFrame()) return;
+  const url = new URL(frame.url());
+  viewTransitions.push({ path: url.pathname, view: url.searchParams.get('view'), hasConversation: url.searchParams.has('conversation') });
+});
 const adminDiagnostics = diagnosticsFor(adminPage);
 const employeeDiagnostics = diagnosticsFor(employeePage);
 let artifactState = {};
@@ -846,6 +933,9 @@ try {
   console.log('E2E 业务助手 Excel Artifact：开始');
   artifactState = await generateAndVerifyArtifact(employeePage, application.id, artifactState);
   console.log('E2E 业务助手 Excel Artifact：通过');
+  console.log('E2E 同一任务总入口与页面侧栏：开始');
+  await verifySharedTaskViews(employeePage, application, artifactState);
+  console.log('E2E 同一任务总入口与页面侧栏：通过');
   cleanupResult = await cleanupBusinessRun(employeePage, artifactState);
   artifactState = null;
   assert.equal(cleanupResult.failures.length, 0, cleanupResult.failures.join('；'));
@@ -866,10 +956,22 @@ try {
   console.log('E2E 双端退出登录与会话撤销：通过');
   console.log('E2E PASS：管理员与员工 staging 核心回归全部通过');
 } catch (error) {
+  console.log('E2E failure location', JSON.stringify({
+    path: safePath(employeePage.url()),
+    dialogs: await employeePage.getByRole('dialog').count().catch(() => -1),
+    artifactSections: await employeePage.locator('section[aria-label="本轮交付文件"]').count().catch(() => -1),
+    transitions: viewTransitions.slice(-12),
+    diagnostics: employeeDiagnostics.snapshot(),
+    viewStatus: await employeePage.evaluate(() => {
+      const text = document.querySelector('main')?.textContent || '';
+      return ['正在校验应用权限', '应用入口不可用', '应用加载失败', '应用未授权或已停用'].filter((label) => text.includes(label));
+    }).catch(() => []),
+  }));
   throw new Error(redact(error instanceof Error ? error.message : error));
 } finally {
   if (artifactState) {
     cleanupResult = await cleanupBusinessRun(employeePage, artifactState).catch(() => null);
+    console.log('E2E failure cleanup', JSON.stringify(cleanupResult));
   }
   if (modelGrantState) {
     await restoreModelGrant(adminPage, modelGrantState).catch(() => null);

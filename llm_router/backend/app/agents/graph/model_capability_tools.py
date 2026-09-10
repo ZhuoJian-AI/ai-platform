@@ -30,6 +30,7 @@ from app.services import (
     workspace_service,
 )
 from app.services.assistant_tool_protocol import tool_result_json
+from app.services.audio_validation import validate_audio_output as _validate_audio_output
 from app.utils.workspace_presentation import enrich_metadata
 
 logger = structlog.get_logger()
@@ -257,20 +258,6 @@ def _error(
 def _audio_format(file: Any) -> str | None:
     suffix = PurePosixPath(str(getattr(file, "path", "") or "")).suffix.lower()
     return _AUDIO_INPUT_SUFFIXES.get(suffix)
-
-
-def _validate_audio_output(raw: bytes, output_format: str) -> str:
-    if not raw:
-        raise ValueError("语音模型返回了空文件")
-    if output_format == "wav":
-        if len(raw) < 12 or not raw.startswith(b"RIFF") or raw[8:12] != b"WAVE":
-            raise ValueError("语音模型返回的内容不是有效 WAV 文件")
-        return "audio/wav"
-    is_id3 = raw.startswith(b"ID3")
-    is_frame = len(raw) >= 2 and raw[0] == 0xFF and (raw[1] & 0xE0) == 0xE0
-    if not (is_id3 or is_frame):
-        raise ValueError("语音模型返回的内容不是有效 MP3 文件")
-    return "audio/mpeg"
 
 
 def _safe_audio_name(value: object, output_format: str) -> str:
@@ -613,8 +600,8 @@ async def _synthesize(
             request_id=request_id,
         )
         raw = result["audio"]
-        mime_type = _validate_audio_output(raw, output_format)
-    except (model_gateway.GatewayError, ValueError, TypeError, KeyError) as exc:
+        mime_type = await _validate_audio_output(raw, output_format)
+    except (model_gateway.GatewayError, ValueError, TypeError, KeyError, OSError, TimeoutError) as exc:
         category = exc.category if isinstance(exc, model_gateway.GatewayError) else "invalid_audio_output"
         logger.warning("assistant_speech_synthesize_failed", category=category)
         return _error(
@@ -622,6 +609,31 @@ async def _synthesize(
             "语音文件生成或校验失败",
             hint="请稍后重试，或检查管理员配置的语音模型能力",
         )
+
+    # A provider call can outlive a role change. Resolve the same workspace
+    # again through the callback that reloads the employee's current roles,
+    # before uploading bytes or creating a file version.
+    final_workspace, final_principal, final_error = await resolve_output_workspace(params, principal)
+    if (
+        final_error or final_workspace is None or final_principal is None
+        or str(final_workspace.id) != str(workspace.id)
+        or str(final_principal.id) != str(principal.id)
+    ):
+        return _error(
+            "workspace_permission_changed",
+            "语音生成期间工作空间权限或目标发生变化，未保存文件",
+            hint="请确认当前角色有目标空间写入权限后重新生成",
+            retryable=False,
+        )
+    permission_error = await _check_audio_permission(db, final_principal, "multimodal.speech.use")
+    if permission_error:
+        return _error(
+            "speech_permission_changed",
+            "语音生成期间语音权限已变化，未保存文件",
+            hint="请联系企业管理员确认当前角色的语音权限",
+            retryable=False,
+        )
+    workspace, principal = final_workspace, final_principal
 
     filename = _safe_audio_name(params.get("output_name"), output_format)
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")

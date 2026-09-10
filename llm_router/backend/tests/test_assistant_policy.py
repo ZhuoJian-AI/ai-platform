@@ -28,6 +28,12 @@ def db_engine():
         ("请生成一份 Excel 表格汇总各部门销量", True),
         ("把这份数据导出成 PDF 报告", True),
         ("Generate a spreadsheet of the monthly totals", True),
+        ("请生成一段 MP3", True),
+        ("把这段文字转为 WAV 音频", True),
+        ("生成一张图片", True),
+        ("请创建 Markdown", True),
+        ("输出 TXT", True),
+        ("看看这个音频里讲了什么", False),
         ("看看这个表里合计多少", False),
         ("处理一下附件", False),
         ("这个文件里说了什么", False),
@@ -48,12 +54,47 @@ def test_completion_policy_requires_an_explicit_artifact_request(request_text, e
     assert policy["max_nudges"] == 1
     assert policy["nudge_text"].startswith("[系统续执行要求]")
     assert "spreadsheet_tool" in policy["file_output_tools"]
+    assert nodes._requires_file_artifact(request_text) is expected
+
+
+@pytest.mark.parametrize("request_text", ["请生成 MP3", "创建 WAV 音频", "生成一张图片", "输出 TXT"])
+def test_media_without_artifact_cannot_pass_final_persistence_guard(request_text):
+    state = {"request": request_text, "assistant_final": "已经生成"}
+    assert nodes._apply_artifact_completion_guard(state, []) is False
+    assert state["error"] == "assistant artifact delivery failed"
 
 
 def test_completion_policy_never_arms_outside_craft_mode():
     for mode in ("ask", "plan"):
         policy = runner._completion_policy({"exec_mode": mode, "request": "请生成一份 Excel 表格"})
         assert policy["require_file_output"] is False
+
+
+@pytest.mark.parametrize("application_id", [None, "application-1"])
+@pytest.mark.parametrize("expected_output", ["text", "data", "navigation"])
+def test_auxiliary_intent_cannot_cancel_explicit_file_delivery(application_id, expected_output):
+    state = {
+        "application_id": application_id,
+        "exec_mode": "craft",
+        "request": "请生成 MP3 音频",
+        "business_turn_intent": {"intent": "general", "expectedOutput": expected_output},
+        "assistant_final": "已经生成",
+    }
+    assert runner._completion_policy(state)["require_file_output"] is True
+    assert nodes._apply_artifact_completion_guard(state, []) is False
+
+
+@pytest.mark.parametrize("application_id", [None, "application-1"])
+def test_artifact_intent_can_require_delivery_without_keyword_match(application_id):
+    state = {
+        "application_id": application_id,
+        "exec_mode": "craft",
+        "request": "按刚才的规格来一份",
+        "business_turn_intent": {"intent": "file_operation", "expectedOutput": "artifact"},
+        "assistant_final": "已经生成",
+    }
+    assert runner._completion_policy(state)["require_file_output"] is True
+    assert nodes._apply_artifact_completion_guard(state, []) is False
 
 
 def test_artifact_completion_guard_applies_to_the_global_assistant():
@@ -67,7 +108,7 @@ def test_artifact_completion_guard_applies_to_the_global_assistant():
 
     assert completed is False
     assert state["error"] == "assistant artifact delivery failed"
-    assert "工作空间确认的有效文件" in state["assistant_final"]
+    assert "工作空间确认且符合要求格式的有效文件" in state["assistant_final"]
     assert "/tmp/report.xlsx" not in state["assistant_final"]
 
 
@@ -76,7 +117,7 @@ def test_artifact_completion_guard_accepts_verified_workspace_artifacts():
 
     completed = nodes._apply_artifact_completion_guard(
         state,
-        [{"file_id": "file-1", "version_id": "version-1"}],
+        [{"file_id": "file-1", "version_id": "version-1", "mime_type": "application/pdf"}],
     )
 
     assert completed is True
@@ -180,7 +221,7 @@ async def test_policy_blocks_and_timeouts_are_recorded_without_retracting_text(m
     policy_traces = [trace for trace in state["traces"] if trace.get("category") == "policy"]
     assert [trace["action"] for trace in policy_traces] == ["repeat_failure_block", "tool_timeout"]
     assert all(trace.get("ok") is None for trace in policy_traces)  # never counted as a tool call
-    forwarded = [event for event in staged if event.get("type") == "trace"]
+    forwarded = [event for event in staged if event.get("type") == "trace" and event.get("category") == "policy"]
     assert [event["action"] for event in forwarded] == ["repeat_failure_block", "tool_timeout"]
     assert forwarded[1]["title"] == "工具超时"
     assert not any(event.get("type") == "text_retract" for event in staged)

@@ -170,6 +170,63 @@ async def test_create_bailian_provider_and_mask_secret(client: AsyncClient, monk
     assert embedding_create.status_code == 422
 
 
+@pytest.mark.asyncio
+async def test_failed_verification_survives_http_request_and_new_db_session(
+    client, db_session, db_engine, monkeypatch,
+):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app import database
+    from app.database import get_db
+    from app.main import app
+
+    organization = (await client.post(
+        "/api/v1/organizations", json={"name": "验证事务企业", "slug": "verification-transaction"},
+    )).json()
+    created = await client.post(
+        f"/api/v1/organizations/{organization['id']}/providers",
+        json={
+            "name": "验证事务供应商", "vendor": "openai", "provider_type": "openai",
+            "base_url": "https://example.com/v1", "api_key": "test-only-key",
+            "scope_type": "organization",
+            "model_deployments": [{
+                "model_id": "test-chat", "adapter": "openai_chat_completions",
+                "capabilities": ["chat"],
+            }],
+        },
+    )
+    assert created.status_code == 201, created.text
+    data = created.json()
+    deployment_id = data["model_deployments"][0]["id"]
+    from uuid import UUID
+
+    deployment = await db_session.get(ModelDeployment, UUID(deployment_id))
+    deployment.verification_status = "verified"
+    deployment.config = {"verified_capabilities": ["chat"]}
+    await db_session.commit()
+
+    async def reject(*_args, **_kwargs):
+        raise model_gateway.GatewayError("invalid_provider_response")
+
+    monkeypatch.setattr("app.api.llm_providers.test_deployment", reject)
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    monkeypatch.setattr(database, "async_session_factory", factory)
+    original_override = app.dependency_overrides.pop(get_db)
+    try:
+        response = await client.post(
+            f"/api/v1/providers/{data['id']}/models/{deployment_id}/test/chat",
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == "供应商返回了无法识别的响应"
+        async with factory() as fresh:
+            stored = await fresh.get(ModelDeployment, UUID(deployment_id))
+            assert stored.verification_status == "failed"
+            assert stored.config["verified_capabilities"] == []
+            assert stored.last_error == "invalid_provider_response"
+    finally:
+        app.dependency_overrides[get_db] = original_override
+
+
 class _FakeResponse:
     def __init__(self, payload, status_code=200):
         self._payload = payload
@@ -313,7 +370,7 @@ async def test_mock_gateway_chat_vision_image_and_stream(monkeypatch, db_session
         for body in vision_bodies
     )
     assert any(
-        "input_image" not in str(body) and body["max_output_tokens"] == 128
+        "input_image" not in str(body) and body["max_output_tokens"] == 512
         for body in vision_bodies
     )
 

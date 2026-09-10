@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
+import subprocess
+import wave
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -9,6 +12,75 @@ import pytest
 from PIL import Image
 
 from app.agents.graph import model_capability_tools as capability_tools
+from app.services import audio_validation
+
+
+@pytest.fixture(autouse=True)
+def db_engine():
+    """Tool unit tests use explicit service doubles, not PostgreSQL."""
+    yield
+
+
+@pytest.fixture(scope="module")
+def audio_samples():
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16000)
+        output.writeframes(b"\x00\x00" * 1600)
+    wav = buffer.getvalue()
+    mp3 = subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-f", "wav", "-i", "pipe:0", "-f", "mp3", "pipe:1"],
+        input=wav, capture_output=True, check=True, timeout=10,
+    ).stdout
+    return {"mp3": mp3, "wav": wav}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("format_name", ["mp3", "wav"])
+async def test_audio_output_decodes_real_audio(audio_samples, format_name):
+    mime = await capability_tools._validate_audio_output(audio_samples[format_name], format_name)
+    assert mime == ("audio/mpeg" if format_name == "mp3" else "audio/wav")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("raw", "format_name"), [
+    (b"ID3\x04\x00\x00\x00\x00\x00\x00payload", "mp3"),
+    (b"RIFF\x04\x00\x00\x00WAVE", "wav"),
+    (b"\xff\xfbgarbage", "mp3"),
+])
+async def test_audio_output_rejects_header_only_garbage(raw, format_name):
+    with pytest.raises(ValueError):
+        await capability_tools._validate_audio_output(raw, format_name)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [TimeoutError, asyncio.CancelledError])
+async def test_audio_validation_reaps_decoder_on_interrupt(monkeypatch, error_type):
+    calls = []
+
+    class Decoder:
+        returncode = None
+
+        async def communicate(self, _raw):
+            raise error_type()
+
+        def kill(self):
+            calls.append("kill")
+
+        async def wait(self):
+            calls.append("wait")
+
+    async def spawn(*args, **kwargs):
+        assert args[args.index("-protocol_whitelist") + 1] == "pipe"
+        assert kwargs["stderr"] == asyncio.subprocess.DEVNULL
+        return Decoder()
+
+    monkeypatch.setattr(audio_validation.asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(error_type):
+        await capability_tools._validate_audio_output(b"ID3test", "mp3")
+    assert calls == ["kill", "wait"]
 
 
 class _Db:
@@ -141,7 +213,8 @@ async def test_audio_transcribe_rechecks_file_and_uses_default_capability_route(
 
 
 @pytest.mark.asyncio
-async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
+@pytest.mark.parametrize("revocation", [None, "workspace", "speech", "target", "corrupt_audio"])
+async def test_speech_synthesize_commits_only_with_current_permissions(monkeypatch, revocation, audio_samples):
     db = _Db()
     principal = _user("multimodal.speech.use")
     workspace = SimpleNamespace(id=uuid4(), name="zhangsan")
@@ -156,10 +229,23 @@ async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
     )
     called: dict = {}
 
+    resolve_calls = 0
+    permission_calls = 0
+
     async def resolve_output(_params, _user):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        if resolve_calls == 2 and revocation == "workspace":
+            return None, principal, "工作空间权限已撤销"
+        if resolve_calls == 2 and revocation == "target":
+            return SimpleNamespace(id=uuid4()), principal, None
         return workspace, principal, None
 
     async def check_permission(*_args, **_kwargs):
+        nonlocal permission_calls
+        permission_calls += 1
+        if permission_calls == 2 and revocation == "speech":
+            return "当前角色语音权限已撤销"
         return None
 
     async def scan(*_args, **_kwargs):
@@ -168,7 +254,7 @@ async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
     async def synthesize(_db, _org_id, **kwargs):
         called["synthesize"] = kwargs
         return {
-            "audio": b"ID3\x04\x00\x00\x00\x00\x00\x00payload",
+            "audio": b"ID3garbage" if revocation == "corrupt_audio" else audio_samples["mp3"],
             "format": "mp3",
             "model": "mimo-v2.5-tts",
             "usage": {},
@@ -217,6 +303,19 @@ async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
         )
     )
 
+    assert resolve_calls == (1 if revocation == "corrupt_audio" else 2)
+    if revocation:
+        assert result["status"] == ("retryable_error" if revocation == "corrupt_audio" else "failed")
+        assert not result.get("artifacts")
+        assert "ingest" not in called
+        assert not db.added
+        expected_code = {
+            "speech": "speech_permission_changed",
+            "corrupt_audio": "invalid_audio_output",
+        }.get(revocation, "workspace_permission_changed")
+        assert result["error"]["code"] == expected_code
+        return
+    assert permission_calls == 2
     assert result["status"] == "completed"
     assert result["artifacts"][0]["file_id"] == str(file_id)
     assert result["artifacts"][0]["version_id"] == str(version_id)

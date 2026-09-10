@@ -59,21 +59,11 @@ def classify_execution_verification(
         failed = len(tool_traces) - succeeded
         if failed == 0:
             status: ExecutionStatus = "verified"
-        elif (
-            isinstance((metadata or {}).get("artifacts"), list)
-            and bool((metadata or {}).get("artifacts"))
-            and any(
-                trace["ok"] is True
-                for trace in tool_traces[
-                    max(index for index, trace in enumerate(tool_traces) if trace["ok"] is False) + 1:
-                ]
-            )
-        ):
-            # A failed validation attempt can be recovered by a later tool path.
-            # Keep the failure count visible without mislabelling the delivered
-            # result as only partially complete.
-            status = "recovered"
         elif succeeded:
+            # These traces prove tool execution, not fulfillment of the user's
+            # goal. An unrelated artifact (e.g. TXT instead of requested MP3)
+            # and a later successful query cannot certify recovery. Only the
+            # runtime's delivery validation may establish task completion.
             status = "partial"
         else:
             status = "failed"

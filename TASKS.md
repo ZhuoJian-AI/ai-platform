@@ -1,5 +1,12 @@
 # Active tasks
 
+## PLATFORM-UNIFIED-ASSISTANT-RUNTIME-E2E-20260910 (@codex)
+
+- [ ] 核对模型实际可见工具与延迟注册表，补齐可验证的运行事件。
+- [ ] 修复真实模型能力测试和统一助手端到端发现的问题。
+- [ ] 完成管理员、员工、模型工具和工作空间产物验收后发布 staging。
+- [ ] 不修改外部 Skill、业务系统、退役功能或其他任务的未提交文件。
+
 ## PLATFORM-RETIRE-RAG-SKILLS-20260909 (@codex)
 
 - [ ] 删除知识库及全部 RAG 产品、运行时、接口、数据表、向量依赖和 Embedding 模型能力，保留工作空间解析器。

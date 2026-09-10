@@ -171,28 +171,27 @@ OUTPUT_PROTOCOL_PROMPT = (
 
 def _requires_file_artifact(request: str) -> bool:
     """Conservatively detect an explicit request to create or export a file."""
+    from app.services.assistant_delivery_policy import requests_file_delivery
 
-    text = str(request or "").casefold()
-    file_kind = re.search(r"(?:excel|xlsx|csv|word|docx|ppt|pptx|pdf|markdown|md|txt|图片|压缩包|文件)", text)
-    delivery = re.search(r"(?:生成|创建|制作|导出|保存|交付|下载|produce|create|export|save)", text)
-    return bool(file_kind and delivery)
+    return requests_file_delivery(request)
 
 
 def _apply_artifact_completion_guard(state: AgentState, artifacts: list[dict[str, Any]]) -> bool:
     """Prevent every assistant view from claiming a file that was not committed."""
 
+    from app.services.assistant_delivery_policy import explicit_output_formats, missing_output_formats
     from app.services.business_assistant_orchestration import intent_requires_artifact
 
     business_intent = state.get("business_turn_intent") or {}
     requires_artifact = (
         intent_requires_artifact(business_intent)
-        if business_intent
-        else _requires_file_artifact(str(state.get("request") or ""))
+        or _requires_file_artifact(str(state.get("request") or ""))
     )
-    if not requires_artifact or artifacts:
+    missing = missing_output_formats(explicit_output_formats(str(state.get("request") or "")), artifacts)
+    if not requires_artifact or (artifacts and not missing):
         return True
     state["assistant_final"] = (
-        "文件生成未完成：本轮没有得到平台工作空间确认的有效文件，"
+        "文件生成未完成：本轮没有得到平台工作空间确认且符合要求格式的有效文件，"
         "因此不会把文字、服务器路径或下载地址冒充为已交付文件。请稍后重试。"
     )
     state["error"] = "assistant artifact delivery failed"
@@ -891,12 +890,13 @@ def _enterprise_export_file_parameters(
     properties.pop("nextCursor", None)
     properties["output_name"] = {
         "type": "string",
-        "description": "交付到当前选定工作空间的文件名，建议以 .xlsx 或 .csv 结尾",
+        "description": "交付到当前选定工作空间的文件名，扩展名必须匹配 target_format；Excel 默认使用 .xlsx。",
     }
     properties["target_format"] = {
         "type": "string",
         "enum": supported_formats or ["xlsx", "csv"],
         "default": "xlsx",
+        "description": "用户要求 Excel 时使用 xlsx；只有用户明确要求 CSV 时才使用 csv。",
     }
     required = [item for item in parameters.get("required", []) if item not in {"snapshotId", "nextCursor"}]
     if "output_name" not in required:
