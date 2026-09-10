@@ -623,6 +623,31 @@ async def _synthesize(
             hint="请稍后重试，或检查管理员配置的语音模型能力",
         )
 
+    # A provider call can outlive a role change. Resolve the same workspace
+    # again through the callback that reloads the employee's current roles,
+    # before uploading bytes or creating a file version.
+    final_workspace, final_principal, final_error = await resolve_output_workspace(params, principal)
+    if (
+        final_error or final_workspace is None or final_principal is None
+        or str(final_workspace.id) != str(workspace.id)
+        or str(final_principal.id) != str(principal.id)
+    ):
+        return _error(
+            "workspace_permission_changed",
+            "语音生成期间工作空间权限或目标发生变化，未保存文件",
+            hint="请确认当前角色有目标空间写入权限后重新生成",
+            retryable=False,
+        )
+    permission_error = await _check_audio_permission(db, final_principal, "multimodal.speech.use")
+    if permission_error:
+        return _error(
+            "speech_permission_changed",
+            "语音生成期间语音权限已变化，未保存文件",
+            hint="请联系企业管理员确认当前角色的语音权限",
+            retryable=False,
+        )
+    workspace, principal = final_workspace, final_principal
+
     filename = _safe_audio_name(params.get("output_name"), output_format)
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     task_part = str(state.get("task_id") or "playground")

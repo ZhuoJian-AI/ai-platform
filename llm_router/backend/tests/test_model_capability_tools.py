@@ -11,6 +11,12 @@ from PIL import Image
 from app.agents.graph import model_capability_tools as capability_tools
 
 
+@pytest.fixture(autouse=True)
+def db_engine():
+    """Tool unit tests use explicit service doubles, not PostgreSQL."""
+    yield
+
+
 class _Db:
     def __init__(self) -> None:
         self.added: list[object] = []
@@ -141,7 +147,8 @@ async def test_audio_transcribe_rechecks_file_and_uses_default_capability_route(
 
 
 @pytest.mark.asyncio
-async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
+@pytest.mark.parametrize("revocation", [None, "workspace", "speech", "target"])
+async def test_speech_synthesize_commits_only_with_current_permissions(monkeypatch, revocation):
     db = _Db()
     principal = _user("multimodal.speech.use")
     workspace = SimpleNamespace(id=uuid4(), name="zhangsan")
@@ -156,10 +163,23 @@ async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
     )
     called: dict = {}
 
+    resolve_calls = 0
+    permission_calls = 0
+
     async def resolve_output(_params, _user):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        if resolve_calls == 2 and revocation == "workspace":
+            return None, principal, "工作空间权限已撤销"
+        if resolve_calls == 2 and revocation == "target":
+            return SimpleNamespace(id=uuid4()), principal, None
         return workspace, principal, None
 
     async def check_permission(*_args, **_kwargs):
+        nonlocal permission_calls
+        permission_calls += 1
+        if permission_calls == 2 and revocation == "speech":
+            return "当前角色语音权限已撤销"
         return None
 
     async def scan(*_args, **_kwargs):
@@ -217,6 +237,17 @@ async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
         )
     )
 
+    assert resolve_calls == 2
+    if revocation:
+        assert result["status"] == "failed"
+        assert not result.get("artifacts")
+        assert "ingest" not in called
+        assert not db.added
+        assert result["error"]["code"] == (
+            "speech_permission_changed" if revocation == "speech" else "workspace_permission_changed"
+        )
+        return
+    assert permission_calls == 2
     assert result["status"] == "completed"
     assert result["artifacts"][0]["file_id"] == str(file_id)
     assert result["artifacts"][0]["version_id"] == str(version_id)
