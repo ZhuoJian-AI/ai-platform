@@ -370,7 +370,7 @@ async def test_mock_gateway_chat_vision_image_and_stream(monkeypatch, db_session
         for body in vision_bodies
     )
     assert any(
-        "input_image" not in str(body) and body["max_output_tokens"] == 128
+        "input_image" not in str(body) and body["max_output_tokens"] == 512
         for body in vision_bodies
     )
 
