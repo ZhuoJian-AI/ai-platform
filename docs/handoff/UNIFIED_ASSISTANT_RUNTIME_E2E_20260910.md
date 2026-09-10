@@ -39,3 +39,13 @@
 - 同次重新执行聚焦测试：`pytest tests/test_model_gateway_contract.py tests/test_native_assistant_core.py tests/test_assistant_tool_catalog.py -q`，25 passed。
 - 本地 PostgreSQL 仍未启动：Docker Desktop 日志明确为残留 `dockerInference` reparse 节点不可访问导致 Inference manager 初始化失败。尝试可恢复移动该单一节点被 Windows 拒绝，没有删除任何节点、容器、数据卷或重置 Docker。下一步可使用独立 PostgreSQL 运行环境，不必继续重复启动失败的 Docker。
 - 部署规则重新获取为 `c948cd2`；本轮没有部署。
+
+## 2026-09-10 19:34 管理员—员工语音权限闭环
+
+- root 真实表单登录后，通过 `/org/roles` 创建 `E2E-20260910-语音能力`（code `e2e_20260910_audio`），包含转写、音频理解、朗读、设计和克隆五项权限；通过员工编辑表单附加给 zhangsan，保留原三个角色。
+- 授权后旧员工会话调用 `/api/v1/terminal/me` 返回 401 `User session has been revoked`。重新表单登录后，me 返回上述五项权限，证明角色变更与新会话权限生效。
+- 同一 Task 续问重新生成 MP3，仍未发现语音工具。只读调用 `/api/v1/multimodal/voices` 返回 404 `Multimodal audio is not enabled for this organization`。因此除了原来的权限缺项，还存在已部署环境的组织语音开关阻断；不能仅启用模型部署后就宣称助手可用。
+- 第二轮最终未生成文件，出现连续八次 `web_tool` 失败，直到第 19 步才结束。还需修复缺少能力时的可解释终止及重复失败控制，不能只扩大重试上限。
+- 第一轮 TXT 替代 MP3 的结果，实时显示“部分完成”，刷新后变为“已完成（有重试）”。`TerminalAssistantMessage.verificationFromBlocks` 依据任意 Artifact 和末次失败后的工具成功推断 recovered，不能证明用户目标完成；需与服务端可信交付状态统一，不能仅改提示词。
+- 已经通过管理员 UI 撤销临时角色，员工行重新显示原来的总经理、production01、系统研发者；随后删除临时角色并确认列表不存在该记录。未修改任何原有角色权限。
+- 尚未修改语音部署开关，没有部署本地代码；下一步核对实际 Coolify 配置并修复交付/失败控制，再进行授权后的真正 MP3 成功验收。
