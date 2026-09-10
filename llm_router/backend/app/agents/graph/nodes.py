@@ -171,11 +171,9 @@ OUTPUT_PROTOCOL_PROMPT = (
 
 def _requires_file_artifact(request: str) -> bool:
     """Conservatively detect an explicit request to create or export a file."""
+    from app.services.assistant_delivery_policy import requests_file_delivery
 
-    text = str(request or "").casefold()
-    file_kind = re.search(r"(?:excel|xlsx|csv|word|docx|ppt|pptx|pdf|markdown|md|txt|图片|压缩包|文件)", text)
-    delivery = re.search(r"(?:生成|创建|制作|导出|保存|交付|下载|produce|create|export|save)", text)
-    return bool(file_kind and delivery)
+    return requests_file_delivery(request)
 
 
 def _apply_artifact_completion_guard(state: AgentState, artifacts: list[dict[str, Any]]) -> bool:

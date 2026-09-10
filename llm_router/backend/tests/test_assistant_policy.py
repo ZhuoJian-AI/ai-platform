@@ -28,6 +28,12 @@ def db_engine():
         ("请生成一份 Excel 表格汇总各部门销量", True),
         ("把这份数据导出成 PDF 报告", True),
         ("Generate a spreadsheet of the monthly totals", True),
+        ("请生成一段 MP3", True),
+        ("把这段文字转为 WAV 音频", True),
+        ("生成一张图片", True),
+        ("请创建 Markdown", True),
+        ("输出 TXT", True),
+        ("看看这个音频里讲了什么", False),
         ("看看这个表里合计多少", False),
         ("处理一下附件", False),
         ("这个文件里说了什么", False),
@@ -48,6 +54,14 @@ def test_completion_policy_requires_an_explicit_artifact_request(request_text, e
     assert policy["max_nudges"] == 1
     assert policy["nudge_text"].startswith("[系统续执行要求]")
     assert "spreadsheet_tool" in policy["file_output_tools"]
+    assert nodes._requires_file_artifact(request_text) is expected
+
+
+@pytest.mark.parametrize("request_text", ["请生成 MP3", "创建 WAV 音频", "生成一张图片", "输出 TXT"])
+def test_media_without_artifact_cannot_pass_final_persistence_guard(request_text):
+    state = {"request": request_text, "assistant_final": "已经生成"}
+    assert nodes._apply_artifact_completion_guard(state, []) is False
+    assert state["error"] == "assistant artifact delivery failed"
 
 
 def test_completion_policy_never_arms_outside_craft_mode():

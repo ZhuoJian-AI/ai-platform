@@ -106,3 +106,10 @@
 - 前端逐项运行 package.json 中全部 11 个非 `test:e2e:*` 测试脚本：presentation、file-links、file-events、csv-document、file-ui、subsystem-bridge、admin-session、login-feedback、responsive、admin-quota、retired-frontend 全部 exit 0。responsive 输出 `RESPONSIVE_ACCEPTANCE_OK engines=chromium viewports=8`。
 - 未执行 staging-core 或 attachments 线上 E2E，因此不能据本轮结果宣称管理员/员工端到端全量通过。仍需解决请求目标格式匹配、音频启用配置与真实模型/工作空间交付，再进行完整发布门禁。
 - 部署规则已重新获取，版本仍为 c948cd2；本轮只使用其协作规则，没有改线上配置、镜像 digest、Skill 或子系统。
+
+## 无产物检查规则统一（本地，未发布）
+
+- 运行时 runner 与最终保存 nodes 原先分别维护自然语言产物检测，且均漏掉音频生成。提取 assistant_delivery_policy 作为共同检查，补充 MP3/WAV/音频、图片和文本产物用词；仅用于完成后无文件防护，不作为意图执行门禁或工具选择器。
+- 新增对两处规则一致性和无产物最终拒绝的回归。普通音频问答仍不强制生成文件。
+- `pytest tests/test_assistant_policy.py tests/test_native_assistant_core.py tests/test_message_verification.py -q`：66 passed。四个受影响 Python 文件 Ruff 通过。
+- 这仍是保守的显式请求检测，不证明完整自然语言理解，也没有解决 TXT 替代 MP3 的目标格式一致性；该项及真实语音/OSS/双端 E2E 继续保留为未完成。未部署。

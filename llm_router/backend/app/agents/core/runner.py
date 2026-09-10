@@ -42,6 +42,10 @@ from app.models.agent_run import AgentRun
 from app.models.task import TaskMessage
 from app.services import business_assistant_orchestration
 from app.services.agent_admission import agent_admission
+from app.services.assistant_delivery_policy import (
+    FILE_ARTIFACT_NOUNS as _FILE_ARTIFACT_NOUNS,
+)
+from app.services.assistant_delivery_policy import requests_file_delivery as _requests_file_delivery
 from app.services.assistant_tool_catalog import partition_tool_specs
 from app.services.file_capability_registry import FILE_CREATE_TOOL_NAMES, FILE_TOOL_OPERATIONS
 from app.services.message_verification import contains_unverified_tool_success_claim
@@ -81,73 +85,6 @@ _FILE_OUTPUT_TOOL_NAMES = tuple(
 )
 # Registry kinds whose dynamically named tools materialize Runner outputs as workspace files.
 _FILE_OUTPUT_REGISTRY_KINDS = {"enterprise_export_file"}
-# A file-delivery request needs BOTH an explicit production verb AND an artifact noun
-# (audit M4): "处理一下" + attachment or "看看这个表里合计多少" must not arm the policy.
-_FILE_PRODUCTION_VERBS = (
-    "生成",
-    "创建",
-    "制作",
-    "导出",
-    "转换",
-    "转成",
-    "转为",
-    "保存",
-    "另存",
-    "输出",
-    "做一份",
-    "做成",
-    "写一份",
-    "整理成",
-    "汇总成",
-    "编辑",
-    "修改",
-    "新建",
-    "产出",
-    "交付",
-    "generate",
-    "create",
-    "make",
-    "produce",
-    "export",
-    "convert",
-    "save",
-    "write",
-    "build",
-    "deliver",
-)
-_FILE_ARTIFACT_NOUNS = (
-    "文件",
-    "表格",
-    "excel",
-    "xlsx",
-    "xls",
-    "csv",
-    "word",
-    "docx",
-    "文档",
-    "ppt",
-    "pptx",
-    "幻灯片",
-    "演示文稿",
-    "pdf",
-    "报告",
-    "报表",
-    "压缩包",
-    "zip",
-    "附件",
-    "产物",
-    "交付物",
-    "spreadsheet",
-    "sheet",
-    "document",
-    "report",
-    "slide",
-    "deck",
-    "presentation",
-    "archive",
-    "deliverable",
-    "file",
-)
 _CURRENT_BUSINESS_DATA_TERMS = (
     "当前",
     "现在",
@@ -270,16 +207,6 @@ def _merge(state: dict, patch: dict | None) -> None:
 def _tool_specs(tools: list[dict], registry: dict[str, dict] | None = None) -> list[dict]:
     """Native tool specs (schema plus runtime metadata) for one run."""
     return assistant_tool_specs(tools, registry or {})
-
-
-def _requests_file_delivery(request: str) -> bool:
-    """Return whether the user explicitly asked for a file / document / table deliverable."""
-    text = (request or "").lower()
-    return (
-        bool(text)
-        and any(verb in text for verb in _FILE_PRODUCTION_VERBS)
-        and any(noun in text for noun in _FILE_ARTIFACT_NOUNS)
-    )
 
 
 def _requests_current_business_data(state: dict) -> bool:
