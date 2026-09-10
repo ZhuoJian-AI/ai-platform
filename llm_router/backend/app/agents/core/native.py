@@ -57,7 +57,11 @@ def _platform_tools(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _model_messages(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop platform-only history annotations before calling a provider."""
-    allowed = {"role", "content", "tool_calls", "tool_call_id", "name"}
+    # OpenAI-compatible reasoning models such as MiMo require an assistant
+    # tool-call turn's ``reasoning_content`` to be passed back verbatim on the
+    # following request.  It remains provider-facing metadata and is never
+    # emitted as user-visible progress or stored as chat prose.
+    allowed = {"role", "content", "reasoning_content", "tool_calls", "tool_call_id", "name"}
     return [{key: value for key, value in row.items() if key in allowed} for row in rows]
 
 
@@ -233,9 +237,10 @@ async def _model_turn(
     deps: dict[str, Any],
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
-) -> tuple[str, list[dict[str, Any]], dict[str, int]]:
+) -> tuple[str, list[dict[str, Any]], dict[str, int], str | None]:
     text = ""
     calls: list[dict[str, Any]] = []
+    reasoning_parts: list[str] = []
     usage = {"input_tokens": 0, "output_tokens": 0}
     stream = model_gateway.stream_chat(
         deps["db"],
@@ -255,11 +260,14 @@ async def _model_turn(
             text += str(payload or "")
         elif kind == "tool_calls":
             calls = list(payload or [])
+        elif kind == "reasoning_content" and payload:
+            reasoning_parts.append(str(payload))
         elif kind == "usage" and isinstance(extra, dict):
             usage["input_tokens"] += int(extra.get("input_tokens") or 0)
             usage["output_tokens"] += int(extra.get("output_tokens") or 0)
     if text or calls:
-        return text, calls, usage
+        reasoning_content = "".join(reasoning_parts) or None
+        return text, calls, usage, reasoning_content
 
     # Some OpenAI-compatible providers omit tool calls from their streaming response.
     # A non-streaming retry is safe because no text/tool side effect was emitted.
@@ -279,7 +287,12 @@ async def _model_turn(
         )
     usage["input_tokens"] += int((result.usage or {}).get("input_tokens") or 0)
     usage["output_tokens"] += int((result.usage or {}).get("output_tokens") or 0)
-    return str(result.content or ""), list(result.tool_calls or []), usage
+    return (
+        str(result.content or ""),
+        list(result.tool_calls or []),
+        usage,
+        str(result.reasoning_content) if result.reasoning_content else None,
+    )
 
 
 async def _approval(
@@ -381,7 +394,7 @@ async def stream_run(
 
     for step_index in range(max_steps):
         yield {"type": "phase", "phase": "llm", "index": step_index}
-        text, calls, usage = await _model_turn(
+        text, calls, usage, reasoning_content = await _model_turn(
             state=state,
             prepared=prepared,
             deps=deps,
@@ -405,11 +418,10 @@ async def stream_run(
                 raise RuntimeError("模型请求了本轮未授权的工具，已拒绝执行")
 
         if authorized_calls:
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": text,
-                    "tool_calls": [
+            assistant_tool_turn = {
+                "role": "assistant",
+                "content": text,
+                "tool_calls": [
                         {
                             "id": str(call.get("id") or f"native-{step_index}-{index}"),
                             "type": "function",
@@ -420,8 +432,10 @@ async def stream_run(
                         }
                         for index, call in enumerate(authorized_calls)
                     ],
-                }
-            )
+            }
+            if reasoning_content:
+                assistant_tool_turn["reasoning_content"] = reasoning_content
+            messages.append(assistant_tool_turn)
             for index, original in enumerate(authorized_calls):
                 call = dict(original)
                 call["id"] = str(call.get("id") or f"native-{step_index}-{index}")

@@ -115,6 +115,77 @@ async def test_native_core_executes_authorized_tool_and_preserves_event_contract
 
 
 @pytest.mark.asyncio
+async def test_native_core_passes_reasoning_content_back_with_tool_call(monkeypatch):
+    """MiMo thinking-mode tool turns require verbatim reasoning pass-through."""
+
+    provider_messages: list[list[dict]] = []
+    turns = [
+        [
+            ("reasoning_content", "先定位并调用报表工具。", None),
+            ("tool_calls", [{"id": "c1", "name": "report_create", "arguments": '{"rows":[]}'}], None),
+        ],
+        [("text", "文件已生成。", None)],
+    ]
+    cursor = {"value": 0}
+
+    def stream_chat(*_args, **kwargs):
+        messages = kwargs.get("messages") or (_args[3] if len(_args) > 3 else [])
+        provider_messages.append([dict(item) for item in messages])
+        index = cursor["value"]
+        cursor["value"] += 1
+
+        async def events():
+            for event in turns[index]:
+                yield event
+
+        return events()
+
+    async def execute(_state, call, _registry):
+        payload = json.dumps({"status": "completed", "data": {"rows": []}}, ensure_ascii=False)
+        return {"role": "tool", "tool_call_id": call["id"], "content": payload}, payload, True
+
+    monkeypatch.setattr(native.model_gateway, "stream_chat", stream_chat)
+    monkeypatch.setattr(native, "_execute_tool_call", execute)
+
+    events = [
+        event
+        async for event in native.stream_run(
+            _request(), state=_state(), prepared=_prepared(), deps={"db": object()}
+        )
+    ]
+
+    assert len(provider_messages) == 2, events
+    assistant_turn = provider_messages[1][-2]
+    assert assistant_turn["role"] == "assistant"
+    assert assistant_turn["reasoning_content"] == "先定位并调用报表工具。"
+    assert assistant_turn["tool_calls"][0]["id"] == "c1"
+    assert next(item for item in events if item["type"] == "done")["text"] == "文件已生成。"
+
+
+def test_model_messages_preserves_reasoning_only_as_provider_metadata():
+    messages = native._model_messages(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "完整思考续传",
+                "tool_calls": [],
+                "platform_annotation": "不得发送",
+            }
+        ]
+    )
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "完整思考续传",
+            "tool_calls": [],
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_native_core_reuses_duplicate_side_effect_in_one_model_turn(monkeypatch):
     monkeypatch.setattr(
         native.model_gateway,

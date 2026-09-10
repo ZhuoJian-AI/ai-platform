@@ -471,6 +471,20 @@ async def stream_understand_audio(
         )
 
 
+def speech_capability(
+    *,
+    design_prompt: str | None = None,
+    clone_audio: bytes | None = None,
+) -> str:
+    """Map the stable speech tool mode to the administrator-routed capability."""
+
+    if clone_audio is not None:
+        return "voice_clone"
+    if design_prompt:
+        return "voice_design"
+    return "text_to_speech"
+
+
 async def _synthesize_audio_unmetered(
     db: AsyncSession,
     org_id: UUID,
@@ -486,7 +500,7 @@ async def _synthesize_audio_unmetered(
     model_alias: str = "default",
     dept_id: str | UUID | None = None,
 ) -> dict[str, Any]:
-    capability = "voice_clone" if clone_audio is not None else "voice_design" if design_prompt else "text_to_speech"
+    capability = speech_capability(design_prompt=design_prompt, clone_audio=clone_audio)
     resolved = await resolve_deployment(
         db,
         org_id,
@@ -545,6 +559,7 @@ async def _synthesize_audio_unmetered(
     return {
         "audio": raw,
         "format": audio_format,
+        "capability": capability,
         "usage": usage,
         "deployment_id": str(deployment.id),
         "model": deployment.model_id,
@@ -568,11 +583,12 @@ async def synthesize_audio(
     dept_id: str | UUID | None = None,
     request_id: str | None = None,
 ) -> dict[str, Any]:
+    capability = speech_capability(design_prompt=design_prompt, clone_audio=clone_audio)
     reservation = await _reserve_gateway_quota(
         db,
         org_id,
         payload={
-            "capability": "text_to_speech",
+            "capability": capability,
             "text": text,
             "style": style,
             "design_prompt": design_prompt,

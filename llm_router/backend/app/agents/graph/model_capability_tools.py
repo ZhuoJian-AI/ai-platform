@@ -662,6 +662,10 @@ async def _synthesize(
         }
     )
     usage = result.get("usage") or {}
+    routed_capability = result.get("capability") or model_gateway.speech_capability(
+        design_prompt=voice_profile.design_prompt if voice_profile is not None else None,
+        clone_audio=clone_audio,
+    )
     db.add(
         AuditLog(
             request_id=request_id,
@@ -669,7 +673,7 @@ async def _synthesize(
             department_id=principal.department_id,
             event_type="speech_synthesis",
             direction="outbound",
-            model_requested="default:text_to_speech",
+            model_requested=f"default:{routed_capability}",
             model_served=result.get("model"),
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),

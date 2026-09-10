@@ -224,6 +224,8 @@ async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
     assert called["ingest"]["content_type"] == "audio/mpeg"
     assert called["ingest"]["created_by_user_id"] == principal.id
     assert db.added
+    audit = next(item for item in db.added if hasattr(item, "model_requested"))
+    assert audit.model_requested == "default:text_to_speech"
 
 
 @pytest.mark.asyncio
