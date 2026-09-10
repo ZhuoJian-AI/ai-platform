@@ -860,6 +860,28 @@ const browser = await chromium.launch({
 const desktopViewport = { width: 1920, height: 1080 };
 const adminContext = await browser.newContext({ viewport: desktopViewport });
 const employeeContext = await browser.newContext({ acceptDownloads: true, viewport: desktopViewport });
+// Optional pre-deployment frontend verification. API, login, model and storage
+// requests stay live; only this browser's static application assets are local.
+if (process.env.E2E_LOCAL_FRONTEND === '1') {
+  const distRoot = fs.realpathSync(path.resolve('dist'));
+  assert.ok(fs.existsSync(path.join(distRoot, 'index.html')), '先构建本地前端');
+  for (const context of [adminContext, employeeContext]) {
+    await context.route(`${baseUrl.origin}/**`, async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      if (request.method() !== 'GET' || /^\/(api|v1)(\/|$)/.test(pathname)) return route.continue();
+      const candidate = path.resolve(distRoot, `.${decodeURIComponent(pathname)}`);
+      if (candidate !== distRoot && !candidate.startsWith(`${distRoot}${path.sep}`)) return route.abort();
+      const file = fs.existsSync(candidate) && fs.statSync(candidate).isFile()
+        ? fs.realpathSync(candidate)
+        : request.isNavigationRequest() ? path.join(distRoot, 'index.html') : null;
+      if (!file) return route.continue();
+      if (!file.startsWith(`${distRoot}${path.sep}`)) return route.abort();
+      return route.fulfill({ path: file });
+    });
+  }
+  console.log('E2E 模式：本地构建前端＋真实 staging 接口（非已部署前端验收）');
+}
 const adminPage = await adminContext.newPage();
 const employeePage = await employeeContext.newPage();
 const viewTransitions = [];
