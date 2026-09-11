@@ -1956,7 +1956,6 @@ export default function Terminal() {
         loadFileVersionById={terminal.getWsFileVersion}
         fallbackCapabilities={resources?.workspaces.find((item) => item.id === taskConfig.workspace_id)?.capabilities}
         fallbackWorkspaceName={resources?.workspaces.find((item) => item.id === taskConfig.workspace_id)?.name}
-        saveTextFile={terminal.updateWsFile}
         listFileVersions={terminal.listWsFileVersions}
         restoreFileVersion={terminal.restoreWsFileVersion}
         onFileChanged={() => {

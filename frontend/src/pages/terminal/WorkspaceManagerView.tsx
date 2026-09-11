@@ -1041,7 +1041,6 @@ export default function WorkspaceManagerView({
         loadFileVersionById={terminal.getWsFileVersion}
         fallbackCapabilities={selectedWs?.capabilities}
         fallbackWorkspaceName={selectedWs?.name}
-        saveTextFile={terminal.updateWsFile}
         listFileVersions={terminal.listWsFileVersions}
         restoreFileVersion={terminal.restoreWsFileVersion}
         onFileChanged={() => {

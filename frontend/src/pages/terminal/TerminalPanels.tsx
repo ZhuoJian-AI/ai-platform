@@ -88,7 +88,6 @@ export function FilePanel({ workspaceId, workspaceName }: { workspaceId: string 
         loadFileById={terminal.getWsFile}
         loadFileVersionById={terminal.getWsFileVersion}
         fallbackWorkspaceName={workspaceName}
-        saveTextFile={terminal.updateWsFile}
         listFileVersions={terminal.listWsFileVersions}
         restoreFileVersion={terminal.restoreWsFileVersion}
         onFileChanged={() => {

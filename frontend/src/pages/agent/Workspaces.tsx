@@ -981,7 +981,6 @@ export default function Workspaces() {
         loadFileVersionById={workspaces.getFileVersion}
         fallbackCapabilities={{ read: true, create: true, update: true, delete: true }}
         fallbackWorkspaceName={fileModalWs?.name}
-        saveTextFile={(fileId, data) => workspaces.updateFile(fileId, data)}
         onReparse={async (fileId) => {
           await workspaces.reparseFile(fileId);
           await qc.invalidateQueries({ queryKey: ['workspace-files'] });
