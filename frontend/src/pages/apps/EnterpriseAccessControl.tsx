@@ -35,6 +35,16 @@ const DEPARTMENT_UPLOAD_PREFIX = 'workspace.department.upload:';
 const ORGANIZATION_MANAGE_PERMISSION = 'workspace.organization.manage';
 const ORGANIZATION_READ_PERMISSION = 'workspace.organization.read';
 
+const PLATFORM_PERMISSIONS = [
+  { label: '语音输入 / 音频转文字（ASR）', value: 'multimodal.audio.transcribe' },
+  { label: '朗读回复 / 文字转语音（TTS）', value: 'multimodal.speech.use' },
+  { label: '音频理解', value: 'multimodal.audio.understand' },
+  { label: '设计音色', value: 'multimodal.voice.design' },
+  { label: '克隆音色', value: 'multimodal.voice.clone' },
+  { label: '管理音色', value: 'multimodal.voice.manage' },
+];
+const isPlatformPermission = (code: string) => PLATFORM_PERMISSIONS.some(item => item.value === code);
+
 const OPERATION_COLUMNS: Array<{ key: EnterpriseApplicationOperation; label: string }> = [
   { key: 'query', label: '查询' },
   { key: 'create', label: '新增' },
@@ -131,7 +141,9 @@ export default function EnterpriseAccessControl() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewUserId, setPreviewUserId] = useState<string>();
   const [roleModalOpen, setRoleModalOpen] = useState(false);
-  const [roleForm] = Form.useForm<{ name: string; code: string; description?: string }>();
+  const [editingRole, setEditingRole] = useState(false);
+  const [platformPermissions, setPlatformPermissions] = useState<string[]>([]);
+  const [roleForm] = Form.useForm<{ name: string; code: string; description?: string; is_active: boolean }>();
   const { nodeMap } = useOrgTree();
 
   const { data: orgs = [] } = useQuery({ queryKey: ['orgs'], queryFn: organizations.list });
@@ -183,6 +195,7 @@ export default function EnterpriseAccessControl() {
       setOrganizationWorkspaceManage(false);
       setOrganizationWorkspaceRead(false);
       setLegacyVisible({});
+      setPlatformPermissions([]);
       return;
     }
     const nextDrafts: DraftByApplication = {};
@@ -196,6 +209,7 @@ export default function EnterpriseAccessControl() {
     });
     setDrafts(nextDrafts);
     const permissions = new Set(role.permission_codes);
+    setPlatformPermissions(PLATFORM_PERMISSIONS.filter(item => permissions.has('*') || permissions.has(item.value)).map(item => item.value));
     setOrganizationWorkspaceManage(permissions.has('*') || permissions.has(ORGANIZATION_MANAGE_PERMISSION));
     setOrganizationWorkspaceRead(permissions.has('*') || permissions.has(ORGANIZATION_READ_PERMISSION) || permissions.has(ORGANIZATION_MANAGE_PERMISSION));
     setDepartmentDraft(Object.fromEntries(organizationDepartments.map(department => [department.id, {
@@ -217,8 +231,11 @@ export default function EnterpriseAccessControl() {
   }, [searchParams, userList]);
 
   const createRole = useMutation({
-    mutationFn: async (values: { name: string; code: string; description?: string }) => {
+    mutationFn: async (values: { name: string; code: string; description?: string; is_active: boolean }) => {
       if (!orgId) throw new Error('请先选择企业');
+      if (editingRole && role) return roles.update(role.id, {
+        name: values.name, description: values.description, is_active: values.is_active,
+      });
       return roles.create(orgId, { ...values, is_active: true });
     },
     onSuccess: created => {
@@ -231,7 +248,18 @@ export default function EnterpriseAccessControl() {
       qc.invalidateQueries({ queryKey: ['roles', orgId] });
       setRoleModalOpen(false);
       roleForm.resetFields();
-      message.success('角色已创建，现在可以直接配置页面权限');
+      message.success(editingRole ? '角色已更新' : '角色已创建，现在可以配置权限');
+    },
+    onError: error => message.error(errorText(error)),
+  });
+
+  const deleteRole = useMutation({
+    mutationFn: (id: string) => roles.delete(id),
+    onSuccess: () => {
+      setSelectedRoleId(undefined);
+      qc.invalidateQueries({ queryKey: ['roles', orgId] });
+      qc.invalidateQueries({ queryKey: ['users', orgId] });
+      message.success('角色已删除');
     },
     onError: error => message.error(errorText(error)),
   });
@@ -244,6 +272,7 @@ export default function EnterpriseAccessControl() {
         && !code.startsWith(DEPARTMENT_UPLOAD_PREFIX)
         && code !== ORGANIZATION_MANAGE_PERMISSION
         && code !== ORGANIZATION_READ_PERMISSION
+        && !isPlatformPermission(code)
       ));
       const workspacePermissionCodes = inheritsAllWorkspaceAccess ? [] : Object.entries(departmentDraft).flatMap(([departmentId, access]) => {
         if (access.upload) return [`${DEPARTMENT_READ_PREFIX}${departmentId}`, `${DEPARTMENT_UPLOAD_PREFIX}${departmentId}`];
@@ -291,6 +320,7 @@ export default function EnterpriseAccessControl() {
         return [enterpriseApplications.replaceGrants(application.id, retained)];
       }), roles.replacePermissions(role.id, Array.from(new Set([
         ...retainedPermissionCodes, ...workspacePermissionCodes,
+        ...(inheritsAllWorkspaceAccess ? role.permission_codes.filter(isPlatformPermission) : platformPermissions),
       ])))]);
     },
     onMutate: () => {
@@ -300,6 +330,8 @@ export default function EnterpriseAccessControl() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['enterprise-applications', orgId] });
       qc.invalidateQueries({ queryKey: ['roles', orgId] });
+      qc.invalidateQueries({ queryKey: ['users', orgId] });
+      qc.invalidateQueries({ queryKey: ['user-effective-access'] });
       const departmentCount = inheritsAllWorkspaceAccess
         ? organizationDepartments.length
         : Object.values(departmentDraft).filter(access => access.read || access.upload).length;
@@ -573,11 +605,20 @@ export default function EnterpriseAccessControl() {
           <Select
             showSearch optionFilterProp="label" value={role?.id}
             getPopupContainer={trigger => trigger.parentElement ?? document.body}
-            options={roleList.filter(item => item.is_active).map(item => ({ value: item.id, label: item.name }))}
+            options={roleList.map(item => ({ value: item.id, label: `${item.name}${item.is_active ? '' : '（停用）'}` }))}
             onChange={setSelectedRoleId} placeholder="选择角色"
           />
         </div>
-        <Button icon={<PlusOutlined />} onClick={() => { roleForm.resetFields(); setRoleModalOpen(true); }}>新建角色</Button>
+        <Button icon={<PlusOutlined />} onClick={() => { setEditingRole(false); roleForm.resetFields(); roleForm.setFieldValue('is_active', true); setRoleModalOpen(true); }}>新建角色</Button>
+        <Button disabled={!role || isRuntimeDeveloper} onClick={() => {
+          if (!role) return;
+          setEditingRole(true); roleForm.setFieldsValue({ name: role.name, code: role.code,
+            description: role.description ?? undefined, is_active: role.is_active }); setRoleModalOpen(true);
+        }}>编辑角色</Button>
+        <Button danger disabled={!role || role.is_builtin || isRuntimeDeveloper} onClick={() => {
+          if (role) Modal.confirm({ title: `删除角色“${role.name}”？`, content: '仍被员工使用的角色不能删除。',
+            okText: '删除', cancelText: '取消', onOk: () => deleteRole.mutateAsync(role.id) });
+        }}>删除角色</Button>
         <div className="toolbar-summary">
           <span>当前草稿</span>
           <strong>{grantedDepartmentCount} 个部门{organizationWorkspaceManage ? ' + 企业公共空间管理' : organizationWorkspaceRead ? ' + 企业公共空间只读' : ''}</strong>
@@ -590,6 +631,19 @@ export default function EnterpriseAccessControl() {
         <Tabs
           defaultActiveKey="departments"
           items={[
+            {
+              key: 'platform', label: '语音与平台能力',
+              children: <div className="permission-tab-pane">
+                <Alert type="info" showIcon message="员工自动继承所绑定角色的能力，无需逐个员工授权"
+                  description="授权仅决定能否使用；ASR/TTS 还需要管理员配置可用模型，朗读需要可用标准音色。设计、克隆和管理音色属于独立的高级权限。" />
+                {inheritsAllWorkspaceAccess && <Alert type="success" showIcon message="此角色通过 * 拥有全部平台能力，无需重复勾选" />}
+                <Checkbox.Group style={{ display: 'grid', gap: 16, padding: 24 }}
+                  options={PLATFORM_PERMISSIONS} value={platformPermissions}
+                  disabled={!role || isRuntimeDeveloper || inheritsAllWorkspaceAccess || save.isPending}
+                  onChange={values => setPlatformPermissions(values as string[])} />
+                <div>修改后点击本页“保存权限”；不改变其他角色、工作空间及业务页面授权。</div>
+              </div>,
+            },
             {
               key: 'departments',
               label: '工作空间',
@@ -818,21 +872,23 @@ export default function EnterpriseAccessControl() {
     </div>
 
     <Modal
-      open={roleModalOpen} title="新建角色" onCancel={() => setRoleModalOpen(false)}
+      open={roleModalOpen} title={editingRole ? '编辑角色' : '新建角色'} onCancel={() => setRoleModalOpen(false)}
       onOk={() => roleForm.submit()} confirmLoading={createRole.isPending} destroyOnClose
     >
       <Form form={roleForm} layout="vertical" onFinish={values => createRole.mutate(values)}>
         <Form.Item name="name" label="角色名称" rules={[{ required: true, message: '请输入角色名称' }]}>
           <Input placeholder="例如：质量审批员" onChange={event => {
-            if (!roleForm.isFieldTouched('code')) roleForm.setFieldValue('code', roleCode(event.target.value));
+            if (!editingRole && !roleForm.isFieldTouched('code')) roleForm.setFieldValue('code', roleCode(event.target.value));
           }} />
         </Form.Item>
         <Form.Item name="code" label="角色标识" rules={[
           { required: true, message: '请输入角色标识' },
           { pattern: /^[a-z0-9_.:-]+$/, message: '仅支持小写字母、数字和 _ . : -' },
-        ]}><Input placeholder="quality_approver" /></Form.Item>
+        ]}><Input disabled={editingRole} placeholder="quality_approver" /></Form.Item>
         <Form.Item name="description" label="说明"><Input.TextArea rows={3} /></Form.Item>
-        <Alert type="info" showIcon message="角色创建后不会自动获得任何企业模块权限" />
+        <Form.Item name="is_active" label="状态"><Select disabled={editingRole && role?.is_builtin}
+          options={[{ value: true, label: '启用' }, { value: false, label: '停用' }]} /></Form.Item>
+        <Alert type="info" showIcon message="新角色默认无权限；已分配给员工的角色不能直接停用或删除" />
       </Form>
     </Modal>
 
