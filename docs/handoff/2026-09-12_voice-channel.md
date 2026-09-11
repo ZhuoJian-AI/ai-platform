@@ -25,3 +25,7 @@ node scripts/test-voice-conversation.mjs 通过：重复启动、播放时不开
 - npm run build 通过；两个控制器测试通过。test-voice-browser.mjs 在 Chrome 使用合成麦克风和替身 ASR/TTS 验证一轮提交、播放结束重开麦、旧轨道释放、退出全释放；不是模型或真人麦克风验收。
 - 最初浏览器测试因 Vite 带时间戳模块与替身模块不是同一实例触发真实 401 跳转；修正测试导入路径后通过，没有修改产品鉴权。
 - 尚无真人麦克风与真实子系统语音修改 E2E；这部分不能声称完成。发布记录随后补充。
+
+## 发布阻断
+
+Source e8b7a99c70b3f7dc47fb4ffb293ec48c5021f788 已 push，PR131 已创建。后续 gh 查询/合并连续 EOF，Git fetch TLS EOF，用户浏览器打开 PR 也返回 ERR_CONNECTION_CLOSED；不能确认合并，因此没有构建或更新部署清单。线上仍是 97d60a2 的角色授权版本，未部署本批语音模式。连接恢复后先确认 PR131 的实际状态，再按 Registry-first 发布，不重跑已通过的模型测试。
