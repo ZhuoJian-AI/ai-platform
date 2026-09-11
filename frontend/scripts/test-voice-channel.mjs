@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
+const source = readFileSync(new URL('../src/pages/terminal/voiceChannel.ts', import.meta.url), 'utf8');
+globalThis.window = new EventTarget();
+const module = await import(`data:text/javascript;base64,${Buffer.from(ts.transpile(source, { module: ts.ModuleKind.ESNext })).toString('base64')}`);
+let speech = 0, recording = 0;
+window.addEventListener(module.STOP_SPEECH, () => speech++);
+window.addEventListener(module.STOP_RECORDING, () => recording++);
+module.claimVoiceChannel();
+assert.equal(speech, 1); assert.equal(recording, 1);
+module.claimVoiceChannel();
+assert.equal(speech, 2); assert.equal(recording, 2);
+const terminal = readFileSync(new URL('../src/pages/terminal/Terminal.tsx', import.meta.url), 'utf8');
+assert(terminal.includes("window.addEventListener('pagehide', cancelRecording)"));
+assert(terminal.includes('window.removeEventListener(STOP_RECORDING, cancelRecording)'));
+assert(terminal.includes('recordingGenerationRef.current !== generation'));
+console.log('PASS: shared channel stops recording/playback synchronously; lifecycle guards retained');

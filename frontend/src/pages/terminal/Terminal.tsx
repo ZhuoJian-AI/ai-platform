@@ -4,6 +4,7 @@ import {
   type Dispatch, type FormEvent, type KeyboardEvent, type ReactNode, type SetStateAction,
 } from 'react';
 import { applicationConversationRoute, conversationIdFromRoute } from './assistantConversationRoute';
+import { claimVoiceChannel, STOP_RECORDING } from './voiceChannel';
 import {
   ConfigProvider, Button, Typography, Input, Tag, Drawer, Dropdown, Tabs, Empty, Spin,
   message, Avatar, Popover, Tooltip,
@@ -2599,6 +2600,7 @@ function TaskInputBox(props: {
       message.error('当前浏览器不支持录音');
       return;
     }
+    claimVoiceChannel();
     const generation = ++recordingGenerationRef.current;
     recordingPendingRef.current = true;
     try {
@@ -2677,6 +2679,15 @@ function TaskInputBox(props: {
   }, []);
 
   useEffect(() => () => cancelRecording(), [attachmentScopeKey, effectiveWorkspaceId, cancelRecording]);
+  useEffect(() => {
+    window.addEventListener(STOP_RECORDING, cancelRecording);
+    window.addEventListener('pagehide', cancelRecording);
+    return () => {
+      window.removeEventListener(STOP_RECORDING, cancelRecording);
+      window.removeEventListener('pagehide', cancelRecording);
+      cancelRecording();
+    };
+  }, [cancelRecording]);
 
   const retryAttachment = useCallback(async (item: ComposerAttachment) => {
     if (item.file.size > MAX_ATTACHMENT_BYTES) {
