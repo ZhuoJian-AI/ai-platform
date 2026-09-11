@@ -373,7 +373,9 @@ async def execute_run_inline(db: AsyncSession, job: MultimodalJob) -> Multimodal
     from app.workers import multimodal_worker
 
     job.status = "processing"
-    job.started_at = job.started_at or datetime.now(UTC)
+    job.locked_at = datetime.now(UTC)
+    job.locked_by = "assistant-inline"
+    job.attempts = (job.attempts or 0) + 1
     try:
         with tempfile.TemporaryDirectory(prefix="zhuojian-specialist-") as raw_dir:
             payload = await multimodal_worker._process_specialist(db, job, Path(raw_dir))
@@ -392,6 +394,8 @@ async def execute_run_inline(db: AsyncSession, job: MultimodalJob) -> Multimodal
         job.error_category = category
         job.error_detail = multimodal_worker._specialist_error_zh(category)
     finally:
+        job.locked_at = None
+        job.locked_by = None
         await purge_inputs(job)
         await db.flush()
     return job

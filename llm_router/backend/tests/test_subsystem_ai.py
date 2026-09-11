@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 
 from app.agents.graph import nodes
+from app.models.multimodal import MultimodalJob
 from app.services import platform_tool_registry, subsystem_ai_service
 from app.services.subsystem_integration_service import (
     _normalize_platform_ai_capability,
@@ -80,9 +81,8 @@ async def test_unified_assistant_executes_specialist_into_the_same_tool_loop(mon
 
     monkeypatch.setattr(multimodal_worker, "_process_specialist", process)
     monkeypatch.setattr(subsystem_ai_service, "purge_inputs", purge)
-    job = SimpleNamespace(
+    job = MultimodalJob(
         status="queued",
-        started_at=None,
         finished_at=None,
         result={},
         usage={},
@@ -94,6 +94,30 @@ async def test_unified_assistant_executes_specialist_into_the_same_tool_loop(mon
     assert job.status == "succeeded"
     assert job.result["draft"] == {"opinion": "袖长增加 2cm"}
     assert job.usage == {"input_tokens": 12, "output_tokens": 8}
+    assert job.attempts == 1
+    assert job.locked_at is None
+    assert job.locked_by is None
+    assert job.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_inline_specialist_failure_releases_lock_and_purges_inputs(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    process = AsyncMock(side_effect=ValueError("invalid draft"))
+    purge = AsyncMock()
+    monkeypatch.setattr(multimodal_worker, "_process_specialist", process)
+    monkeypatch.setattr(subsystem_ai_service, "purge_inputs", purge)
+    job = MultimodalJob(status="queued", result={}, usage={})
+    db = SimpleNamespace(flush=AsyncMock())
+    await subsystem_ai_service.execute_run_inline(db, job)
+    assert job.status == "failed"
+    assert job.error_category == "invalid_structured_result"
+    assert job.finished_at is not None
+    assert job.locked_at is None and job.locked_by is None
+    purge.assert_awaited_once_with(job)
+    await subsystem_ai_service.execute_run_inline(db, job)
+    assert process.await_count == 1, "A terminal job must not execute twice"
 
 
 @pytest.mark.asyncio
