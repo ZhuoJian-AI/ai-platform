@@ -2252,6 +2252,10 @@ function TaskInputBox(props: {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordingStreamRef = useRef<MediaStream | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
+  const recordingGenerationRef = useRef(0);
+  const recordingPendingRef = useRef(false);
+  const latestComposerValueRef = useRef(value);
+  latestComposerValueRef.current = value;
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -2535,7 +2539,9 @@ function TaskInputBox(props: {
     input.click();
   }, [queueFiles]);
 
-  const processRecording = useCallback(async (blob: Blob) => {
+  const processRecording = useCallback(async (blob: Blob, generation: number) => {
+    const active = () => recordingGenerationRef.current === generation;
+    if (!active()) return;
     if (!effectiveWorkspaceId) throw new Error('请先选择工作空间');
     setRecordingState('processing');
     const extension = blob.type.includes('mp4') ? 'm4a' : 'webm';
@@ -2546,14 +2552,20 @@ function TaskInputBox(props: {
       file,
       attachmentPath(attachmentScopeKey, filename),
     );
+    if (!active()) return;
     refreshWorkspaceFiles(effectiveWorkspaceId);
     const created = await multimodal.transcribe(uploaded.id);
     for (let attempt = 0; attempt < 150; attempt += 1) {
+      if (!active()) return;
       const job = await multimodal.job(created.job_id);
+      if (!active()) return;
       if (job.status === 'succeeded') {
         const text = String(job.result.text || '').trim();
         if (!text) throw new Error('录音已识别，但没有可用文字');
-        setValue(value.trim() ? `${value.trim()}\n${text}` : text);
+        const current = latestComposerValueRef.current;
+        const next = current ? `${current}${current.endsWith('\n') ? '' : '\n'}${text}` : text;
+        latestComposerValueRef.current = next;
+        setValue(next);
         message.success('录音已转写，请确认或编辑后发送');
         setRecordingState('idle');
         return;
@@ -2564,9 +2576,10 @@ function TaskInputBox(props: {
       await new Promise((resolve) => window.setTimeout(resolve, 2000));
     }
     throw new Error('录音转写等待超过 5 分钟，可稍后重试');
-  }, [attachmentScopeKey, effectiveWorkspaceId, refreshWorkspaceFiles, setValue, value]);
+  }, [attachmentScopeKey, effectiveWorkspaceId, refreshWorkspaceFiles, setValue]);
 
   const startRecording = useCallback(async () => {
+    if (recordingPendingRef.current || recorderRef.current) return;
     if (!effectiveWorkspaceId) {
       message.warning('请先选择工作空间，再开始录音');
       onOpenConfig();
@@ -2576,8 +2589,15 @@ function TaskInputBox(props: {
       message.error('当前浏览器不支持录音');
       return;
     }
+    const generation = ++recordingGenerationRef.current;
+    recordingPendingRef.current = true;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (recordingGenerationRef.current !== generation) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      recordingStreamRef.current = stream;
       const preferred = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
         .find((type) => MediaRecorder.isTypeSupported(type));
       const recorder = new MediaRecorder(stream, preferred ? { mimeType: preferred } : undefined);
@@ -2593,7 +2613,8 @@ function TaskInputBox(props: {
         recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
         recordingStreamRef.current = null;
         recorderRef.current = null;
-        void processRecording(blob).catch((error) => {
+        void processRecording(blob, generation).catch((error) => {
+          if (recordingGenerationRef.current !== generation) return;
           setRecordingState('idle');
           message.error((error as Error).message || '录音处理失败');
         });
@@ -2601,11 +2622,19 @@ function TaskInputBox(props: {
       recorder.start(1000);
       setRecordingState('recording');
     } catch (error) {
+      if (recordingGenerationRef.current !== generation) return;
+      recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+      recordingStreamRef.current = null;
+      recorderRef.current = null;
       message.error((error as Error).name === 'NotAllowedError' ? '麦克风权限被拒绝' : '无法启动录音');
+    } finally {
+      if (recordingGenerationRef.current === generation) recordingPendingRef.current = false;
     }
   }, [effectiveWorkspaceId, onOpenConfig, processRecording]);
 
   const cancelRecording = useCallback(() => {
+    recordingGenerationRef.current += 1;
+    recordingPendingRef.current = false;
     const recorder = recorderRef.current;
     if (recorder && recorder.state !== 'inactive') {
       recorder.onstop = null;
@@ -2617,6 +2646,8 @@ function TaskInputBox(props: {
     recordingChunksRef.current = [];
     setRecordingState('idle');
   }, []);
+
+  useEffect(() => () => cancelRecording(), [attachmentScopeKey, effectiveWorkspaceId, cancelRecording]);
 
   const retryAttachment = useCallback(async (item: ComposerAttachment) => {
     if (item.file.size > MAX_ATTACHMENT_BYTES) {
@@ -2857,7 +2888,10 @@ function TaskInputBox(props: {
                 <AudioOutlined /> 录音
               </button>
             ) : recordingState === 'processing' ? (
-              <span style={chipBtnStyle}><Spin size="small" /> 正在转写</span>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <span style={chipBtnStyle}><Spin size="small" /> 正在转写</span>
+                <button type="button" style={chipBtnStyle} onClick={cancelRecording}>取消回填</button>
+              </span>
             ) : (
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                 <button
