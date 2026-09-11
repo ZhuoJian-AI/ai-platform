@@ -6,7 +6,7 @@
 - 分支：`fix/assistant-voice-reliability-20260911`。
 - 独立工作树：`D:/Agent_Project/ai-platform-voice-reliability-20260911`。
 - 任务认领：`44f4132`。未覆盖其他工作树或修改外部 Skill、业务子系统。
-- 本批未合并、未部署，无新镜像 digest，不代表整个计划完成。
+- 本批已合并并部署，见下方最终发布记录；不代表整个计划完成。
 
 ## 已修改
 
@@ -27,7 +27,7 @@ python -m pytest --noconftest tests/test_voice_reliability_boundaries.py tests/t
 
 受影响 Python 文件 Ruff 检查通过。覆盖推理泄露、空答案、缺失身份、个人所有权、混合工具发现和已有原生主脑循环。
 
-## 未通过验收门禁的事项
+## 初次验收遇到的问题（已由后续记录补齐）
 
 - `--noconftest` 仅用于纯测试，不是数据库集成验收。
 - 混合测试集中的 `test_workspace_permission_scope.py` 有 3 项、`test_agent_file_references.py` 有 12 项因缺少数据库 fixture 未运行；不能计为通过。
@@ -35,6 +35,19 @@ python -m pytest --noconftest tests/test_voice_reliability_boundaries.py tests/t
 - 候选分支未做真实管理员、员工浏览器回归，未构建、合并或部署。
 
 ## 后续工作
+
+### 最终发布记录
+
+- Source：`9b00713cb536cd821572522dc584b8b8f116830d`（PR #116）。
+- Manifest：`110f2781aceeecebfa95727369fb1e2511b06ecb`（PR #117）。
+- 后端 digest：`sha256:0904ede643ad72c47b5da69ae2248e56b563ca57cad5227bd5a2ab5868e0a289`。
+- Coolify：`jwbpxybciypgdidyzu2ebrlr`；部署 `voicefix7bf6193b6ed77898` 已 finished，无 Changes pending。
+- 域名：`https://ai-platform.staging.zhuojianai.com`。9 个服务全部 healthy，4 个使用后端镜像的服务 digest 一致，调用端/服务端共享令牌一致（未输出原文）。
+- 上线后的全新浏览器隔离上下文：root 登录及工作空间目录通过；zhangsan 登录及个人空间文件视图通过；未出现 5xx。未伪造 Token/Cookie，未新增或删除业务文件、未修改角色。
+- 无数据库迁移、无前端产物变化、无 OSS 链路变更；因此复用既有存储验收，不重复全量测试。
+- 临时 PostgreSQL、额外测试容器和测试网络已删除；仅丢弃可重建的测试数据。未清理线上卷、其他项目、旧回切镜像，未初始化 `/dev/vdb`。
+- 部署规则版本：`c948cd2`。Compose 入口、真实环境变量预检 PASS。
+- 录音回填、按需朗读、沉浸式语音，以及未知写入核实/历史 401 调查仍待后续实施。
 
 ### 后续验收更新
 
