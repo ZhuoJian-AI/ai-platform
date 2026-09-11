@@ -22,4 +22,18 @@
 
 发布前确认Coolify目标jwbpxybciypgdidyzu2ebrlr对应ZhuoJian-AI/ai-platform main，自动部署关闭，当前完成部署q3vogb5vy63j2vpgj5vbdocc / df2301c，无需改变其他项目。
 
-镜像、最终部署及健康结果待本次发布完成后补充。发布期间不清理旧镜像或用户文件。
+源码 PR #82 已合并，source SHA：388fafdc590ca7c3314ca5bdfa091025488bb2f9。
+
+Registry 已确认新镜像：
+
+- backend（含 parser/lifecycle/multimodal worker）：sha256:1059367699bd1ba2f0c5e5f88c6d8fd7967ecc8868758e629d41c434825bfa77
+- frontend：sha256:c61b5b62bd2e005a1563804ccd49276e3c7323a760f36416be4ef3fbbc3e4281
+
+回切镜像（保留，不清理）：
+
+- backend：sha256:039960583b79b409e04960623e1ff91e5835185120dd5fe1d18c23c0dbd1ee10
+- frontend：sha256:280874e48250ce9a43d0767a2cf6fecae8675058bd51ae1eac756d2cc1e1a01d
+
+前端生产构建成功；后端复用既有依赖镜像，清空 /app 后复制此源码；依赖与迁移无变化。真实环境变量校验 PASS，backend/executor 令牌一致，无待生效配置。存储仍为 Storage Gateway / OSS，两个 STORAGE 变量存在；本次不修改存储链路、上传限制、CORS 或用户文件，不重复 OSS 上传验收。
+
+最终部署及健康结果待发布完成后补充。
