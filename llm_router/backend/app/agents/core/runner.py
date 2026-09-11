@@ -15,6 +15,7 @@ from starlette.responses import Response, StreamingResponse
 
 from app.agents.core import approval_registry
 from app.agents.core import native as native_core
+from app.agents.core.analysis_evidence import FileAnalysisEvidence
 from app.agents.core.approval_registry import AssistantRunContext
 from app.agents.graph import run_registry
 from app.agents.graph.context import bind_runtime
@@ -594,6 +595,7 @@ async def _consume_native(
     text = ""
     successful_tools = 0
     successful_specialist_analyses = 0
+    file_analysis = FileAnalysisEvidence()
     failed_tools: list[tuple[str, str]] = []
     enterprise_action_calls = 0
     enterprise_query_calls = 0
@@ -631,8 +633,12 @@ async def _consume_native(
             name = str(event.get("name") or "tool")
             successful_tools += int(ok)
             call_id = str(event.get("id") or "")
-            entry = (state.get("_assistant_tool_registry") or {}).get(name) or {}
+            entry = tool_registry.get(name) or {}
             entry_kind = entry.get("kind")
+            file_analysis.observe(
+                name=name, kind=entry_kind or "", arguments=tool_arguments.get(call_id, "{}"),
+                content=str(event.get("content") or ""), ok=ok,
+            )
             published_event = dict(event)
             published_event["tool_kind"] = entry_kind or ""
             try:
@@ -745,7 +751,9 @@ async def _consume_native(
     # Generic nouns such as "记录" must not arm a second query requirement and turn a
     # completed write into a failed run merely because the model did not query again.
     live_business_data_required = _requests_current_business_data(state) and not mutation_required
-    verified_analysis_only = successful_specialist_analyses > 0 and enterprise_action_calls == 0
+    verified_analysis_only = file_analysis.verified or (
+        not file_analysis.required and successful_specialist_analyses > 0 and enterprise_action_calls == 0
+    )
     live_business_data_unverified = (
         live_business_data_required
         and successful_enterprise_queries == 0
@@ -783,6 +791,13 @@ async def _consume_native(
                     "enterprise_mutation_calls": enterprise_mutation_calls,
                 }
             )
+        _publish(handle, staged, {"type": "text", "delta": text})
+    elif file_analysis.required and not file_analysis.verified:
+        if text:
+            _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
+        text = "本轮文件分析未取得有效结果，无法确认文件中的内容。其他业务查询结果不能替代该文件的分析结果。"
+        state["error"] = "File analysis was not verified by an input-bound tool result"
+        state.setdefault("steps", []).append({"step": "file_analysis_unverified"})
         _publish(handle, staged, {"type": "text", "delta": text})
     elif live_business_data_unverified:
         if text:
