@@ -2142,7 +2142,7 @@ export const terminal = {
     );
   },
   invokeApplicationAction: (
-    id: string, actionKey: string, data: { module_key: string; params: Record<string, unknown>; request_id?: string },
+    id: string, actionKey: string, data: { module_key: string; page_key?: string; params: Record<string, unknown>; request_id?: string },
   ) => userRequest<EnterpriseApplicationActionResult>(
     `/api/v1/terminal/applications/${id}/actions/${encodeURIComponent(actionKey)}`,
     { method: 'POST', body: JSON.stringify(data) },

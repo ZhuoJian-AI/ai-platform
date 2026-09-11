@@ -48,7 +48,11 @@ def _platform_tools(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": str(spec.get("name") or ""),
-                "description": str(spec.get("description") or ""),
+                "description": str(spec.get("description") or "") + (
+                    " 调用本工具会先由平台显示确认卡片，用户确认前不会执行写入。"
+                    "参数明确后请调用工具发起确认，不要用文字按钮代替确认卡片。"
+                    if spec.get("approval") == "ask" else ""
+                ),
                 "parameters": spec.get("input_schema") or {"type": "object", "properties": {}},
                 "strict": True,
             },

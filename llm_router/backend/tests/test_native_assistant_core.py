@@ -13,6 +13,18 @@ from app.services.assistant_delivery_policy import explicit_output_formats
 ORG_ID = "00000000-0000-0000-0000-000000000001"
 
 
+def test_confirmation_tool_explains_runtime_card_without_weakening_schema():
+    schema = {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}
+    specs = [
+        {"name": "supplier_create", "description": "新增厂商", "input_schema": schema, "approval": "ask"},
+        {"name": "supplier_query", "description": "查询厂商", "input_schema": schema},
+    ]
+    tools = native._platform_tools(specs)
+    assert "用户确认前不会执行写入" in tools[0]["function"]["description"]
+    assert tools[0]["function"]["parameters"] == schema
+    assert tools[1]["function"]["description"] == "查询厂商"
+
+
 @pytest.mark.parametrize(("request_text", "formats"), [
     ("生成一份MP3音频", {"mp3"}),
     ("请把原来的 XLSX 转成 CSV", {"csv"}),
