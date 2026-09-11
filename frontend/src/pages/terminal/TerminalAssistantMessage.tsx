@@ -556,7 +556,7 @@ function InlineArtifactCard({
             </div>
           </div>
           <Tooltip title="打开完整预览"><Button type="text" size="small" icon={<EyeOutlined />} onClick={openPreview} /></Tooltip>
-          <Tooltip title="下载原文件"><Button type="text" size="small" icon={<DownloadOutlined />} onClick={() => void download()} /></Tooltip>
+          <Tooltip title="下载原文件"><Button aria-label="下载原文件" type="text" size="small" icon={<DownloadOutlined />} onClick={() => void download()} /></Tooltip>
         </div>
       </article>
     );
@@ -574,7 +574,7 @@ function InlineArtifactCard({
         </div>
       </div>
       <Button size="small" icon={<EyeOutlined />} onClick={openPreview}>预览</Button>
-      <Tooltip title="下载原文件"><Button type="text" size="small" icon={<DownloadOutlined />} onClick={() => void download()} /></Tooltip>
+      <Tooltip title="下载原文件"><Button aria-label="下载原文件" type="text" size="small" icon={<DownloadOutlined />} onClick={() => void download()} /></Tooltip>
     </article>
   );
 }

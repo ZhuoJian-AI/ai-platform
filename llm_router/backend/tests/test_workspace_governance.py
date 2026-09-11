@@ -107,13 +107,17 @@ async def test_member_capabilities_and_cross_tenant_are_consistent(db_session):
         "manage": True, "publish": False,
     }
     assert await workspace_permission_service.capabilities(db_session, department_ws, cu) == {
-        "read": True, "create": False, "update": False, "delete": False,
+        "read": False, "create": False, "update": False, "delete": False,
         "manage": False, "publish": False,
     }
     assert await workspace_permission_service.capabilities(db_session, organization_ws, cu) == {
-        "read": True, "create": False, "update": False, "delete": False,
+        "read": False, "create": False, "update": False, "delete": False,
         "manage": False, "publish": False,
     }
+    for shared in (department_ws, organization_ws):
+        with pytest.raises(HTTPException) as denied:
+            await workspace_permission_service.assert_can_read(db_session, shared, cu)
+        assert denied.value.status_code == 403
     cu.permission_codes = (workspace_permission_service.ORGANIZATION_MANAGE_PERMISSION,)
     assert await workspace_permission_service.capabilities(db_session, organization_ws, cu) == {
         "read": True, "create": True, "update": True, "delete": True,

@@ -41,7 +41,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     if (window.location.pathname.startsWith('/f/')) {
       sessionStorage.setItem('zhuojian_return_to', `${window.location.pathname}${window.location.search}`);
     }
-    throw new ApiError(401, 'Session expired');
+    throw new ApiError(401, '登录已失效，请重新登录');
   }
 
   if (!resp.ok) {
@@ -306,7 +306,7 @@ export const organizations = {
       xhr.onload = () => {
         if (xhr.status === 401) {
           handleAdminXhrUnauthorized(xhr.status);
-          reject(new ApiError(401, 'Session expired'));
+          reject(new ApiError(401, '登录已失效，请重新登录'));
           return;
         }
         if (xhr.status < 200 || xhr.status >= 300) {
@@ -1210,7 +1210,7 @@ function userRequest<T>(path: string, options?: RequestInit): Promise<T> {
         try { storedSlug = stored ? JSON.parse(stored)?.organization_slug ?? null : null; } catch { storedSlug = null; }
         const slug = m ? m[1] : storedSlug;
         window.location.href = slug ? `/${slug}/terminal/login` : '/login';
-        throw new ApiError(401, 'Session expired');
+        throw new ApiError(401, '登录已失效，请重新登录');
       }
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));

@@ -1015,19 +1015,23 @@ async def run_general_agent(
     state["user_message_id"] = str(user_message.id)
     staged: list[dict] = []
     run_token = ""
+
+    def writer(raw: str) -> None:
+        _publish(None, staged, json.loads(raw))
+
     try:
-        prepared, run_token = await _prepare(state, deps, lambda raw: staged.append(json.loads(raw)), staged=staged)
+        prepared, run_token = await _prepare(state, deps, writer, staged=staged)
         try:
             await _admitted_run(state, deps, prepared, run_token, None, staged, str(user.id))
-            await _finish(state, deps)
+            await _finish(state, deps, writer)
         except Exception as exc:  # noqa: BLE001
             logger.warning("assistant_terminal_run_failed", error=str(exc), exc_info=True)
-            await _finish_failed_run(state, deps, exc)
+            await _finish_failed_run(state, deps, exc, writer)
     finally:
         if run_token:
             approval_registry.revoke(run_token)
     status = "failed" if state.get("error") else "completed"
-    return {
+    result = {
         "session_id": state["session_id"],
         "assistant": state.get("assistant_final", ""),
         "steps": state.get("steps", []),
@@ -1047,6 +1051,12 @@ async def run_general_agent(
         "artifacts": state.get("artifacts") or [],
         "navigationSuggestion": state.get("business_navigation_suggestion"),
     }
+    _publish(None, staged, {"type": "done", "usage": state.get("usage") or {}})
+    await persist_run_events(
+        state.get("run_id"), str(task.id), staged,
+        json.dumps({"type": "final", **result}, ensure_ascii=False),
+    )
+    return result
 
 
 async def stream_general_agent(

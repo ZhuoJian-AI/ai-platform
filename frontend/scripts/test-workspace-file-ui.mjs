@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
 import spreadsheetModule from 'styled-exceljs';
+
+const assistantSource = await readFile('src/pages/terminal/TerminalAssistantMessage.tsx', 'utf8');
+assert.equal((assistantSource.match(/aria-label="下载原文件"/g) || []).length, 2,
+  'image and document artifact download buttons need accessible names');
 
 const XLSX = spreadsheetModule.default || spreadsheetModule;
 const sheet = XLSX.utils.aoa_to_sheet([

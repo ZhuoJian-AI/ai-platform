@@ -190,6 +190,10 @@ def _normalize_path(path: str) -> str:
     path = unicodedata.normalize("NFC", path)
     if "\x00" in path or any(ord(char) < 32 for char in path):
         raise WorkspaceFileInvalidPath("路径包含非法控制字符")
+    if ":/" in path.replace("\\", "/"):
+        raise WorkspaceFileInvalidPath(
+            "请填写工作空间内的相对路径，例如 报表/结果.txt；不要包含工作空间名称、磁盘盘符或 URL"
+        )
     parts: list[str] = []
     for seg in path.replace("\\", "/").split("/"):
         if seg in ("", ".",):
