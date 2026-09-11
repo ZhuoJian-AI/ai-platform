@@ -65,6 +65,9 @@ async def test_unified_assistant_executes_specialist_into_the_same_tool_loop(mon
         async def flush(self):
             return None
 
+        async def refresh(self, job):
+            return None
+
     async def process(_db, _job, _directory):
         return {
             "result": {
@@ -109,13 +112,14 @@ async def test_inline_specialist_failure_releases_lock_and_purges_inputs(monkeyp
     monkeypatch.setattr(multimodal_worker, "_process_specialist", process)
     monkeypatch.setattr(subsystem_ai_service, "purge_inputs", purge)
     job = MultimodalJob(status="queued", result={}, usage={})
-    db = SimpleNamespace(flush=AsyncMock())
+    db = SimpleNamespace(flush=AsyncMock(), refresh=AsyncMock())
     await subsystem_ai_service.execute_run_inline(db, job)
     assert job.status == "failed"
     assert job.error_category == "invalid_structured_result"
     assert job.finished_at is not None
     assert job.locked_at is None and job.locked_by is None
     purge.assert_awaited_once_with(job)
+    db.refresh.assert_awaited_once_with(job)
     await subsystem_ai_service.execute_run_inline(db, job)
     assert process.await_count == 1, "A terminal job must not execute twice"
 
