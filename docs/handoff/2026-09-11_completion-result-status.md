@@ -17,3 +17,11 @@
 - frontend 未修改；没有数据库迁移、文件迁移或业务服务器变更。本批不重复上一批真实管理员/员工文件验收，不能把既有 E2E 写成本批重新执行。
 - 回切 backend：`sha256:f93e2db43e3e5e98c8a98853c5df15d4a89420689f1736858f839c71d3d9a463`，不回滚数据库。
 - 后续复核发现：`mutation_committed` 仍仅排除 pending/failed/error，需要单独验证其他未完成状态不会被写操作计为成功；尚未修复，不能宣称整个完成判定已收尾。
+
+## 后续写操作回执修复（待发布）
+
+- 写操作复用未完成状态集合，排除 running/queued/needs_input/needs_confirmation/retryable_error/cancelled 等状态；pending 与 needs_confirmation 均保留等待确认语义。
+- 结果不确定时不再断言“业务数据未被修改”，而是说明未获得成功回执，应先核实状态，避免重复提交。
+- 新增 18 个组合用例，修复前 14 failed/4 passed，修复后 runner + policy 共 90 passed（1.33 秒），Ruff PASS。
+- 后续成功回执仍能完成任务；测试的后续事件是已获验证的回执，不授权对未知写操作盲目重试。
+- 不改变模型输入 Schema、业务参数、确认权限、数据库或子系统。专业主目标完成证据与跨运行未知结果恢复仍未完成。

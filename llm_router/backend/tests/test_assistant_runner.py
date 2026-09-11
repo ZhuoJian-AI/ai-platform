@@ -256,6 +256,40 @@ async def test_transport_success_is_not_business_completion(monkeypatch, kind, s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [
+    "failed", "error", "pending", "retryable_error", "needs_input", "needs_confirmation",
+    "queued", "running", "cancelled",
+])
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_write_requires_completed_receipt_and_allows_recovery(monkeypatch, status, recovers):
+    state = {
+        "run_id": 16, "request": "修改订单负责人", "application_id": "app-1",
+        "messages": [], "steps": [],
+        "_assistant_tool_registry": {"update_order": {"kind": "enterprise_action", "operation": "update"}},
+    }
+    events = [{"type": "tool_result", "id": "first", "name": "update_order", "ok": True,
+               "content": json.dumps({"status": status})}]
+    if recovers:
+        events.append({"type": "tool_result", "id": "verified", "name": "update_order", "ok": True,
+                       "content": json.dumps({"status": "completed"})})
+    events.append({"type": "done", "text": "已修改订单负责人。"})
+    staged = await _consume(monkeypatch, events, state)
+    receipts = [event for event in staged if event.get("type") == "tool_result"]
+    assert receipts[0]["business_mutation_committed"] is False
+    if recovers:
+        assert receipts[1]["business_mutation_committed"] is True
+        assert state.get("error") is None
+        assert state["assistant_final"] == "已修改订单负责人。"
+    else:
+        assert "已修改订单负责人" not in state["assistant_final"]
+        if status in {"pending", "needs_confirmation"}:
+            assert "等待你确认" in state["assistant_final"]
+        else:
+            assert state.get("error")
+            assert "业务数据未被修改" not in state["assistant_final"]
+
+
+@pytest.mark.asyncio
 async def test_empty_success_is_not_misreported_as_max_steps(monkeypatch):
     state = {"run_id": 2, "request": "你好", "messages": [], "steps": []}
     await _consume(monkeypatch, [{"type": "done", "text": ""}], state)
