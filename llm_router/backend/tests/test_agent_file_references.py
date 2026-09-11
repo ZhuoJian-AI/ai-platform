@@ -905,7 +905,7 @@ async def test_agent_searches_and_reads_authorized_shared_space_without_referenc
 
 
 @pytest.mark.asyncio
-async def test_platform_tool_executor_target_file_updates_in_place(
+async def test_platform_tool_executor_target_file_saves_new_file(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -921,7 +921,6 @@ async def test_platform_tool_executor_target_file_updates_in_place(
     principal_user = User(
         organization_id=org.id,
         username=f"runner-{uuid4().hex[:8]}",
-        role="member",
         is_active=True,
     )
     db_session.add(principal_user)
@@ -967,6 +966,8 @@ async def test_platform_tool_executor_target_file_updates_in_place(
 
     await db_session.refresh(file)
     assert result["status"] == "success"
-    assert result["outputs"][0]["file_id"] == str(file.id)
-    assert file.current_version_id != base_version_id
-    assert file.content == base64.b64encode(output_bytes).decode("ascii")
+    assert result["outputs"][0]["file_id"] != str(file.id)
+    assert file.current_version_id == base_version_id
+    derived = await workspace_service.get_file(db_session, result["outputs"][0]["file_id"])
+    assert derived.metadata_["derived_from_file_id"] == str(file.id)
+    assert derived.content_hash != file.content_hash
