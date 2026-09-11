@@ -36,4 +36,14 @@ Registry 已确认新镜像：
 
 前端生产构建成功；后端复用既有依赖镜像，清空 /app 后复制此源码；依赖与迁移无变化。真实环境变量校验 PASS，backend/executor 令牌一致，无待生效配置。存储仍为 Storage Gateway / OSS，两个 STORAGE 变量存在；本次不修改存储链路、上传限制、CORS 或用户文件，不重复 OSS 上传验收。
 
-最终部署及健康结果待发布完成后补充。
+## 最终部署结果
+
+- 部署清单 PR #83 已合并，manifest SHA：2235e93ba8623a2b689cddc5b44e54d7b1a575a6。
+- Coolify 部署 ID：gmi90doj1reddybqt0uodxpe；2026-09-11 12:14（Asia/Shanghai）状态 finished。
+- 只发布既有 application jwbpxybciypgdidyzu2ebrlr；使用 Coolify 标准部署队列，未启用自动 Webhook 部署。
+- 9/9 容器 healthy；前端、后端和三个复用后端镜像的 worker 的实际 digest 与上表一致，OCI source 均为 388fafd。
+- 公网 https://ai-platform.staging.zhuojianai.com/ 返回 200；/health 返回 200 和 status=ok。
+- 数据库迁移仍为 0076_retire_rag_and_user_skills (head)，本次无新增迁移、无数据库备份/恢复、无数据清理。
+- 按用户要求未重复功能测试和真实用户浏览器冒烟；以上健康检查不等于完整 E2E。
+- 未改其他项目、业务服务器、外部 Skill、OSS 配置或用户文件；未清理旧镜像，可按已记录 digest 回切。
+- 统一助手共享会话、真实子系统导航/Action/确认完整闭环及专业 AI 组合验收仍未完成，本发布不宣称它们已上线。
