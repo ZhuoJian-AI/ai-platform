@@ -398,6 +398,7 @@ async def execute_run_inline(db: AsyncSession, job: MultimodalJob) -> Multimodal
         job.locked_by = None
         await purge_inputs(job)
         await db.flush()
+        await db.refresh(job)
     return job
 
 
@@ -472,6 +473,7 @@ async def cancel_run(db: AsyncSession, user: CurrentUser, run_id: UUID) -> Multi
     job.error_detail = "任务已由用户取消"
     await purge_inputs(job)
     await db.flush()
+    await db.refresh(job)
     return job
 
 
