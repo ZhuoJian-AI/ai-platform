@@ -13,3 +13,9 @@
 - 前端 Registry HEAD digest：`sha256:da92a14c194c47c3bc8944a383eb3c299e66f386c6c6b47054d4a2177c1f128d`，OCI revision 为上述 source。
 - 后端和其他服务保持上一批镜像不变，无数据库或权限变更；前端回切 digest `sha256:a5da2816d7b0e0a531dbb64461885b2f648c63e352bb3d43826158d7f3c64283`。
 - 真实环境变量预检 PASS；规则版本 c948cd2，Registry-first。实际部署结果待后续补充。
+
+## 上线记录
+
+- Manifest PR #123：`3a1007885dd65b512c4b1b88393c674592522655`；Coolify 部署 `voicefix918c4fe57740e111` finished，无 Changes pending。
+- 9 服务 healthy，前端 OCI revision/digest 与本次 source 对应，后端仍为 `eb2e873`，共享令牌一致，公网 `/health` 200。
+- 上线真实 zhangsan 表单登录后点击录音：中文权限提示可见（feedbackVisible=true），getUserMedia 调用次数 0；ASR/TTS 均仍 permission_denied，没有修改任何角色。这补齐了上一批未捕获 toast 的失败项。
