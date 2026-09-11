@@ -314,7 +314,8 @@ async def test_successful_query_does_not_mask_a_failed_mutation(monkeypatch):
 
     await runner._consume_native(state, {"system_prompt": "", "tools": []}, "run-token", None, staged, {})
 
-    assert "业务数据未被修改" in state["assistant_final"]
+    assert "未获得业务操作的成功回执" in state["assistant_final"]
+    assert "业务数据未被修改" not in state["assistant_final"]
     assert "已经修改成功" not in state["assistant_final"]
     assert "HTTP 409" in state["assistant_final"]
     assert any(event.get("type") == "text_retract" for event in staged)

@@ -18,10 +18,14 @@
 - 回切 backend：`sha256:f93e2db43e3e5e98c8a98853c5df15d4a89420689f1736858f839c71d3d9a463`，不回滚数据库。
 - 后续复核发现：`mutation_committed` 仍仅排除 pending/failed/error，需要单独验证其他未完成状态不会被写操作计为成功；尚未修复，不能宣称整个完成判定已收尾。
 
-## 后续写操作回执修复（待发布）
+## 后续写操作回执修复
 
 - 写操作复用未完成状态集合，排除 running/queued/needs_input/needs_confirmation/retryable_error/cancelled 等状态；pending 与 needs_confirmation 均保留等待确认语义。
 - 结果不确定时不再断言“业务数据未被修改”，而是说明未获得成功回执，应先核实状态，避免重复提交。
 - 新增 18 个组合用例，修复前 14 failed/4 passed，修复后 runner + policy 共 90 passed（1.33 秒），Ruff PASS。
 - 后续成功回执仍能完成任务；测试的后续事件是已获验证的回执，不授权对未知写操作盲目重试。
 - 不改变模型输入 Schema、业务参数、确认权限、数据库或子系统。专业主目标完成证据与跨运行未知结果恢复仍未完成。
+- 补查现有 enterprise_action_hardening 用例并更新旧提示断言；runner、policy、enterprise_action_hardening、native_assistant_core 共 150 passed（1.62 秒）。其中保留成功查询不能掩盖失败写操作、未知结果不能盲重试等回归。
+- source SHA `49129ff93a129e387f234238df34ef0bc24c11bb`（PR #105），backend digest `sha256:6860abd863022981f428a81ccbe12d0daf6ce909921bf76cb736bc69d8660bef`，镜像内 runner 与本地 SHA-256 相同。
+- manifest SHA `6fdf4feab316bb49aa1c74eb35f79a4a9d3ab822`（PR #106），部署 ID `writesdc19260fbe8e56b1`。Compose 和真实运行环境预检 PASS；无数据库迁移。回切为上一批 `94bf832...` 镜像。
+- 2026-09-11 07:45:32 UTC 部署 finished；九个服务 healthy，staging `/health` 200，运行 backend digest/OCI revision 与上述来源一致。部署重建期间短暂 503，已恢复。本批没有重复浏览器全量验收，不声称整个计划完成。
