@@ -23,7 +23,7 @@ from app.agents.graph.context import bind_runtime
 from app.agents.graph.nodes import _execute_tool_call
 from app.services import model_gateway
 from app.services.assistant_delivery_policy import explicit_output_formats, missing_output_formats
-from app.services.assistant_tool_catalog import search_business_capabilities, search_tool_specs
+from app.services.assistant_tool_catalog import search_assistant_capabilities
 from app.services.assistant_tool_protocol import descriptor_from_spec, tool_result_json
 
 logger = structlog.get_logger()
@@ -194,21 +194,18 @@ def _capability_search_result(
     *,
     limit: int,
 ) -> tuple[str, list[str]]:
-    selected_specs = search_tool_specs(query, lazy_specs.values(), limit=limit)
+    selected = search_assistant_capabilities(query, lazy_specs.values(), business_catalog, limit=limit)
+    selected_specs = [entry["item"] for entry in selected if entry["kind"] == "tool"]
     activated = [
         str(item.get("name") or "")
         for item in selected_specs
         if item.get("name")
     ]
-    tool_candidates = [
-        {"kind": "tool", "descriptor": descriptor_from_spec(item)}
-        for item in selected_specs
+    candidates = [
+        {"kind": "tool", "descriptor": descriptor_from_spec(entry["item"])}
+        if entry["kind"] == "tool" else {**entry["item"], "kind": "business"}
+        for entry in selected
     ]
-    page_candidates = [
-        {"kind": "business", **item}
-        for item in search_business_capabilities(query, business_catalog, limit=limit)
-    ]
-    candidates = [*page_candidates, *tool_candidates][:limit]
     return (
         tool_result_json(
             "completed",

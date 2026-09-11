@@ -1,5 +1,12 @@
 # Active tasks
 
+## PLATFORM-VOICE-RELIABILITY-20260911 (@codex)
+
+- [ ] 第一批：关闭音频推理泄露和权限缺字段放行，完善工具发现与未知写入恢复。
+- [ ] 第二批：角色能力状态、录音回填和消息按需朗读。
+- [ ] 第三批：同一 Task 的可选轮流语音对话，退出释放麦克风。
+- [ ] 聚焦回归和真实角色验收后分批部署 staging；不修改外部 Skill、子系统或其他项目。
+
 ## PLATFORM-ASSISTANT-COMPLETION-20260911 (@codex)
 
 - [ ] 完成统一会话与真实业务确认闭环，专业 AI 返回主脑。

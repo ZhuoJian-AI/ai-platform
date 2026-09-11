@@ -19,6 +19,16 @@ ORGANIZATION_MANAGE_PERMISSION = "workspace.organization.manage"
 ORGANIZATION_READ_PERMISSION = "workspace.organization.read"
 
 
+def _has_tenant_identity(workspace: Workspace, cu: CurrentUser) -> bool:
+    """Projected objects must carry the same identity evidence as ORM rows."""
+    return bool(
+        getattr(workspace, "organization_id", None)
+        and getattr(cu, "organization_id", None)
+        and getattr(cu, "id", None)
+        and str(workspace.organization_id) == str(cu.organization_id)
+    )
+
+
 def department_workspace_scope_ids(cu: CurrentUser) -> tuple[str, ...]:
     """Return departments explicitly exposed to the user by role permissions."""
     department_ids: set[str] = set()
@@ -48,7 +58,7 @@ def is_workspace_readable(workspace: Workspace, cu: CurrentUser) -> bool:
     """Synchronous read predicate shared by catalogue and legacy callers."""
 
     if (
-        str(getattr(workspace, "organization_id", None)) != str(getattr(cu, "organization_id", None))
+        not _has_tenant_identity(workspace, cu)
         or getattr(workspace, "deleted_at", None) is not None
         or not getattr(workspace, "is_active", True)
     ):
@@ -86,17 +96,8 @@ def _role_sources(
 
 
 async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) -> dict[str, bool]:
-    # ORM Workspace / CurrentUser always expose these fields.  A few internal
-    # integrations and tests intentionally pass lightweight projected objects;
-    # keep read-only compatibility without weakening checks for real rows.
-    if not hasattr(workspace, "organization_id"):
-        return {
-            "read": True, "create": False, "update": False, "delete": False,
-            "manage": False, "publish": False,
-        }
-    cross_tenant = str(workspace.organization_id) != str(getattr(cu, "organization_id", None))
     if (
-        cross_tenant
+        not _has_tenant_identity(workspace, cu)
         or getattr(workspace, "deleted_at", None) is not None
         or not getattr(workspace, "is_active", True)
     ):
@@ -133,6 +134,8 @@ async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) 
 
 def capability_sources(workspace: Workspace, cu: CurrentUser) -> dict[str, list[dict[str, str]]]:
     """Explain why the principal has each workspace capability."""
+    if not is_workspace_readable(workspace, cu):
+        return {}
     scope_type = getattr(workspace, "scope_type", "organization")
     scope_id = str(getattr(workspace, "scope_id", None) or "")
     own = scope_type == "user" and scope_id == str(getattr(cu, "id", ""))

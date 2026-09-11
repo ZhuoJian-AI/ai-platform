@@ -13,6 +13,20 @@ from app.services.assistant_delivery_policy import explicit_output_formats
 ORG_ID = "00000000-0000-0000-0000-000000000001"
 
 
+def test_discovery_activates_only_returned_public_candidates():
+    specs = {
+        "speech_synthesize": {"name": "speech_synthesize", "description": "把文字合成为语音文件"},
+        "text_create": {"name": "text_create", "description": "创建文字文件"},
+    }
+    result, activated = native._capability_search_result(
+        "把文字合成为语音文件", specs,
+        [{"name": "查询文件", "actionKey": "files.query"}], limit=1,
+    )
+    candidates = json.loads(result)["data"]["candidates"]
+    assert activated == ["speech_synthesize"]
+    assert [row["descriptor"]["name"] for row in candidates] == activated
+
+
 def test_confirmation_tool_explains_runtime_card_without_weakening_schema():
     schema = {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}
     specs = [

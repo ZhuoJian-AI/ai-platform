@@ -438,11 +438,16 @@ async def test_attachment_validation_accepts_authorized_cross_workspace_and_unre
     workspace_id = uuid4()
     other_workspace_id = uuid4()
     file_id = uuid4()
-    cu = SimpleNamespace()
-    ws = SimpleNamespace(id=workspace_id)
+    org_id = uuid4()
+    cu = SimpleNamespace(
+        id=str(uuid4()), organization_id=org_id,
+        permission_codes=("workspace.organization.read",),
+    )
 
     async def get_workspace(_db, _workspace_id):
-        return ws
+        return SimpleNamespace(
+            id=_workspace_id, organization_id=org_id, scope_type="organization", scope_id=None,
+        )
 
     monkeypatch.setattr(terminal_api.workspace_service, "get_workspace", get_workspace)
     monkeypatch.setattr(terminal_api.scope_service, "is_workspace_visible", lambda _ws, _cu: True)
@@ -659,7 +664,11 @@ async def test_attachment_validation_returns_deduplicated_display_snapshot(
 ):
     workspace_id = uuid4()
     file_id = uuid4()
-    cu = SimpleNamespace()
+    org_id = uuid4()
+    cu = SimpleNamespace(
+        id=str(uuid4()), organization_id=org_id,
+        permission_codes=("workspace.organization.read",),
+    )
 
     async def get_file(_db, _file_id):
         return SimpleNamespace(
@@ -672,7 +681,9 @@ async def test_attachment_validation_returns_deduplicated_display_snapshot(
         )
 
     async def get_workspace(_db, _workspace_id):
-        return SimpleNamespace(id=workspace_id)
+        return SimpleNamespace(
+            id=workspace_id, organization_id=org_id, scope_type="organization", scope_id=None,
+        )
 
     monkeypatch.setattr(terminal_api.workspace_service, "get_file", get_file)
     monkeypatch.setattr(terminal_api.workspace_service, "get_workspace", get_workspace)

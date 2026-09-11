@@ -66,16 +66,19 @@ async def understand_audio(
         try:
             async for event, payload, extra in stream:
                 if event == "text" and payload:
-                    emitted_text = True
-                    body = {"content": str(payload)}
-                    yield f"event: delta\ndata: {json.dumps(body, ensure_ascii=False)}\n\n"
-                elif event == "reasoning_content" and payload and not emitted_text:
-                    # OpenAI-compatible audio understanding may place its user-facing answer
-                    # in reasoning_content while leaving content empty.
+                    emitted_text = emitted_text or bool(str(payload).strip())
                     body = {"content": str(payload)}
                     yield f"event: delta\ndata: {json.dumps(body, ensure_ascii=False)}\n\n"
                 elif event == "usage":
                     yield f"event: usage\ndata: {json.dumps(extra or {}, ensure_ascii=False)}\n\n"
+            if not emitted_text:
+                body = {
+                    "category": "empty_response",
+                    "messageZh": "音频模型未返回有效回答，请重试。",
+                    "retryable": True,
+                }
+                yield f"event: error\ndata: {json.dumps(body, ensure_ascii=False)}\n\n"
+                return
             yield "event: done\ndata: {}\n\n"
         except Exception as exc:
             category = exc.category if isinstance(exc, GatewayError) else classify_gateway_error(exc)
