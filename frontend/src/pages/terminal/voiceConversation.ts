@@ -17,6 +17,7 @@ export class VoiceConversation {
   private active?: AbortController;
   private listeners = new Set<() => void>();
   private generation = 0;
+  private pendingLoop = false;
   constructor(private adapter: VoiceAdapter) {}
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => {
@@ -45,12 +46,13 @@ export class VoiceConversation {
     else this.listeners.forEach(listener => listener());
   };
   start = () => {
-    if (!['off', 'paused', 'error'].includes(this.snapshot.phase)) return;
+    if (this.pendingLoop || !['off', 'paused', 'error'].includes(this.snapshot.phase)) return;
     this.cancel();
     const controller = new AbortController();
     this.active = controller;
     const generation = this.generation;
     const valid = () => !controller.signal.aborted && generation === this.generation;
+    this.pendingLoop = true;
     void (async () => {
       try {
         while (valid()) {
@@ -79,7 +81,7 @@ export class VoiceConversation {
         if (!valid()) return;
         this.cancel();
         this.update('error', (error as Error).message || '语音对话失败，文字记录保留');
-      }
+      } finally { this.pendingLoop = false; }
     })();
   };
   // Called only after the existing trusted confirmation flow resolves.

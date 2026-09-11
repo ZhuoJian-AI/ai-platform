@@ -3,7 +3,7 @@
 export const STOP_SPEECH = 'zhuojian:stop-message-speech';
 export const STOP_RECORDING = 'zhuojian:stop-recording';
 
-export function claimVoiceChannel() {
-  window.dispatchEvent(new Event(STOP_SPEECH));
-  window.dispatchEvent(new Event(STOP_RECORDING));
+export function claimVoiceChannel(owner?: string) {
+  window.dispatchEvent(new CustomEvent(STOP_SPEECH, { detail: owner }));
+  window.dispatchEvent(new CustomEvent(STOP_RECORDING, { detail: owner }));
 }

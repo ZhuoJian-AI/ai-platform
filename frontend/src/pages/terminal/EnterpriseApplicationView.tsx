@@ -293,6 +293,7 @@ export default function EnterpriseApplicationView({
   onNavigate,
   assistantOpenRequestKey,
   onAskAI,
+  registerVoiceSubmit,
   onResumeAI,
   models,
   modelAlias,
@@ -316,6 +317,7 @@ export default function EnterpriseApplicationView({
   onModuleChange: (moduleKey: string) => void;
   onNavigate: (intent: Record<string, unknown>) => void;
   assistantOpenRequestKey: number;
+  registerVoiceSubmit?: (handler: import('./voiceConversation').VoiceAdapter['submit'] | null) => void;
   onAskAI: (
     prompt: string,
     pageContext: Record<string, unknown>,
@@ -947,8 +949,8 @@ export default function EnterpriseApplicationView({
     return () => window.removeEventListener('message', onMessage);
   }, [activeFrameIndex, application, launch]);
 
-  const submit = async () => {
-    const value = prompt.trim();
+  const submit = async (voiceText?: unknown) => {
+    const value = typeof voiceText === 'string' ? voiceText.trim() : prompt.trim();
     if (!value || assistantRunning) return;
     const fallbackModuleKey = launch?.module_key ?? moduleKey ?? undefined;
     const fallbackPageKey = fallbackModuleKey
@@ -1069,6 +1071,7 @@ export default function EnterpriseApplicationView({
           : { key: 'error', label: '执行未完成，请查看下方原因', tone: 'error' }),
       }));
       if (result.refreshRequired) scheduleSilentRefresh();
+      return result;
     } catch (assistantError) {
       const errorMessage = assistantError instanceof Error ? assistantError.message : '灼见助手执行失败';
       updateRunningAssistant((item) => ({
@@ -1085,6 +1088,20 @@ export default function EnterpriseApplicationView({
       setAssistantRunning(false);
     }
   };
+
+  const voiceSubmitRef = useRef(submit);
+  voiceSubmitRef.current = submit;
+  useEffect(() => {
+    registerVoiceSubmit?.(async (text, signal) => {
+      signal.throwIfAborted();
+      setAssistantOpen(true);
+      const result = await voiceSubmitRef.current(text);
+      signal.throwIfAborted();
+      if (!result || result.status === 'failed' || result.status === 'cancelled') throw Error('业务操作未完成，请查看当前对话');
+      return { taskId: result.taskId, messageId: result.assistantMessageId ?? undefined, needsConfirmation: result.status === 'interrupted' };
+    });
+    return () => registerVoiceSubmit?.(null);
+  }, [registerVoiceSubmit]);
 
   const uploadInputFiles = async (files: FileList | null) => {
     if (!files?.length || !targetWorkspaceId || assistantRunning) return;
