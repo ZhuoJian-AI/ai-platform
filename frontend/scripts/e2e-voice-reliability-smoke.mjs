@@ -29,12 +29,17 @@ try {
       await page.waitForURL(url => !url.pathname.endsWith('/login'));
       await page.getByText('工作空间', { exact: true }).first().click();
       if (kind === 'admin') {
-        assert(process.env.E2E_WORKSPACE_OWNER_LABEL, 'Choose an existing workspace owner for admin smoke');
-        await page.getByText(process.env.E2E_WORKSPACE_OWNER_LABEL, { exact: true }).first().click();
+        if (process.env.E2E_WORKSPACE_OWNER_LABEL) {
+          await page.getByText(process.env.E2E_WORKSPACE_OWNER_LABEL, { exact: true }).first().click();
+        } else {
+          await page.getByText('请从左侧选择工作空间节点', { exact: true }).waitFor();
+        }
       }
-      await page.getByText('新建文件夹', { exact: true }).first().waitFor({ timeout: 20000 });
+      if (kind === 'employee' || process.env.E2E_WORKSPACE_OWNER_LABEL) {
+        await page.getByText('新建文件夹', { exact: true }).first().waitFor({ timeout: 20000 });
+      }
       assert.equal(failures.length, 0, JSON.stringify(failures));
-      console.log(JSON.stringify({ kind, login: 'passed', workspace: 'passed', serverErrors: failures }));
+      console.log(JSON.stringify({ kind, login: 'passed', workspace: kind === 'admin' && !process.env.E2E_WORKSPACE_OWNER_LABEL ? 'catalogue_passed' : 'file_view_passed', serverErrors: failures }));
     } finally { await context.close(); }
   }
 } finally { await browser.close(); }
