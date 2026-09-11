@@ -1,5 +1,11 @@
 # Active tasks
 
+## PLATFORM-VERIFIED-RELEASE-20260911 (@codex)
+
+- [ ] 仅移植已验证的工作空间、中文错误、下载及非流式事件修复。
+- [ ] 复用既有测试证据，完成发布预检、不可变镜像和 staging 健康核验。
+- [ ] 不合并未验收的助手链路，不修改业务子系统或外部 Skill。
+
 ## PLATFORM-RETIRE-RAG-SKILLS-20260909 (@codex)
 
 - [ ] 删除知识库及全部 RAG 产品、运行时、接口、数据表、向量依赖和 Embedding 模型能力，保留工作空间解析器。
