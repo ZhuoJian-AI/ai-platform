@@ -32,3 +32,11 @@
 - Frontend：`sha256:eb814075436c25b192ff3eb95fee925b5ed9928d37a51e3dfc40cebf3e76e2a4`。
 - Registry HEAD 均为 200 并返回上述 digest；构建 linux/amd64，OCI revision 均绑定 source。后端新模块镜像内 compileall 通过。
 - 无迁移、无新增依赖；回切使用前一 manifest `3a1007885dd65b512c4b1b88393c674592522655` 的镜像，不回滚数据。构建使用既有镜像依赖层，不安装重型依赖。
+
+## 上线结果
+
+- Manifest PR #126：`f284a2d8ffc44735369c1a67704646b81a2d72a6`。
+- Coolify `voicefixf0cacfd507301790` finished，无 Changes pending；9 服务 healthy，运行镜像引用/OCI revision 对应本批，跨服务令牌一致，公网 `/health` 200。
+- 2026-09-12 线上 root 与 zhangsan 均真实表单登录成功；历史助手消息显示朗读按钮，zhangsan 点击后接口明确 403，界面显示中文语音权限提示。未修改任何角色、标准音色或模型部署。
+- 线上员工尚不可直接使用语音：zhangsan ASR/TTS 仍未授权，标准音色仍需管理员配置。候选成功播放不能替代这项上线条件，也不能宣称所有员工已经可以语音聊天。
+- 仅验证本批受影响路径，未重测录音模型、所有 CRUD 或其他项目；没有磁盘初始化、数据库迁移和业务文件删除。
