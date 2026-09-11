@@ -5,7 +5,8 @@ import { chromium } from 'playwright';
 
 const base = process.env.E2E_BASE_URL || 'https://ai-platform.staging.zhuojianai.com';
 const app = '9689828b-9d07-4a93-8b52-0eefad8be885';
-const name = `E2E-ASSISTANT-CONFIRM-${Date.now()}`;
+const name = process.env.E2E_CLEANUP_NAME || `E2E-ASSISTANT-CONFIRM-${Date.now()}`;
+assert.match(name, /^E2E-ASSISTANT-CONFIRM-\d+$/);
 if (!process.env.E2E_USERNAME || !process.env.E2E_PASSWORD) throw new Error('Missing environment credentials');
 const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--no-proxy-server'] });
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
@@ -13,14 +14,14 @@ const page = await context.newPage();
 const root = resolve('dist');
 const errors = [];
 page.on('pageerror', e => errors.push(e.message));
-async function action(key, params) {
-  return page.evaluate(async ({ app, key, params }) => {
+async function action(key, params, expectedVersion) {
+  return page.evaluate(async ({ app, key, params, expectedVersion }) => {
     const response = await fetch(`/api/v1/terminal/applications/${app}/actions/${key}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sessionStorage.getItem('ai_infra_user_token')}` },
-      body: JSON.stringify({ module_key: 'material_suppliers', page_key: 'material_suppliers.main', params, request_id: crypto.randomUUID() }),
+      body: JSON.stringify({ module_key: 'material_suppliers', page_key: 'material_suppliers.main', params, expected_version: expectedVersion, request_id: crypto.randomUUID() }),
     });
     return { http: response.status, body: await response.json() };
-  }, { app, key, params });
+  }, { app, key, params, expectedVersion });
 }
 try {
   await page.route(`${base}/**`, async route => {
@@ -36,6 +37,7 @@ try {
   await page.getByRole('textbox', { name: '密码', exact: true }).fill(process.env.E2E_PASSWORD);
   await page.getByRole('button', { name: '登 录' }).click();
   await page.waitForURL(`${base}/alphabet/terminal`);
+  if (!process.env.E2E_CLEANUP_NAME) {
   await page.goto(`${base}/alphabet/terminal?view=application&app=${app}&module=material_suppliers&page=material_suppliers.main`);
   await page.getByRole('button', { name: /灼见助手$/ }).click();
   const dialog = page.getByRole('dialog');
@@ -48,25 +50,33 @@ try {
   assert.equal(before.body.result.items.length, 0, 'Business mutation happened before confirmation');
   console.log(JSON.stringify({ phase: 'confirmation_visible_no_write', name }));
   await confirm.click();
-  await page.waitForFunction(() => !document.querySelector('.business-assistant-progress__step--active'), null, { timeout: 180000 });
+  await page.waitForFunction(() => {
+    const input = document.querySelector('.business-assistant-drawer__composer textarea');
+    return input && !input.disabled;
+  }, null, { timeout: 180000 });
   const after = await action('material_suppliers.query', { query: name });
   assert.equal(after.http, 200);
   const matching = after.body.result.items.filter(row => row.name === name);
   assert.equal(matching.length, 1, 'Confirmed creation did not create exactly one test record');
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ status: 'passed', name, checks: ['real_subsystem', 'confirmation_before_write', 'confirmed_single_create'] }));
+  }
 } finally {
   // Cleanup may only target the exact, unique record created by this test.
   try {
     const query = await action('material_suppliers.query', { query: name });
     for (const row of query.body?.result?.items || []) {
       if (row.name !== name) continue;
-      const deletion = await action('material_suppliers.delete', { id: row.id });
+      const version = row.version ?? row.dataVersion ?? query.body.result.version ?? query.body.result.dataVersion;
+      assert.ok(version !== undefined, 'Cleanup requires a trusted query version');
+      const deletion = await action('material_suppliers.delete', { id: row.id }, version);
       if (deletion.body.status === 'pending' && deletion.body.confirmation_id) {
-        await page.evaluate(async id => {
+        const resolved = await page.evaluate(async id => {
           const r = await fetch(`/api/v1/terminal/application-action-confirmations/${id}/approve`, { method: 'POST', headers: { Authorization: `Bearer ${sessionStorage.getItem('ai_infra_user_token')}` } });
           if (!r.ok) throw new Error('E2E cleanup confirmation failed');
+          return r.json();
         }, deletion.body.confirmation_id);
+        console.log(JSON.stringify({ cleanupReceipt: resolved }));
       } else if (deletion.body.status !== 'completed') throw new Error('E2E cleanup failed');
     }
     const remaining = await action('material_suppliers.query', { query: name });
