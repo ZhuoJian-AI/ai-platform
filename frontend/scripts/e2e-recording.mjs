@@ -14,7 +14,10 @@ async function login(kind) {
   const ctx = await browser.newContext({ permissions: ['microphone'] });
   const page = await ctx.newPage();
   page.on('console', entry => {
-    if (/CORS policy/i.test(entry.text())) report.corsBlocked = true;
+    if (/CORS policy/i.test(entry.text())) {
+      report.corsBlocked = true;
+      report.corsReason = entry.text().replace(/https?:\/\/[^\s'"]+/g, '[URL]').slice(0, 600);
+    }
   });
   page.on('request', request => {
     const auth = request.headers().authorization;
@@ -68,6 +71,9 @@ try {
   const createResponse = await created;
   assert.equal(createResponse.status(), 201);
   const jobId = (await createResponse.json()).job_id;
+  const upload = await createResponse.json();
+  report.uploadHeaders = Object.keys(upload.headers || {});
+  report.uploadHosts = [upload.url, upload.fallback_url].filter(Boolean).map(url => new URL(url).hostname);
   report.jobId = jobId;
   await page.locator('[contenteditable="true"]').first().fill('等待期间新输入的文字');
   for (let attempt = 0; attempt < 60; attempt++) {
