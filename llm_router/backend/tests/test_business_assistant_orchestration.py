@@ -529,7 +529,9 @@ def test_ai_semantics_is_closed_and_default_query_must_be_real():
 
 
 def test_intent_provider_schema_closes_every_object_definition():
-    strict_provider = SimpleNamespace(provider_type="openai", vendor="openai", config={})
+    strict_provider = SimpleNamespace(
+        provider_type="openai", vendor="openai", base_url="https://api.openai.com/v1", config={},
+    )
     prepared = llm_client.prepare_tools_for_provider(strict_provider, [orchestration._intent_tool()])
     parameters = prepared[0]["function"]["parameters"]
 

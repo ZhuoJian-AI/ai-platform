@@ -206,6 +206,11 @@ try {
   );
 
   const terminalSource = await readFile(resolve('src/pages/terminal/Terminal.tsx'), 'utf8');
+  assert.doesNotMatch(
+    terminalSource,
+    /请先选择模型后再执行/,
+    'new conversations and follow-ups must allow the server default model route',
+  );
   const apiClientSource = await readFile(resolve('src/api/client.ts'), 'utf8');
   const terminalStreamSource = await readFile(resolve('src/pages/terminal/terminalConversationModel.ts'), 'utf8');
   assert.match(
@@ -224,6 +229,11 @@ try {
     'the launch request must send the exact page key for server-side role authorization',
   );
   const applicationAssistantSource = terminalSource.slice(terminalSource.indexOf('onAskAI={async'));
+  assert.match(
+    applicationAssistantSource,
+    /params\.set\('conversation', created\.id\);\s*navigate\([\s\S]*replace: true/,
+    'a new sidebar task must persist its conversation id in the URL before streaming for reload recovery',
+  );
   assert.match(
     applicationAssistantSource,
     /terminal\.runTaskStream\(/,

@@ -22,6 +22,7 @@ from app.agents.core import approval_registry
 from app.agents.graph.context import bind_runtime
 from app.agents.graph.nodes import _execute_tool_call
 from app.services import model_gateway
+from app.services.assistant_delivery_policy import explicit_output_formats, missing_output_formats
 from app.services.assistant_tool_catalog import search_business_capabilities, search_tool_specs
 from app.services.assistant_tool_protocol import descriptor_from_spec, tool_result_json
 
@@ -36,6 +37,8 @@ _DEFAULT_COMPLETION_NUDGE = (
     "只有工作空间返回真实文件后才能结束。"
 )
 _MAX_APPROVAL_PREVIEW_CHARS = 500
+_MAX_CORRECTION_CALLS = 3
+_MAX_FAILED_ATTEMPTS = 1 + _MAX_CORRECTION_CALLS
 
 
 def _platform_tools(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -45,7 +48,11 @@ def _platform_tools(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": str(spec.get("name") or ""),
-                "description": str(spec.get("description") or ""),
+                "description": str(spec.get("description") or "") + (
+                    " 调用本工具会先由平台显示确认卡片，用户确认前不会执行写入。"
+                    "参数明确后请调用工具发起确认，不要用文字按钮代替确认卡片。"
+                    if spec.get("approval") == "ask" else ""
+                ),
                 "parameters": spec.get("input_schema") or {"type": "object", "properties": {}},
                 "strict": True,
             },
@@ -139,7 +146,7 @@ def _bounded_tool_content(content: str, limit: int) -> str:
     return content[:limit] + f"\n[工具结果已截断，共 {len(content)} 字符；如需更多内容请分页读取]"
 
 
-def _tool_result_has_trusted_artifact(content: str | dict[str, Any]) -> bool:
+def _tool_result_artifacts(content: str | dict[str, Any]) -> list[dict[str, Any]]:
     """Only a stable workspace file/version identity counts as delivery.
 
     A tool name, server path, URL, or free-form success message is not proof that
@@ -152,9 +159,9 @@ def _tool_result_has_trusted_artifact(content: str | dict[str, Any]) -> bool:
         try:
             value = json.loads(value)
         except (json.JSONDecodeError, TypeError):
-            return False
+            return []
     if not isinstance(value, dict):
-        return False
+        return []
 
     def has_identity(item: Any) -> bool:
         if not isinstance(item, dict):
@@ -163,8 +170,7 @@ def _tool_result_has_trusted_artifact(content: str | dict[str, Any]) -> bool:
         version_id = item.get("version_id") or item.get("versionId")
         return bool(file_id and version_id)
 
-    if has_identity(value):
-        return True
+    artifacts = [value] if has_identity(value) else []
     containers = [value]
     data = value.get("data")
     if isinstance(data, dict):
@@ -172,9 +178,13 @@ def _tool_result_has_trusted_artifact(content: str | dict[str, Any]) -> bool:
     for container in containers:
         for key in ("artifacts", "outputs", "files"):
             candidates = container.get(key)
-            if isinstance(candidates, list) and any(has_identity(item) for item in candidates):
-                return True
-    return False
+            if isinstance(candidates, list):
+                artifacts.extend(item for item in candidates if has_identity(item))
+    return artifacts
+
+
+def _tool_result_has_trusted_artifact(content: str | dict[str, Any]) -> bool:
+    return bool(_tool_result_artifacts(content))
 
 
 def _capability_search_result(
@@ -386,11 +396,17 @@ async def stream_run(
     file_tools = {str(item) for item in policy.get("file_output_tools") or []}
     max_nudges = max(0, min(int(policy.get("max_nudges") or 0), 3))
     delivered = False
+    required_formats = explicit_output_formats(str(state.get("request") or ""))
+    delivered_artifacts: list[dict[str, Any]] = []
     nudges = 0
     visible_text = ""
     last_failure_key = ""
     consecutive_failures = 0
+    tool_failures: dict[str, int] = {}
+    exhausted_tools: set[str] = set()
+    discovery_corrections = 0
     successful_side_effects: dict[str, str] = {}
+    uncertain_writes: dict[str, str] = {}
 
     for step_index in range(max_steps):
         yield {"type": "phase", "phase": "llm", "index": step_index}
@@ -409,13 +425,61 @@ async def stream_run(
         authorized_calls = [call for call in calls if str(call.get("name") or "") in allowed_names]
         rejected_calls = [str(call.get("name") or "<empty>") for call in calls if call not in authorized_calls]
         if rejected_calls:
+            recoverable = (
+                all(name in lazy_specs for name in rejected_calls)
+                and "enterprise_capability_search" in allowed_names
+                and discovery_corrections < _MAX_CORRECTION_CALLS
+            )
+            yield {
+                "type": "trace",
+                "category": "policy",
+                "title": "工具调用未执行",
+                "code": "tool_not_loaded_or_allowed",
+                "tools": sorted({name[:128] for name in rejected_calls})[:64],
+                "visibleTools": sorted(allowed_names),
+                "retryable": recoverable,
+            }
             logger.warning(
                 "native_unadvertised_tool_calls",
                 tools=sorted(set(rejected_calls)),
                 run_id=state.get("run_id"),
             )
-            if not authorized_calls:
-                raise RuntimeError("模型请求了本轮未授权的工具，已拒绝执行")
+            if not recoverable:
+                raise RuntimeError("模型请求了本轮未授权或尚未加载的工具，已拒绝执行")
+            discovery_corrections += 1
+            # Reject the entire batch before side effects. Preserve a complete
+            # assistant/tool exchange, including provider reasoning metadata.
+            correction_turn = {
+                "role": "assistant",
+                "content": text,
+                "tool_calls": [
+                    {
+                        "id": str(call.get("id") or f"native-{step_index}-{index}"),
+                        "type": "function",
+                        "function": {
+                            "name": str(call.get("name") or ""),
+                            "arguments": str(call.get("arguments") or "{}"),
+                        },
+                    }
+                    for index, call in enumerate(calls)
+                ],
+            }
+            if reasoning_content:
+                correction_turn["reasoning_content"] = reasoning_content
+            messages.append(correction_turn)
+            for call in correction_turn["tool_calls"]:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": _tool_error(
+                        "tool_discovery_required",
+                        "本批次未执行：包含尚未加载的工具",
+                        "请先调用 enterprise_capability_search 搜索所需能力，"
+                        "获得完整 Schema 后重新提交；不要直接重试未加载工具",
+                        retryable=True,
+                    ),
+                })
+            continue
 
         if authorized_calls:
             assistant_tool_turn = {
@@ -436,6 +500,7 @@ async def stream_run(
             if reasoning_content:
                 assistant_tool_turn["reasoning_content"] = reasoning_content
             messages.append(assistant_tool_turn)
+            recovery_guidance: list[dict[str, str]] = []
             for index, original in enumerate(authorized_calls):
                 call = dict(original)
                 call["id"] = str(call.get("id") or f"native-{step_index}-{index}")
@@ -448,7 +513,19 @@ async def stream_run(
                 failure_key = _failure_key(name, params or {"_raw": arguments_text})
                 dedupe_side_effect = validation_error is None and not bool(spec.get("concurrency_safe"))
                 skip_repeat = failure_key == last_failure_key and consecutive_failures >= 2
-                if skip_repeat:
+                if name in uncertain_writes:
+                    # A new call id or changed arguments cannot establish that
+                    # a timed-out write did not commit. Keep reads available,
+                    # but never automatically issue this write again.
+                    content, ok = uncertain_writes[name], False
+                elif name in exhausted_tools:
+                    content = _tool_error(
+                        "tool_retry_exhausted",
+                        "首次尝试及三次纠正均未成功，已停止该工具重试",
+                        "请使用其他获权能力，或如实说明无法完成；不要生成替代产物",
+                    )
+                    ok = False
+                elif skip_repeat:
                     content = _tool_error(
                         "repeat_failure_blocked",
                         f"相同工具与参数已连续失败 {consecutive_failures + 1} 次",
@@ -487,13 +564,17 @@ async def stream_run(
                             if activated_spec is not None:
                                 specs[activated_name] = activated_spec
                                 allowed_names.add(activated_name)
-                        model_tools = _platform_tools(list(specs.values()))
+                        model_tools = _platform_tools([
+                            item for key, item in specs.items() if key in allowed_names
+                        ])
                         ok = True
                         yield {
                             "type": "policy",
                             "action": "tool_catalog_loaded",
                             "tool": name,
                             "detail": f"activated={len(activated_names)}",
+                            "activatedTools": activated_names,
+                            "visibleTools": sorted(allowed_names),
                         }
                     elif spec.get("approval") == "ask":
                         approved, requested, decided = await _approval(
@@ -528,10 +609,16 @@ async def stream_run(
                             content = str(tool_message.get("content") or "")
                         except TimeoutError:
                             content = _tool_error(
-                                "tool_timeout",
-                                f"工具执行超时（{int(timeout * 1000)} ms）",
-                                "请缩小处理范围或稍后重试",
+                                "write_outcome_unknown" if dedupe_side_effect else "tool_timeout",
+                                ("写操作超时，执行结果尚未确认" if dedupe_side_effect
+                                 else f"工具执行超时（{int(timeout * 1000)} ms）"),
+                                ("先通过只读查询核对执行状态，不得重新提交写操作或宣称成功；"
+                                 f"原调用标识：{call['id']}" if dedupe_side_effect
+                                 else "请缩小处理范围或稍后重试"),
+                                retryable=not dedupe_side_effect,
                             )
+                            if dedupe_side_effect:
+                                uncertain_writes[name] = content
                             ok = False
                             yield {
                                 "type": "policy",
@@ -541,14 +628,18 @@ async def stream_run(
                             }
 
                 if ok:
+                    tool_failures[name] = 0
                     consecutive_failures = 0
                     last_failure_key = failure_key
                     if dedupe_side_effect:
                         successful_side_effects.setdefault(failure_key, content)
-                    delivered = delivered or (
-                        name in file_tools and _tool_result_has_trusted_artifact(content)
+                    if name in file_tools:
+                        delivered_artifacts.extend(_tool_result_artifacts(content))
+                    delivered = bool(delivered_artifacts) and not missing_output_formats(
+                        required_formats, delivered_artifacts,
                     )
                 else:
+                    tool_failures[name] = tool_failures.get(name, 0) + 1
                     consecutive_failures = consecutive_failures + 1 if failure_key == last_failure_key else 1
                     last_failure_key = failure_key
                     if consecutive_failures >= 2 and not skip_repeat:
@@ -558,12 +649,38 @@ async def stream_run(
                             "tool": name,
                             "detail": f"consecutive_failures={consecutive_failures}; backend_skipped=false",
                         }
-                    if consecutive_failures in {3, 5}:
-                        messages.append({"role": "user", "content": _REPEAT_FAILURE_GUIDANCE})
+                    if consecutive_failures == 2:
+                        recovery_guidance.append({"role": "user", "content": _REPEAT_FAILURE_GUIDANCE})
 
                 yield {"type": "tool_result", "id": call["id"], "name": name, "content": content, "ok": ok}
                 model_content = _bounded_tool_content(str(content), int(spec.get("max_model_chars") or 60_000))
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content": model_content})
+                if tool_failures.get(name, 0) >= _MAX_FAILED_ATTEMPTS and name not in exhausted_tools:
+                    # A changed argument or an unrelated successful lookup must
+                    # not reset this tool's correction budget. Keep other tools
+                    # available so the model may choose a genuinely different path.
+                    exhausted_tools.add(name)
+                    allowed_names.discard(name)
+                    model_tools = _platform_tools([
+                        item for key, item in specs.items() if key in allowed_names
+                    ])
+                    yield {
+                        "type": "policy",
+                        "action": "tool_retry_exhausted",
+                        "tool": name,
+                        "detail": "首次尝试及三次纠正均失败；其他获权工具仍可使用",
+                    }
+                    recovery_guidance.append({
+                        "role": "user",
+                        "content": (
+                            f"[执行状态] {name} 首次尝试及三次纠正均失败，本轮不再提供。"
+                            "请选择其他获权能力；如果无法交付用户要求的结果，请明确失败，"
+                            "不要用其他格式的文件替代。"
+                        ),
+                    })
+            # Every tool_call must receive its tool response before guidance or
+            # another user turn (required by OpenAI-compatible providers).
+            messages.extend(recovery_guidance)
             continue
 
         if policy.get("require_file_output") and not delivered and nudges < max_nudges and step_index + 1 < max_steps:
@@ -576,8 +693,20 @@ async def stream_run(
             }
             visible_text = ""
             messages.append({"role": "assistant", "content": text})
-            messages.append({"role": "user", "content": str(policy.get("nudge_text") or _DEFAULT_COMPLETION_NUDGE)})
+            missing = missing_output_formats(required_formats, delivered_artifacts)
+            correction = str(policy.get("nudge_text") or _DEFAULT_COMPLETION_NUDGE)
+            if missing:
+                correction += " 尚未交付要求的格式：" + "、".join(sorted(missing)) + "；其他格式不能替代。"
+            messages.append({"role": "user", "content": correction})
             continue
+
+        if policy.get("require_file_output") and not delivered:
+            yield {
+                "type": "error",
+                "code": "ARTIFACT_DELIVERY_FAILED",
+                "message": "文件生成未完成：未取得工作空间确认的文件版本，不能宣称交付成功。",
+            }
+            return
 
         if not text:
             raise RuntimeError("模型服务没有返回有效的最终响应")

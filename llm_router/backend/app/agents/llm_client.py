@@ -51,8 +51,17 @@ def prepare_tools_for_provider(
     if not tools:
         return None
     config = provider.config or {}
-    supports_strict = provider.provider_type == "openai" and bool(
-        config.get("supports_strict_tools", provider.vendor == "openai")
+    # ``vendor`` is a UI classification, not a protocol capability guarantee.
+    # Existing compatible providers (including MiMo) can carry vendor=openai.
+    # Applying OpenAI's nullable/required schema transformation to those
+    # endpoints can corrupt their tool-call parsing. Only the official endpoint
+    # gets the default; compatible deployments must explicitly opt in.
+    endpoint = urlparse(str(getattr(provider, "base_url", "") or ""))
+    official_openai = (
+        endpoint.scheme == "https" and endpoint.hostname == "api.openai.com"
+    )
+    supports_strict = provider.provider_type == "openai" and (
+        config.get("supports_strict_tools", official_openai) is True
     )
     prepared = copy.deepcopy(tools)
     for tool in prepared:
