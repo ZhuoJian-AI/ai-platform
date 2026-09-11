@@ -21,4 +21,6 @@ assert.match(history, /selectTask\(task.id\)/);
 assert.match(terminal, /pageKey \|\| null, selectedConversationRef.current/);
 assert.match(terminal, /if \(abortRef.current && !skipRestoreRef.current\) return/);
 assert.match(terminal, /\}, \[selectedTask, view\]\)/);
+assert.match(terminal, /dispatchEventRef.current = dispatchEvent/);
+assert.match(terminal, /consumeTerminalEventStream\(resp, event => dispatchEventRef.current\(event\)\)/);
 console.log('shared assistant conversation routing passed');

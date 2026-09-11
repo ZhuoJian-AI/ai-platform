@@ -766,9 +766,13 @@ export default function Terminal() {
   }, [navigateToEnterpriseIntent, updateTurn]);
 
   // SSE 读取循环：解析 `data: {...}` 行并派发。POST /run 与 GET /stream 共用。
+  // 一个流可以持续数分钟；使用最新处理器，避免导航仍读到请求开始时
+  // 尚未加载的应用目录或已经变化的页面上下文。
+  const dispatchEventRef = useRef(dispatchEvent);
+  dispatchEventRef.current = dispatchEvent;
   const consumeSSE = useCallback(async (resp: Response) => {
-    await consumeTerminalEventStream(resp, dispatchEvent);
-  }, [dispatchEvent]);
+    await consumeTerminalEventStream(resp, event => dispatchEventRef.current(event));
+  }, []);
 
   const runStream = useCallback(async (
     taskId: string, msg: string, attachments: MessageAttachment[] = [],
