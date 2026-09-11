@@ -85,6 +85,10 @@ _FILE_OUTPUT_TOOL_NAMES = tuple(
 )
 # Registry kinds whose dynamically named tools materialize Runner outputs as workspace files.
 _FILE_OUTPUT_REGISTRY_KINDS = {"enterprise_export_file"}
+_UNFINISHED_TOOL_RESULT_STATUSES = {
+    "failed", "error", "pending", "retryable_error", "needs_input",
+    "needs_confirmation", "queued", "running", "cancelled",
+}
 _CURRENT_BUSINESS_DATA_TERMS = (
     "当前",
     "现在",
@@ -667,7 +671,9 @@ async def _consume_native(
                 )
                 if operation == "query":
                     enterprise_query_calls += 1
-                    successful_enterprise_queries += int(ok and result_status != "failed")
+                    successful_enterprise_queries += int(
+                        ok and result_status not in _UNFINISHED_TOOL_RESULT_STATUSES
+                    )
                 elif operation in {"create", "update", "delete", "approve"}:
                     enterprise_mutation_calls += 1
                     if ok and result_status == "pending":
@@ -696,7 +702,9 @@ async def _consume_native(
                 enterprise_action_calls += 1
                 enterprise_query_calls += 1
                 result_status = _enterprise_result_status(event.get("content"))
-                successful_enterprise_queries += int(ok and result_status not in {"failed", "error"})
+                successful_enterprise_queries += int(
+                    ok and result_status not in _UNFINISHED_TOOL_RESULT_STATUSES
+                )
             _publish(handle, staged, published_event)
             state.setdefault("business_tool_executions", []).append({
                 "toolCallId": call_id,

@@ -229,6 +229,33 @@ async def test_specialist_analysis_is_not_rejected_for_missing_database_query(mo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["enterprise_action", "enterprise_export_file"])
+@pytest.mark.parametrize("status", [
+    "error", "pending", "retryable_error", "needs_input", "needs_confirmation", "queued", "running", "cancelled",
+])
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_transport_success_is_not_business_completion(monkeypatch, kind, status, recovers):
+    state = {
+        "run_id": 15, "request": "查询当前记录", "application_id": "app-1",
+        "messages": [], "steps": [],
+        "_assistant_tool_registry": {"query": {"kind": kind, "operation": "query"}},
+    }
+    events = [{"type": "tool_result", "id": "first", "name": "query", "ok": True,
+               "content": json.dumps({"status": status})}]
+    if recovers:
+        events.append({"type": "tool_result", "id": "corrected", "name": "query", "ok": True,
+                       "content": json.dumps({"status": "completed", "count": 12})})
+    events.append({"type": "done", "text": "当前共有 12 条记录。"})
+    await _consume(monkeypatch, events, state)
+    if recovers:
+        assert state.get("error") is None
+        assert "12" in state["assistant_final"]
+    else:
+        assert state.get("error")
+        assert "12" not in state["assistant_final"]
+
+
+@pytest.mark.asyncio
 async def test_empty_success_is_not_misreported_as_max_steps(monkeypatch):
     state = {"run_id": 2, "request": "你好", "messages": [], "steps": []}
     await _consume(monkeypatch, [{"type": "done", "text": ""}], state)
