@@ -41,6 +41,7 @@ export interface ChatFileLink {
 
 export interface ArtifactOutput {
   fileId: string;
+  versionId?: string;
   path: string;
   name: string;
   mimeType: string;

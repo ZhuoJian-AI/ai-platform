@@ -14,6 +14,7 @@ import ApprovalCard from '../../components/terminal/ApprovalCard';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS } from '../../branding/BrandLogoSlot';
 import { presentAssistantMarkdown } from '../../utils/workspacePresentation';
 import { workspaceInternalPath } from '../../utils/workspaceFileLinks';
+import { executionVerificationLabel } from './executionVerificationLabel';
 import type {
   ArtifactOutput, Block, ChatFileLink, ChatMsg, TraceCategory,
 } from './terminalConversationTypes';
@@ -70,13 +71,10 @@ function verificationFromBlocks(blocks?: Block[]): ExecutionVerification | null 
   if (!calls.length) return null;
   const succeeded = calls.filter((call) => call.result?.ok !== false).length;
   const failed = calls.length - succeeded;
-  let lastFailedIndex = -1;
-  calls.forEach((call, index) => { if (call.result?.ok === false) lastFailedIndex = index; });
-  const recovered = failed > 0
-    && extractArtifacts(blocks).length > 0
-    && calls.slice(lastFailedIndex + 1).some((call) => call.result?.ok !== false);
+  // Tool traces and arbitrary artifacts do not prove the requested deliverable
+  // was produced. Keep the same conservative classification as history replay.
   return {
-    status: failed === 0 ? 'verified' : recovered ? 'recovered' : succeeded ? 'partial' : 'failed',
+    status: failed === 0 ? 'verified' : succeeded ? 'partial' : 'failed',
     tool_calls: calls.length,
     succeeded,
     failed,
@@ -87,16 +85,16 @@ function ExecutionStatus({ verification, streaming }: { verification: ExecutionV
   if (streaming) return <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginBottom: 8, color: WB.primary }}><LoadingOutlined /> 执行中…</div>;
   if (!verification) return null;
   const display = {
-    verified: { color: '#16a34a', label: '已验证执行', icon: <CheckCircleOutlined /> },
-    recovered: { color: '#16a34a', label: '已完成（有重试）', icon: <CheckCircleOutlined /> },
-    partial: { color: '#d97706', label: '部分完成', icon: <CheckCircleOutlined /> },
-    failed: { color: '#dc2626', label: '执行失败', icon: <CloseOutlined /> },
-    legacy_unverified: { color: '#d97706', label: '历史结果未验证', icon: <CloseOutlined /> },
+    verified: { color: '#16a34a', icon: <CheckCircleOutlined /> },
+    recovered: { color: '#16a34a', icon: <CheckCircleOutlined /> },
+    partial: { color: '#d97706', icon: <CloseOutlined /> },
+    failed: { color: '#dc2626', icon: <CloseOutlined /> },
+    legacy_unverified: { color: '#d97706', icon: <CloseOutlined /> },
   }[verification.status];
   return (
     <Tooltip title={verification.status === 'legacy_unverified' ? '未找到真实工具执行记录' : `工具调用 ${verification.tool_calls} 次：成功 ${verification.succeeded}，失败 ${verification.failed}`}>
       <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, marginBottom: 8, color: display.color }}>
-        {display.icon} {display.label}
+        {display.icon} {executionVerificationLabel(verification.status)}
       </div>
     </Tooltip>
   );
@@ -406,7 +404,7 @@ function ArtifactGallery({
       <div style={{ display: 'grid', gap: 10 }}>
         {artifacts.map((artifact) => (
           <InlineArtifactCard
-            key={artifact.fileId || artifact.path}
+            key={`${artifact.fileId || artifact.path}:${artifact.versionId || ''}`}
             artifact={artifact}
             fileLinks={fileLinks}
             streaming={streaming}
@@ -464,11 +462,11 @@ function InlineArtifactCard({
     setImageUrl(null);
     setImageLoading(true);
     setImageError(null);
-    terminal.getWsFileOriginalPreview(fileId, controller.signal)
+    terminal.getWsFileOriginalPreview(fileId, controller.signal, artifact.versionId)
       .catch((previewError) => {
         if (controller.signal.aborted) throw previewError;
         // 原文件预览可能被部署级开关关闭；图片卡片仍应能走已有下载链路展示。
-        return terminal.downloadWsFile(fileId, controller.signal);
+        return terminal.downloadWsFile(fileId, controller.signal, artifact.versionId);
       })
       .then((blob) => {
         if (cancelled) return;
@@ -491,10 +489,10 @@ function InlineArtifactCard({
       window.clearTimeout(timeout);
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [fileId, isImage, reloadToken, streaming, resolved?.updatedAt]);
+  }, [fileId, artifact.versionId, isImage, reloadToken, streaming, resolved?.updatedAt]);
 
   const openPreview = () => {
-    if (fileId) onLink(workspaceInternalPath(fileId));
+    if (fileId) onLink(`${workspaceInternalPath(fileId)}${artifact.versionId ? `?version=${encodeURIComponent(artifact.versionId)}` : ''}`);
     else if (path) onLink(path);
     else message.warning('文件路径尚未保存，请稍后重试');
   };
@@ -505,7 +503,7 @@ function InlineArtifactCard({
       return;
     }
     try {
-      const blob = await terminal.downloadWsFile(fileId);
+      const blob = await terminal.downloadWsFile(fileId, artifact.versionId);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url;

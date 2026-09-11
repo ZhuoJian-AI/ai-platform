@@ -92,7 +92,7 @@ export function messageFileRefLabel(ref: MessageFileRef): string {
 }
 
 
-function messageArtifacts(metadata: Record<string, unknown> | undefined): ArtifactOutput[] {
+export function messageArtifacts(metadata: Record<string, unknown> | undefined): ArtifactOutput[] {
   const raw = metadata?.artifacts;
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((item) => {
@@ -104,6 +104,7 @@ function messageArtifacts(metadata: Record<string, unknown> | undefined): Artifa
     if (!fileId && !path) return [];
     return [{
       fileId,
+      versionId: typeof value.version_id === 'string' ? value.version_id : undefined,
       path,
       name: typeof value.display_name === 'string' ? value.display_name : '生成文件',
       mimeType: typeof value.mime_type === 'string' ? value.mime_type : '',
@@ -112,6 +113,18 @@ function messageArtifacts(metadata: Record<string, unknown> | undefined): Artifa
       sourceLabel: source.kind === 'skill' ? '历史平台产物' : '平台工具生成',
     }];
   });
+}
+
+/** Only consume structured server artifact events, never model text or tool prose. */
+export function applyArtifactEvent(chat: ChatMsg[], event: Record<string, unknown>): ChatMsg[] {
+  if (event.type !== 'artifact' && event.type !== 'final') return chat;
+  const incoming = messageArtifacts({ artifacts: event.type === 'artifact' ? [event.artifact] : event.artifacts })
+    .filter((artifact) => artifact.fileId && artifact.versionId);
+  if (!incoming.length || chat[chat.length - 1]?.role !== 'assistant') return chat;
+  const last = chat[chat.length - 1];
+  const merged = new Map((last.artifacts || []).map((a) => [`${a.fileId}:${a.versionId || ''}`, a]));
+  for (const artifact of incoming) merged.set(`${artifact.fileId}:${artifact.versionId}`, artifact);
+  return [...chat.slice(0, -1), { ...last, artifacts: [...merged.values()] }];
 }
 
 

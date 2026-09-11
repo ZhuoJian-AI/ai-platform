@@ -50,7 +50,7 @@ import { useWorkspaceFileEvents } from '../../hooks/useWorkspaceFileEvents';
 import { AssistantBubble, MessageTimestamp } from './TerminalAssistantMessage';
 import { FilePanel, MemoryPanel, ResourcePanel } from './TerminalPanels';
 import {
-  consumeTerminalEventStream, dropTurnFromChat, messageFileRefLabel, POLICY_TRACE_TITLE, restoreChat,
+  applyArtifactEvent, consumeTerminalEventStream, dropTurnFromChat, messageFileRefLabel, POLICY_TRACE_TITLE, restoreChat,
 } from './terminalConversationModel';
 import type {
   Block, ChatFileLink, ChatMsg, MessageAttachment, TraceCategory,
@@ -578,6 +578,10 @@ export default function Terminal() {
   const dispatchEvent = useCallback((evt: Record<string, unknown>) => {
     setTraceLog((t) => [...t, evt]);
     switch (evt.type) {
+      case 'artifact':
+      case 'final':
+        setChat((chat) => applyArtifactEvent(chat, evt));
+        break;
       case 'phase': {
         const idx = (evt.index as number) ?? 0;
         updateTurn((bs) => {
@@ -745,7 +749,7 @@ export default function Terminal() {
       case 'done':
         setRuntimeStatus(null);
         break;
-      // 'final' / 'step' (legacy) — 无需特殊渲染
+      // 'step' (legacy) — 无需特殊渲染
       default:
         break;
     }
@@ -1012,11 +1016,6 @@ export default function Terminal() {
   const startTask = async () => {
     const readyAttachments = inputAttachments.filter((item) => item.status === 'ready' && item.file_id);
     if ((!input.trim() && !readyAttachments.length && !inputFileRefs.length) || streaming) return;
-    if (!config.model_alias) {
-      message.warning('请先选择模型后再执行');
-      setCfgContext('composer'); setCfgOpen(true);
-      return;
-    }
     const msg = input.trim() || (readyAttachments.length
       ? `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`
       : '请处理已引用的工作空间文件');
@@ -1048,11 +1047,6 @@ export default function Terminal() {
   const sendFollowUp = async () => {
     const readyAttachments = followUpAttachments.filter((item) => item.status === 'ready' && item.file_id);
     if (!selectedId || (!followUp.trim() && !readyAttachments.length && !followUpFileRefs.length) || streaming) return;
-    if (!taskConfig.model_alias) {
-      message.warning('请先选择模型后再执行');
-      setCfgContext('chat'); setCfgOpen(true);
-      return;
-    }
     const msg = followUp.trim() || (readyAttachments.length
       ? `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`
       : '请继续处理任务中引用的工作空间文件');
@@ -1580,6 +1574,15 @@ export default function Terminal() {
                     activeTaskId = created.id;
                     setSelectedId(created.id);
                     setComposerOpen(false);
+                    // Persist a newly created sidebar conversation before streaming.
+                    // The route-to-state guard cannot infer this state-only selection.
+                    const params = new URLSearchParams(location.search);
+                    params.set('view', 'application');
+                    params.set('app', selectedApplication.id);
+                    if (selectedApplicationModuleKey) params.set('module', selectedApplicationModuleKey);
+                    if (selectedApplicationPageKey) params.set('page', selectedApplicationPageKey);
+                    params.set('conversation', created.id);
+                    navigate(`${terminalBasePath}?${params.toString()}`, { replace: true });
                     qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
                   }
                   const controller = new AbortController();
@@ -2440,17 +2443,20 @@ function TaskInputBox(props: {
   }, [effectiveWorkspaceId, onOpenConfig, onSetWorkspace, resources]);
 
   const queueFiles = useCallback(async (fileList: FileList | File[]) => {
+    // FileList is live: the input change handler clears its value immediately.
+    // Snapshot before any await so permission resolution cannot lose the files.
+    const filesToQueue = Array.from(fileList);
     const workspaceId = await ensureWritableWorkspace();
     if (!workspaceId) {
       return;
     }
     const available = Math.max(0, MAX_ATTACHMENTS - attachmentsRef.current.length);
-    const selected = Array.from(fileList).slice(0, available);
+    const selected = filesToQueue.slice(0, available);
     if (!available) {
       message.warning(`每条消息最多添加 ${MAX_ATTACHMENTS} 个附件`);
       return;
     }
-    if (fileList.length > available) {
+    if (filesToQueue.length > available) {
       message.warning(`每条消息最多添加 ${MAX_ATTACHMENTS} 个附件，已保留前 ${available} 个`);
     }
     const drafts: ComposerAttachment[] = selected.map((file) => ({

@@ -171,28 +171,49 @@ OUTPUT_PROTOCOL_PROMPT = (
 
 def _requires_file_artifact(request: str) -> bool:
     """Conservatively detect an explicit request to create or export a file."""
+    from app.services.assistant_delivery_policy import requests_file_delivery
 
-    text = str(request or "").casefold()
-    file_kind = re.search(r"(?:excel|xlsx|csv|word|docx|ppt|pptx|pdf|markdown|md|txt|图片|压缩包|文件)", text)
-    delivery = re.search(r"(?:生成|创建|制作|导出|保存|交付|下载|produce|create|export|save)", text)
-    return bool(file_kind and delivery)
+    return requests_file_delivery(request)
 
 
 def _apply_artifact_completion_guard(state: AgentState, artifacts: list[dict[str, Any]]) -> bool:
     """Prevent every assistant view from claiming a file that was not committed."""
 
+    # A failed run is already incomplete. Preserve its original error and the
+    # sanitized failure reply instead of replacing the cause with a secondary
+    # missing-artifact symptom during final persistence.
+    if state.get("error"):
+        return False
+
+    from app.services.assistant_delivery_policy import explicit_output_formats, missing_output_formats
     from app.services.business_assistant_orchestration import intent_requires_artifact
 
     business_intent = state.get("business_turn_intent") or {}
+    # Actual server-recorded writes require delivery even when a contextual
+    # request (e.g. "把17改为19") contains no file-production keywords.
+    produced = {
+        (str(item.get("file_id")), str(item.get("version_id")))
+        for item in state.get("file_accesses_v1") or []
+        if isinstance(item, dict)
+        and item.get("source") == "tool_result"
+        and item.get("tool_name") in (_builtin_tools.BUILTIN_TOOL_NAMES | _builtin_tools.LEGACY_BUILTIN_TOOL_NAMES)
+        and item.get("operation") in _builtin_tools._ARTIFACT_OPERATIONS
+        and item.get("file_id") and item.get("version_id")
+    }
+    delivered = {
+        (str(item.get("file_id")), str(item.get("version_id")))
+        for item in artifacts
+    }
     requires_artifact = (
         intent_requires_artifact(business_intent)
-        if business_intent
-        else _requires_file_artifact(str(state.get("request") or ""))
+        or _requires_file_artifact(str(state.get("request") or ""))
+        or bool(produced)
     )
-    if not requires_artifact or artifacts:
+    missing = missing_output_formats(explicit_output_formats(str(state.get("request") or "")), artifacts)
+    if not requires_artifact or (artifacts and not missing and produced <= delivered):
         return True
     state["assistant_final"] = (
-        "文件生成未完成：本轮没有得到平台工作空间确认的有效文件，"
+        "文件生成未完成：本轮没有得到平台工作空间确认且符合要求格式的有效文件，"
         "因此不会把文字、服务器路径或下载地址冒充为已交付文件。请稍后重试。"
     )
     state["error"] = "assistant artifact delivery failed"
@@ -2580,20 +2601,26 @@ async def save_memory(state: AgentState) -> dict:
         # "latest reference per logical file" index.  A single turn may read
         # v1 and then write v2; filtering accesses through ``tool_file_refs``
         # would silently discard the exact v1 read that informed the edit.
-        file_accesses_v1, _ = await _verified_tool_file_records(
+        file_accesses_v1, artifacts = await _verified_tool_file_records(
             state,
             file_accesses_v1,
             deps.get("user"),
             task_id=str(task_id),
             task_title=task.title if task is not None else None,
         )
-        tool_file_refs, artifacts = await _verified_tool_file_records(
+        tool_file_refs, _ = await _verified_tool_file_records(
             state,
             tool_file_refs,
             deps.get("user"),
             task_id=str(task_id),
             task_title=task.title if task is not None else None,
         )
+        # The latest reference may be a read after an edit, or even a read of
+        # an older version. Deliver writes from the complete verified access
+        # log, not from the compact recall index. Match SSE replay identity.
+        artifacts = list({
+            (item["file_id"], item["version_id"]): item for item in artifacts
+        }.values())
         streamed_final = str(state.get("assistant_final") or "")
         _apply_artifact_completion_guard(state, artifacts)
         state["artifacts"] = artifacts

@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from app.agents import llm_client
-from app.agents.graph import nodes
+from app.agents.graph import builtin_tools, nodes
 from app.api import terminal
 from app.auth.user_auth import current_user_for_user
 from app.main import _redacted_validation_errors, conceal_stable_file_forbidden
