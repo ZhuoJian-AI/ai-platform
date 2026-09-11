@@ -38,6 +38,10 @@ python -m pytest --noconftest tests/test_voice_reliability_boundaries.py tests/t
 
 ### 后续验收更新
 
+- Source PR #116 已合并：`9b00713cb536cd821572522dc584b8b8f116830d`。
+- Registry 已返回候选后端 digest：`sha256:0904ede643ad72c47b5da69ae2248e56b563ca57cad5227bd5a2ab5868e0a289`；镜像编译检查通过。仅复制代码，无依赖安装或数据库迁移。
+- 回切后端 digest：`sha256:84032ed2ee9a9c408385c2b0b937060fe6a7b26ec447416a55f10dde21f2749f`，前端保持原 digest。
+
 - 服务器只读检查：系统盘约剩 15GB；`/dev/vdb` 为 60GB，`lsblk` 无文件系统和挂载点、`wipefs -n` 无签名输出。未格式化、分区或挂载。
 - 使用独立 PostgreSQL 容器和 512MB tmpfs 数据目录，未使用线上数据库。测试进程复用本项目空闲测试容器，在独立目录运行。
 - 正常 conftest 的上述 6 个测试文件共 **98 passed (19.42s)**。初次出现的两个失败源自空身份测试替身；已补齐租户、主体和明确角色授权，未放宽生产校验。
