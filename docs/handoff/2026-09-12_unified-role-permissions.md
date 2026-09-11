@@ -19,3 +19,11 @@
 - 实际员工登录 ASR 可用；配置 MiMo 官方 mimo_default 标准音色，仅授予企业管理员角色。
 - 线上点击朗读真实通过，job 531b6dab-29ec-4d9f-8919-28fd481edfc4，845256 字节，播放/停止/重复点击缓存复用通过，工作空间文件不增加。未声称真人麦克风或沉浸式已完成。
 - 前端新镜像 sha256:6a065b4ad681e76e775b8aceb88930a10ae31ae5bc60a536104c290b9daa32a4，Registry HEAD 验证；后端等镜像不变，无迁移。待本 manifest 部署验证新管理界面。
+
+## 已发布
+
+- Manifest PR129，97d60a23a04cca65ef942991d1d72a8f6f6bc773；Coolify voicefix4a6a6cb13c95530c finished，无待应用配置。
+- 9 服务 healthy，真实环境变量预检及 Compose 校验 PASS，运行镜像/source 对应，跨服务令牌一致，公网 health 200。
+- 线上 root 真实登录，“语音与平台能力”、ASR/TTS 选项、编辑/删除角色入口均可见。首次冒烟发生在发布切换期间未找到登录框，发布完成后同一脚本通过；未调整产品代码规避。
+- staging https://ai-platform.staging.zhuojianai.com；存储沿用 signed-upload，无数据库迁移、业务文件删除或磁盘初始化。规则 c948cd2。
+- 本轮只将 zhangsan 通过企业管理员角色授权，并配置标准音色；其他员工未变更。ASR 可用状态已确认，未把状态检查称为真人录音验收。沉浸式语音、未知写入核实和历史 401 仍待完成。
