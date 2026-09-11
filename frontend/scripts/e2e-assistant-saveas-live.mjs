@@ -130,7 +130,7 @@ try {
   catch (e) { console.log(JSON.stringify({ phase: 'admin_ui_failed', path: new URL(admin.url()).pathname, hasFileLink: new URL(admin.url()).searchParams.has('file') })); throw e; }
   await adminContext.close();
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ status: 'passed', taskId, sourceId: source.id, outputId: output.id, checks: ['real_upload', 'llm_edit', 'new_artifact', 'original_unchanged', 'employee_admin_readonly_download'] }));
+  console.log(JSON.stringify({ status: 'passed', adminFrontend: process.env.E2E_CANDIDATE === '1' ? 'local_candidate' : 'deployed', reusedTask: !!process.env.E2E_RESUME_TASK, taskId, sourceId: source.id, outputId: output.id, checks: ['real_upload', 'llm_edit', 'new_artifact', 'original_unchanged', 'employee_admin_readonly_download'] }));
 } finally {
   for (const f of [output, source].filter(Boolean)) {
     try {
