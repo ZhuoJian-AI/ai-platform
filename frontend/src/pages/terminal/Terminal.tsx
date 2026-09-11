@@ -2592,6 +2592,13 @@ function TaskInputBox(props: {
     const generation = ++recordingGenerationRef.current;
     recordingPendingRef.current = true;
     try {
+      const freshResources = await terminal.resources();
+      if (recordingGenerationRef.current !== generation) return;
+      const asr = freshResources.audio_capabilities?.speech_to_text;
+      if (!asr?.available) {
+        message.warning(asr?.messageZh || '暂时无法确认语音转文字能力，请稍后重试');
+        return;
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       if (recordingGenerationRef.current !== generation) {
         stream.getTracks().forEach((track) => track.stop());
@@ -2884,7 +2891,9 @@ function TaskInputBox(props: {
               <UploadOutlined /> 上传附件
             </button>
             {recordingState === 'idle' ? (
-              <button type="button" style={chipBtnStyle} title="录音并转写" onClick={() => void startRecording()}>
+              <button type="button" style={chipBtnStyle}
+                title={resources?.audio_capabilities?.speech_to_text?.messageZh || '录音前检查语音转文字权限'}
+                onClick={() => void startRecording()}>
                 <AudioOutlined /> 录音
               </button>
             ) : recordingState === 'processing' ? (

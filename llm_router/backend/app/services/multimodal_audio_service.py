@@ -43,7 +43,42 @@ from app.services.scope_service import effective_scope_set, is_workspace_visible
 def require_permission(cu: CurrentUser, code: str) -> None:
     permissions = set(cu.permission_codes or ())
     if "*" not in permissions and code not in permissions:
-        raise HTTPException(status_code=403, detail=f"Permission required: {code}")
+        label = {
+            "multimodal.audio.transcribe": "语音转文字",
+            "multimodal.speech.use": "语音朗读",
+        }.get(code, "该语音能力")
+        raise HTTPException(status_code=403, detail=f"当前角色未获{label}权限，请联系管理员授权")
+
+
+async def interaction_capabilities(db: AsyncSession, cu: CurrentUser) -> dict:
+    """Read-only availability; execution still repeats authorization and routing."""
+    organization = await db.get(Organization, cu.organization_id)
+    enabled = bool(organization and settings.multimodal_audio_enabled_for(
+        organization.slug, organization_id=organization.id,
+    ))
+    permissions = set(cu.permission_codes or ())
+    result = {}
+    for capability, permission, label in (
+        ("speech_to_text", "multimodal.audio.transcribe", "语音转文字"),
+        ("text_to_speech", "multimodal.speech.use", "语音朗读"),
+    ):
+        code, reason = "available", "可用"
+        if not enabled:
+            code, reason = "disabled", "当前企业尚未启用语音功能"
+        elif "*" not in permissions and permission not in permissions:
+            code, reason = "permission_denied", f"当前角色未获{label}权限，请联系管理员授权"
+        else:
+            deployment = await model_gateway.resolve_deployment(
+                db, cu.organization_id, "default", capability, dept_id=cu.department_id,
+            )
+            if deployment is None:
+                code, reason = "no_available_deployment", f"暂无可用的{label}模型，请管理员检查部署、验证及健康状态"
+            elif capability == "text_to_speech":
+                voices = await list_visible_voices(db, cu)
+                if not any(voice.voice_type == "builtin" for voice in voices):
+                    code, reason = "no_available_voice", "暂无获授权的标准音色，请联系管理员配置"
+        result[capability] = {"available": code == "available", "code": code, "messageZh": reason}
+    return result
 
 
 async def require_multimodal_enabled(db: AsyncSession, organization_id: UUID) -> None:

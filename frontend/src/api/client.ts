@@ -1230,6 +1230,9 @@ export interface TerminalUser {
 
 export interface TerminalResources {
   workspaces: Workspace[];
+  audio_capabilities?: Partial<Record<'speech_to_text' | 'text_to_speech', {
+    available: boolean; code: string; messageZh: string;
+  }>>;
   /** 用户默认装配：默认工作空间（个人）+ 默认模型（最近一次使用）。 */
   defaults?: { workspace_id: string | null; model_alias: string | null };
 }
