@@ -11,3 +11,11 @@
 验证：node scripts/test-unified-role-permissions.mjs 通过（实际保存表达式的授予/撤销、未知权限和通配符保留、旧路由删除）；npm run build 通过，保留现有 chunk 警告；git diff --check 通过。
 
 尚未浏览器端到端验收、合并或部署；不宣称线上已可见，不宣称 zhangsan 已能使用语音。无数据库、后端、模型或音色配置变更。旧源码可以从 Git 历史恢复。
+
+## 后续进展
+
+- Source PR128 已合并，source b3057dcf1599b5cfe4ad40c3e02d86f6d11623c8。
+- 用户明确授权 zhangsan 全部权限：通过真实 root 登录的既有角色 API 增加企业管理员（*），保留原角色，回读确认；没有用户名特例。
+- 实际员工登录 ASR 可用；配置 MiMo 官方 mimo_default 标准音色，仅授予企业管理员角色。
+- 线上点击朗读真实通过，job 531b6dab-29ec-4d9f-8919-28fd481edfc4，845256 字节，播放/停止/重复点击缓存复用通过，工作空间文件不增加。未声称真人麦克风或沉浸式已完成。
+- 前端新镜像 sha256:6a065b4ad681e76e775b8aceb88930a10ae31ae5bc60a536104c290b9daa32a4，Registry HEAD 验证；后端等镜像不变，无迁移。待本 manifest 部署验证新管理界面。
