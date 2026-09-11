@@ -27,6 +27,8 @@ ENTRY_TOOL_DEFINITIONS = [
             "description": (
                 "按用户自然语言搜索当前角色可用的企业系统、模块、页面和平台工具；"
                 "返回少量候选并在本轮激活候选工具的完整参数结构。"
+                "这也是文件读取、识图/OCR、语音等公共能力的发现入口，不仅搜索企业业务。"
+                "当前工具列表是已加载子集；缺少所需工具时先搜索，不能据此断言平台没有该能力。"
             ),
             "parameters": {
                 "type": "object",
@@ -228,15 +230,23 @@ def search_tool_specs(
         if not name or name in ENTRY_TOOL_NAMES:
             continue
         haystack = descriptor_search_text(spec)
+        # Group aliases improve recall, but must not outweigh the operation's
+        # own description (e.g. image generation is not image understanding).
+        direct_text = " ".join(
+            (name, str(spec.get("description") or ""),
+             " ".join(str(item) for item in (spec.get("search_terms") or [])))
+        ).lower()
         score = 0
-        if query_text and query_text in haystack:
+        if query_text and query_text in direct_text:
             score += 30
         for term in query_terms:
             if term in name.lower():
                 score += 12
-            elif term in haystack:
+            elif term in direct_text:
                 score += 4
-        if spec.get("required_context") == "current_page":
+            elif term in haystack:
+                score += 1
+        if score and spec.get("required_context") == "current_page":
             score += 2
         if score:
             ranked.append((score, name, spec))
@@ -280,7 +290,7 @@ def search_business_capabilities(
             elif term in haystack_terms:
                 score += 4
         # Prefer executable Actions over their containing page when both match.
-        if item.get("actionKey"):
+        if score and item.get("actionKey"):
             score += 3
         if score:
             stable_name = "|".join(

@@ -1,14 +1,115 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
+import subprocess
+import wave
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 from PIL import Image
 
 from app.agents.graph import model_capability_tools as capability_tools
+from app.services import audio_validation
+
+
+@pytest.fixture(autouse=True)
+def db_engine():
+    """Tool unit tests use explicit service doubles, not PostgreSQL."""
+    yield
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["音频中的公开回答", None, "", "   "])
+async def test_audio_understanding_never_returns_private_reasoning(monkeypatch, answer):
+    principal = _user()
+    file = SimpleNamespace(id=uuid4(), path="sample.mp3", content_ref="oss://sample",
+                           size=100, metadata_={"mime": "audio/mpeg"})
+    monkeypatch.setattr(capability_tools, "scan_request", AsyncMock(
+        return_value=SimpleNamespace(blocked=False, redacted_text=None)))
+    monkeypatch.setattr(capability_tools, "_check_audio_permission", AsyncMock(return_value=None))
+    monkeypatch.setattr(capability_tools.workspace_service, "storage_version_id", lambda _: None)
+    monkeypatch.setattr(capability_tools.storage_gateway_service, "get_browser_signed_download",
+                        AsyncMock(return_value={"url": "https://example.invalid/audio"}))
+    monkeypatch.setattr(capability_tools.model_gateway, "understand_audio", AsyncMock(
+        return_value=SimpleNamespace(content=answer, reasoning_content="PRIVATE_AUDIO_REASONING")))
+    result = _open_result(await capability_tools._understand(
+        db=object(), state={"org_id": str(principal.organization_id)},
+        params={"input_file_ids": [str(file.id)], "question": "总结内容"},
+        user=principal, authorize_input=AsyncMock(return_value=(file, principal)),
+    ))
+    assert "PRIVATE_AUDIO_REASONING" not in json.dumps(result)
+    if answer and answer.strip():
+        assert result["status"] == "completed"
+        assert result["data"]["answers"][0]["answer"] == answer
+    else:
+        assert result["status"] == "retryable_error"
+        assert result["error"]["code"] == "empty_model_answer"
+
+
+@pytest.fixture(scope="module")
+def audio_samples():
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(16000)
+        output.writeframes(b"\x00\x00" * 1600)
+    wav = buffer.getvalue()
+    mp3 = subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-f", "wav", "-i", "pipe:0", "-f", "mp3", "pipe:1"],
+        input=wav, capture_output=True, check=True, timeout=10,
+    ).stdout
+    return {"mp3": mp3, "wav": wav}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("format_name", ["mp3", "wav"])
+async def test_audio_output_decodes_real_audio(audio_samples, format_name):
+    mime = await capability_tools._validate_audio_output(audio_samples[format_name], format_name)
+    assert mime == ("audio/mpeg" if format_name == "mp3" else "audio/wav")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("raw", "format_name"), [
+    (b"ID3\x04\x00\x00\x00\x00\x00\x00payload", "mp3"),
+    (b"RIFF\x04\x00\x00\x00WAVE", "wav"),
+    (b"\xff\xfbgarbage", "mp3"),
+])
+async def test_audio_output_rejects_header_only_garbage(raw, format_name):
+    with pytest.raises(ValueError):
+        await capability_tools._validate_audio_output(raw, format_name)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [TimeoutError, asyncio.CancelledError])
+async def test_audio_validation_reaps_decoder_on_interrupt(monkeypatch, error_type):
+    calls = []
+
+    class Decoder:
+        returncode = None
+
+        async def communicate(self, _raw):
+            raise error_type()
+
+        def kill(self):
+            calls.append("kill")
+
+        async def wait(self):
+            calls.append("wait")
+
+    async def spawn(*args, **kwargs):
+        assert args[args.index("-protocol_whitelist") + 1] == "pipe"
+        assert kwargs["stderr"] == asyncio.subprocess.DEVNULL
+        return Decoder()
+
+    monkeypatch.setattr(audio_validation.asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(error_type):
+        await capability_tools._validate_audio_output(b"ID3test", "mp3")
+    assert calls == ["kill", "wait"]
 
 
 class _Db:
@@ -141,7 +242,10 @@ async def test_audio_transcribe_rechecks_file_and_uses_default_capability_route(
 
 
 @pytest.mark.asyncio
-async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
+@pytest.mark.parametrize("revocation", [None, "workspace", "speech", "target", "corrupt_audio", "missing_style",
+                                       "post_workspace", "post_speech"])
+@pytest.mark.parametrize("mode", ["standard", "design"])
+async def test_speech_synthesize_commits_only_with_current_permissions(monkeypatch, revocation, audio_samples, mode):
     db = _Db()
     principal = _user("multimodal.speech.use")
     workspace = SimpleNamespace(id=uuid4(), name="zhangsan")
@@ -153,13 +257,31 @@ async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
         metadata_={},
         content_hash="a" * 64,
         current_version_id=version_id,
+        content_ref="oss://test-speech-only",
     )
     called: dict = {}
 
+    resolve_calls = 0
+    permission_calls = 0
+
     async def resolve_output(_params, _user):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        if (resolve_calls == 2 and revocation == "workspace") or (
+            resolve_calls == 3 and revocation == "post_workspace"
+        ):
+            return None, principal, "工作空间权限已撤销"
+        if resolve_calls == 2 and revocation == "target":
+            return SimpleNamespace(id=uuid4()), principal, None
         return workspace, principal, None
 
     async def check_permission(*_args, **_kwargs):
+        nonlocal permission_calls
+        permission_calls += 1
+        if (permission_calls == 2 and revocation == "speech") or (
+            permission_calls == 3 and revocation == "post_speech"
+        ):
+            return "当前角色语音权限已撤销"
         return None
 
     async def scan(*_args, **_kwargs):
@@ -168,7 +290,7 @@ async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
     async def synthesize(_db, _org_id, **kwargs):
         called["synthesize"] = kwargs
         return {
-            "audio": b"ID3\x04\x00\x00\x00\x00\x00\x00payload",
+            "audio": b"ID3garbage" if revocation == "corrupt_audio" else audio_samples["mp3"],
             "format": "mp3",
             "model": "mimo-v2.5-tts",
             "usage": {},
@@ -197,14 +319,17 @@ async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
     monkeypatch.setattr(capability_tools.model_gateway, "synthesize_audio", synthesize)
     monkeypatch.setattr(capability_tools.workspace_service, "ingest_uploaded_file", ingest)
     monkeypatch.setattr(capability_tools.workspace_service, "sync_current_version", sync)
+    cleanup = AsyncMock()
+    monkeypatch.setattr(capability_tools.storage_gateway_service, "delete_object", cleanup)
 
-    result = _open_result(
-        await capability_tools.execute_audio_tool(
+    operation = capability_tools.execute_audio_tool(
             db=db,
             state={"org_id": str(principal.organization_id), "run_id": "run-2", "task_id": "task-2"},
             name="speech_synthesize",
             params={
                 "text": "请播报今日生产进度",
+                "mode": mode,
+                "style": "" if revocation == "missing_style" else "温和清晰的成年女性普通话音色",
                 "output_format": "mp3",
                 "output_name": "生产播报.mp3",
                 "_tool_call_id": "call-2",
@@ -214,9 +339,41 @@ async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
             resolve_output_workspace=resolve_output,
             task_source=task_source,
             file_identity=file_identity,
-        )
     )
+    if revocation in {"post_workspace", "post_speech"}:
+        with pytest.raises(PermissionError):
+            await operation
+        cleanup.assert_awaited_once_with(saved.content_ref)
+        assert "ingest" in called
+        assert not db.added
+        return
+    result = _open_result(await operation)
 
+    if revocation == "missing_style" and mode == "design":
+        assert result["status"] == "retryable_error"
+        assert result["error"]["code"] == "voice_design_description_required"
+        assert "synthesize" not in called
+        assert "ingest" not in called
+        assert not db.added
+        return
+    if revocation == "missing_style":
+        revocation = None  # Standard speech does not require a design description.
+    assert resolve_calls == (1 if revocation == "corrupt_audio" else 2 if revocation else 3)
+    assert called["synthesize"]["design_prompt"] == (
+        "温和清晰的成年女性普通话音色" if mode == "design" else None
+    )
+    if revocation:
+        assert result["status"] == ("retryable_error" if revocation == "corrupt_audio" else "failed")
+        assert not result.get("artifacts")
+        assert "ingest" not in called
+        assert not db.added
+        expected_code = {
+            "speech": "speech_permission_changed",
+            "corrupt_audio": "invalid_audio_output",
+        }.get(revocation, "workspace_permission_changed")
+        assert result["error"]["code"] == expected_code
+        return
+    assert permission_calls == 3
     assert result["status"] == "completed"
     assert result["artifacts"][0]["file_id"] == str(file_id)
     assert result["artifacts"][0]["version_id"] == str(version_id)
@@ -225,11 +382,27 @@ async def test_speech_synthesize_commits_a_real_workspace_artifact(monkeypatch):
     assert called["ingest"]["created_by_user_id"] == principal.id
     assert db.added
     audit = next(item for item in db.added if hasattr(item, "model_requested"))
-    assert audit.model_requested == "default:text_to_speech"
+    assert audit.model_requested == ("default:voice_design" if mode == "design" else "default:text_to_speech")
 
 
 @pytest.mark.asyncio
-async def test_image_understand_uses_verified_vision_route(monkeypatch):
+@pytest.mark.parametrize("blocked,redacted", [(True, None), (False, "已脱敏")])
+async def test_visual_tool_retains_pixel_dlp_rejection(monkeypatch, blocked, redacted):
+    monkeypatch.setattr(
+        capability_tools.tool_executor_client, "execute_builtin",
+        AsyncMock(return_value=({"summary": {"text": "受限文字"}}, [])),
+    )
+    scanner = AsyncMock(return_value=SimpleNamespace(blocked=blocked, redacted_text=redacted))
+    monkeypatch.setattr(capability_tools, "scan_request", scanner)
+    image = SimpleNamespace(file_id=str(uuid4()), name="test.png", raw=b"pixels")
+    with pytest.raises(ValueError, match="不能发送给外部视觉模型"):
+        await capability_tools._check_image_dlp(object(), {"org_id": str(uuid4())}, image)
+    scanner.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["这是一张服装款式图", None, "", "   ", "gateway_failure", "dlp_blocked"])
+async def test_image_understand_uses_verified_vision_route(monkeypatch, answer):
     principal = _user()
     file = SimpleNamespace(
         id=uuid4(),
@@ -248,23 +421,31 @@ async def test_image_understand_uses_verified_vision_route(monkeypatch):
         return png
 
     async def scan(*_args, **_kwargs):
-        return SimpleNamespace(blocked=False, redacted_text=None)
+        return SimpleNamespace(blocked=answer == "dlp_blocked" and _args[1] == "安全图片", redacted_text=None)
 
     async def resolve(*_args, **_kwargs):
-        return SimpleNamespace(provider=object(), model="mimo-v2.5-pro")
+        return SimpleNamespace(provider=SimpleNamespace(id=uuid4()), model="mimo-v2.5-pro")
 
     async def chat(_db, _org_id, model_alias, _messages, **kwargs):
         called["chat"] = (model_alias, kwargs)
-        return SimpleNamespace(content="这是一张服装款式图", reasoning_content=None)
+        if answer == "gateway_failure":
+            raise capability_tools.model_gateway.GatewayError("upstream_timeout")
+        return SimpleNamespace(content=answer, reasoning_content="PRIVATE_REASONING_MUST_NOT_LEAK")
 
     monkeypatch.setattr(capability_tools.workspace_service, "load_file_bytes", load_file_bytes)
     monkeypatch.setattr(capability_tools, "scan_request", scan)
     monkeypatch.setattr(capability_tools.multimodal_service, "resolve_vision_fallback", resolve)
     monkeypatch.setattr(capability_tools.model_gateway, "chat", chat)
+    monkeypatch.setattr(
+        capability_tools.tool_executor_client, "execute_builtin",
+        AsyncMock(return_value=({"summary": {"text": "安全图片"}}, [])),
+    )
 
+    audited = []
+    audit_db = SimpleNamespace(add=audited.append, flush=AsyncMock())
     result = _open_result(
         await capability_tools.execute_image_understanding(
-            db=object(),
+            db=audit_db,
             state={"org_id": str(principal.organization_id)},
             params={"input_file_ids": [str(file.id)], "question": "这是什么款式？"},
             user=principal,
@@ -272,7 +453,29 @@ async def test_image_understand_uses_verified_vision_route(monkeypatch):
         )
     )
 
-    assert result["status"] == "completed"
-    assert result["data"]["answer"] == "这是一张服装款式图"
+    assert "PRIVATE_REASONING_MUST_NOT_LEAK" not in json.dumps(result)
+    if answer == "dlp_blocked":
+        assert result["status"] == "failed"
+        assert result["error"]["code"] == "image_content_blocked"
+        assert "chat" not in called
+        assert audited == []
+        return
+    success = bool(answer and answer.strip() and answer != "gateway_failure")
+    if success:
+        assert result["status"] == "completed"
+        assert result["data"]["answer"] == answer
+    else:
+        assert result["status"] == "retryable_error"
+        assert result["error"]["code"] == (
+            "upstream_timeout" if answer == "gateway_failure" else "empty_model_answer"
+        )
     assert called["chat"][0] == "mimo-v2.5-pro"
     assert called["chat"][1]["provider_override"] is not None
+    assert len(audited) == 1
+    audit = audited[0]
+    assert audit.request_id == called["chat"][1]["request_id"]
+    assert audit.event_type == "image_understanding"
+    assert audit.model_served == "mimo-v2.5-pro"
+    assert audit.status_code == (200 if success else 502)
+    assert audit.error_message == (None if success else result["error"]["code"])
+    assert audit.metadata_ == {"run_id": None, "input_count": 1}
