@@ -9,3 +9,11 @@
 - 171 项相关测试通过；新增 16 个组合回归和 5 个证据单元测试。未要求真实模型必须一次调用成功。
 - 边界：本批只覆盖文件型专业分析。文本/业务上下文型专业 AI、跨运行写结果核实、多目标逐项完成，以及其他文件读取工具的替代回执仍待单独实现。不能把此补丁描述为完整语义事实校验。
 - 已有真实专业 AI 上传返回主脑验收证据复用；本批故障组合由确定性工具事件注入验证，不冒充新的全量浏览器验收。
+
+## 发布证据
+
+- source `8070ccd4d9db5adf14c2800a8698b3cfc4202809`（PR #108）。
+- backend `sha256:eef81efc788cd2bf15ba0bfff1499cedbe9c1fdffbea71fc10da7ca07c0e824f`；Registry 返回 200，镜像内两份修改源码的 SHA-256 与本地一致。
+- manifest `9a05ae90e5c7ecc0205982b4591130415c7c76f8`（PR #109）。
+- Coolify `analysis6800aacef792e7ca`，2026-09-11 08:03:23 UTC finished；九个服务 healthy，正式 staging `/health` 返回 200，运行镜像与 source revision 核对一致。
+- Compose 与真实环境变量预检 PASS；无数据库迁移，无前端改动。上一版 backend `sha256:6860abd863022981f428a81ccbe12d0daf6ce909921bf76cb736bc69d8660bef` 保留为回切版本。
