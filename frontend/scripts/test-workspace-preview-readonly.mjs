@@ -13,3 +13,7 @@ for (const path of ['agent/Workspaces.tsx', 'terminal/Terminal.tsx', 'terminal/T
   assert.ok(!readFileSync(new URL(path, root), 'utf8').includes('saveTextFile='), `${path} still supplies a web editor`);
 }
 console.log('PASS: shared admin/employee preview retains read/download/history, no web text editor');
+const admin = readFileSync(new URL('agent/Workspaces.tsx', root), 'utf8');
+assert.match(admin, /titleExtra=\{linkResolutionPending\s*\?/);
+assert.match(admin, /setLinkResolutionPending\(false\)/);
+console.log('PASS: administrator deep links resolve before default organization selection');

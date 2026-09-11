@@ -85,6 +85,7 @@ export default function Workspaces() {
   const linkedWorkspaceId = urlParams.get('workspace');
   const linkedFileId = urlParams.get('file');
   const linkedVersionId = urlParams.get('version');
+  const [linkResolutionPending, setLinkResolutionPending] = useState(() => !!linkedWorkspaceId && !!linkedFileId);
   const trashRestoreAttemptRef = useRef(new Map<string, string>());
   const [orgId, setOrgId] = useState<string | undefined>();
   const [fileModalWs, setFileModalWs] = useState<{ id: string; name: string; path: string } | null>(null);
@@ -155,8 +156,12 @@ export default function Workspaces() {
   // 稳定 /f/:id 地址鉴权完成后会进入本页面；这里再次按管理员身份校验
   // workspace、file 和历史版本的一致性，再在正常工作空间壳层打开统一抽屉。
   useEffect(() => {
-    if (!linkedWorkspaceId || !linkedFileId) return;
+    if (!linkedWorkspaceId || !linkedFileId) {
+      setLinkResolutionPending(false);
+      return;
+    }
     let disposed = false;
+    setLinkResolutionPending(true);
     const resolve = async () => {
       const [workspace, file] = await Promise.all([
         workspaces.get(linkedWorkspaceId),
@@ -174,6 +179,8 @@ export default function Workspaces() {
     };
     void resolve().catch(() => {
       if (!disposed) message.error('文件不存在或没有查看权限');
+    }).finally(() => {
+      if (!disposed) setLinkResolutionPending(false);
     });
     return () => { disposed = true; };
   }, [linkedFileId, linkedVersionId, linkedWorkspaceId]);
@@ -667,7 +674,7 @@ export default function Workspaces() {
       <TitleBar
         icon={<FolderOutlined />}
         title="工作空间"
-        titleExtra={<OrgSelect value={orgId} onChange={(v) => {
+        titleExtra={linkResolutionPending ? <Typography.Text type="secondary">正在定位文件…</Typography.Text> : <OrgSelect value={orgId} onChange={(v) => {
           setOrgId(v); setSelectedNodeKey(null); setFileModalWs(null); setActiveFileId(null); setActiveFileVersionId(null);
           replaceWorkspaceLocation(null);
         }} />}
