@@ -7,6 +7,7 @@ import pytest
 from app.services.assistant_tool_catalog import (
     entry_tool_definitions,
     partition_tool_specs,
+    search_assistant_capabilities,
     search_business_capabilities,
     search_tool_specs,
 )
@@ -162,3 +163,33 @@ def test_tool_result_envelope_uses_one_typed_error_shape():
     assert result["status"] == "retryable_error"
     assert result["error"]["messageZh"] == "订单号不能为空"
     assert result["error"]["correctionFields"][0]["field"] == "order_no"
+
+
+def test_business_candidates_cannot_crowd_out_matching_public_tool():
+    result = search_assistant_capabilities(
+        "把文字合成为语音文件",
+        [_spec("speech_synthesize", "把文字合成为语音文件")],
+        [{"name": "查询文件", "description": "查询业务文件记录", "actionKey": f"query_{i}"} for i in range(12)],
+        limit=1,
+    )
+    assert result[0]["kind"] == "tool"
+    assert result[0]["item"]["name"] == "speech_synthesize"
+
+
+def test_business_operation_can_outrank_public_group_alias():
+    result = search_assistant_capabilities(
+        "查询款号图片资料",
+        [_spec("image_generation_tool", "生成图片")],
+        [{"name": "查询款号图片资料", "actionKey": "style.query"}],
+        limit=1,
+    )
+    assert result[0]["kind"] == "business"
+
+
+def test_merged_discovery_does_not_search_schema_or_activate_unrelated_tools():
+    result = search_assistant_capabilities(
+        "秘密工资",
+        [_spec("speech_synthesize", "把文字合成为语音")],
+        [{"name": "查询订单", "inputSchema": {"description": "秘密工资"}}],
+    )
+    assert result == []

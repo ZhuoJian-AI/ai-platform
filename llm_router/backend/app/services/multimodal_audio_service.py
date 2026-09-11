@@ -270,9 +270,10 @@ async def understand_file(
         dept_id=cu.department_id,
         audio_size_bytes=file.size,
     )
+    if not result.content or not result.content.strip():
+        raise model_gateway.GatewayError("empty_response")
     return {
-        "content": result.content or result.reasoning_content or "",
-        "reasoning_content": result.reasoning_content,
+        "content": result.content,
         "model": result.model_served,
         "usage": result.usage,
         "request_id": str(uuid4()),

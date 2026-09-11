@@ -302,6 +302,52 @@ def search_business_capabilities(
     return [entry[3] for entry in ranked[: max(1, min(int(limit or 8), 12))]]
 
 
+def search_assistant_capabilities(
+    query: str,
+    specs: Iterable[dict[str, Any]],
+    business_catalog: Iterable[dict[str, Any]],
+    *,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Compare authorized public and business candidates on the same scale.
+
+    This ranks discovery only; it never grants access or chooses an operation.
+    Schemas and arbitrary manifest fields are not relevance evidence.
+    """
+    query_text = str(query or "").strip().lower()
+    terms = _terms(query_text)
+    ranked = []
+
+    def add(kind, item, name, description, context):
+        direct = f"{name} {description}".lower()
+        context = context.lower()
+        score = 30 if query_text and query_text in direct else 0
+        score += sum(4 if term in direct else 1 if term in context else 0 for term in terms)
+        if score:
+            stable = str(item.get("name") or item.get("actionKey") or item.get("pageKey") or "")
+            ranked.append((score, kind, stable, {"kind": kind, "item": item}))
+
+    for spec in specs:
+        name = str(spec.get("name") or "")
+        if name and name not in ENTRY_TOOL_NAMES:
+            description = " ".join([
+                str(spec.get("description") or ""),
+                *[str(term) for term in spec.get("search_terms") or []],
+            ])
+            add("tool", spec, name, description, descriptor_search_text(spec))
+    for item in business_catalog:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("actionName") or item.get("pageName") or "")
+        description = str(item.get("description") or "")
+        context = " ".join(str(item.get(key) or "") for key in (
+            "applicationName", "moduleName", "pageName", "actionKey", "moduleKey", "pageKey",
+        ))
+        add("business", item, name, description, context)
+    ranked.sort(key=lambda row: (-row[0], row[1], row[2]))
+    return [row[3] for row in ranked[:max(1, min(int(limit or 8), 12))]]
+
+
 def partition_tool_specs(
     specs: Iterable[dict[str, Any]],
     *,
