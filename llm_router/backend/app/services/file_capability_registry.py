@@ -718,7 +718,7 @@ _OUTPUT_FIELDS = {
     "output_name": {"type": "string", "minLength": 1, "maxLength": 255},
     "output_path": {"type": "string", "minLength": 1, "maxLength": 1024},
     "target_workspace_id": {"type": "string", "format": "uuid"},
-    "target_file_id": {"type": "string", "format": "uuid"},
+    "target_file_id": {"type": "string", "format": "uuid", "description": "源文件 ID；修改结果另存，原件不变"},
     "base_version_id": {"type": "string", "format": "uuid"},
     "idempotency_key": {"type": "string", "minLength": 8, "maxLength": 200},
 }
@@ -923,7 +923,7 @@ FILE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
 FILE_TOOL_DESCRIPTIONS = {
     "spreadsheet_create": "创建并验证 Excel/CSV/TSV；默认输出 XLSX。",
     "spreadsheet_inspect": "分页检查表格内容；旧格式会在沙箱中转换后读取。",
-    "spreadsheet_edit": "版本化编辑现代 Excel，保留未触及的工作表和单元格。",
+    "spreadsheet_edit": "修改现代 Excel 后另存新文件，保留原件及未触及的工作表和单元格。",
     "spreadsheet_convert": "在沙箱中真实转换表格格式；多工作表转 CSV/TSV 时必须指定工作表。",
     "document_create": "从结构化 Markdown 创建并验证 Word；默认输出 DOCX。",
     "document_inspect": "检查 Word 文档；旧格式会在沙箱中转换后读取，宏永不执行。",
@@ -941,7 +941,7 @@ FILE_TOOL_DESCRIPTIONS = {
     "pdf_convert": "把 PDF（含扫描件 OCR）转换为 UTF-8 文本。",
     "text_create": "创建 UTF-8 TXT 或 CommonMark Markdown。",
     "text_inspect": "按字符分页读取 UTF-8 TXT/Markdown，不静默截断。",
-    "text_edit": "版本化编辑 UTF-8 TXT/Markdown。",
+    "text_edit": "修改 UTF-8 TXT/Markdown 后另存新文件，保留原件。",
     "text_convert": "在 TXT 与 CommonMark Markdown 之间转换。",
 }
 

@@ -54,8 +54,9 @@ function ImeHarness() {
   );
 }
 
-function DraftHarness() {
-  const file = workspaceFile('说明.md', { content: '原始内容' });
+function ReadOnlyHarness() {
+  const csv = new URLSearchParams(window.location.search).get('format') === 'csv';
+  const file = workspaceFile(csv ? '数据.csv' : '说明.md', { content: csv ? '款号,数量\n204A231,100' : '原始内容' });
   return (
     <BrowserDrawer
       open
@@ -63,7 +64,7 @@ function DraftHarness() {
       onClose={() => undefined}
       resolveHref={unsupported}
       loadFileById={async () => file}
-      saveTextFile={async (_fileId, data) => ({ ...file, content: data.content, current_version_id: 'version-2' })}
+      loadOriginalFile={async () => new Blob([file.content || ''])}
     />
   );
 }
@@ -100,8 +101,8 @@ function SpreadsheetHarness() {
 const selectedCase = new URLSearchParams(window.location.search).get('case');
 const element = selectedCase === 'ime'
   ? <ImeHarness />
-  : selectedCase === 'draft'
-    ? <DraftHarness />
+  : selectedCase === 'readonly'
+    ? <ReadOnlyHarness />
     : selectedCase === 'html-security'
       ? <HtmlSecurityHarness />
       : <SpreadsheetHarness />;

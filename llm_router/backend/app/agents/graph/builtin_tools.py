@@ -28,7 +28,7 @@ from app.auth.user_auth import current_user_for_user
 from app.dlp.scanner import scan_request
 from app.models.audit_log import AuditLog
 from app.models.workspace import WorkspaceFileMutation, WorkspaceFileVersion
-from app.schemas.workspace import WorkspaceFileCreate, WorkspaceFileUpdate
+from app.schemas.workspace import WorkspaceFileCreate
 from app.services import model_gateway as llm_client
 from app.services import (
     multimodal_service,
@@ -240,7 +240,7 @@ def _builtin_tool_defs(
             "type": "function",
             "function": {
                 "name": "workspace_write_file",
-                "description": "兼容写工具；file_id 存在时原位更新并生成新版本，否则按 path 新建文本文件。",
+                "description": "兼容写工具；file_id 存在时修改后另存新文件、保留原件，否则按 path 新建文本文件。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -259,7 +259,7 @@ def _builtin_tool_defs(
             "function": {
                 "name": "workspace_update_file",
                 "description": (
-                    "按 file_id 原位更新文本内容；必须带读取到的 base_version_id，重试复用 idempotency_key。"
+                    "读取源文件后修改文本并另存新文件，保留原件；必须带 base_version_id，重试复用 idempotency_key。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -636,14 +636,14 @@ def _builtin_tool_defs(
         }:
             properties["target_workspace_id"] = {
                 "type": "string",
-                "description": "新建输出目标；省略时使用个人空间。按 file_id 更新时由文件确定空间",
+                "description": "输出目标；省略时使用任务工作空间。AI 修改也另存新文件，不覆盖源文件",
             }
         if tool_name in {"image_tool", "archive_tool", "web_tool"}:
             properties.update(
                 {
                     "target_file_id": {
                         "type": "string",
-                        "description": "可选：单个产出原位更新的稳定文件 UUID；不传则创建新文件",
+                        "description": "可选：源文件 UUID；编辑结果另存新文件，原件不变",
                     },
                     "base_version_id": {
                         "type": "string",
@@ -982,7 +982,7 @@ def _remember_structured_tool_result(
         "workspace_read_file": "read",
         "workspace_create_file": "create",
         "workspace_write_file": "write",
-        "workspace_update_file": "update",
+        "workspace_update_file": "create",
         "workspace_rename_file": "rename",
         "workspace_move_file": "move",
         "workspace_copy_file": "copy",
@@ -1268,7 +1268,7 @@ async def _execute_platform_file_tool(
     else:
         tool_kind = name.removesuffix("_tool")
         action = str(params.get("action") or "").strip().lower()
-    if state.get("application_id") and not params.get("target_file_id"):
+    if state.get("application_id"):
         # The model-facing schema omits target_workspace_id, but execution must
         # also ignore undeclared arguments from a provider.  Only the server-
         # validated TaskRunRequest target is allowed for new business outputs.
@@ -1289,32 +1289,35 @@ async def _execute_platform_file_tool(
                 "修改文件时必须提供基础版本",
                 "读取文件的最新版本后同时传入 fileId 和 baseVersionId",
             )
-        target_file, ws, user = await _authorized_file(
+        target_file, source_ws, user = await _authorized_file(
             state,
             target_file_id,
             user,
-            capability="update",
+            capability="read",
         )
         if target_file is None:
             return _file_tool_error(
                 "target_file_unavailable",
-                "目标文件不存在或当前用户无权修改",
-                "重新选择有修改权限的文件",
+                "源文件不存在或当前用户无权读取",
+                "重新选择有读取权限的文件",
             )
-    else:
-        ws, user, workspace_error = await _resolve_tool_workspace(
-            state,
-            params,
-            user,
-            capability="create" if produces_output else "read",
-            parameter="target_workspace_id",
-        )
-        if workspace_error and not (name == "web_tool" and action in {"search", "fetch"}):
+        if str(target_file.current_version_id) != str(params["base_version_id"]):
             return _file_tool_error(
-                "workspace_permission_denied",
-                workspace_error,
-                "选择个人空间或当前用户有相应权限的工作空间",
+                "file_version_conflict", "源文件版本已变化", "读取最新版本后重新修改", status="conflict",
             )
+    ws, user, workspace_error = await _resolve_tool_workspace(
+        state,
+        params,
+        user,
+        capability="create" if produces_output else "read",
+        parameter="target_workspace_id",
+    )
+    if workspace_error and not (name == "web_tool" and action in {"search", "fetch"}):
+        return _file_tool_error(
+            "workspace_permission_denied",
+            workspace_error,
+            "选择个人空间或当前用户有相应权限的工作空间",
+        )
     # A create call is output-only unless the model explicitly selected
     # input_file_ids.  Reusing every historical reference from a persistent
     # Task here made a fresh business export depend on unrelated older files.
@@ -1415,7 +1418,8 @@ async def _execute_platform_file_tool(
                 )
         task_part = state.get("task_id") or "playground"
         for output_index, item in enumerate(outputs):
-            output_mutation_key = f"{params.get('_mutation_key')}-{output_index}"
+            mutation_key = params.get("_mutation_key") or params.get("idempotency_key") or uuid4().hex
+            output_mutation_key = f"{mutation_key}-{output_index}"
             original = PurePosixPath(str(item.get("name") or "output.bin")).name
             relative = PurePosixPath(str(item.get("relative_path") or original).replace("\\", "/"))
             safe_parts = [part for part in relative.parts if part not in {"", ".", ".."}]
@@ -1463,16 +1467,15 @@ async def _execute_platform_file_tool(
                     mime = verified_mime
                     format_verified = True
             output_meta = enrich_metadata(
-                target_file.path if target_file is not None else path,
+                path,
                 {
-                    **((target_file.metadata_ or {}) if target_file is not None else {}),
+                    **({
+                        "derived_from_file_id": target_file_id,
+                        "derived_from_version_id": str(params["base_version_id"]),
+                    } if target_file is not None else {}),
                     "binary": True,
                     "mime": mime,
-                    "name": (
-                        clean_display_name(target_file.path, target_file.metadata_ or {})
-                        if target_file is not None
-                        else (PurePosixPath(path).name if params.get("output_path") else original)
-                    ),
+                    "name": PurePosixPath(path).name if params.get("output_path") else original,
                     "storage_backend": "oss_gateway" if content_ref else "postgres_base64",
                     **({"etag": actual_etag} if actual_etag else {}),
                     **(
@@ -1490,173 +1493,114 @@ async def _execute_platform_file_tool(
                 source_kind="platform_tool",
                 **task_source,
             )
-            if target_file is None:
-                # Runner execution may be long. Rebuild role capabilities at
-                # the final write boundary, including idempotent replays.
-                ws, user, workspace_error = await _resolve_tool_workspace(
-                    state,
-                    {"target_workspace_id": str(ws.id)},
-                    user,
-                    capability="create",
-                    parameter="target_workspace_id",
+            # Runner execution may be long. Rebuild role capabilities at
+            # the final write boundary, including idempotent replays.
+            ws, user, workspace_error = await _resolve_tool_workspace(
+                state,
+                {"target_workspace_id": str(ws.id)},
+                user,
+                capability="create",
+                parameter="target_workspace_id",
+            )
+            if workspace_error:
+                return _file_tool_error(
+                    "workspace_permission_revoked",
+                    "文件生成期间工作空间创建权限已被收回，未保存文件",
+                    "刷新权限后重新选择可写入的工作空间",
                 )
-                if workspace_error:
-                    return _file_tool_error(
-                        "workspace_permission_revoked",
-                        "文件生成期间工作空间创建权限已被收回，未保存文件",
-                        "刷新权限后重新选择可写入的工作空间",
-                    )
-            if target_file is None and params.get("output_path"):
-                existing = await workspace_service.get_file_by_path(db, ws.id, path)
-                if existing is not None:
-                    return _file_tool_error(
-                        "output_path_conflict",
-                        "保存位置已有同名文件，未覆盖现有内容",
-                        "改用新文件名，或读取现有文件版本后执行版本化修改",
-                        status="conflict",
-                        file_id=str(existing.id),
-                        current_version_id=(str(existing.current_version_id) if existing.current_version_id else None),
-                    )
             if target_file is not None:
-                # Re-resolve authorization immediately before the mutation;
-                # Runner execution time must not bridge a role revocation.
-                target_file, ws, user = await _authorized_file(
+                # Recheck source access and revision after the executor finishes.
+                source, source_ws, user = await _authorized_file(state, target_file_id, user, capability="read")
+                if source is None:
+                    return _file_tool_error(
+                        "file_permission_revoked", "源文件读取权限已被收回，未保存结果", "重新选择可读取的源文件",
+                    )
+                await db.refresh(source, with_for_update=True)
+                if source.deleted_at is not None or str(source.current_version_id) != str(params["base_version_id"]):
+                    return _file_tool_error(
+                        "file_version_conflict", "源文件版本已变化，未保存修改结果", "读取最新版本后重新修改",
+                        status="conflict", current_version_id=str(source.current_version_id),
+                    )
+            mutation, replayed = await workspace_service.begin_file_mutation(
+                db,
+                workspace=ws,
+                file=None,
+                actor_type="user" if user is not None else "admin",
+                actor_id=str(getattr(user, "id", None) or "playground"),
+                operation="create",
+                idempotency_key=output_mutation_key,
+                payload={
+                    "tool": name,
+                    "action": action,
+                    "output_index": output_index,
+                    "path": path,
+                    "size": output_size,
+                    "content_hash": content_hash,
+                    "source_file_id": target_file_id or None,
+                    "base_version_id": params.get("base_version_id"),
+                },
+            )
+            if replayed:
+                saved, replay_workspace, user = await _authorized_create_replay(
                     state,
-                    target_file_id,
+                    mutation,
                     user,
-                    capability="update",
                 )
-                if target_file is None:
+                if saved is None or replay_workspace is None:
                     return _file_tool_error(
-                        "file_permission_revoked",
-                        "文件生成期间修改权限已被收回，未覆盖目标文件",
-                        "刷新权限后重新选择可修改的文件",
+                        "idempotent_result_unavailable",
+                        "重复请求对应的历史文件已经不可用",
+                        "使用新的请求标识重新生成文件",
+                        status="conflict",
                     )
+                ws = replay_workspace
+            elif content_ref:
                 try:
-                    saved = await workspace_service.replace_file_artifact(
-                        db,
-                        target_file,
-                        content=inline_content,
-                        content_ref=content_ref,
-                        size=output_size,
-                        content_hash=content_hash,
-                        metadata=output_meta,
-                        parse_status="queued",
-                        parse_kind=None,
-                        base_version_id=UUID(str(params["base_version_id"])),
-                        idempotency_key=str(params.get("_mutation_key") or params["idempotency_key"]),
-                        created_by_user_id=user.id,
-                    )
-                except workspace_service.WorkspaceFileVersionConflict as exc:
-                    return _file_tool_error(
-                        "file_version_conflict",
-                        "文件已经产生新版本，本次修改未覆盖最新内容",
-                        "重新读取最新版本后再修改",
-                        status="conflict",
-                        current_version_id=exc.current_version_id,
-                        latest_version_id=exc.current_version_id,
-                    )
-                except workspace_service.WorkspaceFileIdempotencyConflict:
-                    return _file_tool_error(
-                        "idempotency_conflict",
-                        "重复请求的内容与首次请求不一致，已停止写入",
-                        "使用新的请求标识重新提交",
-                        status="conflict",
-                        current_version_id=str(target_file.current_version_id),
-                        latest_version_id=str(target_file.current_version_id),
-                    )
-                if inline_content is not None:
-                    await workspace_service.reparse_file(db, saved)
-                if user is not None:
-                    await workspace_governance_service.audit(
+                    saved = await workspace_service.upsert_file(
                         db,
                         ws,
-                        "file_updated",
-                        user_id=user.id,
-                        file=saved,
-                        version_id=saved.current_version_id,
-                        metadata={"tool": name},
+                        WorkspaceFileCreate(path=path, content="", metadata=output_meta),
+                        content_ref=content_ref,
+                        raw_size=output_size,
+                        raw_content_hash=content_hash,
+                        created_by_user_id=user.id,
                     )
+                    saved.content = None
+                    saved.parse_status = "queued"
+                    await workspace_service.sync_current_version(db, saved)
+                except Exception:
+                    await db.delete(mutation)
+                    await db.flush()
+                    raise
             else:
-                mutation, replayed = await workspace_service.begin_file_mutation(
+                try:
+                    raw = base64.b64decode(inline_content or "", validate=True)
+                    saved = await workspace_service.ingest_uploaded_file(
+                        db,
+                        ws,
+                        path=path,
+                        filename=original,
+                        content_type=mime,
+                        raw=raw,
+                        created_by_user_id=user.id,
+                    )
+                    saved.metadata_ = output_meta
+                    await workspace_service.sync_current_version(db, saved)
+                except Exception:
+                    await db.delete(mutation)
+                    await db.flush()
+                    raise
+            if not replayed:
+                await workspace_service.complete_file_mutation(
                     db,
-                    workspace=ws,
-                    file=None,
-                    actor_type="user" if user is not None else "admin",
-                    actor_id=str(getattr(user, "id", None) or "playground"),
-                    operation="create",
-                    idempotency_key=output_mutation_key,
-                    payload={
-                        "tool": name,
-                        "action": action,
-                        "output_index": output_index,
-                        "path": path,
-                        "size": output_size,
-                        "content_hash": content_hash,
-                        "content_ref": content_ref,
+                    mutation,
+                    result_file=saved,
+                    result={
+                        "file_id": str(saved.id),
+                        "workspace_id": str(ws.id),
+                        "path": saved.path,
                     },
                 )
-                if replayed:
-                    saved, replay_workspace, user = await _authorized_create_replay(
-                        state,
-                        mutation,
-                        user,
-                    )
-                    if saved is None or replay_workspace is None:
-                        return _file_tool_error(
-                            "idempotent_result_unavailable",
-                            "重复请求对应的历史文件已经不可用",
-                            "使用新的请求标识重新生成文件",
-                            status="conflict",
-                        )
-                    ws = replay_workspace
-                elif content_ref:
-                    try:
-                        saved = await workspace_service.upsert_file(
-                            db,
-                            ws,
-                            WorkspaceFileCreate(path=path, content="", metadata=output_meta),
-                            content_ref=content_ref,
-                            raw_size=output_size,
-                            raw_content_hash=content_hash,
-                            created_by_user_id=user.id,
-                        )
-                        saved.content = None
-                        saved.parse_status = "queued"
-                        await workspace_service.sync_current_version(db, saved)
-                    except Exception:
-                        await db.delete(mutation)
-                        await db.flush()
-                        raise
-                else:
-                    try:
-                        raw = base64.b64decode(inline_content or "", validate=True)
-                        saved = await workspace_service.ingest_uploaded_file(
-                            db,
-                            ws,
-                            path=path,
-                            filename=original,
-                            content_type=mime,
-                            raw=raw,
-                            created_by_user_id=user.id,
-                        )
-                        saved.metadata_ = output_meta
-                        await workspace_service.sync_current_version(db, saved)
-                    except Exception:
-                        await db.delete(mutation)
-                        await db.flush()
-                        raise
-                if not replayed:
-                    await workspace_service.complete_file_mutation(
-                        db,
-                        mutation,
-                        result_file=saved,
-                        result={
-                            "file_id": str(saved.id),
-                            "workspace_id": str(ws.id),
-                            "path": saved.path,
-                        },
-                    )
             await db.flush()
             identity = await _workspace_file_identity(db, saved, ws, user)
             display_name = clean_display_name(saved.path, saved.metadata_ or {})
@@ -1679,6 +1623,15 @@ async def _execute_platform_file_tool(
                 "latency_ms": latency,
             },
             ensure_ascii=False,
+        )
+    except workspace_service.WorkspaceFilePathConflict:
+        return _file_tool_error(
+            "output_path_conflict", "目标位置已有文件，未覆盖原件", "选择新的输出文件名", status="conflict",
+        )
+    except workspace_service.WorkspaceFileIdempotencyConflict:
+        return _file_tool_error(
+            "idempotency_conflict", "相同请求仍在处理或内容不一致，未重复保存",
+            "核对先前结果后再提交", status="conflict",
         )
     except workspace_service.WorkspaceFileInvalidPath as exc:
         return json.dumps({
@@ -2117,67 +2070,33 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                         }
                     )
                 if file_id:
-                    f, file_ws, user = await _authorized_file(
-                        state,
-                        file_id,
-                        user,
-                        capability="update",
-                    )
-                    if f is None:
-                        return json.dumps({"status": "error", "error": "file not found or update denied"})
-                    if not params.get("base_version_id"):
-                        return json.dumps(
-                            {
-                                "status": "error",
-                                "error": "base_version_id is required",
-                            }
+                    source, _, user = await _authorized_file(state, file_id, user, capability="read")
+                    if source is None:
+                        return _file_tool_error("source_unavailable", "源文件不可读取", "重新选择有读取权限的文件")
+                    extension = PurePosixPath(source.path).suffix.lower().lstrip(".")
+                    if extension not in {"txt", "md", "markdown"}:
+                        return _file_tool_error(
+                            "use_format_edit_tool", "此文件需要对应格式的编辑工具，未覆盖原件",
+                            "请使用 spreadsheet_edit、document_edit 或 presentation_edit；结果均另存",
                         )
-                    try:
-                        updated = await workspace_service.update_file(
-                            db,
-                            f,
-                            WorkspaceFileUpdate(
-                                content=params.get("content"),
-                                base_version_id=params.get("base_version_id"),
-                                idempotency_key=params.get("_mutation_key") or params.get("idempotency_key"),
-                            ),
-                            created_by_user_id=getattr(user, "id", None),
-                        )
-                    except workspace_service.WorkspaceFileVersionConflict as exc:
-                        return json.dumps(
-                            {
-                                "status": "conflict",
-                                "error": str(exc),
-                                "current_version_id": exc.current_version_id,
-                            },
-                            ensure_ascii=False,
-                        )
-                    except workspace_service.WorkspaceFileIdempotencyConflict as exc:
-                        return json.dumps({"status": "conflict", "error": str(exc)}, ensure_ascii=False)
-                    except workspace_service.WorkspaceFileUnsupportedTextUpdate as exc:
-                        return json.dumps(
-                            {
-                                "status": "unsupported_format",
-                                "error": str(exc),
-                            },
-                            ensure_ascii=False,
-                        )
-                    if user is not None:
-                        await workspace_governance_service.audit(
-                            db,
-                            file_ws,
-                            "file_updated",
-                            user_id=user.id,
-                            file=updated,
-                            version_id=updated.current_version_id,
-                        )
-                    return json.dumps(
+                    result = json.loads(await _execute_platform_file_tool(
+                        state, "text_create",
                         {
-                            "status": "success",
-                            **await _workspace_file_identity(db, updated, file_ws, user),
+                            "content": params.get("content"),
+                            "format": extension,
+                            "output_name": f"{PurePosixPath(source.path).stem}-修改版.{extension}",
+                            "target_file_id": file_id,
+                            "base_version_id": params.get("base_version_id"),
+                            **{key: params[key] for key in (
+                                "_mutation_key", "_tool_call_id", "idempotency_key", "target_workspace_id",
+                            ) if key in params},
                         },
-                        ensure_ascii=False,
-                    )
+                        ws, user,
+                    ))
+                    if result.get("outputs"):
+                        result.update(result["outputs"][0])
+                        result["created_new"] = True
+                    return json.dumps(result, ensure_ascii=False)
                 file_ws, user, workspace_error = await _resolve_tool_workspace(
                     state,
                     params,

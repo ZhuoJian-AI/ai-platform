@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Alert, Drawer, Tooltip, Spin, Empty, Typography, Button, Input, List, Modal, Select, message, Segmented, Tag } from 'antd';
 import {
   ArrowLeftOutlined, ArrowRightOutlined, ReloadOutlined, SelectOutlined,
   FileTextOutlined, GlobalOutlined, FileWordOutlined, FilePdfOutlined,
-  FileImageOutlined, DownloadOutlined, EditOutlined, LinkOutlined, SaveOutlined,
+  FileImageOutlined, DownloadOutlined, LinkOutlined,
   ExportOutlined, FullscreenOutlined, FullscreenExitOutlined, SearchOutlined, HistoryOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
@@ -15,7 +15,6 @@ import type {
   WorkspaceSpreadsheetPage, WorkspaceSpreadsheetPreview, WorkspaceFile, WorkspaceFileCapabilities, WorkspaceFileEvent, WorkspaceFileVersion,
 } from '../../api/client';
 import { parseWorkspaceInternalUrl, workspaceFileLabel, workspaceInternalUrl } from '../../utils/workspaceFileLinks';
-import { parseCsvDocument, serializeCsvDocument, type CsvDocument } from '../../utils/csvDocument';
 // mammoth 仅在打开 .docx 时按需动态加载（见下方 useEffect），不进主包。
 
 /** WorkBuddy 配色（与 Terminal.tsx 保持一致）。 */
@@ -249,10 +248,6 @@ export interface BrowserDrawerProps {
   loadFileVersionById?: (fileId: string, versionId: string) => Promise<WorkspaceFile>;
   fallbackCapabilities?: WorkspaceFileCapabilities;
   fallbackWorkspaceName?: string;
-  saveTextFile?: (fileId: string, data: {
-    path: string; content: string; metadata?: Record<string, unknown>;
-    base_version_id?: string | null; idempotency_key: string;
-  }) => Promise<WorkspaceFile>;
   onReparse?: (fileId: string) => Promise<void>;
   /** 鉴权获取未经转换的原始文件，由浏览器按实际格式选择查看器。 */
   loadOriginalPreview?: (fileId: string, versionId?: string) => Promise<Blob>;
@@ -282,7 +277,7 @@ export interface BrowserDrawerProps {
 }
 
 export default function BrowserDrawer({
-  open, initialHref, initialFileId, initialVersionId, onClose, resolveHref, loadFileById, loadFileVersionById, fallbackCapabilities, fallbackWorkspaceName, saveTextFile, onReparse, loadOriginalPreview,
+  open, initialHref, initialFileId, initialVersionId, onClose, resolveHref, loadFileById, loadFileVersionById, fallbackCapabilities, fallbackWorkspaceName, onReparse, loadOriginalPreview,
   loadOriginalPreviewSource, loadPdfPreviewInfo, loadPdfPreviewPage, loadOriginalFile, loadDownloadTicket,
   loadPreviewSession, refreshPreviewSession, startFallbackPreview, getFallbackPreview,
   startSpreadsheetPreview, getSpreadsheetPreview, getSpreadsheetPage,
@@ -293,13 +288,6 @@ export default function BrowserDrawer({
   const [loading, setLoading] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [editingText, setEditingText] = useState(false);
-  const [textDraft, setTextDraft] = useState('');
-  const [originalText, setOriginalText] = useState('');
-  const [savingText, setSavingText] = useState(false);
-  const [csvMode, setCsvMode] = useState<'table' | 'text'>('table');
-  const [csvDocument, setCsvDocument] = useState<CsvDocument | null>(null);
-  const [csvSelection, setCsvSelection] = useState<{ anchor: [number, number]; focus: [number, number] } | null>(null);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [versions, setVersions] = useState<WorkspaceFileVersion[]>([]);
   const [versionsLoading, setVersionsLoading] = useState(false);
@@ -313,17 +301,15 @@ export default function BrowserDrawer({
   // 标记某次 resolve 是否由"刷新"触发——刷新失败时回退展示旧内容，避免清屏。
   const refreshTickRef = useRef(0);
   const navigationSeqRef = useRef(0);
-  const saveAttemptRef = useRef<{ fingerprint: string; key: string } | null>(null);
   const restoreAttemptRef = useRef<{ fingerprint: string; key: string } | null>(null);
   // index 的 ref 镜像：异步 navigate/refresh 完成后读取最新游标，避免闭包 stale 值。
   const indexRef = useRef(-1);
   useEffect(() => { indexRef.current = index; }, [index]);
 
-  // 每次关闭预览后恢复为侧边抽屉并清理本地文本草稿状态。
+  // 每次关闭预览后恢复为侧边抽屉。
   useEffect(() => {
     if (!open) {
       setIsFullscreen(false);
-      setEditingText(false);
     }
   }, [open]);
 
@@ -343,23 +329,10 @@ export default function BrowserDrawer({
     ? { ...underlyingCapabilities, update: false }
     : underlyingCapabilities;
   const canRestoreCurrent = underlyingCapabilities?.read === true && underlyingCapabilities.update === true;
-  const canUpdateCurrent = !!currentFileId && currentCapabilities?.read === true && currentCapabilities.update === true;
-  const currentExtension = currentPath ? extOf(currentPath) : '';
-  const canEditText = canUpdateCurrent && !!saveTextFile
-    && ['txt', 'md', 'markdown', 'json', 'csv'].includes(currentExtension);
-  useEffect(() => {
-    setEditingText(false);
-    setTextDraft('');
-    setOriginalText('');
-    setCsvDocument(null);
-    setCsvSelection(null);
-    saveAttemptRef.current = null;
-    restoreAttemptRef.current = null;
-  }, [currentFileId]);
-
+  useEffect(() => { restoreAttemptRef.current = null; }, [currentFileId]);
   // 同一稳定 fileId 的当前版本可能被其他成员更新；空闲预览时轻量轮询并原位刷新。
   useEffect(() => {
-    if (!open || !currentFileId || current?.versionId || editingText || !loadFileById || !current?.file) return;
+    if (!open || !currentFileId || current?.versionId || !loadFileById || !current?.file) return;
     const displayedVersionId = current.file?.current_version_id;
     const displayedUpdatedAt = current.file?.updated_at;
     let disposed = false;
@@ -380,7 +353,7 @@ export default function BrowserDrawer({
     };
     const timer = window.setInterval(() => { void check(); }, 5000);
     return () => { disposed = true; window.clearInterval(timer); };
-  }, [current?.file?.current_version_id, current?.file?.updated_at, current?.versionId, currentFileId, editingText, loadFileById, onFileChanged, open]);
+  }, [current?.file?.current_version_id, current?.file?.updated_at, current?.versionId, currentFileId, loadFileById, onFileChanged, open]);
 
   useEffect(() => {
     setBinaryView('original');
@@ -505,9 +478,6 @@ export default function BrowserDrawer({
   useEffect(() => {
     let cancelled = false;
     if (open && (initialFileId || initialHref)) {
-      setEditingText(false);
-      setTextDraft('');
-      setOriginalText('');
       setHistory([]);
       setIndex(-1);
       indexRef.current = -1;
@@ -531,18 +501,8 @@ export default function BrowserDrawer({
   }, [initialFileId, initialVersionId, initialHref, open]);
 
   const moveHistory = (offset: -1 | 1) => {
-    const move = () => {
-      setEditingText(false);
-      setIndex((value) => value + offset);
-      setRefreshKey((value) => value + 1);
-    };
-    if (!(editingText && textDraft !== originalText)) { move(); return; }
-    Modal.confirm({
-      title: '放弃未保存的修改？',
-      content: '切换文件会丢弃当前草稿。',
-      okText: '放弃并切换', cancelText: '继续编辑', okButtonProps: { danger: true },
-      onOk: move,
-    });
+    setIndex((value) => value + offset);
+    setRefreshKey((value) => value + 1);
   };
   const goBack = () => { if (canBack) moveHistory(-1); };
   const goForward = () => { if (canForward) moveHistory(1); };
@@ -574,137 +534,13 @@ export default function BrowserDrawer({
     if (!externalVersionEvent || externalVersionEvent.id <= handledExternalEventRef.current) return;
     if (!open || externalVersionEvent.file_id !== currentFileId || current?.versionId) return;
     handledExternalEventRef.current = externalVersionEvent.id;
-    // 本地文本草稿靠 base_version_id 在保存时提示冲突；Office 编辑会话由保存对账流程接管。
-    if (editingText) return;
     // 即使 version_id 未变也要刷新：重命名、移动、删除和权限变化都可能保留同一版本号。
     void refresh();
     // refresh 读取当前稳定 file ID；事件只作为失效信号，不携带文件正文。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [externalVersionEvent?.id]);
 
-  const startTextEdit = async () => {
-    if (!current || !canEditText || !currentFileId || !currentPath) return;
-    try {
-      let content = 'content' in current ? current.content : '';
-      if (currentExtension === 'csv' && current.file?.metadata?.binary && loadOriginalFile) {
-        content = await (await loadOriginalFile(currentFileId)).text();
-      }
-      setTextDraft(content);
-      setOriginalText(content);
-      if (currentExtension === 'csv') {
-        setCsvDocument(parseCsvDocument(content));
-        setCsvMode('table');
-      }
-      setEditingText(true);
-    } catch (error) {
-      message.error((error as Error)?.message || '编辑内容加载失败');
-    }
-  };
-
-  const updateCsvCell = (rowIndex: number, columnIndex: number, value: string) => {
-    setCsvDocument((currentDocument) => {
-      if (!currentDocument) return currentDocument;
-      const rows = currentDocument.rows.map((row) => [...row]);
-      while (rows[rowIndex].length <= columnIndex) rows[rowIndex].push('');
-      rows[rowIndex][columnIndex] = value;
-      const next = { ...currentDocument, rows };
-      setTextDraft(serializeCsvDocument(next));
-      return next;
-    });
-  };
-  const csvColumnCount = useMemo(
-    () => Math.max(1, ...(csvDocument?.rows.slice(0, 500).map((item) => item.length) ?? [1])),
-    [csvDocument],
-  );
-  const csvSelectionBounds = csvSelection ? {
-    top: Math.min(csvSelection.anchor[0], csvSelection.focus[0]),
-    bottom: Math.max(csvSelection.anchor[0], csvSelection.focus[0]),
-    left: Math.min(csvSelection.anchor[1], csvSelection.focus[1]),
-    right: Math.max(csvSelection.anchor[1], csvSelection.focus[1]),
-  } : null;
-  const copyCsvSelection = (event: ReactClipboardEvent<HTMLDivElement>) => {
-    if (!csvDocument || !csvSelectionBounds) return;
-    const value = csvDocument.rows
-      .slice(csvSelectionBounds.top, csvSelectionBounds.bottom + 1)
-      .map((row) => Array.from(
-        { length: csvSelectionBounds.right - csvSelectionBounds.left + 1 },
-        (_, offset) => row[csvSelectionBounds.left + offset] ?? '',
-      ).join('\t'))
-      .join('\n');
-    event.preventDefault();
-    event.clipboardData.setData('text/plain', value);
-  };
-
-  const saveText = async () => {
-    if (!current || !currentFileId || !currentPath || !saveTextFile) return;
-    if (currentExtension === 'json') {
-      try { JSON.parse(textDraft); }
-      catch { message.error('JSON 格式无效，请修正后再保存'); return; }
-    }
-    setSavingText(true);
-    try {
-      const fingerprint = `${currentFileId}\u0000${current.file?.current_version_id || ''}\u0000${textDraft}`;
-      if (saveAttemptRef.current?.fingerprint !== fingerprint) {
-        saveAttemptRef.current = { fingerprint, key: crypto.randomUUID() };
-      }
-      const nextFile = await saveTextFile(currentFileId, {
-        path: currentPath,
-        content: textDraft,
-        metadata: current.file?.metadata,
-        base_version_id: current.file?.current_version_id ?? null,
-        idempotency_key: saveAttemptRef.current.key,
-      });
-      const next = classifyFile(nextFile);
-      const at = indexRef.current;
-      setHistory((items) => { const copy = [...items]; copy[at] = next; return copy; });
-      setEditingText(false);
-      setOriginalText(textDraft);
-      saveAttemptRef.current = null;
-      onFileChanged?.(nextFile);
-      message.success('已保存为新版本');
-    } catch (error) {
-      const status = (error as { status?: number })?.status;
-      message.error(status === 409 ? '文件已有更新，请刷新后再保存，未覆盖他人的版本' : ((error as Error)?.message || '保存失败'));
-    } finally {
-      setSavingText(false);
-    }
-  };
-
-  const textDirty = editingText && textDraft !== originalText;
-  useEffect(() => {
-    if (!textDirty) return;
-    const guard = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = '';
-    };
-    window.addEventListener('beforeunload', guard);
-    return () => window.removeEventListener('beforeunload', guard);
-  }, [textDirty]);
-
-  const cancelTextEdit = () => {
-    if (!textDirty) { setEditingText(false); return; }
-    Modal.confirm({
-      title: '放弃未保存的修改？',
-      content: '草稿只保存在当前浏览器中，放弃后无法恢复。',
-      okText: '放弃修改', cancelText: '继续编辑', okButtonProps: { danger: true },
-      onOk: () => setEditingText(false),
-    });
-  };
-  const discardAndClose = () => {
-    setEditingText(false);
-    setTextDraft('');
-    setOriginalText('');
-    onClose();
-  };
-  const closeDrawer = () => {
-    if (!textDirty) { discardAndClose(); return; }
-    Modal.confirm({
-      title: '关闭并放弃未保存的修改？',
-      content: '草稿只保存在当前浏览器中，关闭后无法恢复。',
-      okText: '关闭', cancelText: '继续编辑', okButtonProps: { danger: true },
-      onOk: discardAndClose,
-    });
-  };
+  const closeDrawer = onClose;
 
   const copyInternalAddress = async () => {
     if (!currentFileId) return;
@@ -985,8 +821,6 @@ export default function BrowserDrawer({
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{addr || 'about:blank'}</span>
           </Tooltip>
         </div>
-        {canEditText && !editingText && navBtn(() => { void startTextEdit(); }, false, <EditOutlined />, currentExtension === 'csv' ? '以安全文本模式编辑 CSV' : '编辑文件')}
-        {editingText && navBtn(() => { void saveText(); }, savingText, <SaveOutlined />, '保存为新版本')}
         {!!currentFileId && !!listFileVersions && navBtn(() => { void openVersionHistory(); }, false, <HistoryOutlined />, '版本历史')}
         {navBtn(download, false, <DownloadOutlined />, '下载')}
         {!!currentFileId && navBtn(() => { void copyInternalAddress(); }, false, <LinkOutlined />, '复制文件地址')}
@@ -1007,7 +841,6 @@ export default function BrowserDrawer({
             <Tag style={{ margin: 0 }}>版本 {current?.versionId ? current.file?.resolved_version_no : current?.file?.current_version_no}</Tag>
           )}
           <Tag color={currentCapabilities?.read ? 'green' : 'default'} style={{ margin: 0 }}>{currentCapabilities?.read ? '可查看' : '只读状态未知'}</Tag>
-          {currentCapabilities?.update && <Tag color="blue" style={{ margin: 0 }}>可编辑</Tag>}
         </div>
       )}
 
@@ -1021,20 +854,20 @@ export default function BrowserDrawer({
         {!current && !loading && (
           <div style={{ padding: 40 }}><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未指定地址" /></div>
         )}
-        {!editingText && current?.kind === 'web' && (
+        {current?.kind === 'web' && (
           <iframe key={refreshKey} src={current.url} title="web"
             style={{ width: '100%', height: '100%', border: 'none' }}
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox" />
         )}
-        {!editingText && current?.kind === 'pdf' && (
+        {current?.kind === 'pdf' && (
           <iframe key={refreshKey} src={current.url} title="pdf"
             style={{ width: '100%', height: '100%', border: 'none' }} />
         )}
-        {!editingText && current?.kind === 'docx' && (
+        {current?.kind === 'docx' && (
           <iframe key={refreshKey} src={gviewUrl(current.url)} title="docx"
             style={{ width: '100%', height: '100%', border: 'none' }} />
         )}
-        {!editingText && current?.kind === 'docx-bin' && (
+        {current?.kind === 'docx-bin' && (
           docxError ? (
             <div style={{ padding: 40, textAlign: 'center' }}>
               <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -1050,85 +883,12 @@ export default function BrowserDrawer({
               sandbox="allow-same-origin allow-popups" />
           ) : null
         )}
-        {editingText && currentFileId && (
-          <div style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: 14, gap: 10, background: '#fafafa' }}>
-            {currentExtension === 'csv' && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <Alert style={{ flex: 1 }} type="info" showIcon message="CSV 编辑保留 BOM、原换行风格和尾换行；数值不会自动转换。" />
-                <Segmented
-                  value={csvMode}
-                  options={[{ label: '表格', value: 'table' }, { label: '安全文本', value: 'text' }]}
-                  onChange={(value) => {
-                    const nextMode = value as 'table' | 'text';
-                    if (nextMode === 'table') setCsvDocument(parseCsvDocument(textDraft));
-                    setCsvMode(nextMode);
-                  }}
-                />
-              </div>
-            )}
-            {currentExtension === 'csv' && csvMode === 'table' && csvDocument ? (
-              <div
-                tabIndex={0}
-                onCopy={copyCsvSelection}
-                style={{ flex: 1, minHeight: 0, overflow: 'auto', border: `1px solid ${WB.border}`, background: '#fff', outline: 'none' }}
-              >
-                {csvDocument.rows.length > 500 && <Alert banner type="warning" message="表格模式仅显示前 500 行；切到安全文本模式可编辑全部内容。" />}
-                <table style={{ borderCollapse: 'collapse', minWidth: '100%', tableLayout: 'fixed' }}>
-                  <tbody>
-                    {csvDocument.rows.slice(0, 500).map((row, rowIndex) => (
-                      <tr key={rowIndex}>
-                        <th style={{ width: 48, minWidth: 48, padding: '4px 6px', border: `1px solid ${WB.border}`, background: '#f3f4f6', color: '#6b7280', fontWeight: 500 }}>{rowIndex + 1}</th>
-                        {Array.from({ length: csvColumnCount }, (_, columnIndex) => {
-                          const selected = !!csvSelectionBounds
-                            && rowIndex >= csvSelectionBounds.top && rowIndex <= csvSelectionBounds.bottom
-                            && columnIndex >= csvSelectionBounds.left && columnIndex <= csvSelectionBounds.right;
-                          return (
-                          <td
-                            key={columnIndex}
-                            onMouseDown={(event) => {
-                              const cell: [number, number] = [rowIndex, columnIndex];
-                              setCsvSelection((current) => event.shiftKey && current ? { ...current, focus: cell } : { anchor: cell, focus: cell });
-                            }}
-                            onMouseEnter={(event) => {
-                              if (event.buttons === 1) setCsvSelection((current) => current ? { ...current, focus: [rowIndex, columnIndex] } : current);
-                            }}
-                            style={{ minWidth: 140, padding: 0, border: `1px solid ${selected ? WB.primary : WB.border}`, background: selected ? '#eef2ff' : '#fff' }}
-                          >
-                            <Input
-                              bordered={false}
-                              value={row[columnIndex] ?? ''}
-                              onChange={(event) => updateCsvCell(rowIndex, columnIndex, event.target.value)}
-                              style={{ minWidth: 140, borderRadius: 0, fontFamily: 'Consolas, "SFMono-Regular", monospace', background: 'transparent' }}
-                            />
-                          </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <Input.TextArea
-                autoFocus
-                value={textDraft}
-                onChange={(event) => setTextDraft(event.target.value)}
-                spellCheck={false}
-                style={{ flex: 1, resize: 'none', fontFamily: 'Consolas, "SFMono-Regular", monospace', fontSize: 13, lineHeight: 1.55 }}
-              />
-            )}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <Button onClick={cancelTextEdit} disabled={savingText}>取消</Button>
-              <Button type="primary" icon={<SaveOutlined />} loading={savingText} onClick={() => { void saveText(); }}>保存为新版本</Button>
-            </div>
-          </div>
-        )}
-        {!editingText && current?.kind === 'md' && (
+        {current?.kind === 'md' && (
           <div className="wb-md" style={{ height: '100%', overflowY: 'auto', padding: '20px 24px' }}>
             <MdNav content={current.content} onLink={navigate} />
           </div>
         )}
-        {!editingText && (current?.kind === 'parsed' || current?.kind === 'binary') && (
+        {(current?.kind === 'parsed' || current?.kind === 'binary') && (
           <div style={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
             <div style={{
               flex: '0 0 auto', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -1184,7 +944,7 @@ export default function BrowserDrawer({
             </div>
           </div>
         )}
-        {!editingText && current?.kind === 'html-text' && (
+        {current?.kind === 'html-text' && (
           <div style={{ height: '100%', overflowY: 'auto', padding: '12px 16px', background: '#fafafa' }}>
             <Alert
               type="info"
@@ -1200,7 +960,7 @@ export default function BrowserDrawer({
             >{current.content}</pre>
           </div>
         )}
-        {!editingText && current?.kind === 'image' && (
+        {current?.kind === 'image' && (
           <div key={refreshKey} style={{
             height: '100%', overflow: 'auto', display: 'flex',
             alignItems: 'center', justifyContent: 'center',
@@ -1213,12 +973,12 @@ export default function BrowserDrawer({
             />
           </div>
         )}
-        {!editingText && current?.kind === 'text' && (
+        {current?.kind === 'text' && (
           <div style={{ height: '100%', overflowY: 'auto', padding: '12px 16px', background: '#fafafa' }}>
             <pre className="wb-pre" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{current.content}</pre>
           </div>
         )}
-        {!editingText && current?.kind === 'unsupported' && (
+        {current?.kind === 'unsupported' && (
           <div style={{ padding: 40, textAlign: 'center' }}>
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
               description={<>

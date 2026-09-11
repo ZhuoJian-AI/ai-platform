@@ -73,16 +73,21 @@ try {
   await page.getByRole('button', { name: '创建' }).click();
   assert.equal(await page.getByTestId('ime-submitted').textContent(), '中文目录');
 
-  // Fullscreen is a presentation state only; toggling it must not remount or
-  // clear the local text draft.
-  await page.goto(`${origin}/scripts/fixtures/workspace-file-ui.html?case=draft`);
-  await page.getByRole('button', { name: '编辑文件' }).click();
-  const draft = page.locator('textarea');
-  await draft.fill('尚未保存的中文草稿');
-  await page.getByRole('button', { name: '全屏预览' }).click();
-  assert.equal(await draft.inputValue(), '尚未保存的中文草稿');
-  await page.getByRole('button', { name: '退出全屏预览' }).click();
-  assert.equal(await draft.inputValue(), '尚未保存的中文草稿');
+  // Even with full file permissions, the shared admin/employee drawer is a
+  // reader. Fullscreen and original-byte downloads must remain available.
+  for (const format of ['md', 'csv']) {
+    await page.goto(`${origin}/scripts/fixtures/workspace-file-ui.html?case=readonly&format=${format}`);
+    const text = format === 'md' ? '原始内容' : '204A231';
+    await page.getByText(text, { exact: false }).first().waitFor();
+    assert.equal(await page.getByRole('button', { name: /编辑文件|安全文本模式编辑|保存为新版本/ }).count(), 0);
+    assert.equal(await page.locator('textarea').count(), 0);
+    await page.getByRole('button', { name: '全屏预览' }).click();
+    await page.getByText(text, { exact: false }).first().waitFor();
+    await page.getByRole('button', { name: '退出全屏预览' }).click();
+    const downloaded = page.waitForEvent('download');
+    await page.getByRole('button', { name: '下载', exact: true }).click();
+    assert.equal(await (await downloaded).failure(), null);
+  }
 
   // Workspace HTML is untrusted. It must render as escaped text, must not get
   // an executable/new-tab path, and inline/event-handler JavaScript must stay inert.
