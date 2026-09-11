@@ -1,0 +1,24 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { transform } from 'esbuild';
+
+const source = await readFile('src/pages/terminal/assistantConversationRoute.ts', 'utf8');
+const { code } = await transform(source, { loader: 'ts', format: 'esm' });
+const { conversationIdFromRoute, applicationConversationRoute } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
+assert.equal(conversationIdFromRoute('t1', ''), 't1');
+assert.equal(conversationIdFromRoute(undefined, '?view=application&conversation=t1'), 't1');
+assert.equal(conversationIdFromRoute('old', '?view=application&conversation=t2'), 't2');
+assert.equal(conversationIdFromRoute(undefined, '?view=application'), null);
+assert.equal(conversationIdFromRoute(undefined, '?conversation=unrelated'), null);
+const url = applicationConversationRoute('/alphabet/terminal', 'app1', 'orders', 'detail', 't1');
+assert.equal(conversationIdFromRoute(undefined, new URL(url, 'https://test.invalid').search), 't1');
+assert.match(url, /page=detail/);
+assert.doesNotMatch(applicationConversationRoute('/terminal', 'app2', 'stock', null, null), /conversation=/);
+const terminal = await readFile('src/pages/terminal/Terminal.tsx', 'utf8');
+const history = terminal.slice(terminal.indexOf('const openTaskFromHistory'), terminal.indexOf('const resumeBusinessTask'));
+assert.doesNotMatch(history, /task.config\?\.application_id/);
+assert.match(history, /selectTask\(task.id\)/);
+assert.match(terminal, /pageKey \|\| null, selectedConversationRef.current/);
+assert.match(terminal, /if \(abortRef.current && !skipRestoreRef.current\) return/);
+assert.match(terminal, /\}, \[selectedTask, view\]\)/);
+console.log('shared assistant conversation routing passed');

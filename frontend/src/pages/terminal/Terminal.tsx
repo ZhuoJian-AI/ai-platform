@@ -3,6 +3,7 @@ import {
   type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type CSSProperties, type DragEvent as ReactDragEvent,
   type Dispatch, type FormEvent, type KeyboardEvent, type ReactNode, type SetStateAction,
 } from 'react';
+import { applicationConversationRoute, conversationIdFromRoute } from './assistantConversationRoute';
 import {
   ConfigProvider, Button, Typography, Input, Tag, Drawer, Dropdown, Tabs, Empty, Spin,
   message, Avatar, Popover, Tooltip,
@@ -173,7 +174,12 @@ export default function Terminal() {
   const { slug, taskId } = useParams<{ slug?: string; taskId?: string }>();
   const terminalBasePath = slug ? `/${slug}/terminal` : '/terminal';
 
-  const [selectedId, setSelectedId] = useState<string | null>(() => taskId || null);
+  const [selectedId, setSelectedIdState] = useState<string | null>(() => conversationIdFromRoute(taskId, location.search));
+  const selectedConversationRef = useRef(selectedId);
+  const setSelectedId = useCallback((id: string | null) => {
+    selectedConversationRef.current = id;
+    setSelectedIdState(id);
+  }, []);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   // 删除确认弹窗：界面正中模态框（统一用共享 ConfirmModal）。
   const [delConfirm, setDelConfirm] = useState<{ id: string; title: string } | null>(null);
@@ -300,7 +306,8 @@ export default function Terminal() {
     setComposerOpen(false);
     setApplicationNavOpen(false);
     setAssistantOpenRequestKey((current) => current + 1);
-  }, [terminalApplications]);
+    navigate(applicationConversationRoute(terminalBasePath, applicationId, moduleKey, pageKey || null, selectedConversationRef.current));
+  }, [terminalApplications, terminalBasePath, navigate]);
 
   useEffect(() => {
     setApplicationNavOpen(false);
@@ -423,15 +430,15 @@ export default function Terminal() {
   });
 
   useEffect(() => {
-    const routeId = taskId || null;
+    const routeId = conversationIdFromRoute(taskId, location.search);
     setSelectedId(routeId);
     if (routeId) {
       setComposerOpen(false);
-      setView('assistant');
+      if (new URLSearchParams(location.search).get('view') !== 'application') setView('assistant');
     } else if (location.pathname === terminalBasePath) {
       setComposerOpen(true);
     }
-  }, [taskId]);
+  }, [taskId, location.search, location.pathname, terminalBasePath]);
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
@@ -475,13 +482,16 @@ export default function Terminal() {
     const query = params.toString();
     const desired = `${desiredPath}${query ? `?${query}` : ''}`;
     const current = `${location.pathname}${location.search}`;
-    const routeTaskId = taskId || null;
+    const routeTaskId = conversationIdFromRoute(taskId, location.search);
     if (routeTaskId !== selectedId && (location.pathname === terminalBasePath || location.pathname.startsWith(`${terminalBasePath}/tasks/`))) return;
     if (desired !== current) navigate(desired, { replace: true });
   }, [composerOpen, location.pathname, location.search, navigate, selectedApplicationId, selectedApplicationModuleKey, selectedApplicationPageKey, selectedBusinessTaskId, selectedId, taskId, terminalBasePath, view]);
 
   useEffect(() => {
     if (!selectedTask) return;
+    // The sidebar can append messages to the same Task. Refresh persisted chat
+    // when its query changes, but never overwrite a live global SSE buffer.
+    if (abortRef.current && !skipRestoreRef.current) return;
     const restoredStatus = selectedTask.run_status;
     setRuntimeStatus(restoredStatus === 'queued' || restoredStatus === 'running'
       ? { status: restoredStatus }
@@ -519,7 +529,7 @@ export default function Terminal() {
         if (reconnRef.current === selectedTask.id) reconnRef.current = null;
       });
     }
-  }, [selectedTask?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedTask, view]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 切换到已存在任务时，按 task.config.template_agent_id 预填「选智能体」（不落库，仅 UI 默认）。
   // 刚创建并 live 执行的任务跳过：保留作曲器里用户选的智能体，不被新任务空 config 重置为通用。
@@ -908,30 +918,12 @@ export default function Terminal() {
   }, [selectedId, abortActiveStream, navigate, qc, terminalBasePath]);
 
   const openTaskFromHistory = useCallback((task: TerminalTask) => {
-    const applicationId = task.config?.application_id;
-    if (applicationId) {
-      const application = terminalApplications.find((item) => item.id === applicationId);
-      if (!application) {
-        message.error('该业务对话所属应用当前不可用或已取消授权');
-        return;
-      }
-      const pageContext = task.last_page_context ?? {};
-      const moduleKey = typeof pageContext.module_key === 'string'
-        ? pageContext.module_key
-        : application.modules?.[0]?.module_key ?? null;
-      setComposerOpen(false);
-      setSelectedId(task.id);
-      setSelectedApplicationId(applicationId);
-      setSelectedApplicationModuleKey(moduleKey);
-      setView('application');
-      setApplicationNavOpen(false);
-      navigate(terminalBasePath);
-      return;
-    }
+    // History opens the shared conversation, not a second app-bound assistant.
+    // Its saved page context is reauthorized by the server on the next turn.
     void selectTask(task.id);
     setView('assistant');
     setApplicationNavOpen(false);
-  }, [navigate, selectTask, terminalApplications, terminalBasePath]);
+  }, [selectTask]);
 
   const resumeBusinessTask = useCallback(async (
     taskId: string,
