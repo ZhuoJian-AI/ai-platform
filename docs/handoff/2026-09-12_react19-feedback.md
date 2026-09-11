@@ -6,3 +6,10 @@
 - npm run typecheck、npm run build 通过。录音 ASR/OSS 复用上一批验收，不重复调用模型。
 - 测试脚本 frontend/scripts/e2e-antd-feedback.mjs 仅面向本地 Vite 候选环境。
 - 此提交是 source；上线后需验证 zhangsan 点击录音时真实显示权限提示且不开麦。朗读、沉浸式语音仍未交付。
+
+## 镜像发布
+
+- Source PR #122：`4c7dfb6b8672dfd7eadf8a2c82a1f0d088fe9616`。
+- 前端 Registry HEAD digest：`sha256:da92a14c194c47c3bc8944a383eb3c299e66f386c6c6b47054d4a2177c1f128d`，OCI revision 为上述 source。
+- 后端和其他服务保持上一批镜像不变，无数据库或权限变更；前端回切 digest `sha256:a5da2816d7b0e0a531dbb64461885b2f648c63e352bb3d43826158d7f3c64283`。
+- 真实环境变量预检 PASS；规则版本 c948cd2，Registry-first。实际部署结果待后续补充。
