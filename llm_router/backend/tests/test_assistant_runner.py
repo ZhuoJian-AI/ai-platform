@@ -206,6 +206,29 @@ async def test_current_business_export_accepts_a_successful_composite_file_tool(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("specialist_ok", [True, False])
+async def test_specialist_analysis_is_not_rejected_for_missing_database_query(monkeypatch, specialist_ok):
+    state = {
+        "run_id": 14, "request": "识别上传的报告", "application_id": "app-1",
+        "messages": [], "steps": [],
+        "business_turn_intent": {"intent": "query", "requiresLiveData": True},
+        "_assistant_tool_registry": {"specialist": {"kind": "subsystem_specialist"}},
+    }
+    await _consume(monkeypatch, [
+        {"type": "tool_result", "id": "c1", "name": "specialist", "ok": specialist_ok,
+         "content": json.dumps({"status": "completed" if specialist_ok else "failed",
+                                "data": {"draft": {"style": "204A231"}}})},
+        {"type": "done", "text": "上传报告的款号是 204A231。"},
+    ], state)
+    if specialist_ok:
+        assert state.get("error") is None
+        assert "204A231" in state["assistant_final"]
+    else:
+        assert state.get("error")
+        assert "204A231" not in state["assistant_final"]
+
+
+@pytest.mark.asyncio
 async def test_empty_success_is_not_misreported_as_max_steps(monkeypatch):
     state = {"run_id": 2, "request": "你好", "messages": [], "steps": []}
     await _consume(monkeypatch, [{"type": "done", "text": ""}], state)

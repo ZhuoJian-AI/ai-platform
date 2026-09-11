@@ -589,6 +589,7 @@ async def _consume_native(
     }
     text = ""
     successful_tools = 0
+    successful_specialist_analyses = 0
     failed_tools: list[tuple[str, str]] = []
     enterprise_action_calls = 0
     enterprise_query_calls = 0
@@ -675,6 +676,17 @@ async def _consume_native(
                         successful_enterprise_mutations += 1
                     else:
                         failed_enterprise_mutations.append(str(event.get("content") or "未返回错误详情"))
+            elif entry_kind == "subsystem_specialist":
+                # A validated draft is evidence for an analysis task, not a database
+                # query or mutation receipt. Do not force a second unrelated query
+                # just because the initial intent classifier called OCR a query.
+                successful_specialist_analyses += int(
+                    ok
+                    and isinstance(tool_envelope, dict)
+                    and tool_envelope.get("status") == "completed"
+                    and isinstance(tool_envelope.get("data"), dict)
+                    and isinstance(tool_envelope["data"].get("draft"), dict)
+                )
             elif entry_kind == "enterprise_export_file":
                 # This trusted composite tool performs the current-page export Action
                 # itself, validates every paged result, then commits the artifact through
@@ -725,7 +737,12 @@ async def _consume_native(
     # Generic nouns such as "记录" must not arm a second query requirement and turn a
     # completed write into a failed run merely because the model did not query again.
     live_business_data_required = _requests_current_business_data(state) and not mutation_required
-    live_business_data_unverified = live_business_data_required and successful_enterprise_queries == 0
+    verified_analysis_only = successful_specialist_analyses > 0 and enterprise_action_calls == 0
+    live_business_data_unverified = (
+        live_business_data_required
+        and successful_enterprise_queries == 0
+        and not verified_analysis_only
+    )
     if mutation_unverified:
         if text:
             _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
