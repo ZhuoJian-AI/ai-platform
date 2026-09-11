@@ -836,7 +836,7 @@ export default function Terminal() {
             return dbm ? { ...m, id: dbm.id, createdAt: dbm.created_at } : m;
           }
           const dbm = dbAssistants[assistantIdx++];
-          return dbm ? { ...m, createdAt: dbm.updated_at || dbm.created_at } : m;
+          return dbm ? { ...m, id: dbm.id, content: dbm.content, createdAt: dbm.updated_at || dbm.created_at } : m;
         }));
       } catch { /* 回填失败不影响展示 */ }
     } catch (e) {

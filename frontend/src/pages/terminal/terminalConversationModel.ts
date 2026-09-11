@@ -171,7 +171,7 @@ export function restoreChat(messages: TerminalTaskMessage[]): ChatMsg[] {
       const blocks = traces.length ? tracesToBlocks(traces) : undefined;
       if (blocks && m.content) blocks.push({ kind: 'text', content: m.content });
       return {
-        role: 'assistant' as const, content: m.content, blocks,
+        role: 'assistant' as const, id: m.id, content: m.content, blocks,
         createdAt: m.updated_at || m.created_at,
         executionVerification: m.execution_verification, artifacts: messageArtifacts(m.metadata),
       };

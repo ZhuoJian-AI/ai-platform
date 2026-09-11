@@ -22,11 +22,25 @@ from app.schemas.multimodal import (
     VoiceProfileRead,
     VoiceProfileUpdate,
 )
+from app.services import message_speech_service as message_speech
 from app.services import multimodal_audio_service as service
 from app.services import voice_recording_service as recordings
 from app.services.model_gateway import GatewayError, classify_gateway_error
 
 router = APIRouter(prefix="/multimodal")
+
+
+@router.post("/message-speech", response_model=MultimodalJobCreated, status_code=202)
+async def read_message(data: message_speech.MessageSpeechCreate, cu: CurrentUser = Depends(require_user),
+                       db: AsyncSession = Depends(get_db)):
+    return _created(await message_speech.create(db, cu, data))
+
+
+@router.delete("/message-speech/{job_id}", status_code=204)
+async def cancel_message_speech(job_id: UUID, cu: CurrentUser = Depends(require_user),
+                                db: AsyncSession = Depends(get_db)):
+    await message_speech.cancel(db, cu, job_id)
+    return Response(status_code=204)
 
 
 @router.post("/recordings", status_code=201)

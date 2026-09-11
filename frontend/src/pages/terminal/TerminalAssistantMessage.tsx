@@ -1,15 +1,16 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import {
-  Button, Input, Popover, Select, Spin, Tag, Tooltip, Typography, message,
+  Button, Spin, Tag, Tooltip, message,
 } from 'antd';
 import {
-  AudioOutlined, CheckCircleOutlined, CloseOutlined, DatabaseOutlined,
+  CheckCircleOutlined, CloseOutlined, DatabaseOutlined,
   DownloadOutlined, DownOutlined, EyeOutlined, FileTextOutlined, LoadingOutlined,
   PictureOutlined, RightOutlined, SafetyOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { multimodal, terminal, type TerminalTaskMessage, type VoiceProfile } from '../../api/client';
+import { terminal, type TerminalTaskMessage } from '../../api/client';
+import MessageSpeechButton from './MessageSpeechButton';
 import ApprovalCard from '../../components/terminal/ApprovalCard';
 import BrandLogoSlot, { BRAND_LOGO_SLOTS } from '../../branding/BrandLogoSlot';
 import { presentAssistantMarkdown } from '../../utils/workspacePresentation';
@@ -100,106 +101,6 @@ function ExecutionStatus({ verification, streaming }: { verification: ExecutionV
   );
 }
 
-function SpeechPlaybackButton({ text, disabled }: { text: string; disabled?: boolean }) {
-  const [loading, setLoading] = useState(false);
-  const [voiceLoading, setVoiceLoading] = useState(false);
-  const [open, setOpen] = useState(false);
-  const [voices, setVoices] = useState<VoiceProfile[]>([]);
-  const [voiceId, setVoiceId] = useState<string>();
-  const [style, setStyle] = useState('');
-  const [speed, setSpeed] = useState(1);
-
-  const openSettings = async () => {
-    if (disabled || !text.trim()) return;
-    setOpen(true);
-    if (voices.length || voiceLoading) return;
-    setVoiceLoading(true);
-    try {
-      const available = await multimodal.voices();
-      setVoices(available);
-      setVoiceId(available[0]?.id);
-      if (!available.length) message.warning('管理员尚未为你分配可用音色');
-    } catch (error) {
-      message.error((error as Error).message || '音色加载失败');
-    } finally {
-      setVoiceLoading(false);
-    }
-  };
-
-  const play = async () => {
-    const content = text.trim();
-    if (!content || disabled || loading) return;
-    if (!voiceId) {
-      message.warning('请选择一个可用音色');
-      return;
-    }
-    setLoading(true);
-    try {
-      const created = await multimodal.speech({
-        text: content.slice(0, 20_000),
-        voice_profile_id: voiceId,
-        style: style.trim() || undefined,
-        speed,
-        format: 'wav',
-      });
-      for (let attempt = 0; attempt < 150; attempt += 1) {
-        const job = await multimodal.job(created.job_id);
-        if (job.status === 'succeeded') {
-          if (!job.output_url) throw new Error('朗读文件尚未生成播放地址');
-          await new window.Audio(job.output_url).play();
-          setOpen(false);
-          return;
-        }
-        if (job.status === 'failed' || job.status === 'cancelled') {
-          throw new Error(job.error_detail || job.error_category || '朗读生成失败');
-        }
-        await new Promise((resolve) => window.setTimeout(resolve, 2000));
-      }
-      throw new Error('朗读生成等待超过 5 分钟，可稍后重试');
-    } catch (error) {
-      message.error((error as Error).message || '朗读失败');
-    } finally {
-      setLoading(false);
-    }
-  };
-  return (
-    <Popover
-      trigger="click"
-      open={open}
-      onOpenChange={(next) => { if (!next) setOpen(false); else void openSettings(); }}
-      content={<div style={{ width: 280, display: 'grid', gap: 10 }}>
-        <Typography.Text strong>朗读设置</Typography.Text>
-        <Select
-          loading={voiceLoading}
-          value={voiceId}
-          onChange={setVoiceId}
-          placeholder="选择企业授权音色"
-          options={voices.map(voice => ({ value: voice.id, label: `${voice.name} · ${voice.voice_type}` }))}
-        />
-        <Input value={style} onChange={event => setStyle(event.target.value)} placeholder="可选：温和、正式、充满活力……" maxLength={500} />
-        <Select value={speed} onChange={setSpeed} options={[
-          { value: 0.75, label: '慢速 0.75×' },
-          { value: 1, label: '正常 1.0×' },
-          { value: 1.25, label: '较快 1.25×' },
-          { value: 1.5, label: '快速 1.5×' },
-        ]} />
-        <Button type="primary" icon={loading ? <LoadingOutlined /> : <AudioOutlined />} loading={loading} disabled={!voiceId} onClick={() => void play()}>
-          生成并播放
-        </Button>
-      </div>}
-    >
-      <Button
-        type="text"
-        size="small"
-        icon={loading ? <LoadingOutlined /> : <AudioOutlined />}
-        disabled={disabled || !text.trim()}
-        style={{ marginTop: 8, paddingInline: 4, color: '#6b7280' }}
-      >
-        {loading ? '生成朗读中' : '朗读'}
-      </Button>
-    </Popover>
-  );
-}
 
 export function AssistantBubble({ msg, streaming, onLink, fileLinks, taskId }: { msg: ChatMsg; streaming: boolean; onLink: (href: string) => void; fileLinks: ChatFileLink[]; taskId: string | null }) {
   const blocks = msg.blocks;
@@ -219,7 +120,7 @@ export function AssistantBubble({ msg, streaming, onLink, fileLinks, taskId }: {
             </Md>
           </div>
           <ArtifactGallery artifacts={structuredArtifacts} fileLinks={fileLinks} streaming={streaming} onLink={onLink} />
-          <SpeechPlaybackButton text={msg.content} disabled={streaming} />
+          <MessageSpeechButton taskId={taskId} messageId={msg.id} content={msg.content} disabled={streaming} />
         </div>
       </div>
     );
@@ -230,10 +131,6 @@ export function AssistantBubble({ msg, streaming, onLink, fileLinks, taskId }: {
   const artifacts = structuredArtifacts.length ? structuredArtifacts : extractArtifacts(blocks);
   const artifactPaths = new Set(artifacts.map((artifact) => artifact.path).filter(Boolean));
   const legacyChanges = extractFileChanges(blocks).filter((file) => !artifactPaths.has(file.path));
-  const spokenText = msg.content || blocks
-    .filter((block): block is Extract<Block, { kind: 'text' }> => block.kind === 'text')
-    .map((block) => block.content)
-    .join('\n');
 
   return (
     <div style={{ maxWidth: '92%' }}>
@@ -295,7 +192,7 @@ export function AssistantBubble({ msg, streaming, onLink, fileLinks, taskId }: {
           onLink={onLink}
         />
         <ChangesBox files={legacyChanges} fileLinks={fileLinks} onLink={onLink} />
-        <SpeechPlaybackButton text={spokenText} disabled={streaming} />
+        <MessageSpeechButton taskId={taskId} messageId={msg.id} content={msg.content} disabled={streaming} />
       </div>
     </div>
   );
