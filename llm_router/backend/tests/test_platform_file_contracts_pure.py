@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import zipfile
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
@@ -38,6 +40,35 @@ from app.services.file_capability_registry import (
 @pytest.fixture(autouse=True)
 def db_engine():
     yield
+
+
+@pytest.mark.parametrize("path", ["员工空间:/结果.txt", "C:/结果.txt", "https://example.com/a.txt", "oss://bucket/a.txt"])
+def test_workspace_paths_reject_display_and_storage_addresses(path):
+    with pytest.raises(workspace_service.WorkspaceFileInvalidPath, match="相对路径"):
+        workspace_service._normalize_path(path)
+
+
+def test_workspace_relative_path_keeps_business_name():
+    assert workspace_service._normalize_path("报表/结果.txt") == "报表/结果.txt"
+
+
+@pytest.mark.asyncio
+async def test_workspace_path_error_returns_correction_to_brain(monkeypatch):
+    @asynccontextmanager
+    async def transaction():
+        workspace_service._normalize_path("员工空间:/结果.txt")
+        yield
+
+    monkeypatch.setattr(builtin_tools, "get_deps", lambda: {
+        "db": SimpleNamespace(begin_nested=transaction), "user": SimpleNamespace(),
+    })
+    result = json.loads(await builtin_tools._execute_builtin_tool(
+        {}, "workspace_create_file", {"path": "员工空间:/结果.txt", "content": "test"},
+    ))
+    assert result["status"] == "retryable_error"
+    assert result["error"]["correctionFields"] == ["path"]
+    assert result["error"]["retryable"] is True
+    assert "相对路径" in result["error"]["messageZh"]
 
 
 def test_workspace_platform_catalog_exposes_all_canonical_atomic_tools():
@@ -403,13 +434,16 @@ def test_validation_errors_do_not_reflect_input_or_context():
 
 
 @pytest.mark.asyncio
-async def test_forbidden_stable_file_id_is_concealed_as_not_found():
+@pytest.mark.parametrize("status", [403, 404])
+@pytest.mark.parametrize("prefix", ["/api/v1/terminal", "/api/v1/workspaces"])
+@pytest.mark.parametrize("suffix", ["", "/download", "/versions"])
+async def test_forbidden_stable_file_id_is_concealed_as_not_found(status, prefix, suffix):
     file_id = uuid4()
     request = Request(
         {
             "type": "http",
             "method": "GET",
-            "path": f"/api/v1/terminal/files/{file_id}",
+            "path": f"{prefix}/files/{file_id}{suffix}",
             "headers": [],
             "query_string": b"",
             "server": ("test", 80),
@@ -419,10 +453,28 @@ async def test_forbidden_stable_file_id_is_concealed_as_not_found():
     )
     response = await conceal_stable_file_forbidden(
         request,
-        HTTPException(status_code=403, detail="update denied"),
+        HTTPException(status_code=status, detail="update denied"),
     )
     assert response.status_code == 404
     assert b"update denied" not in response.body
+    assert json.loads(response.body) == {"detail": "文件不存在或无权访问"}
+    assert response.headers["cache-control"] == "private, no-store"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,status", [
+    ("/api/v1/terminal/workspaces/example/files", 403),
+    (f"/api/v1/terminal/files/{uuid4()}", 401),
+    (f"/api/v1/terminal/files/{uuid4()}", 409),
+    (f"/api/v1/terminal/files/{uuid4()}", 422),
+])
+async def test_file_concealment_preserves_other_errors(path, status):
+    request = Request({"type": "http", "method": "GET", "path": path, "headers": []})
+    response = await conceal_stable_file_forbidden(
+        request, HTTPException(status_code=status, detail="原始业务错误"),
+    )
+    assert response.status_code == status
+    assert json.loads(response.body) == {"detail": "原始业务错误"}
 
 
 @pytest.mark.asyncio

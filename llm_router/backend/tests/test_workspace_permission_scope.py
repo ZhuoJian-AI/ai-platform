@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from app.auth.user_auth import CurrentUser
 from app.models.department import Department
@@ -8,6 +9,22 @@ from app.models.organization import Organization
 from app.models.user import User
 from app.models.workspace import Workspace
 from app.services import scope_service, workspace_permission_service
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_tenant", [False, True])
+async def test_workspace_denial_is_chinese_and_hides_other_tenants(other_tenant) -> None:
+    cu = SimpleNamespace(id="u", organization_id="org", permission_codes=())
+    workspace = SimpleNamespace(
+        organization_id="other" if other_tenant else "org",
+        scope_type="organization", scope_id=None, deleted_at=None,
+    )
+    with pytest.raises(HTTPException) as caught:
+        await workspace_permission_service.assert_can_read(None, workspace, cu)
+    assert caught.value.status_code == (404 if other_tenant else 403)
+    assert caught.value.detail == (
+        "工作空间不存在" if other_tenant else "当前角色没有该工作空间的读取权限"
+    )
 
 
 def test_role_workspace_codes_add_cross_department_visibility() -> None:
@@ -93,7 +110,7 @@ async def test_company_workspace_management_requires_explicit_role_permission() 
 
 
 @pytest.mark.asyncio
-async def test_department_membership_is_read_only_and_roles_are_unioned() -> None:
+async def test_department_membership_grants_nothing_and_roles_are_unioned() -> None:
     cu = SimpleNamespace(
         id="user-1",
         organization_id="organization-1",
@@ -113,7 +130,7 @@ async def test_department_membership_is_read_only_and_roles_are_unioned() -> Non
         )
 
     assert await workspace_permission_service.capabilities(None, workspace("department-home"), cu) == {
-        "read": True, "create": False, "update": False, "delete": False,
+        "read": False, "create": False, "update": False, "delete": False,
         "manage": False, "publish": False,
     }
     assert await workspace_permission_service.capabilities(None, workspace("department-design"), cu) == {
@@ -155,7 +172,7 @@ async def test_generic_data_scope_does_not_expand_workspace_visibility(db_sessio
 
     visible = await scope_service.list_workspaces_for_user(db_session, cu)
 
-    assert {str(item.id) for item in visible} == {str(home_ws.id)}
+    assert visible == []
 
 
 @pytest.mark.asyncio
@@ -190,7 +207,7 @@ async def test_effective_access_omits_workspaces_with_no_capability(db_session) 
 
 
 @pytest.mark.asyncio
-async def test_effective_access_includes_company_public_workspace_read_only(db_session) -> None:
+async def test_effective_access_hides_company_workspace_without_role_grant(db_session) -> None:
     org = Organization(name="Public workspace tenant", slug="public-workspace-tenant")
     db_session.add(org)
     await db_session.flush()
@@ -212,19 +229,35 @@ async def test_effective_access_includes_company_public_workspace_read_only(db_s
 
     access = await workspace_permission_service.effective_access(db_session, cu)
 
-    assert access["workspaces"] == [{
-        "id": str(public.id),
-        "name": "公司公共空间",
-        "slug": "organization-public",
-        "scope_type": "organization",
-        "scope_id": None,
-        "capabilities": {
-            "read": True, "create": False, "update": False, "delete": False,
-            "manage": False, "publish": False,
-        },
-        "sources": {
-            "read": [{
-                "type": "membership", "id": str(org.id), "name": "企业公共空间默认只读",
-            }],
-        },
-    }]
+    assert access["workspaces"] == []
+
+
+@pytest.mark.asyncio
+async def test_company_read_role_is_read_only_and_revocation_removes_access() -> None:
+    cu = SimpleNamespace(
+        id="user-1", organization_id="org-1", department_id="home",
+        permission_codes=(workspace_permission_service.ORGANIZATION_READ_PERMISSION,),
+    )
+    workspace = SimpleNamespace(
+        organization_id="org-1", scope_type="organization", scope_id=None,
+        deleted_at=None,
+    )
+    assert await workspace_permission_service.capabilities(None, workspace, cu) == {
+        "read": True, "create": False, "update": False, "delete": False,
+        "manage": False, "publish": False,
+    }
+    cu.permission_codes = ()
+    assert not any((await workspace_permission_service.capabilities(None, workspace, cu)).values())
+    assert workspace_permission_service.capability_sources(workspace, cu) == {}
+
+
+@pytest.mark.asyncio
+async def test_personal_ownership_survives_without_business_roles() -> None:
+    cu = SimpleNamespace(id="user-1", organization_id="org-1", permission_codes=())
+    workspace = SimpleNamespace(
+        organization_id="org-1", scope_type="user", scope_id="user-1", deleted_at=None,
+    )
+    caps = await workspace_permission_service.capabilities(None, workspace, cu)
+    assert all(caps[key] for key in ("read", "create", "update", "delete"))
+    workspace.organization_id = "other-org"
+    assert not any((await workspace_permission_service.capabilities(None, workspace, cu)).values())

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 DEPARTMENT_READ_PREFIX = "workspace.department.read:"
 DEPARTMENT_UPLOAD_PREFIX = "workspace.department.upload:"
 ORGANIZATION_MANAGE_PERMISSION = "workspace.organization.manage"
+ORGANIZATION_READ_PERMISSION = "workspace.organization.read"
 
 
 def department_workspace_scope_ids(cu: CurrentUser) -> tuple[str, ...]:
@@ -33,16 +34,14 @@ def department_workspace_scope_ids(cu: CurrentUser) -> tuple[str, ...]:
 def _department_workspace_access(cu: CurrentUser, department_id: str) -> tuple[bool, bool]:
     """Return explicit role-based read/upload access for one department.
 
-    Department membership is identity, not a permission bundle.  A user's
-    primary department is readable by default; shared writes and cross-
-    department access must be granted by one of the user's roles.
+    Department membership is identity, not a permission bundle. All shared
+    access, including the primary department, requires a role permission.
     """
     codes = set(getattr(cu, "permission_codes", ()) or ())
     wildcard = "*" in codes
     can_upload = wildcard or f"{DEPARTMENT_UPLOAD_PREFIX}{department_id}" in codes
     explicit_read = wildcard or f"{DEPARTMENT_READ_PREFIX}{department_id}" in codes
-    home_department = department_id == str(getattr(cu, "department_id", None) or "")
-    return home_department or explicit_read or can_upload, can_upload
+    return explicit_read or can_upload, can_upload
 
 
 def is_workspace_readable(workspace: Workspace, cu: CurrentUser) -> bool:
@@ -59,10 +58,8 @@ def is_workspace_readable(workspace: Workspace, cu: CurrentUser) -> bool:
     if scope_type == "user":
         return scope_id == str(getattr(cu, "id", ""))
     if scope_type == "organization":
-        # The organization workspace is the tenant's company-wide public area.
-        # Tenant membership grants read-only access; writes still require an
-        # explicit capability and are intentionally not inferred here.
-        return True
+        codes = set(getattr(cu, "permission_codes", ()) or ())
+        return bool(codes & {"*", ORGANIZATION_READ_PERMISSION, ORGANIZATION_MANAGE_PERMISSION})
     if scope_type == "department":
         can_read, _ = _department_workspace_access(cu, scope_id)
         return can_read
@@ -116,9 +113,7 @@ async def capabilities(db: AsyncSession, workspace: Workspace, cu: CurrentUser) 
         scope_type == "organization"
         and (ORGANIZATION_MANAGE_PERMISSION in codes or "*" in codes)
     )
-    # Workspace file access follows the explicit administrator role matrix.
-    # Until organization workspace permissions have corresponding role
-    # codes, membership alone must not silently disclose those catalogues.
+    # Both company and department access follow the explicit role matrix.
     can_read = is_workspace_readable(workspace, cu)
     can_write_department = scope_type == "department" and department_upload
     can_update = own or can_write_department or organization_manage
@@ -145,13 +140,8 @@ def capability_sources(workspace: Workspace, cu: CurrentUser) -> dict[str, list[
         source = [{"type": "ownership", "id": str(cu.id), "name": "个人工作空间"}]
         return {key: source for key in ("read", "create", "update", "delete")}
     if scope_type == "organization":
-        result = {
-            "read": [{
-                "type": "membership",
-                "id": str(getattr(cu, "organization_id", "")),
-                "name": "企业公共空间默认只读",
-            }],
-        }
+        result = {}
+        read_sources = _role_sources(cu, ORGANIZATION_READ_PERMISSION)
         manage_sources = _role_sources(
             cu,
             ORGANIZATION_MANAGE_PERMISSION,
@@ -159,6 +149,9 @@ def capability_sources(workspace: Workspace, cu: CurrentUser) -> dict[str, list[
         )
         if manage_sources:
             result.update({key: manage_sources for key in ("create", "update", "delete")})
+        read_sources.extend(item for item in manage_sources if item not in read_sources)
+        if read_sources:
+            result["read"] = read_sources
         return result
     if scope_type != "department":
         return {}
@@ -167,11 +160,6 @@ def capability_sources(workspace: Workspace, cu: CurrentUser) -> dict[str, list[
     upload_code = f"{DEPARTMENT_UPLOAD_PREFIX}{scope_id}"
     read_sources = _role_sources(cu, read_code)
     upload_sources = _role_sources(cu, upload_code)
-    if scope_id == str(getattr(cu, "department_id", None) or ""):
-        read_sources = [
-            {"type": "membership", "id": scope_id, "name": "主部门默认只读"},
-            *read_sources,
-        ]
     # Upload implies read in the role editor and server-side resolver.
     read_sources.extend(item for item in upload_sources if item not in read_sources)
     result: dict[str, list[dict[str, str]]] = {}
@@ -268,7 +256,12 @@ async def _assert(db: AsyncSession, workspace: Workspace, cu: CurrentUser, capab
             getattr(cu, "organization_id", None)
         )
         status = 404 if cross_tenant else 403
-        raise HTTPException(status_code=status, detail=f"Workspace {capability} permission denied")
+        operation = {
+            "read": "读取", "create": "创建文件", "update": "修改文件",
+            "delete": "删除文件", "publish": "发布文件",
+        }.get(capability, "操作")
+        detail = "工作空间不存在" if cross_tenant else f"当前角色没有该工作空间的{operation}权限"
+        raise HTTPException(status_code=status, detail=detail)
 
 
 async def assert_can_read(db: AsyncSession, workspace: Workspace, cu: CurrentUser) -> None:

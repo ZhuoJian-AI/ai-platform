@@ -69,6 +69,10 @@ try {
   const loginSource = await readFile(resolve('src/components/LoginForm.tsx'), 'utf8');
   const authContextSource = await readFile(resolve('src/context/AuthContext.tsx'), 'utf8');
   const appSource = await readFile(resolve('src/App.tsx'), 'utf8');
+  const clientSource = await readFile(resolve('src/api/client.ts'), 'utf8');
+  assert.doesNotMatch(clientSource, /Session expired/);
+  assert.equal((clientSource.match(/new ApiError\(401, '登录已失效，请重新登录'\)/g) || []).length, 3,
+    'administrator, employee and upload requests must use Chinese expiry feedback');
   assert.doesNotMatch(loginSource, /mfa_code|MFA_REQUIRED|must_change_password/);
   assert.match(loginSource, /login\(null, authenticatedAdmin, csrfToken\)/,
     'new administrator logins must rely on the HttpOnly cookie');

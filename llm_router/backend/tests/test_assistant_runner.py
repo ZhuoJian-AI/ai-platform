@@ -1,7 +1,9 @@
 """Pure coordinator contracts that must survive the DSH retirement."""
 
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -15,6 +17,51 @@ def db_engine():
     """These coordinator tests do not require PostgreSQL."""
 
     yield
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_non_stream_run_persists_tool_and_terminal_events(monkeypatch, fails):
+    state = {"session_id": "session", "run_id": 123, "messages": []}
+    monkeypatch.setattr(runner, "general_initial_state", lambda **kw: state)
+    monkeypatch.setattr(runner, "general_context", lambda *args: {})
+    monkeypatch.setattr(runner, "user_message_metadata", lambda s: {})
+
+    async def prepare(s, deps, writer, **kw):
+        writer(json.dumps({"type": "phase", "phase": "prepare"}))
+        return {}, ""
+
+    async def admitted(s, deps, prepared, token, handle, staged, user_id):
+        staged.append({"type": "tool_result", "name": "image_tool", "ok": not fails})
+        if fails:
+            raise ValueError("test failure")
+
+    async def finish(s, deps, writer):
+        s["assistant_final"] = "完成"
+        writer(json.dumps({"type": "assistant_message", "content": "完成"}))
+
+    async def failed(s, deps, exc, writer):
+        s["error"] = "test failure"
+        s["assistant_final"] = "失败"
+        writer(json.dumps({"type": "assistant_message", "content": "失败"}))
+
+    persist = AsyncMock()
+    monkeypatch.setattr(runner, "_prepare", prepare)
+    monkeypatch.setattr(runner, "_admitted_run", admitted)
+    monkeypatch.setattr(runner, "_finish", finish)
+    monkeypatch.setattr(runner, "_finish_failed_run", failed)
+    monkeypatch.setattr(runner, "persist_run_events", persist)
+    db = SimpleNamespace(add=lambda obj: None, commit=AsyncMock())
+    result = await runner.run_general_agent(
+        org_id="org", user=SimpleNamespace(id="user"), task=SimpleNamespace(id="task"),
+        message="识图", config={}, session_id=None, db=db, request=None,
+    )
+    persist.assert_awaited_once()
+    run_id, task_id, events, final = persist.call_args.args
+    assert (run_id, task_id) == (123, "task")
+    assert [event["type"] for event in events] == ["phase", "tool_result", "assistant_message", "done"]
+    assert json.loads(final)["status"] == ("failed" if fails else "completed")
+    assert json.loads(final)["content"] == result["assistant"]
 
 
 async def _consume(monkeypatch, events, state):

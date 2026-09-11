@@ -87,8 +87,12 @@ async def conceal_stable_file_forbidden(
     exc: HTTPException,
 ):
     """Do not reveal whether an opaque stable file id exists."""
-    if exc.status_code == 403 and _STABLE_FILE_PATH_RE.search(request.url.path):
-        return JSONResponse(status_code=404, content={"detail": "File not found"})
+    if exc.status_code in {403, 404} and _STABLE_FILE_PATH_RE.search(request.url.path):
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "文件不存在或无权访问"},
+            headers={"Cache-Control": "private, no-store"},
+        )
     return await http_exception_handler(request, exc)
 
 

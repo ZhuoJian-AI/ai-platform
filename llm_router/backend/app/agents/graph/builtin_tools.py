@@ -1680,6 +1680,14 @@ async def _execute_platform_file_tool(
             },
             ensure_ascii=False,
         )
+    except workspace_service.WorkspaceFileInvalidPath as exc:
+        return json.dumps({
+            "status": "retryable_error",
+            "error": {
+                "code": "INVALID_WORKSPACE_PATH", "messageZh": str(exc),
+                "correctionFields": ["path"], "retryable": True,
+            },
+        }, ensure_ascii=False)
     except workspace_service.WorkspaceFileUnsupportedTextUpdate:
         return _file_tool_error(
             "incompatible_target_format",
@@ -2647,6 +2655,14 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     saved.metadata_ = {**dict(saved.metadata_ or {}), "task_id": task_id}
                     await workspace_service.sync_current_version(db, saved)
                 return f"generated {filename} ({len(raw)} bytes)"
+    except workspace_service.WorkspaceFileInvalidPath as exc:
+        return json.dumps({
+            "status": "retryable_error",
+            "error": {
+                "code": "INVALID_WORKSPACE_PATH", "messageZh": str(exc),
+                "correctionFields": ["path"], "retryable": True,
+            },
+        }, ensure_ascii=False)
     except workspace_service.WorkspaceFileUnsupportedTextUpdate:
         return "不能用纯文本内容创建 Office、PDF 或其他二进制文件；请使用对应文件工具"
     except Exception as exc:  # noqa: BLE001
