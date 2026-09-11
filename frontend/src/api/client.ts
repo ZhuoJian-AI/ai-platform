@@ -557,6 +557,13 @@ export interface MultimodalJob {
 }
 
 export const multimodal = {
+  createRecording: (data: { size_bytes: number; content_type: string; sha256: string; request_id: string }) =>
+    userRequest<{ job_id: string; url: string; fallback_url?: string; headers: Record<string, string> }>(
+      '/api/v1/multimodal/recordings', { method: 'POST', body: JSON.stringify(data) }),
+  completeRecording: (id: string) => userRequest<{ job_id: string }>(
+    `/api/v1/multimodal/recordings/${id}/complete`, { method: 'POST' }),
+  cancelRecording: (id: string) => userRequest<void>(
+    `/api/v1/multimodal/recordings/${id}`, { method: 'DELETE' }),
   voices: () => userRequest<VoiceProfile[]>('/api/v1/multimodal/voices'),
   transcribe: (workspaceFileId: string, language: 'auto' | 'zh' | 'en' = 'auto') =>
     userRequest<{ job_id: string; request_id: string; status: string }>('/api/v1/multimodal/audio/transcriptions', {
@@ -1230,6 +1237,9 @@ export interface TerminalUser {
 
 export interface TerminalResources {
   workspaces: Workspace[];
+  audio_capabilities?: Partial<Record<'speech_to_text' | 'text_to_speech', {
+    available: boolean; code: string; messageZh: string;
+  }>>;
   /** 用户默认装配：默认工作空间（个人）+ 默认模型（最近一次使用）。 */
   defaults?: { workspace_id: string | null; model_alias: string | null };
 }

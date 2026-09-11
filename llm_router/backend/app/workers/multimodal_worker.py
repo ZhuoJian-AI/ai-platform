@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import socket
 import tempfile
@@ -24,7 +25,13 @@ from app.dlp.scanner import scan_request, scan_response
 from app.models.multimodal import MultimodalJob, VoiceAuthorizationRecord, VoiceProfile
 from app.models.user import User
 from app.models.workspace import WorkspaceFile
-from app.services import model_gateway, storage_gateway_service, subsystem_ai_service
+from app.services import (
+    model_gateway,
+    multimodal_audio_service,
+    storage_gateway_service,
+    subsystem_ai_service,
+    voice_recording_service,
+)
 from app.services.file_capability_registry import (
     _strip_optional_nulls,
     provider_strict_schema,
@@ -188,7 +195,29 @@ async def _assert_daily_quota(db, job: MultimodalJob) -> None:
         raise model_gateway.GatewayError("organization_audio_quota_exceeded")
 
 
-async def _load_input(db, job: MultimodalJob, directory: Path) -> tuple[WorkspaceFile, Path]:
+async def _load_input(db, job: MultimodalJob, directory: Path) -> tuple[WorkspaceFile | None, Path]:
+    if (job.params or {}).get("purpose") == voice_recording_service.PURPOSE:
+        if not job.params.get("upload_ready"):
+            raise model_gateway.GatewayError("recording_upload_expired")
+        user = await db.get(User, job.user_id)
+        if user is None or not user.is_active or user.deleted_at is not None:
+            raise model_gateway.GatewayError("recording_permission_revoked")
+        cu = await current_user_for_user(db, user)
+        if str(cu.organization_id) != str(job.organization_id):
+            raise model_gateway.GatewayError("recording_permission_revoked")
+        try:
+            await multimodal_audio_service.require_multimodal_enabled(db, cu.organization_id)
+            multimodal_audio_service.require_permission(cu, "multimodal.audio.transcribe")
+        except HTTPException as exc:
+            raise model_gateway.GatewayError("recording_permission_revoked") from exc
+        target = directory / f"input.{job.params['suffix']}"
+        await storage_gateway_service.download_to_path(
+            job.params["input_ref"], target, max_bytes=settings.multimodal_audio_max_bytes,
+        )
+        raw = target.read_bytes()
+        if len(raw) != job.params["size_bytes"] or hashlib.sha256(raw).hexdigest() != job.params["sha256"]:
+            raise model_gateway.GatewayError("recording_integrity_failed")
+        return None, target
     if job.input_file_id is None:
         raise model_gateway.GatewayError("missing_audio_input")
     file = await db.get(WorkspaceFile, job.input_file_id)
@@ -628,7 +657,7 @@ async def _process(job_id: UUID) -> None:
                     payload = await _process_specialist(db, job, directory)
                 else:
                     raise model_gateway.GatewayError("unsupported_multimodal_job")
-            await db.refresh(job)
+            await db.refresh(job, with_for_update=True)
             if job.status == "cancelled":
                 await subsystem_ai_service.purge_inputs(job)
                 await db.commit()
@@ -640,6 +669,9 @@ async def _process(job_id: UUID) -> None:
             job.error_category = None
             job.error_detail = None
         except Exception as exc:
+            await db.refresh(job, with_for_update=True)
+            if job.status == "cancelled":
+                return
             category = model_gateway.classify_gateway_error(exc)
             if isinstance(exc, ValueError):
                 category = "invalid_structured_result"
@@ -647,7 +679,11 @@ async def _process(job_id: UUID) -> None:
             job.error_detail = (
                 _specialist_error_zh(category)
                 if job.capability.startswith("platform_ai:")
-                else "Audio processing failed"
+                else {
+                    "recording_upload_expired": "录音上传未完成或已过期，请重新录音",
+                    "recording_permission_revoked": "语音权限已变化，录音处理已停止",
+                    "recording_integrity_failed": "录音完整性校验失败，请重新录音",
+                }.get(category, "音频处理失败，请稍后重试")
             )
             job.locked_at = None
             job.locked_by = None
@@ -668,7 +704,16 @@ async def _process(job_id: UUID) -> None:
 
 
 async def run_forever() -> None:
+    next_recording_cleanup = 0.0
     while True:
+        if time.monotonic() >= next_recording_cleanup:
+            next_recording_cleanup = time.monotonic() + 30
+            try:
+                async with async_session_factory() as cleanup_db:
+                    await voice_recording_service.cleanup(cleanup_db)
+                    await cleanup_db.commit()
+            except Exception:
+                logging.getLogger(__name__).warning("Temporary recording cleanup deferred")
         try:
             if await _cleanup_voice_profile():
                 continue

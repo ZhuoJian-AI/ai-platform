@@ -162,7 +162,7 @@ async def upload_bytes(raw: bytes, *, filename: str, content_type: str) -> str:
 
 async def sign_browser_upload(
     *, filename: str, content_type: str, size_bytes: int, weak_network: bool = False,
-    max_allowed_bytes: int | None = None,
+    max_allowed_bytes: int | None = None, single_put: bool = False,
 ) -> dict:
     """Create a browser upload policy or multipart session without exposing credentials."""
     limit = settings.workspace_max_file_bytes if max_allowed_bytes is None else max_allowed_bytes
@@ -172,7 +172,7 @@ async def sign_browser_upload(
         async with httpx.AsyncClient(timeout=settings.storage_gateway_timeout_seconds, trust_env=False) as client:
             path = (
                 "/v1/multipart/initiate"
-                if size_bytes >= WORKSPACE_MULTIPART_THRESHOLD_BYTES
+                if size_bytes >= WORKSPACE_MULTIPART_THRESHOLD_BYTES and not single_put
                 else "/v1/uploads/sign"
             )
             response = await client.post(

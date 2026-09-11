@@ -118,6 +118,7 @@ from app.services.agent_service import (
 from app.services.agent_service import (
     soft_delete_agent as soft_delete_agent_svc,
 )
+from app.services.multimodal_audio_service import interaction_capabilities as _audio_interaction_capabilities
 from app.services.workspace_preview_service import (
     OriginalPreviewError,
     build_original_preview,
@@ -410,6 +411,7 @@ async def resources_endpoint(
     return {
         "workspaces": workspace_reads,
         "defaults": defaults,
+        "audio_capabilities": await _audio_interaction_capabilities(db, cu),
     }
 
 
