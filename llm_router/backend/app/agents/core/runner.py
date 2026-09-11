@@ -660,7 +660,7 @@ async def _consume_native(
                 mutation_committed = bool(
                     ok
                     and operation in {"create", "update", "delete", "approve"}
-                    and result_status not in {"pending", "failed", "error"}
+                    and result_status not in _UNFINISHED_TOOL_RESULT_STATUSES
                 )
                 published_event.update(
                     {
@@ -676,7 +676,7 @@ async def _consume_native(
                     )
                 elif operation in {"create", "update", "delete", "approve"}:
                     enterprise_mutation_calls += 1
-                    if ok and result_status == "pending":
+                    if ok and result_status in {"pending", "needs_confirmation"}:
                         pending_enterprise_mutations += 1
                     elif mutation_committed:
                         successful_enterprise_mutations += 1
@@ -764,7 +764,7 @@ async def _consume_native(
             )
         elif enterprise_mutation_calls:
             detail = " ".join((failed_enterprise_mutations[-1] if failed_enterprise_mutations else "").split())[:300]
-            text = "本轮业务操作没有成功执行，业务数据未被修改。"
+            text = "本轮未获得业务操作的成功回执，暂时无法确认修改结果。请先核实执行状态，避免重复提交。"
             if detail:
                 text += f" 原因：{detail}"
             state["error"] = "Requested business mutation was not completed"
