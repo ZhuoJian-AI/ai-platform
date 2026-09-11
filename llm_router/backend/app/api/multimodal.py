@@ -23,9 +23,29 @@ from app.schemas.multimodal import (
     VoiceProfileUpdate,
 )
 from app.services import multimodal_audio_service as service
+from app.services import voice_recording_service as recordings
 from app.services.model_gateway import GatewayError, classify_gateway_error
 
 router = APIRouter(prefix="/multimodal")
+
+
+@router.post("/recordings", status_code=201)
+async def create_recording(data: recordings.RecordingCreate, cu: CurrentUser = Depends(require_user),
+                           db: AsyncSession = Depends(get_db)):
+    return await recordings.create_upload(db, cu, data)
+
+
+@router.post("/recordings/{job_id}/complete", response_model=MultimodalJobCreated)
+async def complete_recording(job_id: UUID, cu: CurrentUser = Depends(require_user),
+                             db: AsyncSession = Depends(get_db)):
+    return _created(await recordings.finalize(db, cu, job_id))
+
+
+@router.delete("/recordings/{job_id}", status_code=204)
+async def cancel_recording(job_id: UUID, cu: CurrentUser = Depends(require_user),
+                           db: AsyncSession = Depends(get_db)):
+    await recordings.cancel(db, cu, job_id)
+    return Response(status_code=204)
 
 
 def _admin_org(auth: CurrentAdmin, organization_id: UUID | None) -> UUID:

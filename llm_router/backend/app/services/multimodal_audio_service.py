@@ -347,6 +347,8 @@ async def get_job(db: AsyncSession, cu: CurrentUser, job_id: UUID) -> Multimodal
         raise HTTPException(status_code=404, detail="Audio job not found")
     if str(job.user_id) != cu.id and not can_manage:
         raise HTTPException(status_code=403, detail="Audio job is not available to this user")
+    if (job.params or {}).get("purpose") == "composer_recording":
+        require_permission(cu, "multimodal.audio.transcribe")
     return job
 
 
@@ -363,6 +365,7 @@ async def job_read_payload(db: AsyncSession, cu: CurrentUser, job_id: UUID) -> d
         "id": job.id,
         "organization_id": job.organization_id,
         "user_id": job.user_id,
+        "department_id": job.department_id,
         "capability": job.capability,
         "status": job.status,
         "request_id": job.request_id,
