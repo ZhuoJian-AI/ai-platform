@@ -403,6 +403,40 @@ def _subsystem_response_error(response: httpx.Response) -> str:
     return f"子系统 Action 返回 HTTP {response.status_code}{suffix}"
 
 
+def _write_outcome_unknown(operation: str, exc: Exception, response: httpx.Response | None) -> bool:
+    if operation not in {"create", "update", "delete", "approve"}:
+        return False
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+        return False
+    # A server timeout, transport interruption, malformed success receipt or
+    # 5xx does not prove that the remote transaction was rolled back.
+    return response is None or response.status_code == 408 or not 400 <= response.status_code < 500
+
+
+async def _unresolved_identical_write(db, application, action, user, params, page_key, expected_version):
+    if action.operation not in {"create", "update", "delete", "approve"}:
+        return None
+    rows = (await db.execute(select(EnterpriseApplicationActionRequest).where(
+        EnterpriseApplicationActionRequest.application_id == application.id,
+        EnterpriseApplicationActionRequest.organization_id == application.organization_id,
+        EnterpriseApplicationActionRequest.user_id == UUID(user.id),
+        EnterpriseApplicationActionRequest.action_id == action.id,
+        EnterpriseApplicationActionRequest.module_key == action.module_key,
+        EnterpriseApplicationActionRequest.status == "failed",
+        EnterpriseApplicationActionRequest.result["executionOutcome"].astext == "unknown",
+    ))).scalars().all()
+    for row in rows:
+        if not row.params_encrypted:
+            continue
+        original = _decode_request_payload(decrypt_provider_api_key(row.params_encrypted))
+        if (
+            _params_hash(original[0]) == _params_hash(params)
+            and original[1:] == (page_key, expected_version)
+        ):
+            return row
+    return None
+
+
 async def _execute_request(
     db: AsyncSession,
     request_row: EnterpriseApplicationActionRequest,
@@ -432,6 +466,15 @@ async def _execute_request(
         )
     ):
         raise HTTPException(status_code=403, detail="Action is no longer authorized")
+    unresolved = await _unresolved_identical_write(db, application, action, user, params, page_key, expected_version)
+    if unresolved is not None:
+        # Also covers confirmation cards created before the earlier timeout.
+        request_row.status = "rejected"
+        request_row.error = "相同操作的执行结果尚待核实，本次未重复提交。"
+        request_row.params_encrypted = None
+        request_row.resolved_at = datetime.now(UTC)
+        await db.flush()
+        return action_result(unresolved, application, action, page_key=page_key)
     secret = _action_signing_secret(integration)
     token = jwt.encode(
         _identity_claims(
@@ -455,6 +498,7 @@ async def _execute_request(
         raise HTTPException(status_code=409, detail="Action endpoint left the registered application origin")
     request_row.status = "executing"
     await db.flush()
+    response = None
     try:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=8.0),
@@ -497,10 +541,16 @@ async def _execute_request(
         request_row.error = None
     except (httpx.HTTPError, ValueError, RuntimeError) as exc:
         request_row.status = "failed"
-        request_row.result = {}
-        request_row.error = str(exc)[:1000]
-    request_row.params_encrypted = None
-    request_row.resolved_at = datetime.now(UTC)
+        unknown = _write_outcome_unknown(action.operation, exc, response)
+        request_row.result = {"executionOutcome": "unknown"} if unknown else {}
+        request_row.error = (
+            "执行结果待核实：请求可能已在子系统生效。请先查询业务记录核实，不要重复提交。 "
+            if unknown else ""
+        ) + str(exc)[:700]
+    unknown = (request_row.result or {}).get("executionOutcome") == "unknown" and request_row.status == "failed"
+    if not unknown:
+        request_row.params_encrypted = None
+    request_row.resolved_at = None if unknown else datetime.now(UTC)
     await db.flush()
     return action_result(request_row, application, action, page_key=page_key)
 
@@ -592,6 +642,9 @@ async def invoke_action(
             if existing_page_key != page_key or existing_version != expected_version:
                 raise HTTPException(status_code=409, detail="requestId is bound to another page or version")
         return action_result(existing, application, action, page_key=page_key)
+    unresolved = await _unresolved_identical_write(db, application, action, user, params, page_key, expected_version)
+    if unresolved is not None:
+        return action_result(unresolved, application, action, page_key=page_key)
     now = datetime.now(UTC)
     request_row = EnterpriseApplicationActionRequest(
         application_id=application.id,
