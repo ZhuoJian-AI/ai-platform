@@ -557,6 +557,12 @@ export interface MultimodalJob {
 }
 
 export const multimodal = {
+  readMessage: (taskId: string, messageId: string) => userRequest<{ job_id: string }>(
+    '/api/v1/multimodal/message-speech', {
+      method: 'POST', body: JSON.stringify({ task_id: taskId, message_id: messageId }),
+    }),
+  cancelMessageSpeech: (id: string) => userRequest<void>(
+    `/api/v1/multimodal/message-speech/${id}`, { method: 'DELETE' }),
   createRecording: (data: { size_bytes: number; content_type: string; sha256: string; request_id: string }) =>
     userRequest<{ job_id: string; url: string; fallback_url?: string; headers: Record<string, string> }>(
       '/api/v1/multimodal/recordings', { method: 'POST', body: JSON.stringify(data) }),

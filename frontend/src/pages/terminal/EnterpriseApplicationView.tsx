@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import MessageSpeechButton from './MessageSpeechButton';
 import { Alert, Badge, Button, Card, Drawer, Dropdown, Empty, Input, Popconfirm, Result, Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import {
   AppstoreOutlined, CheckCircleFilled, CloseCircleFilled, DeleteOutlined, DownloadOutlined, ExportOutlined, EyeOutlined, FileTextOutlined,
@@ -64,6 +65,7 @@ type AssistantProgressItem = {
 };
 
 type AssistantConversationMessage = {
+  messageId?: string;
   role: 'user' | 'assistant';
   content: string;
   progress?: AssistantProgressItem[];
@@ -431,6 +433,7 @@ export default function EnterpriseApplicationView({
       .filter((item) => item.role === 'user' || item.role === 'assistant')
       .map((item) => ({
         role: item.role as 'user' | 'assistant',
+        messageId: item.id,
         content: item.content,
         artifacts: item.role === 'assistant' ? businessArtifactsFromMessage(item) : [],
         pageKey: typeof (item.metadata?.page_context as Record<string, unknown> | undefined)?.page_key === 'string'
@@ -700,6 +703,7 @@ export default function EnterpriseApplicationView({
       updateRunningAssistant((item) => ({
         ...item,
         content: result.content,
+        messageId: result.assistantMessageId ?? undefined,
         artifacts: result.artifacts,
         navigationSuggestion: result.navigationSuggestion,
         running: false,
@@ -1054,6 +1058,7 @@ export default function EnterpriseApplicationView({
       updateRunningAssistant((item) => ({
         ...item,
         content: result.content || (result.status === 'completed' ? '操作已完成。' : '执行未完成，请稍后重试。'),
+        messageId: result.assistantMessageId ?? undefined,
         artifacts: result.artifacts,
         navigationSuggestion: result.navigationSuggestion,
         running: false,
@@ -1440,6 +1445,8 @@ export default function EnterpriseApplicationView({
                 {item.content && item.role === 'assistant' ? (
                   <div className="business-assistant-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown></div>
                 ) : item.content ? <Typography.Paragraph style={{ margin: '8px 0 0' }}>{item.content}</Typography.Paragraph> : null}
+                {item.role === 'assistant' && <MessageSpeechButton taskId={businessTaskId ?? null}
+                  messageId={item.messageId} content={item.content} disabled={item.running || !assistantOpen} />}
                 {item.role === 'assistant' && item.navigationSuggestion && typeof item.navigationSuggestion.moduleKey === 'string' && (
                   <Button
                     size="small"

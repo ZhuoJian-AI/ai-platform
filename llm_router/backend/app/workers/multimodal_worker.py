@@ -26,6 +26,7 @@ from app.models.multimodal import MultimodalJob, VoiceAuthorizationRecord, Voice
 from app.models.user import User
 from app.models.workspace import WorkspaceFile
 from app.services import (
+    message_speech_service,
     model_gateway,
     multimodal_audio_service,
     storage_gateway_service,
@@ -271,6 +272,9 @@ async def _transcribe(db, job: MultimodalJob, directory: Path) -> dict:
 
 
 async def _synthesize(db, job: MultimodalJob, directory: Path) -> dict:
+    read_aloud = (job.params or {}).get("purpose") == message_speech_service.PURPOSE
+    if read_aloud:
+        await message_speech_service.authorize_worker(db, job)
     profile = await db.get(VoiceProfile, job.voice_profile_id) if job.voice_profile_id else None
     if profile is None or profile.status != "active" or profile.deleted_at is not None:
         raise model_gateway.GatewayError("voice_profile_unavailable")
@@ -315,6 +319,13 @@ async def _synthesize(db, job: MultimodalJob, directory: Path) -> dict:
     output_path.write_bytes(raw)
     job.audio_duration_ms = await _duration_ms(output_path)
     content_type = "audio/mpeg" if final_format == "mp3" else "audio/wav"
+    if read_aloud:
+        await message_speech_service.authorize_worker(db, job)
+        status = await db.scalar(select(MultimodalJob.status).where(
+            MultimodalJob.id == job.id,
+        ).with_for_update())
+        if status == "cancelled":
+            raise HTTPException(409, "朗读已取消")
     output_ref = await storage_gateway_service.upload_bytes(
         raw,
         filename=f"multimodal/{job.organization_id}/{job.id}.{final_format}",
@@ -322,6 +333,11 @@ async def _synthesize(db, job: MultimodalJob, directory: Path) -> dict:
     )
     job.output_file_ref = output_ref
     job.deployment_id = UUID(result["deployment_id"])
+    if read_aloud:
+        # Persist the temporary reference before the final refresh; lifecycle
+        # cleanup must retain ownership even if cancellation wins afterwards.
+        await db.flush()
+        await message_speech_service.authorize_worker(db, job)
     return {
         "result": {
             "output_file_ref": output_ref,
@@ -711,6 +727,7 @@ async def run_forever() -> None:
             try:
                 async with async_session_factory() as cleanup_db:
                     await voice_recording_service.cleanup(cleanup_db)
+                    await message_speech_service.cleanup(cleanup_db)
                     await cleanup_db.commit()
             except Exception:
                 logging.getLogger(__name__).warning("Temporary recording cleanup deferred")

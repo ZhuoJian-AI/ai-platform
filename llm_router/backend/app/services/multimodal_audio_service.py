@@ -349,6 +349,9 @@ async def get_job(db: AsyncSession, cu: CurrentUser, job_id: UUID) -> Multimodal
         raise HTTPException(status_code=403, detail="Audio job is not available to this user")
     if (job.params or {}).get("purpose") == "composer_recording":
         require_permission(cu, "multimodal.audio.transcribe")
+    if (job.params or {}).get("purpose") == "message_read_aloud":
+        from app.services import message_speech_service
+        await message_speech_service.authorize(db, cu, job)
     return job
 
 
