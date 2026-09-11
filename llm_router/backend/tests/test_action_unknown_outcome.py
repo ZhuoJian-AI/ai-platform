@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -96,10 +97,11 @@ async def test_execution_timeout_keeps_recovery_payload_only_for_write(monkeypat
                              module_key="orders", action_key="change", requires_confirmation=False)
     encrypted = service._request_payload({"owner": "李娜"}, "main", 3)
     row = SimpleNamespace(id=uuid4(), request_id="original", params_encrypted=encrypted, result={}, error=None)
-    db = SimpleNamespace(flush=AsyncMock())
+    db = SimpleNamespace(flush=AsyncMock(), commit=AsyncMock())
     monkeypatch.setattr(service, "_integration_or_409", AsyncMock(return_value=object()))
     monkeypatch.setattr(service, "decrypt_provider_api_key", lambda value: value)
     monkeypatch.setattr(service, "_unresolved_identical_write", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_lock_write_dispatch", AsyncMock())
     monkeypatch.setattr(service, "_manifest_page_action_keys", lambda *args: {"change"})
     monkeypatch.setattr(service.enterprise_application_service, "effective_page_permissions", lambda *a: set())
     monkeypatch.setattr(service.enterprise_application_service, "action_allowed_for_user", lambda *a: True)
@@ -119,3 +121,58 @@ async def test_execution_timeout_keeps_recovery_payload_only_for_write(monkeypat
     else:
         assert row.params_encrypted is None
         assert row.resolved_at is not None
+    assert db.commit.await_count == (2 if operation == "update" else 0)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_marker_is_committed_before_transport_cancellation(monkeypatch):
+    app = SimpleNamespace(id=uuid4(), slug="app", entry_url="https://example.test")
+    action = SimpleNamespace(id=uuid4(), operation="update", is_active=True, ai_enabled=True,
+                             module_key="orders", action_key="change", requires_confirmation=False)
+    encrypted = service._request_payload({"owner": "李娜"}, "main", 3)
+    row = SimpleNamespace(id=uuid4(), request_id="original", params_encrypted=encrypted)
+    db = SimpleNamespace(flush=AsyncMock(), commit=AsyncMock())
+    monkeypatch.setattr(service, "_integration_or_409", AsyncMock(return_value=object()))
+    monkeypatch.setattr(service, "decrypt_provider_api_key", lambda value: value)
+    monkeypatch.setattr(service, "_lock_write_dispatch", AsyncMock())
+    monkeypatch.setattr(service, "_unresolved_identical_write", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_manifest_page_action_keys", lambda *args: {"change"})
+    monkeypatch.setattr(service.enterprise_application_service, "effective_page_permissions", lambda *a: set())
+    monkeypatch.setattr(service.enterprise_application_service, "action_allowed_for_user", lambda *a: True)
+    monkeypatch.setattr(service, "_action_signing_secret", lambda *a: "test")
+    monkeypatch.setattr(service, "_identity_claims", lambda *a, **kw: {})
+    monkeypatch.setattr(service.jwt, "encode", lambda *a, **kw: "test")
+
+    async def cancelled(*args, **kwargs):
+        db.commit.assert_awaited_once()
+        assert row.status == "executing"
+        assert row.result == {"executionOutcome": "unknown"}
+        assert row.params_encrypted == encrypted
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(service, "request_public_http", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await service._execute_request(db, row, app, action, object())
+    assert row.status == "executing"
+    assert row.resolved_at is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_admission_lock_is_stable_scoped_and_not_used_for_reads():
+    db = SimpleNamespace(execute=AsyncMock())
+    app = SimpleNamespace(id=uuid4(), organization_id=uuid4())
+    action = SimpleNamespace(id=uuid4(), operation="update", module_key="orders")
+    user = SimpleNamespace(id=str(uuid4()))
+    keys = []
+    for params, page in [({"id": 1, "owner": "李娜"}, "main"),
+                         ({"owner": "李娜", "id": 1}, "main"),
+                         ({"id": 1, "owner": "李娜"}, "other")]:
+        await service._lock_write_dispatch(db, app, action, user, params, page, 3)
+        statement = db.execute.call_args.args[0]
+        assert "pg_advisory_xact_lock" in str(statement)
+        keys.append(next(iter(statement.compile().params.values())))
+    assert keys[0] == keys[1] != keys[2]
+    assert -(2**63) <= keys[0] < 2**63
+    action.operation = "query"
+    await service._lock_write_dispatch(db, app, action, user, {}, "main", None)
+    assert db.execute.await_count == 3

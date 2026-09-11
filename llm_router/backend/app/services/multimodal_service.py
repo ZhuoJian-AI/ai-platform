@@ -215,6 +215,10 @@ async def resolve_image_generation(
         if provider.provider_type == "anthropic":
             continue
         model = provider_image_generation_model(provider)
+        # A legacy alias must not bypass an explicit deployment's verification,
+        # disabled state, or capability restriction.
+        if any(item.model_id == model for item in (provider.model_deployments or [])):
+            continue
         if model and (not provider.supported_models or model in provider.supported_models):
             return ScopedModel(provider=provider, model=model)
     return None

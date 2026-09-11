@@ -3,6 +3,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.admin_auth import (
@@ -250,7 +251,12 @@ async def test_model_deployment_endpoint(
             "invalid_endpoint_configuration": "模型接口路径配置无效",
             "invalid_image_size": "生图尺寸格式无效",
         }
-        raise HTTPException(status_code=400, detail=labels.get(category, "模型测试失败：供应商拒绝了请求")) from exc
+        # A negative verification must commit its revoked capability. Raising
+        # would roll the update back through get_db and keep a bad route alive.
+        return JSONResponse(
+            status_code=400,
+            content={"detail": labels.get(category, "模型测试失败：供应商拒绝了请求")},
+        )
     verified = set((deployment.config or {}).get("verified_capabilities") or [])
     verified.add(capability)
     deployment.config = {**(deployment.config or {}), "verified_capabilities": sorted(verified)}

@@ -7,9 +7,11 @@ from the administrator's verified capability configuration on every call.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import mimetypes
 import re
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
@@ -20,6 +22,7 @@ import structlog
 from fastapi import HTTPException
 
 from app.auth.user_auth import CurrentUser
+from app.config import settings
 from app.dlp.scanner import scan_request
 from app.models.audit_log import AuditLog
 from app.services import (
@@ -27,12 +30,40 @@ from app.services import (
     multimodal_audio_service,
     multimodal_service,
     storage_gateway_service,
+    tool_executor_client,
     workspace_service,
 )
 from app.services.assistant_tool_protocol import tool_result_json
+from app.services.audio_validation import validate_audio_output as _validate_audio_output
 from app.utils.workspace_presentation import enrich_metadata
 
 logger = structlog.get_logger()
+
+
+async def _check_image_dlp(db, state, image) -> None:
+    """Preserve the local OCR safety check, only when an image tool is invoked."""
+    try:
+        result, _ = await tool_executor_client.execute_builtin(
+            tool_kind="image", action="ocr",
+            params={"language": "chi_sim+eng", "max_pages": 1},
+            inputs=[{
+                "file_id": image.file_id, "name": image.name,
+                "content_base64": base64.b64encode(image.raw).decode("ascii"),
+            }],
+            execution_id=f"vision-dlp-{state.get('task_id') or 'playground'}-{uuid4().hex[:8]}",
+            timeout_seconds=min(settings.tool_executor_timeout_seconds, 45),
+        )
+        summary = result.get("summary") or {}
+        text = str(summary.get("content") or summary.get("text") or "").strip()
+        if text:
+            dlp = await scan_request(db, text, str(state["org_id"]), state.get("department_id"))
+            if dlp.blocked or dlp.redacted_text is not None:
+                raise ValueError(f"图片 {image.name} 含安全策略限制内容，不能发送给外部视觉模型")
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # Preserve existing best-effort OCR behavior; OCR availability is not vision capability.
+        logger.info("vision_ocr_dlp_unavailable", file_id=image.file_id, error=str(exc))
 
 AUDIO_TOOL_NAMES = {
     "audio_transcribe",
@@ -208,6 +239,7 @@ def model_capability_tool_definitions(availability: dict[str, Any] | None) -> li
                     "name": "speech_synthesize",
                     "description": (
                         "把文本合成为真实 MP3/WAV 文件并交付到当前用户工作空间。"
+                        "design 模式通过 style 描述音色，无需预建音色；clone 模式必须指定已授权音色。"
                         "voice_alias 只能使用管理员已授权的企业音色名称。"
                     ),
                     "parameters": {
@@ -257,20 +289,6 @@ def _error(
 def _audio_format(file: Any) -> str | None:
     suffix = PurePosixPath(str(getattr(file, "path", "") or "")).suffix.lower()
     return _AUDIO_INPUT_SUFFIXES.get(suffix)
-
-
-def _validate_audio_output(raw: bytes, output_format: str) -> str:
-    if not raw:
-        raise ValueError("语音模型返回了空文件")
-    if output_format == "wav":
-        if len(raw) < 12 or not raw.startswith(b"RIFF") or raw[8:12] != b"WAVE":
-            raise ValueError("语音模型返回的内容不是有效 WAV 文件")
-        return "audio/wav"
-    is_id3 = raw.startswith(b"ID3")
-    is_frame = len(raw) >= 2 and raw[0] == 0xFF and (raw[1] & 0xE0) == 0xE0
-    if not (is_id3 or is_frame):
-        raise ValueError("语音模型返回的内容不是有效 MP3 文件")
-    return "audio/mpeg"
 
 
 def _safe_audio_name(value: object, output_format: str) -> str:
@@ -458,11 +476,16 @@ async def _understand(
                 "音频理解暂时失败",
                 hint="可以改用语音转写后再由主脑分析，或稍后重试",
             )
+        if not isinstance(result.content, str) or not result.content.strip():
+            return _error(
+                "empty_model_answer", "音频模型未返回有效回答",
+                hint="请稍后重试；内部推理内容不能作为回答",
+            )
         answers.append(
             {
                 "fileId": str(file.id),
                 "name": PurePosixPath(file.path).name,
-                "answer": result.content or result.reasoning_content or "",
+                "answer": result.content,
             }
         )
     return tool_result_json("completed", data={"answers": answers})
@@ -537,7 +560,7 @@ async def _synthesize(
             return _error(
                 "voice_alias_unavailable",
                 "指定音色不存在或当前角色无权使用",
-                hint="改用管理员已授权的企业音色名称，或省略 voice_alias 使用默认音色",
+                hint="使用已授权的音色名称；设计新音色可省略别名并提供 style，不得擅自改用普通音色",
                 fields=["voice_alias"],
             )
         expected_mode = {"builtin": "standard", "designed": "design", "cloned": "clone"}[voice_profile.voice_type]
@@ -548,12 +571,24 @@ async def _synthesize(
                 hint=f"把 mode 改为 {expected_mode}",
                 fields=["mode"],
             )
-    elif mode in {"design", "clone"}:
+    elif mode == "clone":
         return _error(
             "voice_alias_required",
-            "音色设计或克隆模式必须选择管理员已授权的企业音色",
-            hint="补充 voice_alias，或改用 standard 模式",
+            "克隆模式必须选择管理员已授权的企业音色",
+            hint="补充已授权的克隆音色 voice_alias；不能用普通音色替代用户要求的克隆",
             fields=["voice_alias", "mode"],
+        )
+
+    design_prompt = (
+        voice_profile.design_prompt if voice_profile is not None
+        else str(params.get("style") or "").strip() if mode == "design" else None
+    )
+    if mode == "design" and not design_prompt:
+        return _error(
+            "voice_design_description_required",
+            "音色设计需要声音特征描述",
+            hint="在 style 中填写用户要求的声音特征；无法确定时询问用户，不要改用普通音色",
+            fields=["style"],
         )
 
     output_format = str(params.get("output_format") or "mp3").strip().lower()
@@ -605,7 +640,7 @@ async def _synthesize(
             audio_format=output_format,
             style=str(params.get("style") or "").strip() or None,
             speed=float(params.get("speed") or 1.0),
-            design_prompt=voice_profile.design_prompt if voice_profile is not None else None,
+            design_prompt=design_prompt,
             clone_audio=clone_audio,
             clone_format=clone_format,
             model_alias="default",
@@ -613,8 +648,8 @@ async def _synthesize(
             request_id=request_id,
         )
         raw = result["audio"]
-        mime_type = _validate_audio_output(raw, output_format)
-    except (model_gateway.GatewayError, ValueError, TypeError, KeyError) as exc:
+        mime_type = await _validate_audio_output(raw, output_format)
+    except (model_gateway.GatewayError, ValueError, TypeError, KeyError, OSError, TimeoutError) as exc:
         category = exc.category if isinstance(exc, model_gateway.GatewayError) else "invalid_audio_output"
         logger.warning("assistant_speech_synthesize_failed", category=category)
         return _error(
@@ -622,6 +657,31 @@ async def _synthesize(
             "语音文件生成或校验失败",
             hint="请稍后重试，或检查管理员配置的语音模型能力",
         )
+
+    # A provider call can outlive a role change. Resolve the same workspace
+    # again through the callback that reloads the employee's current roles,
+    # before uploading bytes or creating a file version.
+    final_workspace, final_principal, final_error = await resolve_output_workspace(params, principal)
+    if (
+        final_error or final_workspace is None or final_principal is None
+        or str(final_workspace.id) != str(workspace.id)
+        or str(final_principal.id) != str(principal.id)
+    ):
+        return _error(
+            "workspace_permission_changed",
+            "语音生成期间工作空间权限或目标发生变化，未保存文件",
+            hint="请确认当前角色有目标空间写入权限后重新生成",
+            retryable=False,
+        )
+    permission_error = await _check_audio_permission(db, final_principal, "multimodal.speech.use")
+    if permission_error:
+        return _error(
+            "speech_permission_changed",
+            "语音生成期间语音权限已变化，未保存文件",
+            hint="请联系企业管理员确认当前角色的语音权限",
+            retryable=False,
+        )
+    workspace, principal = final_workspace, final_principal
 
     filename = _safe_audio_name(params.get("output_name"), output_format)
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -636,6 +696,18 @@ async def _synthesize(
         raw=raw,
         created_by_user_id=principal.id,
     )
+    checked_workspace, checked_principal, checked_error = await resolve_output_workspace(params, principal)
+    if (
+        checked_error or checked_workspace is None or checked_principal is None
+        or str(checked_workspace.id) != str(workspace.id)
+        or str(checked_principal.id) != str(principal.id)
+        or await _check_audio_permission(db, checked_principal, "multimodal.speech.use")
+    ):
+        if storage_gateway_service.is_object_ref(saved.content_ref):
+            await storage_gateway_service.delete_object(saved.content_ref)
+        # The caller's savepoint rolls back the file/version rows as well.
+        raise PermissionError("speech permissions changed during workspace upload")
+    principal = checked_principal
     source = await task_source()
     saved.metadata_ = enrich_metadata(
         saved.path,
@@ -663,7 +735,7 @@ async def _synthesize(
     )
     usage = result.get("usage") or {}
     routed_capability = result.get("capability") or model_gateway.speech_capability(
-        design_prompt=voice_profile.design_prompt if voice_profile is not None else None,
+        design_prompt=design_prompt,
         clone_audio=clone_audio,
     )
     db.add(
@@ -809,6 +881,15 @@ async def execute_image_understanding(
                 fields=["input_file_ids"],
             )
     multimodal_service.ensure_image_batch_limits(images)
+    for image in images:
+        try:
+            await _check_image_dlp(db, state, image)
+        except ValueError as exc:
+            return _error(
+                "image_content_blocked", str(exc),
+                hint="移除受安全策略限制的图片后重试",
+                retryable=False,
+            )
     fallback = await multimodal_service.resolve_vision_fallback(
         db,
         UUID(str(state["org_id"])),
@@ -833,6 +914,26 @@ async def execute_image_understanding(
             ],
         }
     ]
+    request_id = f"assistant-vision-{uuid4().hex}"
+    started = time.monotonic()
+
+    async def record_audit(status: int, category: str | None = None) -> None:
+        db.add(AuditLog(
+            request_id=request_id,
+            organization_id=str(state["org_id"]),
+            department_id=getattr(principal, "department_id", None),
+            provider_id=str(fallback.provider.id),
+            event_type="image_understanding",
+            direction="outbound",
+            model_requested="default:vision",
+            model_served=fallback.model,
+            status_code=status,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            error_message=category,
+            metadata_={"run_id": state.get("run_id"), "input_count": len(images)},
+        ))
+        await db.flush()
+
     try:
         result = await model_gateway.chat(
             db,
@@ -843,19 +944,27 @@ async def execute_image_understanding(
             provider_override=fallback.provider,
             model_override=fallback.model,
             dept_id=getattr(principal, "department_id", None),
-            request_id=f"assistant-vision-{state.get('run_id') or uuid4().hex}",
+            request_id=request_id,
         )
     except model_gateway.GatewayError as exc:
         logger.warning("assistant_image_understand_failed", category=exc.category)
+        await record_audit(502, exc.category)
         return _error(
             exc.category,
             "图片理解暂时失败",
             hint="请稍后重试，或检查管理员配置的视觉模型能力",
         )
+    if not isinstance(result.content, str) or not result.content.strip():
+        await record_audit(502, "empty_model_answer")
+        return _error(
+            "empty_model_answer", "视觉模型未返回有效回答",
+            hint="请稍后重试；内部推理内容不能作为回答",
+        )
+    await record_audit(200)
     return tool_result_json(
         "completed",
         data={
-            "answer": result.content or result.reasoning_content or "",
+            "answer": result.content,
             "inputFiles": [
                 {"fileId": image.file_id, "name": image.name, "checksumSha256": image.sha256}
                 for image in images

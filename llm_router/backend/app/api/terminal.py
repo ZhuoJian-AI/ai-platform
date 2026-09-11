@@ -879,7 +879,9 @@ async def run_task_endpoint(
     task.config = persisted_cfg
     await db.flush()
     if not cfg.get("model_alias"):
-        raise HTTPException(status_code=400, detail="请先选择模型后再执行任务")
+        # The UI's default model delegates to the configured capability router.
+        # Explicit choices still pass the live allowed-model check below.
+        cfg["model_alias"] = "default"
     attachment_files = await _resolve_task_attachments(
         db, cu, cfg.get("workspace_id"), data.attachment_file_ids,
     )

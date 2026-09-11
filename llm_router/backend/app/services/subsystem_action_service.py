@@ -422,7 +422,7 @@ async def _unresolved_identical_write(db, application, action, user, params, pag
         EnterpriseApplicationActionRequest.user_id == UUID(user.id),
         EnterpriseApplicationActionRequest.action_id == action.id,
         EnterpriseApplicationActionRequest.module_key == action.module_key,
-        EnterpriseApplicationActionRequest.status == "failed",
+        EnterpriseApplicationActionRequest.status.in_(["executing", "failed"]),
         EnterpriseApplicationActionRequest.result["executionOutcome"].astext == "unknown",
     ))).scalars().all()
     for row in rows:
@@ -435,6 +435,23 @@ async def _unresolved_identical_write(db, application, action, user, params, pag
         ):
             return row
     return None
+
+
+async def _lock_write_dispatch(db, application, action, user, params, page_key, expected_version):
+    """Serialize dispatch admission, not the remote HTTP request itself.
+
+    PostgreSQL releases this transaction lock when the durable dispatch marker
+    commits. Another confirmation then observes the marker before sending.
+    """
+    if action.operation not in {"create", "update", "delete", "approve"}:
+        return
+    binding = {
+        "application": str(application.id), "organization": str(application.organization_id),
+        "action": str(action.id), "user": user.id, "module": action.module_key,
+        "params": params, "page": page_key, "version": expected_version,
+    }
+    key = int.from_bytes(bytes.fromhex(_params_hash(binding))[:8], "big", signed=True)
+    await db.execute(select(func.pg_advisory_xact_lock(key)))
 
 
 async def _execute_request(
@@ -466,8 +483,11 @@ async def _execute_request(
         )
     ):
         raise HTTPException(status_code=403, detail="Action is no longer authorized")
+    await _lock_write_dispatch(db, application, action, user, params, page_key, expected_version)
     unresolved = await _unresolved_identical_write(db, application, action, user, params, page_key, expected_version)
     if unresolved is not None:
+        if unresolved.id == request_row.id:
+            return action_result(unresolved, application, action, page_key=page_key)
         # Also covers confirmation cards created before the earlier timeout.
         request_row.status = "rejected"
         request_row.error = "相同操作的执行结果尚待核实，本次未重复提交。"
@@ -497,7 +517,18 @@ async def _execute_request(
     if not same_origin(application.entry_url, url):
         raise HTTPException(status_code=409, detail="Action endpoint left the registered application origin")
     request_row.status = "executing"
+    is_write = action.operation in {"create", "update", "delete", "approve"}
+    if is_write:
+        request_row.result = {"executionOutcome": "unknown"}
+        request_row.error = "操作已进入执行阶段，结果尚待核实；请勿重复提交。"
+        request_row.resolved_at = None
     await db.flush()
+    if is_write:
+        # Explicit transaction boundary: a remote write cannot be rolled back
+        # with the enclosing conversation/API transaction. Commit the journal
+        # BEFORE network I/O, and keep it on cancellation or process failure.
+        # Production sessions use expire_on_commit=False.
+        await db.commit()
     response = None
     try:
         async with httpx.AsyncClient(
@@ -552,6 +583,9 @@ async def _execute_request(
         request_row.params_encrypted = None
     request_row.resolved_at = None if unknown else datetime.now(UTC)
     await db.flush()
+    if is_write:
+        # A later model/stream failure must not lose a verified remote receipt.
+        await db.commit()
     return action_result(request_row, application, action, page_key=page_key)
 
 

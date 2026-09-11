@@ -507,7 +507,11 @@ def _builtin_tool_defs(
             "type": "function",
             "function": {
                 "name": "image_tool",
-                "description": "检查、转换、缩放、裁剪、压缩图片，或对图片/扫描 PDF 执行中英文 OCR。",
+                "description": (
+                    "检查、转换、缩放、裁剪、压缩图片，或对图片/扫描 PDF 执行中英文 OCR。"
+                    + ("使用 understand 调用视觉模型识图，回答图片内容、颜色、款式或比较问题。"
+                       if include_image_understanding else "")
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1798,6 +1802,14 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                 stamp = started.strftime("%Y%m%d-%H%M%S")
                 task_part = state.get("task_id") or "playground"
                 path = f"平台工具输出/{task_part}/{stamp}-{uuid4().hex[:8]}-{filename}"
+                checked_ws, user, workspace_error = await _resolve_tool_workspace(
+                    state, params, user, capability="create", parameter="target_workspace_id",
+                )
+                if workspace_error or checked_ws is None or checked_ws.id != ws.id:
+                    return _file_tool_error(
+                        "workspace_permission_changed", "工作空间权限或目标已变化",
+                        "请重新选择有权工作空间", retryable=False,
+                    )
                 saved = await workspace_service.ingest_uploaded_file(
                     db,
                     ws,
@@ -1805,8 +1817,16 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     filename=filename,
                     content_type="image/png",
                     raw=raw,
+                    created_by_user_id=getattr(user, "id", None),
                 )
-                task_source = await _task_source_fields(db, state)
+                checked_ws, user, workspace_error = await _resolve_tool_workspace(
+                    state, params, user, capability="create", parameter="target_workspace_id",
+                )
+                if workspace_error or checked_ws is None or checked_ws.id != ws.id:
+                    if storage_gateway_service.is_object_ref(saved.content_ref):
+                        await storage_gateway_service.delete_object(saved.content_ref)
+                    raise PermissionError("workspace permission changed during image upload")
+                task_source = await _task_source_fields(db, {**state, "tool_call_id": params.get("_tool_call_id")})
                 saved.metadata_ = enrich_metadata(
                     saved.path,
                     {
@@ -1822,6 +1842,8 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     **task_source,
                 )
                 await workspace_service.sync_current_version(db, saved)
+                if not saved.current_version_id:
+                    raise RuntimeError("image artifact has no committed version")
                 db.add(
                     AuditLog(
                         request_id=f"image-generation-{uuid4().hex}",
@@ -1851,6 +1873,10 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                         "outputs": [
                             {
                                 "file_id": str(saved.id),
+                                "version_id": str(saved.current_version_id),
+                                "workspace_id": str(ws.id),
+                                "checksum_sha256": saved.content_hash,
+                                "size_bytes": len(raw),
                                 "display_name": filename,
                                 "name": filename,
                                 "path": saved.path,
@@ -2574,6 +2600,11 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
                     saved.metadata_ = {**dict(saved.metadata_ or {}), "task_id": task_id}
                     await workspace_service.sync_current_version(db, saved)
                 return f"generated {filename} ({len(raw)} bytes)"
+    except PermissionError:
+        return _file_tool_error(
+            "workspace_permission_changed", "工作空间权限已变化，文件未提交",
+            "请重新选择有权工作空间", retryable=False,
+        )
     except workspace_service.WorkspaceFileInvalidPath as exc:
         return json.dumps({
             "status": "retryable_error",
@@ -2583,8 +2614,14 @@ async def _execute_builtin_tool(state: AgentState, name: str, params: dict) -> s
             },
         }, ensure_ascii=False)
     except workspace_service.WorkspaceFileUnsupportedTextUpdate:
-        return "不能用纯文本内容创建 Office、PDF 或其他二进制文件；请使用对应文件工具"
+        return _file_tool_error(
+            "unsupported_text_write", "不能用纯文本内容创建 Office、PDF 或其他二进制文件",
+            "请使用对应文件工具", retryable=True,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("builtin_tool_failed", tool=name, error_type=type(exc).__name__)
-        return "文件工具执行失败，请重试或检查文件状态"
+        return _file_tool_error(
+            "builtin_execution_failed", "文件工具执行失败，请重试或检查文件状态",
+            "请核对工具依赖和输入；失败时不要声称文件已生成", retryable=True,
+        )
     return f"unknown builtin tool {name}"
