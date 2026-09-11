@@ -65,7 +65,7 @@ const ADMIN_NAVIGATION = [
 ];
 
 const ADMIN_DIRECT_ROUTES = [
-  ['/org/roles', '角色'],
+  ['/enterprise-apps/permissions', '角色权限'],
   ['/enterprise-apps/navigation', '导航配置'],
   ['/enterprise-apps/assistant', '业务助手'],
   ['/org/voices', '音色'],

@@ -33,7 +33,6 @@ const LlmProviders = lazy(() => import('./pages/LlmProviders'));
 const DlpRules = lazy(() => import('./pages/DlpRules'));
 const AdminManagement = lazy(() => import('./pages/AdminManagement'));
 const UsersPage = lazy(() => import('./pages/org/Users'));
-const RolesPage = lazy(() => import('./pages/org/Roles'));
 const VoicesPage = lazy(() => import('./pages/org/Voices'));
 const Workspaces = lazy(() => import('./pages/agent/Workspaces'));
 const Agents = lazy(() => import('./pages/agent/Agents'));
@@ -99,7 +98,6 @@ const SUBSYSTEMS: Subsystem[] = [
       { path: '/org/profile', label: '企业资料', icon: <ApartmentOutlined /> },
       { path: '/org/contact', label: '联系方式', icon: <PhoneOutlined /> },
       // 旧入口保留直达路由，但不再占用企业管理主导航。
-      { path: '/org/roles', label: '角色设置', icon: <TeamOutlined />, hidden: true },
       { path: '/enterprise-apps/navigation', label: '员工导航', icon: <SettingOutlined />, hidden: true },
       { path: '/enterprise-apps/assistant', label: '业务助手', icon: <LinkOutlined />, hidden: true },
       { path: '/org/voices', label: '企业音色库', icon: <AudioOutlined />, hidden: true },
@@ -108,7 +106,6 @@ const SUBSYSTEMS: Subsystem[] = [
       { path: '/org/admins', element: <AdminManagement /> },
       { path: '/org/profile', element: <EnterpriseProfile /> },
       { path: '/org/contact', element: <ContactInfo /> },
-      { path: '/org/roles', element: <RolesPage /> },
       { path: '/enterprise-apps/navigation', element: <EnterpriseApplications section="navigation" /> },
       { path: '/enterprise-apps/assistant', element: <EnterpriseApplications section="assistant" /> },
       { path: '/org/voices', element: <VoicesPage /> },
