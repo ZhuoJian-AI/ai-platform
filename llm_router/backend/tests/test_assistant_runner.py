@@ -290,6 +290,48 @@ async def test_write_requires_completed_receipt_and_allows_recovery(monkeypatch,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("specialist_ok,query_ok", [(False, True), (True, False), (True, True), (False, False)])
+@pytest.mark.parametrize("fallback", ["none", "same_file", "other_file", "empty"])
+async def test_file_analysis_evidence_is_separate_from_auxiliary_query(monkeypatch, specialist_ok, query_ok, fallback):
+    state = {
+        "run_id": 17, "request": "识别上传报告的款号和数量", "application_id": "app-1",
+        "messages": [], "steps": [],
+        "business_turn_intent": {"intent": "query", "requiresLiveData": True},
+        "_assistant_tool_registry": {
+            "specialist": {"kind": "subsystem_specialist"},
+            "query": {"kind": "enterprise_action", "operation": "query"},
+        },
+    }
+    events = [
+        {"type": "tool_call", "id": "s", "name": "specialist", "arguments": '{"input_file_ids":["source"]}'},
+        {"type": "tool_result", "id": "s", "name": "specialist", "ok": specialist_ok,
+         "content": json.dumps({"status": "completed" if specialist_ok else "failed",
+                                "data": {"draft": {"style": "204A231"}} if specialist_ok else {}})},
+        {"type": "tool_result", "id": "q", "name": "query", "ok": query_ok,
+         "content": json.dumps({"status": "completed" if query_ok else "failed", "count": 1})},
+    ]
+    if fallback != "none":
+        file_id = "other" if fallback == "other_file" else "source"
+        events.extend([
+            {"type": "tool_call", "id": "v", "name": "image_tool",
+             "arguments": json.dumps({"action": "understand", "input_file_ids": [file_id]})},
+            {"type": "tool_result", "id": "v", "name": "image_tool", "ok": True,
+             "content": json.dumps({"status": "completed", "data": {
+                 "answer": "204A231，100件" if fallback != "empty" else "",
+                 "inputFiles": [{"fileId": file_id}],
+             }})},
+        ])
+    events.append({"type": "done", "text": "报告款号为204A231。"})
+    await _consume(monkeypatch, events, state)
+    if specialist_ok or fallback == "same_file":
+        assert state.get("error") is None
+        assert "204A231" in state["assistant_final"]
+    else:
+        assert state.get("error") == "File analysis was not verified by an input-bound tool result"
+        assert "204A231" not in state["assistant_final"]
+
+
+@pytest.mark.asyncio
 async def test_empty_success_is_not_misreported_as_max_steps(monkeypatch):
     state = {"run_id": 2, "request": "你好", "messages": [], "steps": []}
     await _consume(monkeypatch, [{"type": "done", "text": ""}], state)
