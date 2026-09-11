@@ -24,3 +24,11 @@
 - 本 source 提交时尚未部署本批；发布后补充 source/manifest/digest/Coolify 记录。
 - staging zhangsan 当前 ASR/TTS 权限仍未授予，且没有可用标准音色；上线代码不会自动扩权，管理员需按业务决定授权和配置。
 - 沉浸式轮流语音、未知写入核实与历史运行 401 仍未完成。
+
+## 不可变镜像
+
+- Source PR #125，`aa2c693d1c20ae967a40d19adf0f5ca75ef396cb`。
+- Backend / parser / lifecycle / multimodal worker：`sha256:802300387bce73ea55c588bfdd4fa15f15462ecc25b935523e46289390c4f5d0`。
+- Frontend：`sha256:eb814075436c25b192ff3eb95fee925b5ed9928d37a51e3dfc40cebf3e76e2a4`。
+- Registry HEAD 均为 200 并返回上述 digest；构建 linux/amd64，OCI revision 均绑定 source。后端新模块镜像内 compileall 通过。
+- 无迁移、无新增依赖；回切使用前一 manifest `3a1007885dd65b512c4b1b88393c674592522655` 的镜像，不回滚数据。构建使用既有镜像依赖层，不安装重型依赖。
