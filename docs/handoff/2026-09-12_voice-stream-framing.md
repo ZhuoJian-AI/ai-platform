@@ -64,3 +64,5 @@ Python 3.12 环境：test_native_text_stream_unit.py 3 项通过（首段早于�
 ## 重连撤回与退出迟到结果
 
 speech_reset 增加 invalidatesBefore；runner 文本撤回还标明 Task/Run。浏览器忽略其他 Run 和早于当前首次接收句子的历史撤回，避免 SSE 回放误停有效语音；当前已接收句子仍在失效范围时照常停止。新增确定性 adapter 测试：重复句子、历史及异 Run reset、当前真实 reset、退出后迟到 job 取消、无迟到播放和无二次业务提交。`node scripts/test-live-voice-stream.mjs`、typecheck、8 项 Run speech 测试与 Ruff 通过。未重复调用付费模型；这些是故障注入测试，不替代跨页 UI 验收。真实候选 API/worker/Redis 已停止，数据库副本保留便于后续恢复，线上未改动。
+
+同步既有 test-voice-browser.mjs 的分句接口 stub 后，E2E_BASE=http://127.0.0.1:4183 运行通过：submissions=1、tts=1、phase=listening、oldReleased=true、allReleased=true。这是合成麦克风/ASR/TTS 浏览器生命周期测试，不是重复真实模型调用。生产构建通过。bf2bff6 及其前置 2a46972 本轮尚未推送成功：现有 7897 代理 CONNECT 成功但 GitHub/API TLS 握手持续失败，有界重试后停止，未改代理或证书规则，未部署。

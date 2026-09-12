@@ -5,7 +5,7 @@ const browser = await chromium.launch({ headless: true, channel: 'chrome' });
 try {
   const page = await browser.newPage();
   await page.route('**/voice-test', route => route.fulfill({ contentType: 'text/html', body: '<html><body>Voice lifecycle test</body></html>' }));
-  await page.goto('http://127.0.0.1:4173/voice-test');
+  await page.goto(`${process.env.E2E_BASE || 'http://127.0.0.1:4173'}/voice-test`);
   const result = await page.evaluate(async () => {
     const { browserVoiceAdapter } = await import('/src/pages/terminal/browserVoiceAdapter.ts');
     const { VoiceConversation } = await import('/src/pages/terminal/voiceConversation.ts');
@@ -27,7 +27,8 @@ try {
     window.fetch = async (url, init) => url === '/synthetic-upload' ? new Response('', {status:200}) : originalFetch(url,init);
     multimodal.completeRecording = async () => ({job_id:'record'});
     multimodal.cancelRecording = async () => {};
-    multimodal.readMessage = async () => { tts++;return {job_id:'speech'}; };
+    multimodal.messageSpeechPlan = async () => ({segment_count:1,content_version:'a'.repeat(64)});
+    multimodal.readMessageSegment = async () => { tts++;return {job_id:'speech'}; };
     multimodal.cancelMessageSpeech = async () => {};
     const bytes = new Uint8Array(44+16000);const dv=new DataView(bytes.buffer);
     const str=(at,s)=>[...s].forEach((c,i)=>bytes[at+i]=c.charCodeAt(0));
