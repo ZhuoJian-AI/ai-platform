@@ -1995,6 +1995,7 @@ async def _execute_tool_call(
                     db, application, action, user, params.get("requestId"),
                     entry.get("recovery_request_ids") or [], entry.get("page_key"),
                 )
+                assistant_action_recovery.retain_completed_provenance(state, result)
                 content = json.dumps(result, ensure_ascii=False, default=str)
                 ok = result.get("status") in {"pending", "completed"}
             except HTTPException as exc:
@@ -2044,15 +2045,7 @@ async def _execute_tool_call(
             )
             content = json.dumps(result, ensure_ascii=False, default=str)
             ok = result.get("status") in {"pending", "completed"}
-            if result.get("status") == "completed" and isinstance(result.get("provenance"), dict):
-                result_payload = result.get("result") if isinstance(result.get("result"), dict) else {}
-                state.setdefault("business_action_provenance", []).append(
-                    {
-                        **dict(result["provenance"]),
-                        "snapshot_id": result_payload.get("snapshotId"),
-                        "snapshot_at": result_payload.get("snapshotAt"),
-                    }
-                )
+            assistant_action_recovery.retain_completed_provenance(state, result)
             return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
         except Exception as exc:  # noqa: BLE001
             logger.warning("enterprise_action_failed", action=action.action_key, error=str(exc))

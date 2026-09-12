@@ -103,10 +103,34 @@ async def test_runner_recovery_branch_refreshes_user_without_new_action(context,
     entry = {"kind": "enterprise_action", "resume_only": True, "application": app, "action": action,
              "page_key": "main", "recovery_request_ids": ["original"]}
     call = {"name": "resume", "id": "new-tool-id", "arguments": json.dumps({"requestId": "original"})}
-    message, _, ok = await nodes._execute_tool_call({"task_id": "task"}, call, {"resume": entry})
+    state = {"task_id": "task"}
+    message, _, ok = await nodes._execute_tool_call(state, call, {"resume": entry})
     assert ok and json.loads(message["content"])["request_id"] == "original"
+    evidence = state["business_action_provenance"][-1]
+    assert evidence["executedAt"] == row.resolved_at.isoformat()
+    assert evidence["replayed"] is True
     fresh.assert_awaited_once()
     remote.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["pending", "failed", "executing", "expired", "rejected"])
+def test_incomplete_recovery_cannot_supply_completed_file_provenance(status):
+    state = {}
+    recovery.retain_completed_provenance(state, {"status": status, "provenance": {"requestId": "x"}})
+    assert "business_action_provenance" not in state
+
+
+def test_completed_recovery_preserves_snapshot_and_deduplicates_adjacent_evidence():
+    state = {}
+    result = {"status": "completed", "replayed": True, "provenance": {"executedAt": "original"},
+              "result": {"snapshotId": "snapshot-1", "snapshotAt": "original-snapshot"}}
+    recovery.retain_completed_provenance(state, result)
+    recovery.retain_completed_provenance(state, result)
+    assert state["business_action_provenance"] == [{
+        "executedAt": "original", "snapshot_id": "snapshot-1", "snapshot_at": "original-snapshot",
+        "replayed": True,
+    }]
+    assert result["provenance"] == {"executedAt": "original"}
 
 
 @pytest.mark.asyncio
