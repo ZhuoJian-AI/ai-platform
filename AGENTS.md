@@ -13,7 +13,7 @@
 
 ### 业务与语音收尾状态（2026-09-11）
 
-总入口历史接续补丁已完成代码及 49 项聚焦测试，尚未部署：同 Task 保留最近执行及产物引用，不载入旧页面权限。当前线上仍是下面的 source 6b539e3；此补丁不代表跨轮写入去重或完整多目标恢复已实现。详见 `docs/handoff/2026-09-12_global-recovery-context.md`。
+总入口历史接续补丁已部署：source `6452d6c`、manifest `c60fa17`、Coolify `voicefixb8cad6f18679a85e` finished。同 Task 保留最近执行及产物引用，不载入旧页面权限；49 项聚焦测试通过，9 服务健康，root 现有会话刷新及 auth/me 200。此补丁不代表跨轮写入去重或完整多目标恢复已实现，也未新增真人跨视图业务实测。详见 `docs/handoff/2026-09-12_global-recovery-context.md`。
 
 2026-09-12 恢复上下文证据已部署：后端 source `6b539e3`，manifest `55db9ad`，Coolify `voicefixa0a2e35de8bda7c7`。新运行保留 Action 请求引用及未知结果标记，页面业务历史区分已完成、待确认、执行中、未知和未核实，不以 ok=true 代替完成回执。43 项聚焦测试通过，9 服务健康，线上 root 会话刷新 200。总入口对业务历史引用的接续以及完整跨轮去重仍待完成；详见 `docs/handoff/2026-09-12_recovery-history.md`。
 
