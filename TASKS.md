@@ -1,5 +1,9 @@
 # Active tasks
 
+## PLATFORM-PARTIAL-OUTCOME-EVIDENCE-20260912 (@codex)
+
+- [ ] 发布 PR #144 前收紧成功回执判断、纠正自动恢复承诺；聚焦验证并部署。
+
 ## PLATFORM-VOICE-UX-20260912 (@codex)
 
 - [x] 输入框旁语音模式、新对话首轮和导航一次定位；保留用户自由滚动。
