@@ -774,14 +774,15 @@ export default function Terminal() {
   // 尚未加载的应用目录或已经变化的页面上下文。
   const dispatchEventRef = useRef(dispatchEvent);
   dispatchEventRef.current = dispatchEvent;
-  const consumeSSE = useCallback(async (resp: Response) => {
-    await consumeTerminalEventStream(resp, event => dispatchEventRef.current(event));
+  const consumeSSE = useCallback(async (resp: Response, onVoiceEvent?: (event: Record<string, unknown>) => void) => {
+    await consumeTerminalEventStream(resp, event => { dispatchEventRef.current(event); onVoiceEvent?.(event); });
   }, []);
 
   const runStream = useCallback(async (
     taskId: string, msg: string, attachments: MessageAttachment[] = [],
     applicationId?: string | null, currentPageContext: Record<string, unknown> = {},
     fileRefs: WorkspaceFileRefV1[] = [],
+    onVoiceEvent?: (event: Record<string, unknown>) => void,
   ) => {
     // 乐观载入：立即显示用户消息 + 一个「思考中」回合，第一时间给反馈
     // 该轮若选了文本角色，把名称挂到用户消息上（逐次覆盖、不落库）。
@@ -820,7 +821,7 @@ export default function Terminal() {
             : null;
         throw new Error(detailMessage || `HTTP ${resp.status}`);
       }
-      await consumeSSE(resp);
+      await consumeSSE(resp, onVoiceEvent);
       qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
       qc.invalidateQueries({ queryKey: ['terminal-task', taskId] });
       qc.invalidateQueries({ queryKey: ['terminal-memory'] });
@@ -1016,15 +1017,15 @@ export default function Terminal() {
   const businessVoiceSubmit = useRef<VoiceAdapter['submit'] | null>(null);
   const adoptedVoiceTask = useRef<string | null>(null);
   const registerBusinessVoice = useCallback((handler: VoiceAdapter['submit'] | null) => { businessVoiceSubmit.current = handler; }, []);
-  const voiceSubmit: VoiceAdapter['submit'] = async (text, signal) => {
+  const voiceSubmit: VoiceAdapter['submit'] = async (text, signal, hooks) => {
     signal.throwIfAborted();
     if (view === 'application') {
       if (!businessVoiceSubmit.current) throw Error('页面上下文尚未就绪');
-      return businessVoiceSubmit.current(text, signal);
+      return businessVoiceSubmit.current(text, signal, hooks);
     }
     if (streaming) throw Error('请等待当前任务完成');
     if (!selectedId || composerOpen) {
-      const createdId = await startTask(text, signal);
+      const createdId = await startTask(text, signal, hooks?.onEvent);
       signal.throwIfAborted();
       if (!createdId) throw Error('语音任务未创建，请稍后再试');
       const created = await terminal.getTask(createdId);
@@ -1036,7 +1037,7 @@ export default function Terminal() {
     if (['queued', 'running'].includes(before.run_status ?? '')) throw Error('当前任务仍在运行，请稍后继续');
     const priorIds = new Set(before.messages.map(item => item.id));
     signal.throwIfAborted();
-    await runStream(selectedId, text, [], taskConfig.application_id, {}, followUpFileRefs);
+    await runStream(selectedId, text, [], taskConfig.application_id, {}, followUpFileRefs, hooks?.onEvent);
     signal.throwIfAborted();
     const after = await terminal.getTask(selectedId);
     const reply = [...after.messages].reverse().find(item => item.role === 'assistant' && !priorIds.has(item.id));
@@ -1044,7 +1045,7 @@ export default function Terminal() {
     return { taskId: selectedId, messageId: reply.id, needsConfirmation: after.run_status === 'interrupted' };
   };
 
-  const startTask = async (voiceText?: string, signal?: AbortSignal) => {
+  const startTask = async (voiceText?: string, signal?: AbortSignal, onVoiceEvent?: (event: Record<string, unknown>) => void) => {
     const readyAttachments = inputAttachments.filter((item) => item.status === 'ready' && item.file_id);
     if (inputAttachments.some(item => item.status !== 'ready')) throw Error('请等待附件处理完成');
     if ((!(voiceText ?? input).trim() && !readyAttachments.length && !inputFileRefs.length) || streaming) return;
@@ -1072,7 +1073,7 @@ export default function Terminal() {
       setInputFileRefs([]);
       setInputAttachments([]);
       signal?.throwIfAborted();
-      await runStream(task.id, msg, attachmentSnapshots, config.application_id, pageContext, selectedFileRefs);
+      await runStream(task.id, msg, attachmentSnapshots, config.application_id, pageContext, selectedFileRefs, onVoiceEvent);
       setPageContext({});
       return task.id;
     } catch (e) {

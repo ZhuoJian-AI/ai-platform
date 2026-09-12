@@ -21,3 +21,13 @@ E2E_ONLINE=1 node scripts/test-voice-ux-candidate.mjs 跳过本地静态资源�
 ## 简化控制（候选，尚未部署）
 
 用户反馈操作复杂后，将常驻控制收口为状态、暂停/继续、退出；设置弹层仅保留静音和结束本句。关闭状态点击语音模式直接启动，不再打开重复开启按钮。普通录音入口改名语音输入并说明检查后发送。类型检查及原控制器测试通过，尚需生产构建和候选按钮回归后发布；本修改仍不包含流式 TTS。
+
+## 简化控制已发布（取代上一节候选状态）
+
+2026-09-12：生产构建、候选真实员工按钮回归通过后，PR136 合并 source `1b646f47707ca50438a282337c8ab0cafd203c9f`。Registry 镜像 `sha256:4f6646cce4199185a9904371461830c1bae98d74b9ea4aae7a34f9deb83f82ae`，PR137 manifest `3933010c1b60f70f3e05c228ec7952bb5097603e`，Coolify deployment `voicefix2cf6f53310c98791` finished。
+
+运行容器 digest/OCI revision 一致；9 服务 healthy、真实必填环境值齐全、共享令牌一致，无 Changes pending。Compose validator PASS。公网 /health 返回 ok。替换容器期间短暂 Bad Gateway，部署完成后恢复。
+
+在 frontend 目录执行 `E2E_ONLINE=1 node scripts/test-voice-ux-candidate.mjs`：线上真实 zhangsan 登录、草稿一键语音入口、合成麦克风开启与退出、全部轨道释放、无空任务导航、无页面异常通过。凭据仅通过进程环境传入，不保存报告或仓库。没有重复模型测试；不代表首句 ASR、跨页业务确认及真人语音全部通过。
+
+本批仅前端更新，不改数据库、存储、模型部署或权限。规则版本 c948cd2。分句流式播报、未知写入受控核实及其他既有专项限制仍待完成。

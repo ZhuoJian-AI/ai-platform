@@ -1,11 +1,16 @@
 export type VoicePhase = 'off' | 'listening' | 'transcribing' | 'processing' | 'speaking' | 'paused' | 'confirmation' | 'error';
-export type VoiceReply = { taskId: string; messageId?: string; needsConfirmation: boolean };
+export type VoiceReply = { taskId: string; messageId?: string; needsConfirmation: boolean; speechHandled?: boolean };
+export type VoiceSubmitHooks = {
+  onEvent?: (event: Record<string, unknown>) => void;
+  onSpeechStart?: () => void;
+  isMuted?: () => boolean;
+};
 export interface VoiceAdapter {
   capture(signal: AbortSignal): Promise<Blob>;
   finishCapture(): void;
   transcribe(audio: Blob, signal: AbortSignal): Promise<string>;
   // Submit through the existing Task orchestration. Abort must not resend a write.
-  submit(text: string, signal: AbortSignal): Promise<VoiceReply>;
+  submit(text: string, signal: AbortSignal, hooks?: VoiceSubmitHooks): Promise<VoiceReply>;
   speak(reply: VoiceReply, signal: AbortSignal): Promise<void>;
   stopMedia(): void;
 }
@@ -65,13 +70,16 @@ export class VoiceConversation {
           if (!valid()) return;
           if (!text) throw new Error('未识别到有效语音，请重新开始');
           this.update('processing');
-          const reply = await this.adapter.submit(text, controller.signal);
+          const reply = await this.adapter.submit(text, controller.signal, {
+            onSpeechStart: () => { if (valid()) this.update('speaking'); },
+            isMuted: () => this.snapshot.muted,
+          });
           if (!valid()) return;
           if (reply.needsConfirmation) {
             this.update('confirmation');
             return; // A spoken “yes” is never an approval.
           }
-          if (!this.snapshot.muted && reply.messageId) {
+          if (!this.snapshot.muted && reply.messageId && !reply.speechHandled) {
             this.update('speaking');
             await this.adapter.speak(reply, controller.signal);
             if (!valid()) return;

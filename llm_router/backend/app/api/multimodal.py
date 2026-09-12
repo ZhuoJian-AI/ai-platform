@@ -24,10 +24,30 @@ from app.schemas.multimodal import (
 )
 from app.services import message_speech_service as message_speech
 from app.services import multimodal_audio_service as service
+from app.services import run_speech_service as run_speech
 from app.services import voice_recording_service as recordings
 from app.services.model_gateway import GatewayError, classify_gateway_error
 
 router = APIRouter(prefix="/multimodal")
+
+
+@router.get("/run-speech/plan")
+async def run_speech_plan(task_id: UUID, run_id: int = Query(gt=0),
+                         cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return await run_speech.plan(db, cu, task_id, run_id)
+
+
+@router.post("/run-speech", response_model=MultimodalJobCreated, status_code=202)
+async def create_run_speech(data: run_speech.RunSpeechCreate,
+                            cu: CurrentUser = Depends(require_user), db: AsyncSession = Depends(get_db)):
+    return _created(await run_speech.create(db, cu, data))
+
+
+@router.get("/message-speech/plan")
+async def message_speech_plan(task_id: UUID, message_id: UUID,
+                              cu: CurrentUser = Depends(require_user),
+                              db: AsyncSession = Depends(get_db)):
+    return await message_speech.plan(db, cu, task_id, message_id)
 
 
 @router.post("/message-speech", response_model=MultimodalJobCreated, status_code=202)
