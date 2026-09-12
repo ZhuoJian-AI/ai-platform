@@ -717,7 +717,7 @@ async def _consume_native(
                 mutation_committed = bool(
                     ok
                     and operation in {"create", "update", "delete", "approve"}
-                    and result_status not in _UNFINISHED_TOOL_RESULT_STATUSES
+                    and result_status == "completed"
                 )
                 published_event.update(
                     {
