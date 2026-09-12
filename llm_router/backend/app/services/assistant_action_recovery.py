@@ -16,6 +16,27 @@ def recovery_tool_name(action_name: str) -> str:
     return "resume_action_" + hashlib.sha256(action_name.encode()).hexdigest()[:16]
 
 
+def retain_completed_provenance(state: dict, result: dict) -> None:
+    """Carry verified execution evidence into later artifact creation.
+
+    A replay keeps the original timestamp and request reference. Pending,
+    unknown and failed results are not evidence of a successful business step.
+    """
+    if result.get("status") != "completed" or not isinstance(result.get("provenance"), dict):
+        return
+    payload = result.get("result") if isinstance(result.get("result"), dict) else {}
+    provenance = {
+        **result["provenance"],
+        "snapshot_id": payload.get("snapshotId"),
+        "snapshot_at": payload.get("snapshotAt"),
+    }
+    if result.get("replayed"):
+        provenance["replayed"] = True
+    rows = state.setdefault("business_action_provenance", [])
+    if not rows or rows[-1] != provenance:
+        rows.append(provenance)
+
+
 def history_request_ids(state: dict, action_name: str) -> list[str]:
     names = {action_name, recovery_tool_name(action_name)}
     references = []
