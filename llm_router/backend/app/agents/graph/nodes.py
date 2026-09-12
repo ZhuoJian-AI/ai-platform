@@ -2017,6 +2017,14 @@ async def _execute_tool_call(
             action_params.pop("expectedVersion", entry.get("expected_version"))
         )
         try:
+            user = await _fresh_user_principal(db, user)
+            if user is None:
+                raise HTTPException(status_code=403, detail="当前员工会话已失效，无法执行操作")
+            pending_id = await assistant_action_recovery.pending_request_id(
+                db, application, action, user,
+                assistant_action_recovery.history_request_ids(state, name),
+                action_params, entry.get("page_key"), expected_version,
+            )
             result = await subsystem_action_service.invoke_action(
                 db,
                 application.id,
@@ -2024,7 +2032,7 @@ async def _execute_tool_call(
                 action.module_key,
                 action_params,
                 user,
-                request_id=_enterprise_action_request_id(
+                request_id=pending_id or _enterprise_action_request_id(
                     state,
                     tool_call_id,
                     action_params,

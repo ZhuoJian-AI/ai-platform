@@ -141,3 +141,55 @@ async def test_authorized_tool_catalog_only_adds_recovery_for_task_history(monke
         assert spec["parameters"]["properties"] == {"requestId": {"type": "string", "enum": ["original"]}}
         assert registry[name]["current_page"] is True
         assert registry[name]["recovery_request_ids"] == ["original"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", [None, "params", "page", "version", "legacy"])
+async def test_pending_match_requires_exact_binding(context, mismatch):
+    db, app, action, user, row, _ = context
+    if mismatch == "legacy":
+        row.params_encrypted = None
+    db.execute.side_effect = None
+    db.execute.return_value = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [row]))
+    result = await recovery.pending_request_id(
+        db, app, action, user, ["original"], {"id": 2 if mismatch == "params" else 1},
+        "other" if mismatch == "page" else "main", 4 if mismatch == "version" else 3,
+    )
+    assert result == ("original" if mismatch is None else None)
+    query = db.execute.call_args.args[0]
+    values = query.compile().params
+    assert "pending" in values.values()
+    assert all(key in str(query) for key in ("organization_id", "user_id", "action_id", "request_id", "expires_at"))
+
+
+@pytest.mark.asyncio
+async def test_no_history_does_not_search_past_successes(context):
+    db, app, action, user, _, _ = context
+    assert await recovery.pending_request_id(db, app, action, user, [], {}, "main", None) is None
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoked", [False, True])
+async def test_normal_tool_reuses_pending_id_but_keeps_authorization(context, monkeypatch, revoked):
+    db, app, action, user, _, _ = context
+    monkeypatch.setattr(nodes, "get_deps", lambda: {"db": db, "user": user})
+    monkeypatch.setattr(nodes, "_fresh_user_principal", AsyncMock(return_value=user))
+    lookup = AsyncMock(return_value="original")
+    monkeypatch.setattr(recovery, "pending_request_id", lookup)
+    invoke = AsyncMock(return_value={"status": "pending", "request_id": "original"})
+    if revoked:
+        invoke.side_effect = HTTPException(403, "已撤权")
+    monkeypatch.setattr(actions, "invoke_action", invoke)
+    state = {"task_id": "task", "messages": [{"role": "assistant", "business_context": {
+        "toolResultRefs": [{"name": "change", "requestId": "original"}],
+    }}]}
+    entry = {"kind": "enterprise_action", "application": app, "action": action, "page_key": "main"}
+    message, _, ok = await nodes._execute_tool_call(state, {
+        "name": "change", "id": "different-call", "arguments": '{"id": 1}',
+    }, {"change": entry})
+    assert ok is (not revoked)
+    assert invoke.call_args.kwargs["request_id"] == "original"
+    assert lookup.call_args.args[4] == ["original"]
+    if not revoked:
+        assert json.loads(message["content"])["request_id"] == "original"

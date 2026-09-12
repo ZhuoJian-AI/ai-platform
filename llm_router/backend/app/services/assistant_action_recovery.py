@@ -81,3 +81,33 @@ async def recover_action_result(db, application, action, user, request_id, allow
     result["replayed"] = True
     result["provenance"]["executedAt"] = row.resolved_at.isoformat() if row.resolved_at else None
     return result
+
+
+async def pending_request_id(db, application, action, user, allowed_ids, params, page_key, expected_version):
+    """Reuse only an outstanding proposal, not a past successful business operation.
+
+    The caller must still invoke the normal service with this ID: it rechecks
+    current authorization and the stored parameter/page/version binding.
+    """
+    if not allowed_ids or action.operation not in {"create", "update", "delete", "approve"}:
+        return None
+    rows = (await db.execute(select(EnterpriseApplicationActionRequest).where(
+        EnterpriseApplicationActionRequest.application_id == application.id,
+        EnterpriseApplicationActionRequest.organization_id == user.organization_id,
+        EnterpriseApplicationActionRequest.user_id == UUID(str(user.id)),
+        EnterpriseApplicationActionRequest.action_id == action.id,
+        EnterpriseApplicationActionRequest.module_key == action.module_key,
+        EnterpriseApplicationActionRequest.request_id.in_(allowed_ids[-20:]),
+        EnterpriseApplicationActionRequest.status == "pending",
+        EnterpriseApplicationActionRequest.expires_at > datetime.now(UTC),
+    ).order_by(EnterpriseApplicationActionRequest.created_at.desc()).limit(20))).scalars().all()
+    for row in rows:
+        if not row.params_encrypted:
+            continue
+        original, original_page, original_version = subsystem_action_service._decode_request_payload(
+            decrypt_provider_api_key(row.params_encrypted),
+        )
+        if (original_page == page_key and original_version == expected_version
+                and subsystem_action_service._params_hash(original) == subsystem_action_service._params_hash(params)):
+            return row.request_id
+    return None
