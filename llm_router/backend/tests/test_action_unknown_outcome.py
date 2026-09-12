@@ -5,8 +5,55 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from app.services import subsystem_action_service as service
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["pending", "executing", "failed"])
+@pytest.mark.parametrize("changed", [False, True])
+async def test_existing_request_binds_business_params_before_reusing_receipt(monkeypatch, status, changed):
+    app = SimpleNamespace(id=uuid4(), organization_id=uuid4(), slug="app", assistant_enabled=True)
+    action = SimpleNamespace(id=uuid4(), module_key="orders", action_key="change", operation="update",
+                             ai_enabled=True, requires_confirmation=True)
+    user = SimpleNamespace(id=str(uuid4()), organization_id=app.organization_id)
+    original = SimpleNamespace(
+        id=uuid4(), action_id=action.id, module_key="orders", request_id="same-request", status=status,
+        params_encrypted=service._request_payload({"id": 1, "owner": "李娜"}, "main", 3),
+        result={}, error=None,
+    )
+    db = SimpleNamespace(execute=AsyncMock(side_effect=[
+        SimpleNamespace(scalar_one_or_none=lambda: action),
+        SimpleNamespace(scalar_one_or_none=lambda: original),
+    ]), add=AsyncMock())
+    monkeypatch.setattr(service.enterprise_application_service, "get_application", AsyncMock(return_value=app))
+    permission = AsyncMock()
+    monkeypatch.setattr(service.enterprise_application_service, "assert_page_permission", permission)
+    monkeypatch.setattr(service.enterprise_application_service, "action_allowed_for_user", lambda *a: True)
+    monkeypatch.setattr(service, "_validate_params", lambda *a: None)
+    monkeypatch.setattr(service, "_integration_or_409", AsyncMock(return_value=object()))
+    monkeypatch.setattr(service, "_manifest_page_action_keys", lambda *a: {"change"})
+    monkeypatch.setattr(service, "decrypt_provider_api_key", lambda value: value)
+    execute = AsyncMock()
+    monkeypatch.setattr(service, "_execute_request", execute)
+    params = {"owner": "李四" if changed else "李娜", "id": 1}
+    call = service.invoke_action(db, app.id, "change", "orders", params, user,
+                                 request_id="same-request", page_key="main", expected_version=3)
+    if changed:
+        with pytest.raises(HTTPException) as error:
+            await call
+        assert error.value.status_code == 409
+        assert "重新生成确认卡片" in error.value.detail
+    else:
+        result = await call
+        assert result["request_id"] == "same-request"
+        assert result["status"] == status
+        assert result["confirmation_id"] == original.id
+    permission.assert_awaited_once()
+    execute.assert_not_called()
+    db.add.assert_not_called()
+    assert original.status == status
 
 
 @pytest.mark.parametrize("operation", ["create", "update", "delete", "approve", "query", "export"])

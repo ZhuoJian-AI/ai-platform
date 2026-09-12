@@ -1,5 +1,6 @@
 # Active tasks
 
+
 ## PLATFORM-VOICE-UX-20260912 (@codex)
 
 - [x] 输入框旁语音模式、新对话首轮和导航一次定位；保留用户自由滚动。
