@@ -84,6 +84,25 @@ def test_artifact_completion_guard_accepts_verified_workspace_artifacts():
     assert "error" not in state
 
 
+def test_artifact_failure_preserves_a_completed_business_mutation():
+    state = {
+        "request": "修改负责人并导出 Excel",
+        "assistant_final": "全部完成",
+        "business_tool_executions": [{
+            "kind": "enterprise_action",
+            "operation": "update",
+            "ok": True,
+            "resultStatus": "completed",
+        }],
+    }
+
+    completed = nodes._apply_artifact_completion_guard(state, [])
+
+    assert completed is False
+    assert state["assistant_final"].startswith("业务操作已经成功，但文件生成未完成")
+    assert "不会重复执行已经成功的业务操作" in state["assistant_final"]
+
+
 def test_completion_policy_adds_only_trusted_composite_export_tools():
     state = {
         "exec_mode": "craft",
