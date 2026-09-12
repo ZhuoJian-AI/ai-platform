@@ -22,6 +22,7 @@ from app.auth.user_auth import CurrentUser, require_user
 from app.database import get_db
 from app.models.enterprise_application import EnterpriseApplicationIntegration
 from app.schemas.enterprise_application import (
+    ActionReconciliationInput,
     EnterpriseApplicationActionInvoke,
     EnterpriseApplicationActionRead,
     EnterpriseApplicationActionRequestRead,
@@ -48,12 +49,32 @@ from app.schemas.enterprise_application import (
     SubsystemSsoCodeExchangeRead,
     TerminalEnterpriseApplicationRead,
 )
+from app.services import action_reconciliation_service as reconciliation_service
 from app.services import enterprise_application_service as service
 from app.services import subsystem_action_service as action_service
 from app.services import subsystem_integration_service as integration_service
 from app.utils.public_url import request_public_http, same_origin
 
 router = APIRouter()
+
+
+@router.get("/applications/{app_id}/action-reconciliations")
+async def list_action_reconciliations(
+    app_id: UUID, auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+):
+    application = await _application_or_404(db, app_id)
+    return await reconciliation_service.list_requests(db, application, auth)
+
+
+@router.post("/applications/{app_id}/action-reconciliations/{request_id}")
+async def reconcile_action_request(
+    app_id: UUID, request_id: UUID, data: ActionReconciliationInput,
+    auth: CurrentAdmin = Depends(require_admin), db: AsyncSession = Depends(get_db),
+):
+    application = await _application_or_404(db, app_id)
+    return await reconciliation_service.reconcile(
+        db, application, auth, request_id, decision=data.decision, evidence=data.evidence,
+    )
 
 
 def _authorized_launch_route(

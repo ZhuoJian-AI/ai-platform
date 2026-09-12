@@ -1962,6 +1962,12 @@ export interface EnterpriseApplicationAction {
   is_active: boolean; admin_disabled: boolean; created_at: string; updated_at: string;
 }
 
+export interface ActionReconciliation {
+  id: string; request_id: string; module_key: string; action_name: string;
+  user_id: string; status: string; created_at: string; resolved_at: string | null;
+  reconciliation: null | { decision: 'executed' | 'not_executed'; evidence: string; admin_id: number; verified_at: string };
+}
+
 export interface EnterpriseApplicationActionResult {
   request_id: string;
   status: 'pending' | 'executing' | 'completed' | 'rejected' | 'expired' | 'failed';
@@ -2043,6 +2049,11 @@ export const enterpriseApplications = {
     queued_deliveries: number; delivered_events: number; cursor_sequence: number; detail: string | null;
   }>(`/api/v1/applications/${id}/integration/sync`, { method: 'POST' }),
   actions: (id: string) => request<EnterpriseApplicationAction[]>(`/api/v1/applications/${id}/actions`),
+  reconciliations: (id: string) => request<ActionReconciliation[]>(`/api/v1/applications/${id}/action-reconciliations`),
+  reconcile: (id: string, requestId: string, decision: 'executed' | 'not_executed', evidence: string) =>
+    request<ActionReconciliation>(`/api/v1/applications/${id}/action-reconciliations/${requestId}`, {
+      method: 'POST', body: JSON.stringify({ decision, evidence }),
+    }),
   updateAction: (id: string, actionKey: string, isActive: boolean) =>
     request<EnterpriseApplicationAction>(
       `/api/v1/applications/${id}/actions/${encodeURIComponent(actionKey)}`,
