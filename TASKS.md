@@ -1,5 +1,11 @@
 # Active tasks
 
+## PLATFORM-ACTION-RECOVERY-REFERENCE-20260913 (@codex)
+
+- [ ] 按同 Task 原操作引用恢复结果或确认卡片，恢复入口不提交远端写入。
+- [ ] 实时校验角色、页面与操作归属，拒绝其他会话引用。
+- [ ] 聚焦测试并更新 AGENTS.md 剩余任务链接，不宣称任意新调用已自动去重。
+
 
 
 ## PLATFORM-VOICE-UX-20260912 (@codex)
