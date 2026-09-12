@@ -264,7 +264,10 @@ async def _model_turn(
     )
     async for kind, payload, extra in _iterate_with_runtime(stream, deps):
         if kind == "text":
-            text += str(payload or "")
+            delta = str(payload or "")
+            text += delta
+            if delta and deps.get("public_text_sink") is not None:
+                await deps["public_text_sink"](delta)
         elif kind == "tool_calls":
             calls = list(payload or [])
         elif kind == "reasoning_content" and payload:
@@ -300,6 +303,41 @@ async def _model_turn(
         usage,
         str(result.reasoning_content) if result.reasoning_content else None,
     )
+
+
+async def _stream_model_turn(**kwargs):
+    """Relay public text while the model runs; never relay private reasoning.
+
+    The queue is bounded for slow SSE consumers. Closing the generator cancels
+    its sole producer, which lets the gateway settle quota in its finally block.
+    Tools still execute only after the complete model turn is validated.
+    """
+    queue = asyncio.Queue(maxsize=32)
+
+    async def sink(delta):
+        await queue.put(("text", delta))
+
+    async def produce():
+        try:
+            result = await _model_turn(**{**kwargs, "deps": {**kwargs["deps"], "public_text_sink": sink}})
+            await queue.put(("result", result))
+        except Exception as exc:
+            await queue.put(("error", exc))
+
+    producer = asyncio.create_task(produce(), name="assistant-public-text-relay")
+    try:
+        while True:
+            kind, payload = await queue.get()
+            if kind == "error":
+                raise payload
+            yield kind, payload
+            if kind == "result":
+                return
+    finally:
+        if not producer.done():
+            producer.cancel()
+        # Always retrieve the producer outcome, including disconnect cancellation.
+        await asyncio.gather(producer, return_exceptions=True)
 
 
 async def _approval(
@@ -407,14 +445,28 @@ async def stream_run(
 
     for step_index in range(max_steps):
         yield {"type": "phase", "phase": "llm", "index": step_index}
-        text, calls, usage, reasoning_content = await _model_turn(
+        emitted_text = ""
+        turn_result = None
+        turn_stream = _stream_model_turn(
             state=state,
             prepared=prepared,
             deps=deps,
             messages=messages,
             tools=model_tools,
         )
-        if text:
+        try:
+            async for event_kind, payload in turn_stream:
+                if event_kind == "text":
+                    emitted_text += payload
+                    visible_text += payload
+                    yield {"type": "text_delta", "delta": payload}
+                else:
+                    turn_result = payload
+        finally:
+            await turn_stream.aclose()
+        text, calls, usage, reasoning_content = turn_result
+        # Non-streaming fallback/adapter responses have not been sent yet.
+        if text and not emitted_text:
             visible_text += text
             yield {"type": "text_delta", "delta": text}
         yield {"type": "usage", **usage}
