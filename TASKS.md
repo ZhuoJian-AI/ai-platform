@@ -1,5 +1,9 @@
 # Active tasks
 
+## RECOVERY-FILE-PROVENANCE-20260913 (@codex)
+
+- [ ] 恢复已完成业务回执后保留原来源，供后续文件步骤使用，不伪造当前执行。
+
 
 
 
