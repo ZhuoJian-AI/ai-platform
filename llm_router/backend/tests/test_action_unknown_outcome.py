@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -11,7 +12,7 @@ from app.services import subsystem_action_service as service
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["pending", "executing", "failed"])
+@pytest.mark.parametrize("status", ["pending", "executing", "failed", "completed", "rejected", "expired"])
 @pytest.mark.parametrize("changed", [False, True])
 async def test_existing_request_binds_business_params_before_reusing_receipt(monkeypatch, status, changed):
     app = SimpleNamespace(id=uuid4(), organization_id=uuid4(), slug="app", assistant_enabled=True)
@@ -35,6 +36,9 @@ async def test_existing_request_binds_business_params_before_reusing_receipt(mon
     monkeypatch.setattr(service, "_integration_or_409", AsyncMock(return_value=object()))
     monkeypatch.setattr(service, "_manifest_page_action_keys", lambda *a: {"change"})
     monkeypatch.setattr(service, "decrypt_provider_api_key", lambda value: value)
+    monkeypatch.setattr(service, "encrypt_provider_api_key", lambda value: value)
+    if status in {"completed", "rejected", "expired"}:
+        service._retire_request_payload(original)
     execute = AsyncMock()
     monkeypatch.setattr(service, "_execute_request", execute)
     params = {"owner": "李四" if changed else "李娜", "id": 1}
@@ -138,15 +142,17 @@ async def test_new_request_id_reuses_unknown_receipt_before_creating_a_confirmat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["update", "query"])
-async def test_execution_timeout_keeps_recovery_payload_only_for_write(monkeypatch, operation):
+@pytest.mark.parametrize("times_out", [True, False])
+async def test_execution_retires_values_except_unknown_writes(monkeypatch, operation, times_out):
     app = SimpleNamespace(id=uuid4(), slug="app", entry_url="https://example.test")
     action = SimpleNamespace(id=uuid4(), operation=operation, is_active=True, ai_enabled=True,
-                             module_key="orders", action_key="change", requires_confirmation=False)
+                             module_key="orders", action_key="change", requires_confirmation=False, result_schema={})
     encrypted = service._request_payload({"owner": "李娜"}, "main", 3)
     row = SimpleNamespace(id=uuid4(), request_id="original", params_encrypted=encrypted, result={}, error=None)
     db = SimpleNamespace(flush=AsyncMock(), commit=AsyncMock())
     monkeypatch.setattr(service, "_integration_or_409", AsyncMock(return_value=object()))
     monkeypatch.setattr(service, "decrypt_provider_api_key", lambda value: value)
+    monkeypatch.setattr(service, "encrypt_provider_api_key", lambda value: value)
     monkeypatch.setattr(service, "_unresolved_identical_write", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_lock_write_dispatch", AsyncMock())
     monkeypatch.setattr(service, "_manifest_page_action_keys", lambda *args: {"change"})
@@ -155,20 +161,55 @@ async def test_execution_timeout_keeps_recovery_payload_only_for_write(monkeypat
     monkeypatch.setattr(service, "_action_signing_secret", lambda *a: "not-a-real-secret")
     monkeypatch.setattr(service, "_identity_claims", lambda *a, **kw: {})
     monkeypatch.setattr(service.jwt, "encode", lambda *a, **kw: "test")
-    transport = AsyncMock(side_effect=httpx.ReadTimeout("response timed out"))
+    transport = AsyncMock(side_effect=httpx.ReadTimeout("response timed out")) if times_out else AsyncMock(
+        return_value=httpx.Response(200, json={"updated": True}),
+    )
     monkeypatch.setattr(service, "request_public_http", transport)
     result = await service._execute_request(db, row, app, action, object())
     transport.assert_awaited_once()
-    assert result["status"] == "failed"
-    if operation == "update":
+    assert result["status"] == ("failed" if times_out else "completed")
+    if operation == "update" and times_out:
         assert result["result"] == {"executionOutcome": "unknown"}
         assert row.params_encrypted == encrypted
         assert row.resolved_at is None
         assert "不要重复提交" in result["error"]
     else:
-        assert row.params_encrypted is None
+        binding = json.loads(row.params_encrypted)
+        assert binding["_bindingOnly"] == 1
+        assert binding["params"] == {}
+        assert "李娜" not in row.params_encrypted
         assert row.resolved_at is not None
     assert db.commit.await_count == (2 if operation == "update" else 0)
+
+
+def test_retired_payload_is_bounded_idempotent_and_keeps_page_version(monkeypatch):
+    monkeypatch.setattr(service, "decrypt_provider_api_key", lambda value: value)
+    monkeypatch.setattr(service, "encrypt_provider_api_key", lambda value: value)
+    row = SimpleNamespace(params_encrypted=service._request_payload({"secret": "value" * 1000}, "main", 3))
+    service._retire_request_payload(row)
+    first = row.params_encrypted
+    service._retire_request_payload(row)
+    assert first == row.params_encrypted
+    assert len(first) < 220 and "value" not in first
+    assert service._decode_request_payload(first) == ({}, "main", 3)
+    row.params_encrypted = None
+    service._retire_request_payload(row)
+    assert row.params_encrypted is None  # Never fabricate a binding for old purged records.
+
+
+@pytest.mark.asyncio
+async def test_binding_only_record_can_never_be_dispatched(monkeypatch):
+    monkeypatch.setattr(service, "decrypt_provider_api_key", lambda value: value)
+    monkeypatch.setattr(service, "encrypt_provider_api_key", lambda value: value)
+    monkeypatch.setattr(service, "_integration_or_409", AsyncMock(return_value=object()))
+    transport = AsyncMock()
+    monkeypatch.setattr(service, "request_public_http", transport)
+    row = SimpleNamespace(params_encrypted=service._request_payload({"owner": "李娜"}, "main", 3))
+    service._retire_request_payload(row)
+    with pytest.raises(HTTPException) as error:
+        await service._execute_request(object(), row, SimpleNamespace(id=uuid4()), object(), object())
+    assert error.value.status_code == 409
+    transport.assert_not_called()
 
 
 @pytest.mark.asyncio
