@@ -1,10 +1,20 @@
 // Real candidate login/UI/navigation; synthetic audio isolates lifecycle from provider latency.
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
-const base = process.env.E2E_BASE || 'http://127.0.0.1:4183';
-assert.equal(new URL(base).hostname, '127.0.0.1');
+const overlay = process.env.E2E_STAGING_FRONTEND_PREVIEW === '1';
+const base = overlay ? 'https://ai-platform.staging.zhuojianai.com' : 'http://127.0.0.1:4183';
 const browser = await chromium.launch({channel:'chrome',headless:true,args:['--no-proxy-server','--autoplay-policy=no-user-gesture-required']});
 const page = await browser.newPage();
+if (overlay) {
+  // Candidate JS only in this isolated browser; real staging authentication/API
+  // and real external iframe. No server deployment, token injection or CSP edits.
+  await page.route(base+'/**', async route => {
+    const request=route.request();const url=new URL(request.url());
+    if(request.method()!=='GET'||url.pathname.startsWith('/api/')||url.pathname.startsWith('/v1/')) return route.continue();
+    const asset=await page.request.get('http://127.0.0.1:4183'+url.pathname+url.search);
+    await route.fulfill({status:asset.status(),body:await asset.body(),contentType:asset.headers()['content-type']});
+  });
+}
 let taskId;
 try {
   await page.goto(base+'/alphabet/terminal/login');
@@ -51,12 +61,23 @@ try {
   await page.getByText('已连接当前模块：',{exact:false}).waitFor({timeout:120000});
   const result=await page.evaluate(()=>({tasks:window.__createdTasks,url:location.href,
     voiceActive:!!document.querySelector('button[aria-label="退出语音"]'),
-    frames:[...document.querySelectorAll('iframe')].map(f=>({src:f.src,loaded:!!f.contentWindow})),
+    frames:[...document.querySelectorAll('iframe')].map(f=>{const url=new URL(f.src);return {src:url.origin+url.pathname,loaded:!!f.contentWindow};}),
     currentTurnVisible:[...document.querySelectorAll('[data-user-turn]')].some(e=>e.textContent.includes('请打开爱法贝')&&e.getBoundingClientRect().top>=0&&e.getBoundingClientRect().top<innerHeight)}));
   assert.equal(result.tasks.length,1);assert(result.voiceActive);assert(result.currentTurnVisible);
+  // Streaming additions must not reclaim the user's scroll position.
+  const scroll=await page.evaluate(async()=>{
+    const turns=[...document.querySelectorAll('[data-user-turn]')];
+    const last=turns.at(-1);if(!last)return {available:false};
+    let container=last.parentElement;
+    while(container&&!(container.scrollHeight>container.clientHeight&&/auto|scroll/.test(getComputedStyle(container).overflowY)))container=container.parentElement;
+    if(!container)return {available:false};
+    container.scrollTop=0;await new Promise(r=>setTimeout(r,600));
+    return {available:true,free:container.scrollTop===0};
+  });
+  if(scroll.available)assert(scroll.free,'streaming must not force scroll');
   await page.getByRole('button',{name:'退出语音'}).last().click();
   assert(await page.evaluate(()=>window.__voiceTracks.every(t=>t.readyState==='ended')));
-  console.log(JSON.stringify({...result,allTracksReleased:true}));
+  console.log(JSON.stringify({...result,scroll,stagingFrontendPreview:overlay,allTracksReleased:true}));
 } catch(error) {
   console.log(JSON.stringify(await page.evaluate(()=>({url:location.href,status:[...document.querySelectorAll('[role="status"],[role="alert"]')].map(e=>e.textContent),tasks:window.__createdTasks,tracks:window.__voiceTracks?.map(t=>t.readyState)}))));
   console.log(JSON.stringify(await page.evaluate(()=>({applications:window.__voiceApplications}))));

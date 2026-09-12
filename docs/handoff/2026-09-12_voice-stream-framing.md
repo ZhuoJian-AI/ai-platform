@@ -88,3 +88,9 @@ test-live-voice-stream.mjs 增加浏览器 NotAllowedError 注入，通过：提
 已修复断流用量未知的额度落库：disconnected_usage_unknown 为 26 字符，outcome 字段为 VARCHAR(24)。仅该组合改用明确别名 disconnect_usage_unknown（24 字符），不截断未知值，不修改 Schema、用量、保守预留或其他已有状态。test_quota_settlement_outcome_unit.py 覆盖断流/完成/失败及有无用量，5 passed，Ruff 通过。尚未部署。
 
 新增只读 check-candidate-embed.mjs（不调用 LLM）定位 iframe：真实子系统 /api/integration/sso 返回 HTTP 403，响应 CSP frame-ancestors 仅允许 self 和 https://ai-platform.staging.zhuojianai.com；Chrome 返回 ERR_BLOCKED_BY_RESPONSE。本地候选来源不在允许范围，禁止关闭浏览器安全或修改外部 CSP。该证据说明本地完整嵌入门禁不适用，不能证明 staging 自身存在同样故障；需要在受信任 staging 来源下验证真实嵌入。SSO 403 的服务端具体原因尚未获取，不能仅凭 CSP 推断全部鉴权原因。
+
+## staging 来源的候选前端预览通过
+
+E2E_STAGING_FRONTEND_PREVIEW=1 仅在隔离 Playwright 浏览器内用本地 Vite 响应前端静态请求，顶层仍为真实 staging 来源，所有 API/登录/SSO 与业务 iframe 使用真实服务器。未修改服务器静态文件、未注入 Token、未放宽 CSP。麦克风与 ASR 为合成输入，TTS 静音；复用先前真实 MiMo 播放证据，不冒充本次真实媒体验收。
+
+运行结果：唯一 Task 0b614e6e-c57a-46be-976e-4c318e11dcf1；自然语言导航到真实爱法贝 progress_dashboard/main，conversation 保持该 Task；页面 Bridge 的“已连接当前模块”出现；当前轮可见；语音 active；自由滚动不被抢回；退出所有音轨 ended。测试 Task 已取消并删除。日志中的 iframe 地址从此只记录 origin/path，禁止记录一次性 SSO 参数。该证据是候选前端配当前已部署后端，完整新后端及 MiMo/持久化证据见前文；新后端发布后仍需对应冒烟。
