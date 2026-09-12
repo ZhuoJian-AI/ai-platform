@@ -343,7 +343,11 @@ def _image_inputs(messages: list[dict]) -> list[dict[str, str]]:
 
 def _publish(handle: run_registry.RunHandle | None, staged: list[dict], event: dict) -> None:
     if event.get("type") == "text_retract":
-        _publish(handle, staged, {"type": "speech_reset"})
+        cutoff = max((item.get("segmentIndex", -1) for item in staged
+                      if item.get("type") == "speech_segment"), default=-1) + 1
+        _publish(handle, staged, {"type": "speech_reset", "invalidatesBefore": cutoff,
+                                  "taskId": handle.task_id if handle else None,
+                                  "runId": handle.run_id if handle else None})
     staged.append(event)
     if handle is not None:
         run_registry.publish(handle, json.dumps(event, ensure_ascii=False))

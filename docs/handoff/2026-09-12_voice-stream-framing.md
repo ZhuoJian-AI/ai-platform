@@ -60,3 +60,7 @@ Python 3.12 环境：test_native_text_stream_unit.py 3 项通过（首段早于�
 结果：29 个 speech_segment，29 次实际 playing；firstTextMs=27194、firstSoundMs=33801、finalMs=88869，runStatus=success、speechHandled=true。首声确实早于最终事件，不会结尾重读全文。计时包括创建 Task，firstText 是第一个 text 事件，不能单独视为供应商 TTFT。首声延迟仍有优化空间，不能承诺实时同结束。
 
 测试 Task a3a8628d-3b95-4679-ae8d-85197b491ca8 已软删除；临时音色删除后既有 worker 生命周期回收了本轮 29 个临时音频，output_deleted=29、剩余引用=0，未动工作空间文件。脚本 node --check 通过，真实运行退出码 0。候选环境验证不代表已部署；跨页语音、取消/重连/播放拒绝，以及语义摘要与业务可靠性遗留项仍待完成。
+
+## 重连撤回与退出迟到结果
+
+speech_reset 增加 invalidatesBefore；runner 文本撤回还标明 Task/Run。浏览器忽略其他 Run 和早于当前首次接收句子的历史撤回，避免 SSE 回放误停有效语音；当前已接收句子仍在失效范围时照常停止。新增确定性 adapter 测试：重复句子、历史及异 Run reset、当前真实 reset、退出后迟到 job 取消、无迟到播放和无二次业务提交。`node scripts/test-live-voice-stream.mjs`、typecheck、8 项 Run speech 测试与 Ruff 通过。未重复调用付费模型；这些是故障注入测试，不替代跨页 UI 验收。真实候选 API/worker/Redis 已停止，数据库副本保留便于后续恢复，线上未改动。

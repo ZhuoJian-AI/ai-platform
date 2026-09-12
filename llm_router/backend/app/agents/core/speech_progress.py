@@ -25,7 +25,7 @@ class SpeechProgress:
             return []
         events = []
         if not prose.startswith(self.prefix):
-            events.append({"type": "speech_reset"})
+            events.append({"type": "speech_reset", "invalidatesBefore": self.index})
             self.prefix = ""
         remaining = prose[len(self.prefix):]
         while remaining and self.index < 64:

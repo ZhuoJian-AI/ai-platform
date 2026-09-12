@@ -66,6 +66,7 @@ export function browserVoiceAdapter(submit: VoiceAdapter['submit']): VoiceAdapte
       const jobs = new Set<string>();
       let binding = '';
       let handled = false;
+      let firstAcceptedIndex = Number.POSITIVE_INFINITY;
       const queue = new LiveSpeechQueue<Segment, string>({
         signal,
         prepare: async (segment, queueSignal) => {
@@ -92,6 +93,10 @@ export function browserVoiceAdapter(submit: VoiceAdapter['submit']): VoiceAdapte
         const reply = await submit(text, signal, { ...hooks, onEvent: event => {
           hooks?.onEvent?.(event);
           if (event.type === 'speech_reset' && handled) {
+            if (typeof event.taskId === 'string' && typeof event.runId === 'number'
+                && `${event.taskId}:${event.runId}` !== binding) return;
+            // Replayed resets preceding this playback generation must not stop it.
+            if (typeof event.invalidatesBefore === 'number' && event.invalidatesBefore <= firstAcceptedIndex) return;
             queue.cancel(new Error('回复正在纠正，语音已暂停，请查看最新文字'));
             return;
           }
@@ -101,6 +106,7 @@ export function browserVoiceAdapter(submit: VoiceAdapter['submit']): VoiceAdapte
           const key = `${event.taskId}:${event.runId}`;
           if (binding && binding !== key) return;
           binding = key; handled = true;
+          firstAcceptedIndex = Math.min(firstAcceptedIndex, event.segmentIndex);
           queue.append(`${key}:${event.segmentIndex}`, { taskId: event.taskId, runId: event.runId,
             index: event.segmentIndex, version: event.contentVersion });
         } });
