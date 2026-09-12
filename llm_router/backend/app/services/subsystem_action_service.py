@@ -683,9 +683,14 @@ async def invoke_action(
                 detail="requestId is already bound to a different user, module, or action",
             )
         if existing.params_encrypted:
-            _, existing_page_key, existing_version = _decode_request_payload(
+            existing_params, existing_page_key, existing_version = _decode_request_payload(
                 decrypt_provider_api_key(existing.params_encrypted)
             )
+            if _params_hash(existing_params) != _params_hash(params):
+                raise HTTPException(
+                    status_code=409,
+                    detail="该请求编号已绑定其他操作参数；修改方案后请重新生成确认卡片",
+                )
             if existing_page_key != page_key or existing_version != expected_version:
                 raise HTTPException(status_code=409, detail="requestId is bound to another page or version")
         return action_result(existing, application, action, page_key=page_key)

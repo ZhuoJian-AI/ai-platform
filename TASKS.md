@@ -1,9 +1,5 @@
 # Active tasks
 
-## PLATFORM-ACTION-REQUEST-BINDING-20260912 (@codex)
-
-- [ ] 修复复用已有请求 ID 时遗漏业务参数比较的问题；不同参数不得返回旧确认卡片。
-- [ ] 聚焦验证同参数复用、修改参数拒绝、当前角色拒绝路径，不改模型 Schema。
 
 ## PLATFORM-VOICE-UX-20260912 (@codex)
 
