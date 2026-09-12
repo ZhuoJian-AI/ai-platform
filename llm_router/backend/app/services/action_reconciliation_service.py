@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import or_, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import raiseload, selectinload
 
 from app.auth.admin_auth import assert_org_access, assert_org_write_access
 from app.models.audit_log import AuditLog
@@ -25,7 +25,7 @@ def serialize(row):
 async def list_requests(db, application, auth):
     assert_org_access(auth, application.organization_id)
     rows = (await db.execute(
-        select(ActionRequest).options(selectinload(ActionRequest.action)).where(
+        select(ActionRequest).options(raiseload("*"), selectinload(ActionRequest.action)).where(
             ActionRequest.application_id == application.id,
             ActionRequest.organization_id == application.organization_id,
             or_(
@@ -71,11 +71,11 @@ def apply_resolution(row, *, decision, evidence, admin_id):
 async def reconcile(db, application, auth, request_id: UUID, *, decision, evidence):
     assert_org_write_access(auth, application.organization_id)
     row = (await db.execute(
-        select(ActionRequest).options(selectinload(ActionRequest.action)).where(
+        select(ActionRequest).options(raiseload("*"), selectinload(ActionRequest.action)).where(
             ActionRequest.id == request_id,
             ActionRequest.application_id == application.id,
             ActionRequest.organization_id == application.organization_id,
-        ).with_for_update()
+        ).with_for_update().execution_options(populate_existing=True)
     )).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, "未找到本应用的待核实操作")
