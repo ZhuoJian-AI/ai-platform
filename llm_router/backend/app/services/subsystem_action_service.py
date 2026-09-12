@@ -413,7 +413,9 @@ def _write_outcome_unknown(operation: str, exc: Exception, response: httpx.Respo
     return response is None or response.status_code == 408 or not 400 <= response.status_code < 500
 
 
-async def _unresolved_identical_write(db, application, action, user, params, page_key, expected_version):
+async def _unresolved_identical_write(
+    db, application, action, user, params, page_key, expected_version, *, retry_confirmation=False,
+):
     if action.operation not in {"create", "update", "delete", "approve"}:
         return None
     rows = (await db.execute(select(EnterpriseApplicationActionRequest).where(
@@ -422,9 +424,13 @@ async def _unresolved_identical_write(db, application, action, user, params, pag
         EnterpriseApplicationActionRequest.user_id == UUID(user.id),
         EnterpriseApplicationActionRequest.action_id == action.id,
         EnterpriseApplicationActionRequest.module_key == action.module_key,
-        EnterpriseApplicationActionRequest.status.in_(["executing", "failed"]),
-        EnterpriseApplicationActionRequest.result["executionOutcome"].astext == "unknown",
-    ))).scalars().all()
+        EnterpriseApplicationActionRequest.status.in_(
+            ["rejected"] if retry_confirmation else ["executing", "failed", "completed"]
+        ),
+        EnterpriseApplicationActionRequest.result["executionOutcome"].astext.in_(
+            ["not_executed"] if retry_confirmation else ["unknown", "executed"]
+        ),
+    ).order_by(EnterpriseApplicationActionRequest.resolved_at.desc()))).scalars().all()
     for row in rows:
         if not row.params_encrypted:
             continue
@@ -490,11 +496,18 @@ async def _execute_request(
             return action_result(unresolved, application, action, page_key=page_key)
         # Also covers confirmation cards created before the earlier timeout.
         request_row.status = "rejected"
-        request_row.error = "相同操作的执行结果尚待核实，本次未重复提交。"
+        request_row.error = "相同操作已有执行记录，本次未重复提交。"
         request_row.params_encrypted = None
         request_row.resolved_at = datetime.now(UTC)
         await db.flush()
         return action_result(unresolved, application, action, page_key=page_key)
+    retry_record = await _unresolved_identical_write(
+        db, application, action, user, params, page_key, expected_version, retry_confirmation=True,
+    )
+    if retry_record is not None and (
+        not confirmed or request_row.created_at <= retry_record.resolved_at
+    ):
+        raise HTTPException(status_code=409, detail="核实未执行后必须重新生成并确认操作卡片，旧卡片不能重试")
     secret = _action_signing_secret(integration)
     token = jwt.encode(
         _identity_claims(
@@ -505,7 +518,7 @@ async def _execute_request(
             permissions,
             page_key,
             params,
-            confirmation_id=str(request_row.id) if confirmed and action_requires_confirmation(action) else None,
+            confirmation_id=str(request_row.id) if confirmed else None,
         ),
         secret,
         algorithm="HS256",
@@ -693,7 +706,10 @@ async def invoke_action(
     )
     db.add(request_row)
     await db.flush()
-    if action_requires_confirmation(action):
+    retry_requires_confirmation = await _unresolved_identical_write(
+        db, application, action, user, params, page_key, expected_version, retry_confirmation=True,
+    )
+    if action_requires_confirmation(action) or retry_requires_confirmation is not None:
         return action_result(request_row, application, action, page_key=page_key)
     return await _execute_request(db, request_row, application, action, user)
 

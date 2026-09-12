@@ -322,6 +322,18 @@ class EnterpriseApplicationDiscoveryRead(BaseModel):
     modules: list[dict] = Field(default_factory=list)
 
 
+class ActionReconciliationInput(BaseModel):
+    decision: Literal["executed", "not_executed"]
+    evidence: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("evidence")
+    @classmethod
+    def require_evidence(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("请填写业务回执或核查证据")
+        return value.strip()
+
+
 class EnterpriseApplicationActionInvoke(BaseModel):
     module_key: str = Field(..., min_length=1, max_length=120)
     page_key: str | None = Field(None, min_length=1, max_length=160)

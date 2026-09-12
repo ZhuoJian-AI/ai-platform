@@ -20,6 +20,7 @@ import {
 import { FinderShell } from '../../components/finder/primitives';
 import { useOrgTree } from '../../hooks/useOrgTree';
 import './EnterpriseApplicationDetail.css';
+import ActionReconciliationPanel from './ActionReconciliationPanel';
 import { validateHttpsApplicationUrl } from '../../utils/applicationUrl';
 
 const OPERATION_META: Record<EnterpriseApplicationOperation, { label: string; color: string }> = {
@@ -685,7 +686,7 @@ export default function EnterpriseApplicationDetail() {
       key: 'assistant', label: '业务助手',
       children: <Card><Descriptions bordered column={1}><Descriptions.Item label="启用状态">{app.assistant_enabled ? '已启用' : '未启用'}</Descriptions.Item><Descriptions.Item label="提示词">{app.assistant_prompt || '未单独配置，使用平台默认提示词'}</Descriptions.Item><Descriptions.Item label="AI 工具">{aiManifestActions.length} 个 Manifest Action</Descriptions.Item></Descriptions><Button type="primary" style={{ marginTop: 16 }} onClick={() => navigate(`/enterprise-apps/assistant?app=${app.id}`)}>管理业务助手</Button></Card>,
     },
-    { key: 'calls', label: '调用记录', children: <Card>{recentCallsTable}</Card> },
+    { key: 'calls', label: '调用记录', children: <><ActionReconciliationPanel appId={appId} /><Card>{recentCallsTable}</Card></> },
   ];
 
   return (
