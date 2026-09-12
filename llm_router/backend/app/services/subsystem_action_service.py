@@ -316,6 +316,21 @@ def _params_hash(params: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _retire_request_payload(request_row) -> None:
+    """Discard business values but retain encrypted replay identity, without a new table."""
+    if not request_row.params_encrypted:
+        return
+    raw = decrypt_provider_api_key(request_row.params_encrypted)
+    decoded = json.loads(raw)
+    if isinstance(decoded, dict) and decoded.get("_bindingOnly") == 1:
+        return
+    params, page_key, version = _decode_request_payload(raw)
+    request_row.params_encrypted = encrypt_provider_api_key(json.dumps({
+        "_bindingOnly": 1, "paramsDigest": _params_hash(params),
+        "params": {}, "pageKey": page_key, "expectedVersion": version,
+    }, ensure_ascii=False))
+
+
 def _identity_claims(
     application: EnterpriseApplication,
     action: EnterpriseApplicationAction,
@@ -434,7 +449,11 @@ async def _unresolved_identical_write(
     for row in rows:
         if not row.params_encrypted:
             continue
-        original = _decode_request_payload(decrypt_provider_api_key(row.params_encrypted))
+        raw_payload = decrypt_provider_api_key(row.params_encrypted)
+        decoded = json.loads(raw_payload)
+        if isinstance(decoded, dict) and decoded.get("_bindingOnly") == 1:
+            continue
+        original = _decode_request_payload(raw_payload)
         if (
             _params_hash(original[0]) == _params_hash(params)
             and original[1:] == (page_key, expected_version)
@@ -470,9 +489,11 @@ async def _execute_request(
     confirmed: bool = False,
 ) -> dict:
     integration = await _integration_or_409(db, application.id)
-    params, page_key, expected_version = _decode_request_payload(
-        decrypt_provider_api_key(request_row.params_encrypted or "")
-    )
+    raw_payload = decrypt_provider_api_key(request_row.params_encrypted or "")
+    decoded = json.loads(raw_payload)
+    if isinstance(decoded, dict) and decoded.get("_bindingOnly") == 1:
+        raise HTTPException(status_code=409, detail="此请求仅保留历史绑定，不能再次执行")
+    params, page_key, expected_version = _decode_request_payload(raw_payload)
     required = OPERATION_PERMISSION[action.operation]
     permissions = enterprise_application_service.effective_page_permissions(
         application, user, action.module_key, page_key
@@ -497,7 +518,7 @@ async def _execute_request(
         # Also covers confirmation cards created before the earlier timeout.
         request_row.status = "rejected"
         request_row.error = "相同操作已有执行记录，本次未重复提交。"
-        request_row.params_encrypted = None
+        _retire_request_payload(request_row)
         request_row.resolved_at = datetime.now(UTC)
         await db.flush()
         return action_result(unresolved, application, action, page_key=page_key)
@@ -593,7 +614,7 @@ async def _execute_request(
         ) + str(exc)[:700]
     unknown = (request_row.result or {}).get("executionOutcome") == "unknown" and request_row.status == "failed"
     if not unknown:
-        request_row.params_encrypted = None
+        _retire_request_payload(request_row)
     request_row.resolved_at = None if unknown else datetime.now(UTC)
     await db.flush()
     if is_write:
@@ -683,10 +704,16 @@ async def invoke_action(
                 detail="requestId is already bound to a different user, module, or action",
             )
         if existing.params_encrypted:
+            raw_payload = decrypt_provider_api_key(existing.params_encrypted)
+            binding = json.loads(raw_payload)
             existing_params, existing_page_key, existing_version = _decode_request_payload(
-                decrypt_provider_api_key(existing.params_encrypted)
+                raw_payload
             )
-            if _params_hash(existing_params) != _params_hash(params):
+            existing_digest = (
+                binding.get("paramsDigest") if isinstance(binding, dict) and binding.get("_bindingOnly") == 1
+                else _params_hash(existing_params)
+            )
+            if existing_digest != _params_hash(params):
                 raise HTTPException(
                     status_code=409,
                     detail="该请求编号已绑定其他操作参数；修改方案后请重新生成确认卡片",
@@ -740,7 +767,7 @@ async def list_confirmation_requests(db: AsyncSession, user: CurrentUser) -> lis
     for row in rows:
         if row.status == "pending" and row.expires_at <= now:
             row.status = "expired"
-            row.params_encrypted = None
+            _retire_request_payload(row)
             row.resolved_at = now
             # TimestampMixin uses a server-side ``onupdate`` expression.  Without
             # an explicit value SQLAlchemy expires this attribute after flush,
@@ -809,13 +836,13 @@ async def resolve_confirmation(db: AsyncSession, confirmation_id: UUID, user: Cu
     now = datetime.now(UTC)
     if request_row.expires_at <= now:
         request_row.status = "expired"
-        request_row.params_encrypted = None
+        _retire_request_payload(request_row)
         request_row.resolved_at = now
         await db.flush()
         return action_result(request_row, application, action, page_key=page_key)
     if not approve:
         request_row.status = "rejected"
-        request_row.params_encrypted = None
+        _retire_request_payload(request_row)
         request_row.resolved_at = now
         await db.flush()
         return action_result(request_row, application, action, page_key=page_key)
