@@ -77,3 +77,18 @@ const withdrawn = browserVoiceAdapter(async (_text, _signal, hooks) => {
 await assert.rejects(withdrawn.submit('one request', new AbortController().signal), /回复正在纠正/);
 assert.equal(played.length, 2, 'a current reset must still invalidate pending audio');
 console.log('PASS: genuine current-run withdrawal still stops pending playback');
+
+// Playback permission is independent of the already completed business request.
+let blockedSubmissions = 0;
+globalThis.Audio = class {
+  play() { return Promise.reject(new DOMException('Not allowed', 'NotAllowedError')); }
+  pause() {} removeAttribute() {} load() {}
+};
+const blocked = browserVoiceAdapter(async (_text, _signal, hooks) => {
+  blockedSubmissions++;
+  hooks.onEvent({ type: 'speech_segment', taskId: 'owned-task', runId: 11, segmentIndex: 0, contentVersion: 'e'.repeat(64) });
+  return { taskId: 'owned-task', messageId: 'successful-message', needsConfirmation: false };
+});
+await assert.rejects(blocked.submit('one request', new AbortController().signal), /浏览器阻止播放.*朗读/);
+assert.equal(blockedSubmissions, 1, 'autoplay rejection must not resubmit the business request');
+console.log('PASS: autoplay rejection provides manual read-aloud recovery without repeating the business request');

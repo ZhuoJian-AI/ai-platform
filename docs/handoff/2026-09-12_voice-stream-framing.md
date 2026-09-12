@@ -66,3 +66,13 @@ Python 3.12 环境：test_native_text_stream_unit.py 3 项通过（首段早于�
 speech_reset 增加 invalidatesBefore；runner 文本撤回还标明 Task/Run。浏览器忽略其他 Run 和早于当前首次接收句子的历史撤回，避免 SSE 回放误停有效语音；当前已接收句子仍在失效范围时照常停止。新增确定性 adapter 测试：重复句子、历史及异 Run reset、当前真实 reset、退出后迟到 job 取消、无迟到播放和无二次业务提交。`node scripts/test-live-voice-stream.mjs`、typecheck、8 项 Run speech 测试与 Ruff 通过。未重复调用付费模型；这些是故障注入测试，不替代跨页 UI 验收。真实候选 API/worker/Redis 已停止，数据库副本保留便于后续恢复，线上未改动。
 
 同步既有 test-voice-browser.mjs 的分句接口 stub 后，E2E_BASE=http://127.0.0.1:4183 运行通过：submissions=1、tts=1、phase=listening、oldReleased=true、allReleased=true。这是合成麦克风/ASR/TTS 浏览器生命周期测试，不是重复真实模型调用。生产构建通过。bf2bff6 及其前置 2a46972 本轮尚未推送成功：现有 7897 代理 CONNECT 成功但 GitHub/API TLS 握手持续失败，有界重试后停止，未改代理或证书规则，未部署。
+
+## 继续验收：GitHub 恢复、播放拒绝与候选应用缺失
+
+上述网络阻塞已解除：使用独立本地 7896 后备代理，未切换原 Clash 订阅，8210654 及前置提交已推送，Git fetch 和认证后的 gh PR 查询通过。目前 main 仍为 3933010，候选未合并、未部署。
+
+test-live-voice-stream.mjs 增加浏览器 NotAllowedError 注入，通过：提示使用回复下方朗读，不重新提交业务。复用既有真实 MiMo 29 段及 PostgreSQL 证据，未重复付费语音测试。
+
+新增 e2e-voice-navigation.mjs：候选浏览器真实 zhangsan 登录，合成麦克风与 ASR 输入，真实 Task/主脑，静音避免额外付费 TTS。初次录音需等待录音器首次数据就绪再结束本句，不能只等待“正在听”文字。首句创建唯一 Task，模型结束后恢复监听，旧音轨 ended、新音轨 live。测试任务 1076689a-6a1d-40a5-be33-f97ffe80f534 已取消并删除。
+
+跨页未通过：候选 terminal.applications 返回空列表，主脑查询后回答未找到目标看板，未产生导航事件。该候选由旧快照建立；尚未证明是快照权限配置差异还是产品问题，不得扩大授权或据此修改生产鉴权。下一步先使隔离候选具有经过核对的当前应用/角色基线，再完成真实子系统导航与共享状态验收。脚本 E2E_PREFLIGHT_ONLY=1 可只读核对可见应用，避免无意义重复模型调用。此项不冒充真实跨页通过；线上保持原版本。
