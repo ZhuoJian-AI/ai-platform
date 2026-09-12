@@ -30,6 +30,13 @@ from app.services.model_gateway import GatewayError, classify_gateway_error
 router = APIRouter(prefix="/multimodal")
 
 
+@router.get("/message-speech/plan")
+async def message_speech_plan(task_id: UUID, message_id: UUID,
+                              cu: CurrentUser = Depends(require_user),
+                              db: AsyncSession = Depends(get_db)):
+    return await message_speech.plan(db, cu, task_id, message_id)
+
+
 @router.post("/message-speech", response_model=MultimodalJobCreated, status_code=202)
 async def read_message(data: message_speech.MessageSpeechCreate, cu: CurrentUser = Depends(require_user),
                        db: AsyncSession = Depends(get_db)):

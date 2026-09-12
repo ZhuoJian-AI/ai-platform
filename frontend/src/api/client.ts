@@ -557,6 +557,13 @@ export interface MultimodalJob {
 }
 
 export const multimodal = {
+  messageSpeechPlan: (taskId: string, messageId: string) => userRequest<{ content_version: string; segment_count: number }>(
+    `/api/v1/multimodal/message-speech/plan?task_id=${encodeURIComponent(taskId)}&message_id=${encodeURIComponent(messageId)}`),
+  readMessageSegment: (taskId: string, messageId: string, segmentIndex: number, contentVersion: string) =>
+    userRequest<{ job_id: string }>('/api/v1/multimodal/message-speech', {
+      method: 'POST', body: JSON.stringify({ task_id: taskId, message_id: messageId,
+        segment_index: segmentIndex, expected_content_version: contentVersion }),
+    }),
   readMessage: (taskId: string, messageId: string) => userRequest<{ job_id: string }>(
     '/api/v1/multimodal/message-speech', {
       method: 'POST', body: JSON.stringify({ task_id: taskId, message_id: messageId }),

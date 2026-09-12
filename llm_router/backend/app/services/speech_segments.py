@@ -5,8 +5,8 @@ claims. This module deliberately does not decide whether a result is truthful.
 Offsets bind each segment to the exact approved text, independent of SSE chunks.
 """
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

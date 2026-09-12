@@ -1,6 +1,7 @@
 import { multimodal, terminal } from '../../api/client';
 import { SentenceEndpoint, type VoiceAdapter, type VoiceReply } from './voiceConversation';
 import { claimVoiceChannel } from './voiceChannel';
+import { playSpeechQueue } from './speechPlaybackQueue';
 
 const check = (signal: AbortSignal) => signal.throwIfAborted();
 const delay = (signal: AbortSignal) => new Promise<void>((resolve, reject) => {
@@ -105,21 +106,55 @@ export function browserVoiceAdapter(submit: VoiceAdapter['submit']): VoiceAdapte
     speak: async (reply: VoiceReply, signal) => {
       if (!reply.messageId) return;
       check(signal);
-      const created = await multimodal.readMessage(reply.taskId, reply.messageId);
-      const cancel = () => { stopMedia(); void multimodal.cancelMessageSpeech(created.job_id).catch(() => {}); };
+      const plan = await multimodal.messageSpeechPlan(reply.taskId, reply.messageId);
+      check(signal);
+      const activeJobs = new Set<string>();
+      const cancel = () => {
+        stopMedia();
+        activeJobs.forEach(id => { void multimodal.cancelMessageSpeech(id).catch(() => {}); });
+      };
       signal.addEventListener('abort', cancel, { once: true });
       try {
-        check(signal);
-        const job = await waitJob(created.job_id, signal);
-        if (!job.output_url) throw Error('朗读音频不可用');
-        await new Promise<void>((resolve, reject) => {
-          const player = new Audio(job.output_url!); audio = player;
-          const abort = () => { reject(new DOMException('已取消', 'AbortError')); };
-          signal.addEventListener('abort', abort, { once: true });
-          const finish = (error?: Error) => { signal.removeEventListener('abort', abort); error ? reject(error) : resolve(); };
-          player.onended = () => finish();
-          player.onerror = () => finish(Error('音频播放失败，文字回复保留'));
-          void player.play().catch(() => finish(Error('浏览器阻止播放，请用回复下方“朗读”按钮；语音已暂停')));
+        await playSpeechQueue({
+          count: plan.segment_count, signal,
+          prepare: async (index, queueSignal) => {
+            check(queueSignal);
+            const created = await multimodal.readMessageSegment(reply.taskId, reply.messageId!, index, plan.content_version);
+            // A cancelled HTTP request can still create a job: cancel its late result.
+            activeJobs.add(created.job_id);
+            const cancelJob = () => { void multimodal.cancelMessageSpeech(created.job_id).catch(() => {}); };
+            queueSignal.addEventListener('abort', cancelJob, { once: true });
+            try {
+              if (queueSignal.aborted) cancelJob();
+              check(queueSignal);
+              const job = await waitJob(created.job_id, queueSignal);
+              if (!job.output_url) throw Error('朗读音频不可用');
+              return { id: created.job_id };
+            } finally { queueSignal.removeEventListener('abort', cancelJob); }
+          },
+          play: async (prepared, queueSignal) => {
+            // Recheck live permission/content and obtain a fresh URL just before play.
+            const job = await multimodal.job(prepared.id);
+            check(queueSignal);
+            if (!job.output_url) throw Error('朗读音频不可用');
+            await new Promise<void>((resolve, reject) => {
+              const player = new Audio(job.output_url!); audio = player;
+              const finish = (error?: Error) => {
+                queueSignal.removeEventListener('abort', abort);
+                player.onended = null; player.onerror = null;
+                player.pause(); player.removeAttribute('src'); player.load();
+                if (audio === player) audio = undefined;
+                error ? reject(error) : resolve();
+              };
+              const abort = () => finish(new DOMException('已取消', 'AbortError'));
+              queueSignal.addEventListener('abort', abort, { once: true });
+              if (queueSignal.aborted) return abort();
+              player.onended = () => finish();
+              player.onerror = () => finish(Error('音频播放失败，文字回复保留'));
+              void player.play().catch(() => finish(Error('浏览器阻止播放，请用回复下方“朗读”按钮；语音已暂停')));
+            });
+            activeJobs.delete(prepared.id);
+          },
         });
       } catch (error) { cancel(); throw error; }
       finally { signal.removeEventListener('abort', cancel); stopMedia(); }
