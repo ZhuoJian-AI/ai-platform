@@ -1,5 +1,10 @@
 # Active tasks
 
+## PLATFORM-GLOBAL-RECOVERY-CONTEXT-20260912 (@codex)
+
+- [ ] 总入口加载同 Task 的精简执行和产物引用，保留当前权限边界。
+- [ ] 聚焦验证视图切换的上下文行为；跨轮写入去重另行核查。
+
 ## PLATFORM-VOICE-UX-20260912 (@codex)
 
 - [x] 输入框旁语音模式、新对话首轮和导航一次定位；保留用户自由滚动。
