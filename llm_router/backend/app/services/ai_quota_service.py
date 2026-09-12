@@ -1029,7 +1029,13 @@ async def settle_ai_quota(
                 parsed,
                 "settled",
                 usage=usage,
-                outcome=outcome if actual is not None else f"{outcome}_usage_unknown",
+                # Keep the established VARCHAR(24) ledger schema. The full
+                # disconnected_usage_unknown value is 26 characters; use an
+                # explicit alias, not truncation that could lose its meaning.
+                outcome=outcome if actual is not None else (
+                    "disconnect_usage_unknown" if outcome == "disconnected"
+                    else f"{outcome}_usage_unknown"
+                ),
             )
         except (SQLAlchemyError, OSError, TimeoutError) as exc:
             # Admission already wrote an immutable reservation event. Keeping

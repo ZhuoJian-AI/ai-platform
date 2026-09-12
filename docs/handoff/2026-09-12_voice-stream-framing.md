@@ -82,3 +82,9 @@ test-live-voice-stream.mjs 增加浏览器 NotAllowedError 注入，通过：提
 真实主脑任务 67120081-186a-4acc-9def-57bbd229e28f 已导航至 application=9689828b-9d07-4a93-8b52-0eefad8be885、module=progress_dashboard、page=progress_dashboard.main，conversation 参数仍为原 Task；语音持续 listening，旧音轨 ended。该 E2E Task 结束已取消并删除。真实子系统 iframe 在本地候选来源未建立连接，界面显示“业务应用尚未建立连接”，因此 Bridge 页面上下文、本轮滚动定位完整验收仍待验证，不能宣称全闭环通过。没有修改外部系统嵌入配置。
 
 额外发现：候选使用不匹配密钥时模型调用失败；该环境配置已纠正。错误路径同时记录 ai_quota_events 的 varchar(24) 超长，代码可能写入 disconnected_usage_unknown（26 字符），属于独立可靠性待修项；本轮未改变生产 Schema、额度或鉴权语义。当前仍未合并和部署。
+
+## 额度修复与嵌入限制定因
+
+已修复断流用量未知的额度落库：disconnected_usage_unknown 为 26 字符，outcome 字段为 VARCHAR(24)。仅该组合改用明确别名 disconnect_usage_unknown（24 字符），不截断未知值，不修改 Schema、用量、保守预留或其他已有状态。test_quota_settlement_outcome_unit.py 覆盖断流/完成/失败及有无用量，5 passed，Ruff 通过。尚未部署。
+
+新增只读 check-candidate-embed.mjs（不调用 LLM）定位 iframe：真实子系统 /api/integration/sso 返回 HTTP 403，响应 CSP frame-ancestors 仅允许 self 和 https://ai-platform.staging.zhuojianai.com；Chrome 返回 ERR_BLOCKED_BY_RESPONSE。本地候选来源不在允许范围，禁止关闭浏览器安全或修改外部 CSP。该证据说明本地完整嵌入门禁不适用，不能证明 staging 自身存在同样故障；需要在受信任 staging 来源下验证真实嵌入。SSO 403 的服务端具体原因尚未获取，不能仅凭 CSP 推断全部鉴权原因。
