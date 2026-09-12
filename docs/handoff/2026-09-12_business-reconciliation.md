@@ -13,9 +13,13 @@
 - Python 3.12 项目 venv：`pytest --noconftest tests/test_action_reconciliation.py tests/test_action_unknown_outcome.py tests/test_enterprise_action_hardening.py -q`：103 passed（1.68 秒）。
 - 聚焦 Ruff 通过；前端 `npm run build` 通过（类型检查及 Vite，15.85 秒），仅既有大包及 stream externalized 提示。
 - 测试覆盖证据必填、不可覆盖活跃/终态、幂等核实、管理员跨租户先拒绝、旧确认禁止远端请求，并复用未知写入及 Action 现有聚焦回归。
-- 尚未完成：真实 PostgreSQL 并发核实/事务审计验证、新卡片允许路径与已执行重复屏障数据库验证、候选真实管理员浏览器核实闭环。不得凭单测或构建直接宣布可以上线。
-- 本批未合并、未构建镜像、未部署。staging 仍是 1999b1b 语音 source / 0d8ec7a manifest。
-- 部署规则 fetch 与当前 HEAD 一致：c948cd20bc23e64d1d53596ce49699c525351284；当前只执行代码候选步骤，发布前需再次预检。
+- 上述真实 PostgreSQL、候选管理员提交闭环均已在“后续候选验收”完成；不得把它扩展为多目标自动恢复或历史 401 已解决。
+- 已合并并部署：source `28dcfbdf2cc4aec50b4f6c0d6a7f684adbe54c92`，manifest `a8cdf4cbe6f840f1803562cb5934d5502a45b886`，Coolify 部署 `voicefix81b444abfc151da9`。
+- Registry-first 镜像：backend/三个共享 worker `sha256:06718a3b061ff0e0acfac83aefc826daa87c7a633eb8bda5298bea5539918576`；frontend `sha256:23e69fe1c4e1e1fab64050502bf77630e6b7f6b98a0fe568b683e6759cfbbf9d`。
+- Compose 校验通过，9 个服务健康；运行容器镜像和 OCI revision 均对应上述 source。`/health` 返回 200，运行时检查确认共享 Token 一致且必要运行值存在。
+- staging 使用 root 真实会话完成只读验收：“调用记录”核实面板可见，`GET /api/v1/applications/{id}/action-reconciliations` 返回 200，页面无 JavaScript 错误。为避免制造真实未知业务写入，线上未提交核实证据；提交、持久化和重复拦截使用已清理的候选 E2E 数据验证。
+- 本批没有数据库迁移、依赖、服务拓扑或存储配置变化，因此没有执行数据库迁移/快照或重复 OSS 验收；旧镜像保留。
+- 部署规则版本：`c948cd20bc23e64d1d53596ce49699c525351284`。
 
 ## 后续候选验收
 
