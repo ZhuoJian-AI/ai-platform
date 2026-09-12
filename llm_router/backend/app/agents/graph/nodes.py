@@ -37,6 +37,7 @@ from app.models.audit_log import AuditLog
 from app.models.task import Task
 from app.models.workspace import WorkspaceFile
 from app.services import (
+    assistant_action_recovery,
     business_assistant_orchestration,
     enterprise_application_service,
     memory_service,
@@ -1346,6 +1347,7 @@ async def _build_tools(
     request_text: str = "",
     business_intent: dict | None = None,
     business_envelope: dict | None = None,
+    history_messages: list | None = None,
 ) -> tuple[list[dict], dict[str, dict]]:
     """Load platform tools plus role-authorized enterprise capabilities.
 
@@ -1473,6 +1475,27 @@ async def _build_tools(
             current_page=current_page,
         )
         tool_name = base_tool_name
+        recovery_ids = assistant_action_recovery.history_request_ids({"messages": history_messages or []}, tool_name)
+        resume_name = assistant_action_recovery.recovery_tool_name(tool_name)
+        if recovery_ids and action.operation in {"create", "update", "delete", "approve"}:
+            if resume_name not in registry:
+                tools.append({"type": "function", "function": {
+                    "name": resume_name,
+                    "description": (
+                        f"接续原操作：{action.description or action.name}。读取本对话原操作的真实回执或"
+                        "原确认卡片，不重新写入。恢复未完成任务时先核实原操作；新的修改方案使用原业务工具。"
+                    ),
+                    "parameters": {"type": "object", "properties": {
+                        "requestId": {"type": "string", "enum": recovery_ids},
+                    }, "required": ["requestId"], "additionalProperties": False}, "strict": True,
+                }})
+                registry[resume_name] = {
+                    "kind": "enterprise_action", "resume_only": True, "application": application,
+                    "action": action, "page_key": page_key, "current_page": current_page,
+                    "recovery_request_ids": recovery_ids,
+                }
+            elif current_page:
+                registry[resume_name].update(page_key=page_key, current_page=True)
         if tool_name in registry:
             if current_page:
                 registry[tool_name].update(
@@ -1963,6 +1986,23 @@ async def _execute_tool_call(
             return ({"role": "tool", "tool_call_id": tool_call_id, "content": msg}, msg, False)
         application = entry["application"]
         action = entry["action"]
+        if entry.get("resume_only"):
+            try:
+                user = await _fresh_user_principal(db, user)
+                if user is None:
+                    raise HTTPException(status_code=403, detail="当前员工会话已失效，无法恢复操作")
+                result = await assistant_action_recovery.recover_action_result(
+                    db, application, action, user, params.get("requestId"),
+                    entry.get("recovery_request_ids") or [], entry.get("page_key"),
+                )
+                content = json.dumps(result, ensure_ascii=False, default=str)
+                ok = result.get("status") in {"pending", "completed"}
+            except HTTPException as exc:
+                content = tool_result_json("failed", error={
+                    "code": "action_recovery_rejected", "messageZh": str(exc.detail), "retryable": False,
+                })
+                ok = False
+            return ({"role": "tool", "tool_call_id": tool_call_id, "content": content}, content[:4000], ok)
         try:
             action_params = _enforce_business_query_parameters(
                 entry.get("business_intent"),
@@ -2102,6 +2142,8 @@ def _assistant_tool_requires_approval(name: str, entry: dict | None) -> bool:
         return True
     if not entry:
         return False
+    if entry.get("resume_only"):
+        return False  # Reading an old card never approves it or dispatches its write.
     kind = str(entry.get("kind") or "")
     if name in _ASSISTANT_READ_ONLY_TOOL_NAMES or kind in _ASSISTANT_READ_ONLY_REGISTRY_KINDS:
         return False
@@ -2537,6 +2579,7 @@ async def prepare_assistant_turn(state: AgentState) -> dict:
             request_text=str(state.get("request") or ""),
             business_intent=state.get("business_turn_intent") or {},
             business_envelope=state.get("business_turn_envelope") or {},
+            history_messages=state.get("messages") or [],
         )
         if user is not None and not application_id:
             # Long-term memory is a per-user capability; the admin playground has no principal.

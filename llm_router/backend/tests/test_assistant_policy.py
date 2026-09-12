@@ -425,6 +425,7 @@ def _patch_prepare_dependencies(monkeypatch, principal):
         request_text="",
         business_intent=None,
         business_envelope=None,
+        history_messages=None,
     ):
         return nodes._builtin_tool_defs(), {}
 
