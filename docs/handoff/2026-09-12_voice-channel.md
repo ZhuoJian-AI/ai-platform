@@ -33,3 +33,13 @@ Source e8b7a99c70b3f7dc47fb4ffb293ec48c5021f788 已 push，PR131 已创建。后
 ## 连接恢复与候选镜像
 
 2026-09-12 11:36 网络恢复，重新获取部署规则 c948cd2；PR131 已合并，source SHA 为 6ce2a64cd4bce9e10bc6eed75fa122669339c058。复用已通过构建的相同前端源码产物，Registry 读取 digest 为 sha256:b15275cf82a746a7842bd7cb5bedaa5df97d09263d68506a872963fffae0a664。仅替换 frontend 镜像，后端与其他八个服务保持不变，无数据库迁移，无存储协议变化。Coolify 自动部署关闭、无待保存配置、无运行中部署；真实环境变量预检 PASS。部署及线上入口检查随后记录；此处不代表真实麦克风验收完成。
+
+## staging 发布完成
+
+- 仓库 https://github.com/ZhuoJian-AI/ai-platform；域名 https://ai-platform.staging.zhuojianai.com；Coolify Application jwbpxybciypgdidyzu2ebrlr。
+- source 6ce2a64cd4bce9e10bc6eed75fa122669339c058 → frontend digest b15275cf82a746a7842bd7cb5bedaa5df97d09263d68506a872963fffae0a664 → manifest 29a05cf56a0b6ffe7f4eb0e479e145f212847e6b → deployment voicefix2666cfbae3285470 finished；运行容器镜像及 OCI revision 匹配。后端仍为 aa2c693 / 802300387bce73ea55c588bfdd4fa15f15462ecc25b935523e46289390c4f5d0。
+- Registry-first、Compose PASS、真实环境变量 PASS、运行共享令牌一致、9 服务全部 healthy、无 Changes pending。容器替换期间短暂 502，完成后公网 /health 200。
+- 管理员真实登录及角色语音能力页通过；员工真实登录、已有 Task 的语音入口、合成麦克风开启与退出释放全部轨道通过，无页面 JS 异常。首次浏览器访问受到本机代理影响；使用明确直连后通过，无产品鉴权修改。
+- 没有重复调用模型；已通过的候选 ASR/TTS、OSS 证据复用。此次不代表真人麦克风、真实业务写入语音确认、多轮真实模型组合验收通过。
+- 存储继续使用既有 signed-upload / Storage Gateway，两个 STORAGE 变量已配置，普通语音仍为临时媒体；无存储修改、无数据迁移、无数据库备份需求、无新长期工作空间文件或业务数据修改。
+- 剩余：真人麦克风和真实子系统语音闭环、长回答完整口播摘要、未知写入受控核实、历史运行 401、chouchou 真实会话验收。第一版需先打开已有对话，切换页面/视图退出语音而不丢对话。
