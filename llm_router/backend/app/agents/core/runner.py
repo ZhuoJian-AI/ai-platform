@@ -48,6 +48,7 @@ from app.services.assistant_delivery_policy import (
     FILE_ARTIFACT_NOUNS as _FILE_ARTIFACT_NOUNS,
 )
 from app.services.assistant_delivery_policy import requests_file_delivery as _requests_file_delivery
+from app.services.assistant_outcomes import final_outcomes, operation_outcomes, unresolved_writes
 from app.services.assistant_tool_catalog import partition_tool_specs
 from app.services.file_capability_registry import FILE_CREATE_TOOL_NAMES, FILE_TOOL_OPERATIONS
 from app.services.message_verification import contains_unverified_tool_success_claim
@@ -323,7 +324,7 @@ def _history(state: dict) -> list[dict[str, str]]:
             # Same Task, different view: retain execution evidence, not old page authority.
             references = {
                 key: [ref for ref in business_context[key] if isinstance(ref, dict)][-20:]
-                for key in ("toolResultRefs", "artifactRefs")
+                for key in ("toolResultRefs", "artifactRefs", "operationOutcomes")
                 if isinstance(business_context.get(key), list) and business_context[key]
             }
             if references:
@@ -645,6 +646,7 @@ async def _consume_native(
         run_context=approval_registry.get(run_token),
     )
     speech_progress = SpeechProgress()
+    state["_file_delivery_required"] = bool(request["completion_policy"].get("require_file_output"))
 
     async def publish_speech(final=False):
         if not state.get("task_id") or not state.get("run_id"):
@@ -653,6 +655,7 @@ async def _consume_native(
         query_needed = _requests_current_business_data(state) and not mutation_needed
         ready = (
             (not mutation_needed or successful_enterprise_mutations > 0)
+            and not unresolved_writes(state.get("business_tool_executions") or [])
             and (not query_needed or successful_enterprise_queries > 0
                  or file_analysis.verified or successful_specialist_analyses > 0)
             and (not file_analysis.required or file_analysis.verified)
@@ -766,10 +769,12 @@ async def _consume_native(
             state.setdefault("business_tool_executions", []).append({
                 "toolCallId": call_id,
                 "name": name,
+                "canonicalName": entry.get("original_tool") or name,
+                "displayName": getattr(entry.get("action"), "name", None) or name,
                 "kind": entry_kind or "",
                 "operation": published_event.get("business_operation") or _enterprise_operation(entry, name),
                 "ok": ok,
-                "resultStatus": published_event.get("business_result_status") or "",
+                "resultStatus": _enterprise_result_status(event.get("content")),
                 "requestId": (
                     str((tool_envelope.get("provenance") or {}).get("requestId") or "")[:160]
                     if isinstance(tool_envelope, dict) and isinstance(tool_envelope.get("provenance"), dict)
@@ -812,6 +817,8 @@ async def _consume_native(
     _publish(handle, staged, {"type": "business_state", "status": "verifying", "intent": intent.get("intent")})
     mutation_required = _requests_business_mutation(state)
     mutation_unverified = mutation_required and successful_enterprise_mutations == 0
+    outstanding_writes = unresolved_writes(state.get("business_tool_executions") or [])
+    state["operation_outcomes"] = operation_outcomes(state.get("business_tool_executions") or [])
     # A successful mutation already carries the subsystem's authoritative result.
     # Generic nouns such as "记录" must not arm a second query requirement and turn a
     # completed write into a failed run merely because the model did not query again.
@@ -824,7 +831,18 @@ async def _consume_native(
         and successful_enterprise_queries == 0
         and not verified_analysis_only
     )
-    if mutation_unverified:
+    if successful_enterprise_mutations and outstanding_writes:
+        if text:
+            _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
+        labels = {"needs_confirmation": "待确认", "unknown": "结果未知",
+                  "in_progress": "执行中", "not_completed": "未完成", "completed": "已完成"}
+        text = "本轮业务操作只完成了一部分：\n" + "\n".join(
+            f"- {row['displayName']}：{labels[row['status']]}" for row in state["operation_outcomes"]
+            if row["operation"] in {"create", "update", "delete", "approve"}
+        ) + "\n继续时仅处理未完成步骤；已成功的操作不再重复提交。结果未知的操作须先核实。"
+        state["error"] = "Some business operations remain incomplete"
+        _publish(handle, staged, {"type": "text", "delta": text})
+    elif mutation_unverified:
         if text:
             _publish(handle, staged, {"type": "text_retract", "chars": len(text)})
         if pending_enterprise_mutations:
@@ -1021,6 +1039,7 @@ async def _persist_early_failure_reply(state: dict, task: Any, exc: Exception) -
                     "business_turn_intent": state.get("business_turn_intent") or {},
                     "page_context": state.get("page_context") or {},
                     "tool_executions": state.get("business_tool_executions") or [],
+                    "operation_outcomes": final_outcomes(state, []),
                     "runtime_error": True,
                 },
             )

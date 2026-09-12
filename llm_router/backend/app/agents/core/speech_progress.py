@@ -27,20 +27,25 @@ class SpeechProgress:
         if not prose.startswith(self.prefix):
             events.append({"type": "speech_reset", "invalidatesBefore": self.index})
             self.prefix = ""
+        if final and (len(prose) > 600 or "|" in text or self.index >= 63):
+            # The audio endpoint adapts this final public source lazily. Ordinary
+            # text-only runs incur no summary model call. Keep prior segment IDs.
+            events.append({"type": "speech_segment", "segmentIndex": self.index,
+                           "text": text, "summaryRequired": True,
+                           "contentVersion": content_version(text)})
+            self.index += 1
+            self.finished = True
+            return events
         remaining = prose[len(self.prefix):]
-        while remaining and self.index < 64:
+        while remaining and self.index < 63:
             boundary = re.search(r"[。！？!?]|\.(?=\s)", remaining)
             if boundary is None and not final:
                 break
             end = boundary.end() if boundary else len(remaining)
             sentence = remaining[:end]
             if len(self.prefix) + len(sentence) > 600:
-                if self.prefix:
-                    note = "后续详细内容请查看文字回复。"
-                    events.append({"type": "speech_segment", "segmentIndex": self.index,
-                                   "text": note, "contentVersion": content_version(note)})
-                    self.index += 1
-                    self.finished = True
+                # Wait for the verified final reply, including any late failure,
+                # instead of permanently finishing at an arbitrary text cutoff.
                 break
             # Rich/long answers retain the existing explicit excerpt policy.
             if len(sentence) > 600:

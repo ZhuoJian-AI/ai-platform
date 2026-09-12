@@ -50,6 +50,7 @@ def select_segments(events):
             text = event.get("text")
             if isinstance(index, int) and 0 <= index < 64 and isinstance(text, str) and text:
                 segments[index] = {"segment_index": index, "text": text,
+                                   "summary_required": event.get("summaryRequired") is True,
                                    "content_version": speech.content_version(text)}
     return segments
 
@@ -68,7 +69,7 @@ async def plan(db, cu, task_id: UUID, run_id: int):
     events, done = await owned_events(db, cu, task_id, run_id)
     segments = select_segments(events)
     return {"run_id": run_id, "done": done, "segments": [
-        {k: value for k, value in item.items() if k != "text"}
+        {k: value for k, value in item.items() if k not in {"text", "summary_required"}}
         for _, item in sorted(segments.items())]}
 
 
@@ -82,4 +83,4 @@ async def create(db, cu, data: RunSpeechCreate):
     return await speech.create_bound_speech(db, cu, segment["text"], {
         "task_id": str(data.task_id), "run_id": data.run_id,
         "segment_index": data.segment_index, "content_version": segment["content_version"],
-    })
+    }, summary_required=segment.get("summary_required", False))

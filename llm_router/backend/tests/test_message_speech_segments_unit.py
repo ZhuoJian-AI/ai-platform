@@ -39,7 +39,8 @@ class SpeechBindingTest(unittest.IsolatedAsyncioTestCase):
     def test_segment_source_excludes_private_and_rich_payloads(self):
         text = "<think>secret</think>公开回答。\n```json\nsecret\n```\n|秘密|字段|\n下一句。"
         result = speech.message_segments(text)
-        self.assertEqual([s.text for s in result], ["公开回答。", "下一句。"])
+        self.assertEqual([s.text for s in result], ["语音摘要"])
+        self.assertNotIn("secret", str(result))
 
     async def test_segments_have_distinct_cache_and_server_selected_text(self):
         content = "第一句。第二句。"

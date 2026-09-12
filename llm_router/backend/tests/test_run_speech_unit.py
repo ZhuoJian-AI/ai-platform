@@ -70,7 +70,11 @@ class RunSpeechTest(unittest.IsolatedAsyncioTestCase):
         progress = SpeechProgress()
         text = ("这是一个已验证的结果。" * 100)
         events = progress.update(text, ready=True)
-        self.assertEqual(events[-1]["text"], "后续详细内容请查看文字回复。")
+        self.assertLessEqual(sum(len(event["text"]) for event in events), 600)
+        final = progress.update(text, ready=True, final=True)
+        self.assertEqual(len(final), 1)
+        self.assertTrue(final[0]["summaryRequired"])
+        self.assertEqual(final[0]["segmentIndex"], len(events))
         self.assertEqual(progress.update(text, ready=True, final=True), [])
 
 
