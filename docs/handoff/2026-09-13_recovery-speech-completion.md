@@ -24,7 +24,14 @@ python -m pytest --noconftest tests/test_assistant_action_recovery.py tests/test
 
 ## 发布与剩余限制
 
-本文件首次提交时尚未部署。后续填写 source、digest、manifest、部署 ID 与浏览器证据，未填写前不得声称本批上线。
+2026-09-13 整批已部署：
+
+- 仓库 `ZhuoJian-AI/ai-platform`，域名 `https://ai-platform.staging.zhuojianai.com`，Coolify Application `jwbpxybciypgdidyzu2ebrlr`。
+- source `5ca01e726208f9cf2fd02702c2bd5116be1b7439`（PR #172）；manifest `b751c05d03419585aa7ac4c550e0834a26f28267`（PR #173）。
+- backend 与三个共享 worker 镜像 `sha256:13e7c6dbec8232d4781210523843ac74c937c8b21be3b3d93f177e01234de253`；运行镜像与 OCI source 标签一致。前端沿用 `28dcfbd`，未修改前端。
+- Registry-first 构建与 compileall 通过，Compose PASS；真实运行变量齐全、共享令牌一致，无待发布配置或并行部署。Coolify `voicefix6dc92e4a3def0a8e` finished，9 服务 healthy，公开 health 200。
+- 发布后浏览器调用与重连均返回 `Transport closed`。本批 root/zhangsan 页面、长回复播放及真实业务恢复没有新的通过证据，仍待连接恢复后验收。
+- 临时 PostgreSQL 容器与本机隧道已停止并移除；只使用独立测试数据，未碰 staging 数据库。临时构建文件的清理命令被工具策略拦截，未执行；约 2.5 MB 的专用 `/tmp/ai-platform-recovery-build-5ca01e7` 及本批临时源码文件保留，不包含密钥或用户数据。活动和回滚镜像保留。
 
 - 需补最终管理员/员工浏览器业务恢复及长回复播放结果。
 - 不为缺失历史参数补造证据；旧记录需要核实。

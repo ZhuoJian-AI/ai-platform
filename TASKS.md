@@ -2,8 +2,8 @@
 
 ## RECOVERY-SPEECH-COMPLETION-20260913 (@codex)
 
-- [ ] 合并批次：跨轮原操作复用与显式再次执行确认、多步骤结果账本与恢复、长回复语义口播。
-- [ ] 统一聚焦验收和发布，不将未验收限制标记完成。
+- [x] 三项代码统一发布：source 5ca01e7，manifest b751c05，169 项聚焦测试、独立 PostgreSQL 与真实模型摘要通过，9 服务健康。
+- [ ] 最终管理员/员工浏览器恢复与长回复播放回归：发布后 Playwright Transport closed，未将服务验证当作浏览器通过。
 
 
 
