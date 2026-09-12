@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import MessageSpeechButton from './MessageSpeechButton';
+import VoiceConversationPanel from './VoiceConversationPanel';
+import { useCurrentTurnAnchor } from './useCurrentTurnAnchor';
 import { Alert, Badge, Button, Card, Drawer, Dropdown, Empty, Input, Popconfirm, Result, Select, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
 import {
   AppstoreOutlined, CheckCircleFilled, CloseCircleFilled, DeleteOutlined, DownloadOutlined, ExportOutlined, EyeOutlined, FileTextOutlined,
@@ -350,6 +352,7 @@ export default function EnterpriseApplicationView({
   const [prompt, setPrompt] = useState('');
   const [assistantRunning, setAssistantRunning] = useState(false);
   const [assistantMessages, setAssistantMessages] = useState<AssistantConversationMessage[]>([]);
+  const turnAnchor = useCurrentTurnAnchor(businessTaskId, assistantMessages.filter(item => item.role === 'user').length, assistantOpen);
   const [selectedInputFileIds, setSelectedInputFileIds] = useState<string[]>([]);
   const [uploadingInput, setUploadingInput] = useState(false);
   const [creatingConversation, setCreatingConversation] = useState(false);
@@ -1256,6 +1259,7 @@ export default function EnterpriseApplicationView({
           }}><span className="business-assistant-drawer__header-label">新建对话</span></Button>
         </Space>}
         open={assistantOpen}
+        afterOpenChange={(open) => { if (open) turnAnchor.jump(); }}
         onClose={closeAssistant}
         width={isMobile ? '100%' : (isCompact ? 460 : 420)}
         rootClassName="business-assistant-drawer responsive-fullscreen-drawer"
@@ -1412,10 +1416,11 @@ export default function EnterpriseApplicationView({
           ))}
         </div>}
         {assistantMessages.length > 0 && (
-          <div aria-label="灼见助手对话" style={{ display: 'grid', gap: 10, marginBottom: 18 }}>
+          <div ref={turnAnchor.listRef} aria-label="灼见助手对话" style={{ display: 'grid', gap: 10, marginBottom: 18 }}>
             {assistantMessages.map((item, index) => (
               <div
                 key={`${item.role}-${index}`}
+                data-user-turn={item.role === 'user' ? '' : undefined}
                 style={{
                   padding: '10px 12px',
                   borderRadius: 10,
@@ -1509,8 +1514,12 @@ export default function EnterpriseApplicationView({
           style={{ marginBottom: 12 }}
         />}
         <div className="business-assistant-drawer__composer">
+          <Button size="small" type="text" onClick={turnAnchor.jump}>回到当前回复</Button>
           <Input.TextArea value={prompt} disabled={conversationLocked} onChange={(event) => setPrompt(event.target.value)} autoSize={{ minRows: 3, maxRows: 6 }} placeholder="描述你要查询或执行的业务任务…" onPressEnter={(event) => { if (!event.shiftKey) { event.preventDefault(); void submit(); } }} />
-          <Button type="primary" block icon={<SendOutlined />} loading={assistantRunning} disabled={conversationLocked || !prompt.trim()} onClick={() => void submit()} style={{ marginTop: 10 }}>在当前页面执行</Button>
+          <Space style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+            <VoiceConversationPanel />
+            <Button type="primary" icon={<SendOutlined />} loading={assistantRunning} disabled={conversationLocked || !prompt.trim()} onClick={() => void submit()}>发送</Button>
+          </Space>
         </div>
       </Drawer>
     </div>
