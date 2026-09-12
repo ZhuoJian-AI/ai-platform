@@ -319,6 +319,18 @@ def _history(state: dict) -> list[dict[str, str]]:
                 f"{content}\n\n[该历史消息的可信业务上下文]\n"
                 f"{json.dumps(business_context, ensure_ascii=False, default=str)}"
             )
+        elif isinstance(business_context, dict):
+            # Same Task, different view: retain execution evidence, not old page authority.
+            references = {
+                key: [ref for ref in business_context[key] if isinstance(ref, dict)][-20:]
+                for key in ("toolResultRefs", "artifactRefs")
+                if isinstance(business_context.get(key), list) and business_context[key]
+            }
+            if references:
+                content += (
+                    "\n\n[历史执行与文件引用，仅用于接续；执行和读取仍需当前权限校验]\n"
+                    + json.dumps(references, ensure_ascii=False, default=str)
+                )
         rows.append({"role": item.get("role"), "content": content})
     request = str(state.get("request") or "")
     while rows and rows[-1]["role"] == "user" and rows[-1]["content"] == request:

@@ -19,6 +19,48 @@ def db_engine():
     yield
 
 
+@pytest.mark.parametrize("status", ["completed", "needs_confirmation", "unknown", "unverified"])
+def test_global_history_retains_recovery_references_without_page_authority(status):
+    context = {
+        "toolResultRefs": [{"requestId": "original-request", "recoveryState": status}],
+        "artifactRefs": [{"fileId": "file", "versionId": "version"}],
+        "pageKey": "old-page",
+        "roleIds": ["old-role"],
+        "filtersSummary": {"private": "unrelated"},
+    }
+    state = {"messages": [{"role": "assistant", "content": "结果", "business_context": context}]}
+    content = runner._history(state)[0]["content"]
+    references = json.loads(content.split("\n")[-1])
+    assert references == {key: context[key] for key in ("toolResultRefs", "artifactRefs")}
+    assert "当前权限校验" in content
+    assert "old-role" not in content and "old-page" not in content and "unrelated" not in content
+    assert state["messages"][0]["business_context"] == context
+
+
+def test_global_history_bounds_references_and_preserves_request_deduplication():
+    rows = runner._history({
+        "request": "继续",
+        "messages": [
+            {"role": "assistant", "content": "结果", "business_context": {
+                "toolResultRefs": [{"requestId": str(i)} for i in range(30)] + [None],
+                "artifactRefs": "invalid",
+            }},
+            {"role": "user", "content": "继续", "business_context": {"pageKey": "old"}},
+        ],
+    })
+    assert len(rows) == 1
+    refs = json.loads(rows[0]["content"].split("\n")[-1])
+    assert refs == {"toolResultRefs": [{"requestId": str(i)} for i in range(10, 30)]}
+
+
+def test_page_history_keeps_existing_business_context():
+    context = {"pageKey": "page", "entityRefs": [{"entityId": "order"}]}
+    rows = runner._history({"application_id": "app", "messages": [
+        {"role": "assistant", "content": "结果", "business_context": context},
+    ]})
+    assert json.loads(rows[0]["content"].split("\n")[-1]) == context
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fails", [False, True])
 async def test_non_stream_run_persists_tool_and_terminal_events(monkeypatch, fails):
