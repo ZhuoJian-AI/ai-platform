@@ -50,3 +50,13 @@ Python 3.12 环境：test_native_text_stream_unit.py 3 项通过（首段早于�
 本机 Docker 未启动，既有 PostgreSQL 服务停止；使用已安装程序建立仅监听 127.0.0.1:5459 的临时 voice_e2e 实例，未启动或修改既有数据库服务。新增 opt-in test_run_speech_postgres.py，强制检查本机端口与测试用户名，在随机独立 schema 创建 ORM 表，finally 删除该测试 schema。通过不同数据库连接调用实际 persist_run_events 与 owned_segment，并禁用内存 registry，验证增量落库可读、reset 后旧句 409、新句可读、重复 final 保存后 seq 仍为 [1,2,3,4]。
 
 执行设置 VOICE_TEST_DATABASE_URL 后 `pytest --noconftest tests/test_run_speech_postgres.py -q`：1 passed（5.31s），Ruff 通过。测试 schema 已清理，临时 PostgreSQL 已停止。该证据为真实数据库/独立连接，不冒充实际 multimodal-worker 模型执行或浏览器播放。真实 MiMo 首声时序与浏览器联调仍待完成，未部署。
+
+## 真实主脑、MiMo worker 与浏览器播报验收（2026-09-12）
+
+源码 dbd2fe4；新建独立候选容器 ai-platform-voice-stream-dbd2fe4、独立 Redis 和数据库 ai_infra_voice_dbd2fe4，复制既有候选配置及数据库，未改 staging 或旧候选。启动 worker 前确认没有 queued/processing 历史任务。浏览器精确来源仅在候选 API 允许 http://127.0.0.1:4183；API 经 SSH 隧道访问，未开放公网端口。
+
+新增 frontend/scripts/e2e-live-sentence-speech.mjs。使用环境变量凭据让 root、zhangsan 在隔离浏览器真实登录。候选快照缺少获授权标准音色，临时创建角色范围测试音色，finally 删除。真实 browserVoiceAdapter 连接真实 SSE 主脑、Run speech API、独立 worker、管理员配置的 mimo-v2.5-tts 和浏览器 HTMLAudioElement；无模拟 Audio、无伪造 Token。测试绕过 ASR 输入而直接传文字，浏览器允许自动播放，因此不替代麦克风、UI 点击或自动播放拒绝验收。
+
+结果：29 个 speech_segment，29 次实际 playing；firstTextMs=27194、firstSoundMs=33801、finalMs=88869，runStatus=success、speechHandled=true。首声确实早于最终事件，不会结尾重读全文。计时包括创建 Task，firstText 是第一个 text 事件，不能单独视为供应商 TTFT。首声延迟仍有优化空间，不能承诺实时同结束。
+
+测试 Task a3a8628d-3b95-4679-ae8d-85197b491ca8 已软删除；临时音色删除后既有 worker 生命周期回收了本轮 29 个临时音频，output_deleted=29、剩余引用=0，未动工作空间文件。脚本 node --check 通过，真实运行退出码 0。候选环境验证不代表已部署；跨页语音、取消/重连/播放拒绝，以及语义摘要与业务可靠性遗留项仍待完成。
