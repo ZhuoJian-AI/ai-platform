@@ -50,6 +50,7 @@ from app.services import (
     workspace_service,
 )
 from app.services import model_gateway as llm_client
+from app.services.assistant_outcomes import final_outcomes
 from app.services.assistant_recovery_context import historical_tool_references
 from app.services.assistant_tool_catalog import entry_tool_definitions
 from app.services.assistant_tool_protocol import tool_result_json
@@ -567,6 +568,7 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
                 "filtersSummary": filters,
                 "toolResultRefs": tool_refs,
                 "artifactRefs": artifacts,
+                "operationOutcomes": metadata.get("operation_outcomes") or [],
             }
             business_context = {
                 key: value
@@ -1506,6 +1508,9 @@ async def _build_tools(
                         "current_page": True,
                     }
                 )
+                repeat_name = assistant_action_recovery.repeat_tool_name(tool_name)
+                if repeat_name in registry:
+                    registry[repeat_name].update(registry[tool_name])
             return tool_name
         tools.append(
             {
@@ -1527,6 +1532,17 @@ async def _build_tools(
             "business_intent": intent or {},
             "current_page": current_page,
         }
+        if action.operation in {"create", "update", "delete", "approve"}:
+            repeat_name = assistant_action_recovery.repeat_tool_name(tool_name)
+            tools.append({"type": "function", "function": {
+                "name": repeat_name,
+                "description": f"再次执行新的独立操作：{action.description or action.name}。"
+                               "仅在用户明确要求再次执行已做过的操作时使用，必须点击再次执行确认；"
+                               "恢复失败步骤时不要使用。",
+                "parameters": _enterprise_action_parameters(action.input_schema, action.operation),
+                "strict": True,
+            }})
+            registry[repeat_name] = {**registry[tool_name], "repeat_operation": True, "original_tool": tool_name}
         return tool_name
 
     if application_id and user is not None:
@@ -2021,10 +2037,11 @@ async def _execute_tool_call(
             user = await _fresh_user_principal(db, user)
             if user is None:
                 raise HTTPException(status_code=403, detail="当前员工会话已失效，无法执行操作")
-            pending_id = await assistant_action_recovery.pending_request_id(
+            pending_id = None if entry.get("repeat_operation") else await assistant_action_recovery.pending_request_id(
                 db, application, action, user,
                 assistant_action_recovery.history_request_ids(state, name),
                 action_params, entry.get("page_key"), expected_version,
+                task_id=state.get("task_id"),
             )
             result = await subsystem_action_service.invoke_action(
                 db,
@@ -2035,7 +2052,8 @@ async def _execute_tool_call(
                 user,
                 request_id=pending_id or _enterprise_action_request_id(
                     state,
-                    tool_call_id,
+                    (f"{application.id}:{action.id}:{entry.get('page_key')}:{bool(entry.get('repeat_operation'))}"
+                     if action.operation in {"create", "update", "delete", "approve"} else tool_call_id),
                     action_params,
                     expected_version,
                 ),
@@ -2043,6 +2061,12 @@ async def _execute_tool_call(
                 operation=action.operation,
                 expected_version=expected_version,
             )
+            if pending_id:
+                result["replayed"] = True
+                # Re-read the original timestamp and authorization before using its evidence.
+                result = await assistant_action_recovery.recover_action_result(
+                    db, application, action, user, pending_id, [pending_id], entry.get("page_key"),
+                )
             content = json.dumps(result, ensure_ascii=False, default=str)
             ok = result.get("status") in {"pending", "completed"}
             assistant_action_recovery.retain_completed_provenance(state, result)
@@ -2274,6 +2298,8 @@ def _assistant_confirmation_metadata(name: str, entry: dict | None) -> dict:
             "workspace_delete_file": "删除文件",
             "workspace_delete_folder": "删除文件夹",
         }.get(name, "确认本次操作")
+    if (entry or {}).get("repeat_operation"):
+        display_title = f"再次执行（会产生新的业务操作）：{display_title}"
 
     schema = getattr(action, "input_schema", None)
     properties = schema.get("properties") if isinstance(schema, dict) else None
@@ -2673,6 +2699,7 @@ async def save_memory(state: AgentState) -> dict:
         streamed_final = str(state.get("assistant_final") or "")
         _apply_artifact_completion_guard(state, artifacts)
         state["artifacts"] = artifacts
+        state["operation_outcomes"] = final_outcomes(state, artifacts)
         if state.get("application_id"):
             _emit({"type": "business_state", "status": "committing"})
         # Maintain a durable task-level context index.  This is only a recall
@@ -2692,6 +2719,7 @@ async def save_memory(state: AgentState) -> dict:
                 "business_turn_intent": state.get("business_turn_intent") or {},
                 "page_context": state.get("page_context") or {},
                 "tool_executions": state.get("business_tool_executions") or [],
+                "operation_outcomes": state["operation_outcomes"],
                 "navigation_suggestion": state.get("business_navigation_suggestion"),
                 "approvals": state.get("business_approvals") or [],
             },

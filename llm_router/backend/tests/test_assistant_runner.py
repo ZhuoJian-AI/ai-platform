@@ -480,9 +480,10 @@ def test_publish_failure_reply_retracts_partial_text_before_persisted_done():
     staged = [{"type": "text", "delta": "我先"}, {"type": "text", "delta": "读取文件"}]
     runner._publish_failure_reply(handle, staged, {}, RuntimeError("boom"))
 
-    assert staged[2] == {"type": "text_retract", "chars": 6}
-    assert staged[3] == {"type": "text", "delta": runner._public_failure_message(RuntimeError("boom"))}
-    assert len(handle.buffer) == 2
+    assert staged[2]["type"] == "speech_reset"
+    assert staged[3] == {"type": "text_retract", "chars": 6}
+    assert staged[4] == {"type": "text", "delta": runner._public_failure_message(RuntimeError("boom"))}
+    assert len(handle.buffer) == 3
 
 
 @pytest.mark.asyncio

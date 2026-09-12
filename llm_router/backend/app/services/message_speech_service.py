@@ -77,7 +77,13 @@ def voice_version(voice) -> str:
 
 
 def message_segments(content: str):
+    if needs_summary(content):
+        return SpeechSegmenter().append("语音摘要", final=True)
     return SpeechSegmenter().append(spoken_text(content), final=True)
+
+
+def needs_summary(content: str) -> bool:
+    return len(content) > 600 or "|" in content
 
 
 async def plan(db, cu, task_id: UUID, message_id: UUID):
@@ -94,22 +100,24 @@ async def create(db, cu, data: MessageSpeechCreate):
     # Serialize same-user clicks, including concurrent tabs. Never cache across users.
     await db.execute(select(User.id).where(User.id == UUID(cu.id)).with_for_update())
     message = await owned_message(db, cu, data.task_id, data.message_id)
-    text = spoken_text(message.content)
+    summary_required = needs_summary(message.content)
+    text = message.content if summary_required else spoken_text(message.content)
     if data.segment_index is not None:
         if content_version(message.content) != data.expected_content_version:
             raise HTTPException(409, "回复内容已变化，请朗读最新回复")
         segments = message_segments(message.content)
         if data.segment_index >= len(segments):
             raise HTTPException(422, "朗读分句不存在")
-        text = segments[data.segment_index].text
+        if not summary_required:
+            text = segments[data.segment_index].text
     binding = {"task_id": str(data.task_id), "message_id": str(data.message_id),
                "content_version": content_version(message.content)}
     if data.segment_index is not None:
         binding["segment_index"] = data.segment_index
-    return await create_bound_speech(db, cu, text, binding)
+    return await create_bound_speech(db, cu, text, binding, summary_required=summary_required)
 
 
-async def create_bound_speech(db, cu, text: str, binding: dict):
+async def create_bound_speech(db, cu, text: str, binding: dict, *, summary_required: bool = False):
     """Internal only: callers establish ownership and trusted text before calling."""
     voices = await audio.list_visible_voices(db, cu)
     voice = next((item for item in voices if item.voice_type == "builtin"), None)
@@ -121,6 +129,8 @@ async def create_bound_speech(db, cu, text: str, binding: dict):
     if deployment is None:
         raise HTTPException(409, "暂无可用的语音朗读模型，请管理员检查部署")
     binding = {**binding, "voice_version": voice_version(voice)}
+    if summary_required:
+        binding["summary_policy"] = "semantic-v1"
     cache_key = content_version(json.dumps(binding, sort_keys=True))
     existing = (await db.execute(select(MultimodalJob).where(
         MultimodalJob.organization_id == cu.organization_id, MultimodalJob.user_id == UUID(cu.id),
@@ -130,6 +140,9 @@ async def create_bound_speech(db, cu, text: str, binding: dict):
     ).order_by(MultimodalJob.created_at.desc()).limit(1))).scalar_one_or_none()
     if existing and not expired(existing) and (existing.status != "succeeded" or existing.output_file_ref):
         return existing
+    if summary_required:
+        from app.services.speech_summary import summarize
+        text = await summarize(db, cu, text)
     expires = datetime.now(UTC) + timedelta(seconds=settings.workspace_upload_session_ttl_seconds)
     return await audio._create_job(
         db, cu, capability="text_to_speech", input_file_id=None, voice_profile_id=voice.id,

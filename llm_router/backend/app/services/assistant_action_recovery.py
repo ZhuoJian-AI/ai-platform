@@ -1,19 +1,25 @@
 """Read an original operation receipt; never dispatch a business mutation."""
 
 import hashlib
+import json
 from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from app.models.enterprise_application import EnterpriseApplicationAction, EnterpriseApplicationActionRequest
+from app.models.task import Task, TaskMessage
 from app.services import enterprise_application_service, subsystem_action_service
 from app.utils.crypto import decrypt_provider_api_key
 
 
 def recovery_tool_name(action_name: str) -> str:
     return "resume_action_" + hashlib.sha256(action_name.encode()).hexdigest()[:16]
+
+
+def repeat_tool_name(action_name: str) -> str:
+    return "repeat_action_" + hashlib.sha256(action_name.encode()).hexdigest()[:16]
 
 
 def retain_completed_provenance(state: dict, result: dict) -> None:
@@ -38,7 +44,7 @@ def retain_completed_provenance(state: dict, result: dict) -> None:
 
 
 def history_request_ids(state: dict, action_name: str) -> list[str]:
-    names = {action_name, recovery_tool_name(action_name)}
+    names = {action_name, recovery_tool_name(action_name), repeat_tool_name(action_name)}
     references = []
     for message in state.get("messages") or []:
         if not isinstance(message, dict) or message.get("role") != "assistant":
@@ -104,31 +110,58 @@ async def recover_action_result(db, application, action, user, request_id, allow
     return result
 
 
-async def pending_request_id(db, application, action, user, allowed_ids, params, page_key, expected_version):
-    """Reuse only an outstanding proposal, not a past successful business operation.
+async def pending_request_id(db, application, action, user, allowed_ids, params, page_key, expected_version,
+                             *, task_id=None):
+    """Match previous proposals and executions within server-loaded Task history.
 
     The caller must still invoke the normal service with this ID: it rechecks
     current authorization and the stored parameter/page/version binding.
     """
-    if not allowed_ids or action.operation not in {"create", "update", "delete", "approve"}:
+    if (not allowed_ids and not task_id) or action.operation not in {"create", "update", "delete", "approve"}:
         return None
+    history_filter = EnterpriseApplicationActionRequest.request_id.in_(allowed_ids[-20:])
+    if task_id:
+        # Search durable references separately from the LLM's short context window.
+        # A client cannot nominate another Task or inject assistant-role metadata.
+        owned_reference = select(TaskMessage.id).join(Task, Task.id == TaskMessage.task_id).where(
+            Task.id == UUID(str(task_id)), Task.user_id == UUID(str(user.id)),
+            Task.organization_id == user.organization_id, Task.deleted_at.is_(None),
+            TaskMessage.role == "assistant",
+            TaskMessage.metadata_["tool_executions"].op("@>")(
+                func.jsonb_build_array(func.jsonb_build_object(
+                    "requestId", EnterpriseApplicationActionRequest.request_id,
+                )),
+            ),
+        ).exists()
+        history_filter = or_(history_filter, owned_reference)
     rows = (await db.execute(select(EnterpriseApplicationActionRequest).where(
         EnterpriseApplicationActionRequest.application_id == application.id,
         EnterpriseApplicationActionRequest.organization_id == user.organization_id,
         EnterpriseApplicationActionRequest.user_id == UUID(str(user.id)),
         EnterpriseApplicationActionRequest.action_id == action.id,
         EnterpriseApplicationActionRequest.module_key == action.module_key,
-        EnterpriseApplicationActionRequest.request_id.in_(allowed_ids[-20:]),
-        EnterpriseApplicationActionRequest.status == "pending",
-        EnterpriseApplicationActionRequest.expires_at > datetime.now(UTC),
-    ).order_by(EnterpriseApplicationActionRequest.created_at.desc()).limit(20))).scalars().all()
+        history_filter,
+        EnterpriseApplicationActionRequest.status.in_(["pending", "completed", "executing", "failed"]),
+    ).order_by(EnterpriseApplicationActionRequest.created_at.desc()))).scalars().all()
     for row in rows:
-        if not row.params_encrypted:
+        if row.status == "pending" and row.expires_at <= datetime.now(UTC):
             continue
+        if row.status == "failed" and (
+            not isinstance(row.result, dict) or row.result.get("executionOutcome") != "unknown"
+        ):
+            continue
+        if not row.params_encrypted:
+            raise HTTPException(409, "历史操作缺少参数绑定，不能安全判断是否已执行。请先核实原记录，勿直接重试。")
+        raw = decrypt_provider_api_key(row.params_encrypted)
+        binding = json.loads(raw)
+        if not isinstance(binding, dict):
+            raise HTTPException(409, "历史操作参数绑定无效，请先核实原记录")
         original, original_page, original_version = subsystem_action_service._decode_request_payload(
-            decrypt_provider_api_key(row.params_encrypted),
+            raw,
         )
+        digest = (binding.get("paramsDigest") if binding.get("_bindingOnly") == 1
+                  else subsystem_action_service._params_hash(original))
         if (original_page == page_key and original_version == expected_version
-                and subsystem_action_service._params_hash(original) == subsystem_action_service._params_hash(params)):
+                and digest == subsystem_action_service._params_hash(params)):
             return row.request_id
     return None

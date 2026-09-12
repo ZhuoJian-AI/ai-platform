@@ -168,7 +168,7 @@ async def test_authorized_tool_catalog_only_adds_recovery_for_task_history(monke
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mismatch", [None, "params", "page", "version", "legacy"])
+@pytest.mark.parametrize("mismatch", [None, "params", "page", "version"])
 async def test_pending_match_requires_exact_binding(context, mismatch):
     db, app, action, user, row, _ = context
     if mismatch == "legacy":
@@ -182,8 +182,38 @@ async def test_pending_match_requires_exact_binding(context, mismatch):
     assert result == ("original" if mismatch is None else None)
     query = db.execute.call_args.args[0]
     values = query.compile().params
-    assert "pending" in values.values()
-    assert all(key in str(query) for key in ("organization_id", "user_id", "action_id", "request_id", "expires_at"))
+    assert ["pending", "completed", "executing", "failed"] in values.values()
+    assert all(key in str(query) for key in ("organization_id", "user_id", "action_id", "request_id"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,matched", [
+    ("completed", True), ("executing", True), ("pending", False), ("failed", False),
+])
+async def test_completed_binding_and_expired_or_definite_failure(context, status, matched):
+    db, app, action, user, row, _ = context
+    row.status = status
+    row.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    row.params_encrypted = json.dumps({"_bindingOnly": 1, "paramsDigest": actions._params_hash({"id": 1}),
+                                      "params": {}, "pageKey": "main", "expectedVersion": 3})
+    db.execute.side_effect = None
+    db.execute.return_value = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [row]))
+    result = await recovery.pending_request_id(db, app, action, user, [], {"id": 1}, "main", 3,
+                                               task_id=uuid4())
+    assert result == ("original" if matched else None)
+    query = str(db.execute.call_args.args[0])
+    assert "EXISTS" in query and "task_messages" in query and "@>" in query
+
+
+@pytest.mark.asyncio
+async def test_legacy_missing_binding_refuses_new_write(context):
+    db, app, action, user, row, _ = context
+    row.params_encrypted = None
+    db.execute.side_effect = None
+    db.execute.return_value = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [row]))
+    with pytest.raises(HTTPException) as exc:
+        await recovery.pending_request_id(db, app, action, user, ["original"], {}, "main", None)
+    assert exc.value.status_code == 409
 
 
 @pytest.mark.asyncio
