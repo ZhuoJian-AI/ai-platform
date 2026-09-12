@@ -29,3 +29,7 @@ node scripts/test-voice-conversation.mjs 通过：重复启动、播放时不开
 ## 发布阻断
 
 Source e8b7a99c70b3f7dc47fb4ffb293ec48c5021f788 已 push，PR131 已创建。后续 gh 查询/合并连续 EOF，Git fetch TLS EOF，用户浏览器打开 PR 也返回 ERR_CONNECTION_CLOSED；不能确认合并，因此没有构建或更新部署清单。线上仍是 97d60a2 的角色授权版本，未部署本批语音模式。连接恢复后先确认 PR131 的实际状态，再按 Registry-first 发布，不重跑已通过的模型测试。
+
+## 连接恢复与候选镜像
+
+2026-09-12 11:36 网络恢复，重新获取部署规则 c948cd2；PR131 已合并，source SHA 为 6ce2a64cd4bce9e10bc6eed75fa122669339c058。复用已通过构建的相同前端源码产物，Registry 读取 digest 为 sha256:b15275cf82a746a7842bd7cb5bedaa5df97d09263d68506a872963fffae0a664。仅替换 frontend 镜像，后端与其他八个服务保持不变，无数据库迁移，无存储协议变化。Coolify 自动部署关闭、无待保存配置、无运行中部署；真实环境变量预检 PASS。部署及线上入口检查随后记录；此处不代表真实麦克风验收完成。
