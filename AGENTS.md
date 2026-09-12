@@ -13,6 +13,8 @@
 
 ### 业务与语音收尾状态（2026-09-11）
 
+2026-09-12 部分结果提示已发布：后端 source `8ec60f3`，manifest `4b1e859`，部署 `voicefixcba963049bfc5989`；前端沿用 `28dcfbd`。辅助查询与修改失败分别说明；文件交付失败时仅根据明确 completed 回执保留业务成功事实。52 项聚焦测试和 Ruff 通过，9 服务健康，线上 root 会话及核实列表接口 200。此批没有新增完整跨轮自动恢复；不能承诺仅凭提示即可防止任意新操作重复。历史 401 的原始请求证据缺失，当前容器日志不能追溯该事件，仍保留待查。详见 `docs/handoff/2026-09-12_partial-outcome-release.md`。
+
 最新业务可靠性发布：2026-09-12 应用管理“调用记录”已上线结果未知写入的证据核实入口，source `28dcfbd`，manifest `a8cdf4c`，Coolify 部署 `voicefix81b444abfc151da9`。仅失败且结果未知可核实；执行中拒绝覆盖；结论、证据和管理员写入审计。人工核实已执行保留重复写入屏障，不生成虚假业务回执或 Artifact；未执行必须使用核实之后的新确认卡片。9 个服务健康，线上 root 只读验证入口可见且列表接口 200、页面无 JavaScript 错误。候选环境的真实 PostgreSQL 并发/审计和 root 提交、刷新、重复拦截验收通过，测试数据已清理。多目标部分成功自动恢复及历史运行 401 仍未完成，不得扩大本次结论。详见 `docs/handoff/2026-09-12_business-reconciliation.md`。
 
 最新发布（优先于下面历史记录）：2026-09-12 分句语音已部署，source `1999b1b`，manifest `0d8ec7a`，部署 `voicefixdfe04359ea34e489`。9 服务健康，backend/三个共享 worker 与 frontend 均对应该 source。staging 来源候选前端真实子系统导航验证共享 Task、本轮可见、自由滚动和语音不中断；上线后真实页面/主脑/TTS 的 6 片段播放与继续监听通过（仅输入录音/ASR 为合成测试），root 登录通过。测试对话已清理。长回复语义摘要及业务可靠性剩余项仍未完成；详见 `docs/handoff/2026-09-12_voice-stream-release.md`。
