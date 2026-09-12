@@ -1,5 +1,11 @@
 # Active tasks
 
+## PLATFORM-ACTION-BINDING-RETENTION-20260912 (@codex)
+
+- [ ] 已结束请求保留加密摘要以校验请求身份，不保留完整业务参数。
+- [ ] 验证成功、取消、过期、明确失败及未知状态边界；不冒充跨轮新调用去重完成。
+- [ ] 在 AGENTS.md 开头汇总剩余任务，交付时提供可点击链接。
+
 
 ## PLATFORM-VOICE-UX-20260912 (@codex)
 
