@@ -1,5 +1,9 @@
 # Active tasks
 
+## BUSINESS-COMPLETION-EVIDENCE-20260913 (@codex)
+
+- [ ] 业务修改只认可明确 completed 回执，未知或遗漏状态不得记作成功。
+
 
 
 
