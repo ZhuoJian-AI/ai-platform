@@ -40,7 +40,7 @@ def content_version(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
 
-def spoken_text(content: str) -> str:
+def spoken_text(content: str, *, excerpt: bool = True) -> str:
     """Extract a bounded spoken excerpt, never reasoning, code, tables or URLs."""
     text = re.sub(r"<(think|thinking|analysis|reasoning)\b[^>]*>.*?(?:</\1\s*>|$)", "", content,
                   flags=re.I | re.S)
@@ -52,7 +52,7 @@ def spoken_text(content: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         raise HTTPException(422, "该回复没有适合朗读的正文，请在聊天中查看详情")
-    if len(text) > 600:
+    if excerpt and len(text) > 600:
         excerpt = text[:600]
         boundary = max(excerpt.rfind(mark) for mark in "。！？.!?")
         text = excerpt[:boundary + 1] if boundary >= 100 else excerpt
@@ -102,6 +102,15 @@ async def create(db, cu, data: MessageSpeechCreate):
         if data.segment_index >= len(segments):
             raise HTTPException(422, "朗读分句不存在")
         text = segments[data.segment_index].text
+    binding = {"task_id": str(data.task_id), "message_id": str(data.message_id),
+               "content_version": content_version(message.content)}
+    if data.segment_index is not None:
+        binding["segment_index"] = data.segment_index
+    return await create_bound_speech(db, cu, text, binding)
+
+
+async def create_bound_speech(db, cu, text: str, binding: dict):
+    """Internal only: callers establish ownership and trusted text before calling."""
     voices = await audio.list_visible_voices(db, cu)
     voice = next((item for item in voices if item.voice_type == "builtin"), None)
     if voice is None:
@@ -111,10 +120,7 @@ async def create(db, cu, data: MessageSpeechCreate):
     )
     if deployment is None:
         raise HTTPException(409, "暂无可用的语音朗读模型，请管理员检查部署")
-    binding = {"task_id": str(data.task_id), "message_id": str(data.message_id),
-               "content_version": content_version(message.content), "voice_version": voice_version(voice)}
-    if data.segment_index is not None:
-        binding["segment_index"] = data.segment_index
+    binding = {**binding, "voice_version": voice_version(voice)}
     cache_key = content_version(json.dumps(binding, sort_keys=True))
     existing = (await db.execute(select(MultimodalJob).where(
         MultimodalJob.organization_id == cu.organization_id, MultimodalJob.user_id == UUID(cu.id),
@@ -145,9 +151,16 @@ async def authorize(db, cu, job):
     audio.require_permission(cu, "multimodal.speech.use")
     if expired(job):
         raise HTTPException(410, "临时朗读已过期，请重新点击朗读")
-    message = await owned_message(db, cu, UUID(job.params["task_id"]), UUID(job.params["message_id"]))
-    if content_version(message.content) != job.params["content_version"]:
-        raise HTTPException(409, "回复内容已变化，请朗读最新回复")
+    if "run_id" in job.params:
+        from app.services.run_speech_service import owned_segment
+        segment = await owned_segment(db, cu, UUID(job.params["task_id"]),
+                                      job.params["run_id"], job.params["segment_index"])
+        if content_version(segment["text"]) != job.params["content_version"]:
+            raise HTTPException(409, "本轮语音已失效，请查看最新回复")
+    else:
+        message = await owned_message(db, cu, UUID(job.params["task_id"]), UUID(job.params["message_id"]))
+        if content_version(message.content) != job.params["content_version"]:
+            raise HTTPException(409, "回复内容已变化，请朗读最新回复")
     voice = await audio.get_visible_voice(db, cu, job.voice_profile_id)
     await db.refresh(voice)
     if voice.voice_type != "builtin" or voice_version(voice) != job.params["voice_version"]:

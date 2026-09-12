@@ -14,7 +14,7 @@ export function VoiceConversationProvider({ scopeKey, adoptedTask, enabled, subm
   scopeKey: string; adoptedTask: RefObject<string | null>; enabled: boolean; submit: VoiceAdapter['submit']; children: ReactNode;
 }) {
   const latest = useRef(submit); latest.current = submit;
-  const [controller] = useState(() => new VoiceConversation(browserVoiceAdapter((text, signal) => latest.current(text, signal))));
+  const [controller] = useState(() => new VoiceConversation(browserVoiceAdapter((text, signal, hooks) => latest.current(text, signal, hooks))));
   const previousScope = useRef(scopeKey);
   useEffect(() => {
     if (previousScope.current !== scopeKey) {

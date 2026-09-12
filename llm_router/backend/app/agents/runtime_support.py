@@ -78,21 +78,27 @@ def general_context(db: Any, request: Any, user: CurrentUser, task: Any) -> dict
 
 async def persist_run_events(
     run_id: int | None, task_id: str, staged: list[dict], final_evt: str | None,
-) -> None:
+) -> bool:
     if run_id is None or (not staged and final_evt is None):
-        return
+        return True
     try:
         async with async_session_factory() as db:
+            existing = set((await db.execute(select(AgentRunEvent.seq).where(
+                AgentRunEvent.run_id == run_id, AgentRunEvent.task_id == task_id,
+            ))).scalars())
             for index, payload in enumerate(staged, start=1):
-                db.add(AgentRunEvent(run_id=run_id, task_id=task_id, seq=index, payload=payload))
-            if final_evt is not None:
+                if index not in existing:
+                    db.add(AgentRunEvent(run_id=run_id, task_id=task_id, seq=index, payload=payload))
+            if final_evt is not None and len(staged) + 1 not in existing:
                 db.add(AgentRunEvent(
                     run_id=run_id, task_id=task_id, seq=len(staged) + 1,
                     payload=json.loads(final_evt),
                 ))
             await db.commit()
+            return True
     except Exception:  # noqa: BLE001
         logger.warning("assistant_event_persist_failed", task_id=task_id, exc_info=True)
+        return False
 
 
 async def finalize_bg_error(

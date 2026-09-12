@@ -952,7 +952,7 @@ export default function EnterpriseApplicationView({
     return () => window.removeEventListener('message', onMessage);
   }, [activeFrameIndex, application, launch]);
 
-  const submit = async (voiceText?: unknown) => {
+  const submit = async (voiceText?: unknown, onVoiceEvent?: (event: Record<string, unknown>) => void) => {
     const value = typeof voiceText === 'string' ? voiceText.trim() : prompt.trim();
     if (!value || assistantRunning) return;
     const fallbackModuleKey = launch?.module_key ?? moduleKey ?? undefined;
@@ -1004,6 +1004,7 @@ export default function EnterpriseApplicationView({
         page_key: fallbackPageKey,
         ...bridgeContext,
       }, (event) => {
+        onVoiceEvent?.(event);
         if (event.type === 'ui_intent' && event.intent && typeof event.intent === 'object') {
           onNavigate(event.intent as Record<string, unknown>);
         }
@@ -1095,10 +1096,10 @@ export default function EnterpriseApplicationView({
   const voiceSubmitRef = useRef(submit);
   voiceSubmitRef.current = submit;
   useEffect(() => {
-    registerVoiceSubmit?.(async (text, signal) => {
+    registerVoiceSubmit?.(async (text, signal, hooks) => {
       signal.throwIfAborted();
       setAssistantOpen(true);
-      const result = await voiceSubmitRef.current(text);
+      const result = await voiceSubmitRef.current(text, hooks?.onEvent);
       signal.throwIfAborted();
       if (!result || result.status === 'failed' || result.status === 'cancelled') throw Error('业务操作未完成，请查看当前对话');
       return { taskId: result.taskId, messageId: result.assistantMessageId ?? undefined, needsConfirmation: result.status === 'interrupted' };

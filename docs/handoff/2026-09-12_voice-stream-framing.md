@@ -29,3 +29,14 @@
 Python 3.12 环境：test_native_text_stream_unit.py 3 项通过（首段早于供应商结束、关闭时取消、失败不重发）；`pytest --noconftest tests/test_native_assistant_core.py -q` 40 项通过。这批均为无数据库/真实供应商调用的隔离测试；Ruff 通过。
 
 尚需接 Run 绑定的可信可播报事件与 TTS 通道，不能把 text_delta 直接视作不可撤回的语音。当前新增链路仍未上线，不声称已实现真实首声早于全文完成。
+
+## Run 级实时链路已接入候选代码（未部署，取代上述未接通状态）
+
+- runner 在现有业务回执/分析证据允许时发布完整公开句子，文件交付等待最终提交。富文本不在未完成时播出；正文撤回会使语音片段失效。最终残句在 _finish 数据库提交后发布。长结果暂时停止于有限完整句子并提示看文字，语义摘要仍待完善。
+- 新增 run-speech 接口以 Task、Run、segmentIndex、内容摘要定位服务端正文，浏览器不能提供任意文字、模型或供应商。每次检查 Task/Run 同租户同用户、有效角色，取消/错误运行拒绝旧音频；沿用原标准 TTS、计费及临时 OSS 生命周期。
+- 语音 worker 是独立进程，不能读取 backend 内存注册表。因此可播报事件先持久化到 AgentRunEvent 再推送，既有 persist_run_events 按已有 seq 跳过已写事件；worker 从持久事件核验，backend 可读取 live handle。正文撤回及时持久化 reset。没有新增表或服务。
+- 总入口、新 Task、页面侧栏均在各自本次 submit 回调内消费语音事件，不使用全局 DOM 事件或共享其他 Task 的监听器。LiveSpeechQueue 固定一个 Run，按片段序号去重，最多两句预取、单音轨播放；退出取消，迟到建 job 结果也取消。语音失败不重发业务。已经分句播放时禁止结尾再朗读全文。
+
+验证：`node scripts/test-live-voice-stream.mjs` 用真实 adapter 代码加模拟 API/Audio 证明主脑 submit 尚未结束时首句播放、重放去重、顺序与一次业务提交；这是合成测试，不是 MiMo 实测。typecheck、test-speech-playback-queue.mjs、test-voice-conversation.mjs 通过。Python 3.12 环境 64 项聚焦测试通过（native、Run speech、message speech）；Ruff 通过。跨 worker 的持久读取目前为隔离测试，尚需真实数据库/worker 验收。
+
+发布门禁仍未满足：真实 MiMo 首声时间、真实浏览器两轮播放/取消/跨页、数据库增量持久化及 worker 联调尚未验证。本候选禁止只发布前端或只更新 backend 而漏更新 multimodal-worker。线上继续保持 source 1b646f4 / manifest 3933010。未知写入管理核实、历史 401 和 chouchou 等既有事项不因本批变化视为完成。

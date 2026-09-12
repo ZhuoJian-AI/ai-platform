@@ -17,6 +17,7 @@ from app.agents.core import approval_registry
 from app.agents.core import native as native_core
 from app.agents.core.analysis_evidence import FileAnalysisEvidence
 from app.agents.core.approval_registry import AssistantRunContext
+from app.agents.core.speech_progress import SpeechProgress
 from app.agents.graph import run_registry
 from app.agents.graph.context import bind_runtime
 from app.agents.graph.nodes import (
@@ -341,8 +342,19 @@ def _image_inputs(messages: list[dict]) -> list[dict[str, str]]:
 
 
 def _publish(handle: run_registry.RunHandle | None, staged: list[dict], event: dict) -> None:
+    if event.get("type") == "text_retract":
+        _publish(handle, staged, {"type": "speech_reset"})
     staged.append(event)
     if handle is not None:
+        run_registry.publish(handle, json.dumps(event, ensure_ascii=False))
+
+
+async def _publish_durable_speech(state, handle, staged, event):
+    if handle is None:
+        _publish(handle, staged, event)
+        return
+    staged.append(event)
+    if await persist_run_events(int(state["run_id"]), str(state["task_id"]), staged, None):
         run_registry.publish(handle, json.dumps(event, ensure_ascii=False))
 
 
@@ -616,12 +628,35 @@ async def _consume_native(
         deps=deps,
         run_context=approval_registry.get(run_token),
     )
+    speech_progress = SpeechProgress()
+
+    async def publish_speech(final=False):
+        if not state.get("task_id") or not state.get("run_id"):
+            return
+        mutation_needed = _requests_business_mutation(state)
+        query_needed = _requests_current_business_data(state) and not mutation_needed
+        ready = (
+            (not mutation_needed or successful_enterprise_mutations > 0)
+            and (not query_needed or successful_enterprise_queries > 0
+                 or file_analysis.verified or successful_specialist_analyses > 0)
+            and (not file_analysis.required or file_analysis.verified)
+            # Format/input-bound artifact checks can still reject a nominal file.
+            # File delivery speech waits for those final guards, not any artifact.
+            and not request["completion_policy"].get("require_file_output")
+            and (successful_tools > 0 or not contains_unverified_tool_success_claim(text))
+        )
+        for sentence in speech_progress.update(text, ready=ready or final, final=final):
+            await _publish_durable_speech(state, handle, staged, {
+                **sentence, "taskId": str(state["task_id"]), "runId": int(state["run_id"])})
+
+    speech_cursor = len(staged)
     async for event in event_source:
         kind = event.get("type")
         if kind == "text_delta":
             delta = str(event.get("delta") or "")
             text += delta
             _publish(handle, staged, {"type": "text", "delta": delta})
+            await publish_speech()
         elif kind in {"phase", "tool_call"}:
             _publish(handle, staged, event)
             if kind == "tool_call":
@@ -744,6 +779,10 @@ async def _consume_native(
         elif kind == "done":
             text = str(event.get("text") or text)
 
+        if handle is not None and any(item.get("type") == "speech_reset" for item in staged[speech_cursor:]):
+            await persist_run_events(int(state["run_id"]), str(state["task_id"]), staged, None)
+        speech_cursor = len(staged)
+
     _publish(handle, staged, {"type": "business_state", "status": "verifying", "intent": intent.get("intent")})
     mutation_required = _requests_business_mutation(state)
     mutation_unverified = mutation_required and successful_enterprise_mutations == 0
@@ -830,6 +869,9 @@ async def _consume_native(
             text = "模型未返回最终回答，请重试。"
         _publish(handle, staged, {"type": "text", "delta": text})
     state["assistant_final"] = text
+    state["_speech_prefix"] = speech_progress.prefix
+    state["_speech_segment_next"] = speech_progress.index
+    state["_speech_finished"] = speech_progress.finished
     state["usage"] = usage
     state.setdefault("messages", []).append({"role": "assistant", "content": state["assistant_final"]})
     state.setdefault("steps", []).append({"step": "llm_final"})
@@ -871,13 +913,25 @@ async def _admitted_run(
         await _consume_native(state, prepared, run_token, handle, staged, deps)
 
 
-async def _finish(state: dict, deps: dict, writer: Any = lambda _payload: None) -> None:
+async def _finish(state: dict, deps: dict, writer: Any = lambda _payload: None, speech_writer=None) -> None:
     """Persist the final response before the caller emits the terminal ``done`` event."""
     with bind_runtime(deps, writer):
         await save_memory(state)
         _merge(state, await extract_memory(state))
         await write_run_log(state)
         await deps["db"].commit()
+    if state.get("task_id") and state.get("run_id"):
+        progress = SpeechProgress()
+        progress.prefix = state.get("_speech_prefix", "")
+        progress.index = state.get("_speech_segment_next", 0)
+        progress.finished = state.get("_speech_finished", False)
+        for sentence in progress.update(state.get("assistant_final", ""), ready=True, final=True):
+            event = {**sentence, "taskId": str(state["task_id"]), "runId": int(state["run_id"]),
+                     "messageId": state.get("assistant_message_id")}
+            if speech_writer is not None:
+                await speech_writer(event)
+            else:
+                writer(json.dumps(event, ensure_ascii=False))
 
 
 def _publish_failure_reply(
@@ -1110,7 +1164,8 @@ async def _run_bg(handle: run_registry.RunHandle, *, state: dict, user: CurrentU
             handle.run_id = int(state["run_id"])
             try:
                 await _admitted_run(state, deps, prepared, run_token, handle, staged, str(user.id))
-                await _finish(state, deps, writer)
+                await _finish(state, deps, writer, speech_writer=lambda event:
+                              _publish_durable_speech(state, handle, staged, event))
                 _publish(handle, staged, {"type": "done", "usage": state.get("usage") or {}})
             except asyncio.CancelledError:
                 # 用户 Stop / 进程关停：不走「失败回复」，交给外层 CancelledError 分支
