@@ -59,7 +59,7 @@ try {
   console.log(JSON.stringify({...result,allTracksReleased:true}));
 } catch(error) {
   console.log(JSON.stringify(await page.evaluate(()=>({url:location.href,status:[...document.querySelectorAll('[role="status"],[role="alert"]')].map(e=>e.textContent),tasks:window.__createdTasks,tracks:window.__voiceTracks?.map(t=>t.readyState)}))));
-  console.log(JSON.stringify(await page.evaluate(()=>({applications:window.__voiceApplications}))),null,2);
+  console.log(JSON.stringify(await page.evaluate(()=>({applications:window.__voiceApplications}))));
   throw error;
 } finally {
   if(taskId) await page.evaluate(async id=>{const {terminal}=await import('/src/api/client.ts');await terminal.cancelTask(id).catch(()=>{});await terminal.deleteTask(id);},taskId).catch(()=>{});

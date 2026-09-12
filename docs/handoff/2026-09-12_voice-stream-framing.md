@@ -76,3 +76,9 @@ test-live-voice-stream.mjs 增加浏览器 NotAllowedError 注入，通过：提
 新增 e2e-voice-navigation.mjs：候选浏览器真实 zhangsan 登录，合成麦克风与 ASR 输入，真实 Task/主脑，静音避免额外付费 TTS。初次录音需等待录音器首次数据就绪再结束本句，不能只等待“正在听”文字。首句创建唯一 Task，模型结束后恢复监听，旧音轨 ended、新音轨 live。测试任务 1076689a-6a1d-40a5-be33-f97ffe80f534 已取消并删除。
 
 跨页未通过：候选 terminal.applications 返回空列表，主脑查询后回答未找到目标看板，未产生导航事件。该候选由旧快照建立；尚未证明是快照权限配置差异还是产品问题，不得扩大授权或据此修改生产鉴权。下一步先使隔离候选具有经过核对的当前应用/角色基线，再完成真实子系统导航与共享状态验收。脚本 E2E_PREFLIGHT_ONLY=1 可只读核对可见应用，避免无意义重复模型调用。此项不冒充真实跨页通过；线上保持原版本。
+
+后续已只读导出当前 staging 数据到新候选库 ai_infra_voice_current_3ee1e57，旧库保留。仅候选 API 使用对应数据库与匹配的加密密钥，未启动 worker，不执行克隆的历史后台作业。当前应用列表恢复三个真实应用，未修改任何真实角色。
+
+真实主脑任务 67120081-186a-4acc-9def-57bbd229e28f 已导航至 application=9689828b-9d07-4a93-8b52-0eefad8be885、module=progress_dashboard、page=progress_dashboard.main，conversation 参数仍为原 Task；语音持续 listening，旧音轨 ended。该 E2E Task 结束已取消并删除。真实子系统 iframe 在本地候选来源未建立连接，界面显示“业务应用尚未建立连接”，因此 Bridge 页面上下文、本轮滚动定位完整验收仍待验证，不能宣称全闭环通过。没有修改外部系统嵌入配置。
+
+额外发现：候选使用不匹配密钥时模型调用失败；该环境配置已纠正。错误路径同时记录 ai_quota_events 的 varchar(24) 超长，代码可能写入 disconnected_usage_unknown（26 字符），属于独立可靠性待修项；本轮未改变生产 Schema、额度或鉴权语义。当前仍未合并和部署。
