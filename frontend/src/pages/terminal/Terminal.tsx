@@ -2969,9 +2969,9 @@ function TaskInputBox(props: {
             </button>
             {recordingState === 'idle' ? (
               <button type="button" style={chipBtnStyle}
-                title={resources?.audio_capabilities?.speech_to_text?.messageZh || '录音前检查语音转文字权限'}
+                title={resources?.audio_capabilities?.speech_to_text?.messageZh || '说完转成文字，检查后发送'}
                 onClick={() => void startRecording()}>
-                <AudioOutlined /> 录音
+                <AudioOutlined /> 语音输入
               </button>
             ) : recordingState === 'processing' ? (
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>

@@ -5,8 +5,8 @@ import { browserVoiceAdapter } from './browserVoiceAdapter';
 import { VoiceConversation, type VoiceAdapter } from './voiceConversation';
 import { STOP_RECORDING, STOP_SPEECH } from './voiceChannel';
 
-const labels = { off: '语音对话', listening: '正在听 · 麦克风开启', transcribing: '正在转写', processing: '助手处理中 / 如有确认请点击卡片',
-  speaking: '正在播报', paused: '已暂停', confirmation: '等待点击确认，麦克风已关闭', error: '语音已暂停' };
+const labels = { off: '语音模式', listening: '正在听，请说话', transcribing: '正在识别', processing: '正在回答',
+  speaking: '正在说话', paused: '已暂停', confirmation: '请点击确认卡片', error: '已暂停' };
 
 const VoiceContext = createContext<{ controller: VoiceConversation; enabled: boolean } | null>(null);
 
@@ -44,22 +44,19 @@ export default function VoiceConversationPanel() {
 function VoiceControls({ controller, enabled }: { controller: VoiceConversation; enabled: boolean }) {
   const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const active = state.phase !== 'off';
-  return <Popover trigger="click" placement="topRight" content={<div style={{ maxWidth: 320 }}>
-    <Space wrap>
-      <span role="status">{labels[state.phase]}</span>
-      {['off', 'paused', 'error'].includes(state.phase) && <Button size="small" disabled={!enabled} onClick={controller.start}>
-        {state.phase === 'off' ? '开启语音模式' : '继续语音'}</Button>}
-      {state.phase === 'listening' && <Button size="small" onClick={controller.finishSentence}>结束本句</Button>}
-      {!['off', 'paused'].includes(state.phase) && <Button size="small" onClick={controller.pause}>暂停麦克风 / 停止播放</Button>}
-      {state.phase !== 'off' && <Button size="small" onClick={controller.exit}>退出语音</Button>}
-      <Checkbox checked={state.muted} onChange={e => controller.setMuted(e.target.checked)}>静音回复</Checkbox>
-      {!enabled && <span>当前页面暂不可使用语音</span>}
-      {state.error && <span role="alert">{state.error}</span>}
+  if (!active) return <Button aria-label="语音模式" icon={<AudioOutlined />} disabled={!enabled} onClick={controller.start}>语音模式</Button>;
+  const resumable = ['paused', 'error'].includes(state.phase);
+  return <div style={{ maxWidth: 300 }}>
+    <Space size={4} wrap>
+      <span role="status" style={{ fontSize: 12 }}>{labels[state.phase]}</span>
+      {state.phase !== 'confirmation' && <Button size="small" disabled={!enabled}
+        onClick={resumable ? controller.start : controller.pause}>{resumable ? '继续' : '暂停'}</Button>}
+      <Button size="small" aria-label="退出语音" onClick={controller.exit}>退出</Button>
+      <Popover trigger="click" placement="topRight" content={<Space direction="vertical">
+        <Checkbox checked={state.muted} onChange={e => controller.setMuted(e.target.checked)}>静音回复</Checkbox>
+        {state.phase === 'listening' && <Button size="small" onClick={controller.finishSentence}>结束本句</Button>}
+      </Space>}><Button size="small" type="text" aria-label="语音设置">···</Button></Popover>
     </Space>
-  </div>}>
-    <Button aria-label="语音模式" icon={<AudioOutlined />} type={active ? 'primary' : 'default'} disabled={!enabled}
-      onClick={() => { if (!active) controller.start(); }}>
-      {active ? labels[state.phase] : '语音模式'}
-    </Button>
-  </Popover>;
+    {state.error && <div role="alert" style={{ fontSize: 12, color: '#b42318' }}>{state.error}</div>}
+  </div>;
 }
