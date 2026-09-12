@@ -325,15 +325,27 @@ async def _stream_model_turn(**kwargs):
             await queue.put(("error", exc))
 
     producer = asyncio.create_task(produce(), name="assistant-public-text-relay")
+    pending_read = None
     try:
         while True:
-            kind, payload = await queue.get()
+            pending_read = asyncio.create_task(queue.get())
+            await asyncio.wait((pending_read, producer), return_when=asyncio.FIRST_COMPLETED)
+            if not pending_read.done() and queue.empty() and producer.done():
+                # A provider can cancel itself without publishing an error event.
+                # Propagate that outcome instead of waiting forever for queue data.
+                await producer
+                raise RuntimeError("模型流结束但没有返回结果")
+            kind, payload = await pending_read
+            pending_read = None
             if kind == "error":
                 raise payload
             yield kind, payload
             if kind == "result":
                 return
     finally:
+        if pending_read is not None:
+            pending_read.cancel()
+            await asyncio.gather(pending_read, return_exceptions=True)
         if not producer.done():
             producer.cancel()
         # Always retrieve the producer outcome, including disconnect cancellation.

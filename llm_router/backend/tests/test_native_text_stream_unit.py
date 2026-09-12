@@ -66,6 +66,18 @@ class NativeTextStreamTest(unittest.IsolatedAsyncioTestCase):
                 await anext(stream)
             self.assertEqual(calls, [1])
 
+    async def test_provider_self_cancellation_does_not_hang_consumer(self):
+        async def source(*args, **kwargs):
+            yield "text", "部分正文", None
+            raise asyncio.CancelledError()
+
+        with patch.object(native.model_gateway, "stream_chat", source):
+            stream = native._stream_model_turn(state={"org_id": str(uuid4())}, prepared={},
+                                               deps={"db": None}, messages=[], tools=[])
+            self.assertEqual(await asyncio.wait_for(anext(stream), 1), ("text", "部分正文"))
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(anext(stream), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

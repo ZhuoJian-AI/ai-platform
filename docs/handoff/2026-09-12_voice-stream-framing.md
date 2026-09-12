@@ -40,3 +40,7 @@ Python 3.12 环境：test_native_text_stream_unit.py 3 项通过（首段早于�
 验证：`node scripts/test-live-voice-stream.mjs` 用真实 adapter 代码加模拟 API/Audio 证明主脑 submit 尚未结束时首句播放、重放去重、顺序与一次业务提交；这是合成测试，不是 MiMo 实测。typecheck、test-speech-playback-queue.mjs、test-voice-conversation.mjs 通过。Python 3.12 环境 64 项聚焦测试通过（native、Run speech、message speech）；Ruff 通过。跨 worker 的持久读取目前为隔离测试，尚需真实数据库/worker 验收。
 
 发布门禁仍未满足：真实 MiMo 首声时间、真实浏览器两轮播放/取消/跨页、数据库增量持久化及 worker 联调尚未验证。本候选禁止只发布前端或只更新 backend 而漏更新 multimodal-worker。线上继续保持 source 1b646f4 / manifest 3933010。未知写入管理核实、历史 401 和 chouchou 等既有事项不因本批变化视为完成。
+
+## 后续取消边界修复
+
+模型 provider 自行抛出 CancelledError 时，不会进入普通 Exception 分支，原队列消费者可能一直等不到结束事件。消费者现在同时等待队列及 producer，保留已经排队的正文，再传播取消；退出时收取临时读取任务，避免悬挂。聚焦 `pytest --noconftest tests/test_native_text_stream_unit.py tests/test_native_assistant_core.py -q` 44 项通过，Ruff 通过。仍未部署；上述真实供应商与跨 worker 验收门禁不变。
