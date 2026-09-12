@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { Button, message } from 'antd';
 import { AudioOutlined, LoadingOutlined, StopOutlined } from '@ant-design/icons';
 import { multimodal } from '../../api/client';
+import { claimVoiceChannel, STOP_SPEECH } from './voiceChannel';
 
 // One playback owner across global/page views. No audio or URLs in persistent state.
-const STOP_EVENT = 'zhuojian:stop-message-speech';
+const STOP_EVENT = STOP_SPEECH;
 
 export default function MessageSpeechButton({ taskId, messageId, content, disabled }: {
   taskId: string | null; messageId?: string; content: string; disabled?: boolean;
@@ -37,7 +38,7 @@ export default function MessageSpeechButton({ taskId, messageId, content, disabl
 
   const play = async () => {
     if (!taskId || !messageId || disabled) return;
-    window.dispatchEvent(new Event(STOP_EVENT));
+    claimVoiceChannel();
     const run = ++generation.current;
     setState('loading');
     try {

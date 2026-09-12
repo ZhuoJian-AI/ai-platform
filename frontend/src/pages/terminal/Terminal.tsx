@@ -4,6 +4,9 @@ import {
   type Dispatch, type FormEvent, type KeyboardEvent, type ReactNode, type SetStateAction,
 } from 'react';
 import { applicationConversationRoute, conversationIdFromRoute } from './assistantConversationRoute';
+import { claimVoiceChannel, STOP_RECORDING } from './voiceChannel';
+import VoiceConversationPanel from './VoiceConversationPanel';
+import type { VoiceAdapter } from './voiceConversation';
 import {
   ConfigProvider, Button, Typography, Input, Tag, Drawer, Dropdown, Tabs, Empty, Spin,
   message, Avatar, Popover, Tooltip,
@@ -1009,6 +1012,27 @@ export default function Terminal() {
     if (selectedId) terminal.cancelTask(selectedId).catch(() => { /* 静默 */ });
   };
 
+  const businessVoiceSubmit = useRef<VoiceAdapter['submit'] | null>(null);
+  const registerBusinessVoice = useCallback((handler: VoiceAdapter['submit'] | null) => { businessVoiceSubmit.current = handler; }, []);
+  const voiceSubmit: VoiceAdapter['submit'] = async (text, signal) => {
+    signal.throwIfAborted();
+    if (view === 'application') {
+      if (!businessVoiceSubmit.current) throw Error('页面上下文尚未就绪');
+      return businessVoiceSubmit.current(text, signal);
+    }
+    if (!selectedId || streaming) throw Error('请等待当前任务完成');
+    const before = await terminal.getTask(selectedId);
+    if (['queued', 'running'].includes(before.run_status ?? '')) throw Error('当前任务仍在运行，请稍后继续');
+    const priorIds = new Set(before.messages.map(item => item.id));
+    signal.throwIfAborted();
+    await runStream(selectedId, text, [], taskConfig.application_id, {}, followUpFileRefs);
+    signal.throwIfAborted();
+    const after = await terminal.getTask(selectedId);
+    const reply = [...after.messages].reverse().find(item => item.role === 'assistant' && !priorIds.has(item.id));
+    if (!reply || ['error', 'cancelled', 'timeout', 'busy'].includes(after.run_status ?? '')) throw Error('本轮未完成，请查看对话记录，不会自动重试业务操作');
+    return { taskId: selectedId, messageId: reply.id, needsConfirmation: after.run_status === 'interrupted' };
+  };
+
   const startTask = async () => {
     const readyAttachments = inputAttachments.filter((item) => item.status === 'ready' && item.file_id);
     if ((!input.trim() && !readyAttachments.length && !inputFileRefs.length) || streaming) return;
@@ -1250,6 +1274,8 @@ export default function Terminal() {
       }}
     >
       <div className="terminal-shell" style={{ background: '#f5f5f5', fontFamily: WB_FONT }}>
+        <VoiceConversationPanel scopeKey={`${selectedId}:${view}:${selectedApplicationModuleKey}:${selectedApplicationPageKey}`}
+          enabled={Boolean(selectedId) && (view === 'assistant' || view === 'application')} submit={voiceSubmit} />
         {/* 主内容区 */}
         <div className="terminal-shell__body" style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
           {!applicationShellActive && (
@@ -1495,6 +1521,7 @@ export default function Terminal() {
               <AgentManagerView />
             ) : view === 'application' && selectedApplication ? (
               <EnterpriseApplicationView
+                registerVoiceSubmit={registerBusinessVoice}
                 application={selectedApplication}
                 moduleKey={selectedApplicationModuleKey}
                 pageKey={selectedApplicationPageKey}
@@ -2599,6 +2626,7 @@ function TaskInputBox(props: {
       message.error('当前浏览器不支持录音');
       return;
     }
+    claimVoiceChannel();
     const generation = ++recordingGenerationRef.current;
     recordingPendingRef.current = true;
     try {
@@ -2677,6 +2705,15 @@ function TaskInputBox(props: {
   }, []);
 
   useEffect(() => () => cancelRecording(), [attachmentScopeKey, effectiveWorkspaceId, cancelRecording]);
+  useEffect(() => {
+    window.addEventListener(STOP_RECORDING, cancelRecording);
+    window.addEventListener('pagehide', cancelRecording);
+    return () => {
+      window.removeEventListener(STOP_RECORDING, cancelRecording);
+      window.removeEventListener('pagehide', cancelRecording);
+      cancelRecording();
+    };
+  }, [cancelRecording]);
 
   const retryAttachment = useCallback(async (item: ComposerAttachment) => {
     if (item.file.size > MAX_ATTACHMENT_BYTES) {
