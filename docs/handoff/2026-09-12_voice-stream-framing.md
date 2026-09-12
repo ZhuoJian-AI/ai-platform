@@ -44,3 +44,9 @@ Python 3.12 环境：test_native_text_stream_unit.py 3 项通过（首段早于�
 ## 后续取消边界修复
 
 模型 provider 自行抛出 CancelledError 时，不会进入普通 Exception 分支，原队列消费者可能一直等不到结束事件。消费者现在同时等待队列及 producer，保留已经排队的正文，再传播取消；退出时收取临时读取任务，避免悬挂。聚焦 `pytest --noconftest tests/test_native_text_stream_unit.py tests/test_native_assistant_core.py -q` 44 项通过，Ruff 通过。仍未部署；上述真实供应商与跨 worker 验收门禁不变。
+
+## 真实 PostgreSQL 持久化验收
+
+本机 Docker 未启动，既有 PostgreSQL 服务停止；使用已安装程序建立仅监听 127.0.0.1:5459 的临时 voice_e2e 实例，未启动或修改既有数据库服务。新增 opt-in test_run_speech_postgres.py，强制检查本机端口与测试用户名，在随机独立 schema 创建 ORM 表，finally 删除该测试 schema。通过不同数据库连接调用实际 persist_run_events 与 owned_segment，并禁用内存 registry，验证增量落库可读、reset 后旧句 409、新句可读、重复 final 保存后 seq 仍为 [1,2,3,4]。
+
+执行设置 VOICE_TEST_DATABASE_URL 后 `pytest --noconftest tests/test_run_speech_postgres.py -q`：1 passed（5.31s），Ruff 通过。测试 schema 已清理，临时 PostgreSQL 已停止。该证据为真实数据库/独立连接，不冒充实际 multimodal-worker 模型执行或浏览器播放。真实 MiMo 首声时序与浏览器联调仍待完成，未部署。
