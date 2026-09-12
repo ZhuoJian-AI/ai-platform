@@ -457,4 +457,3 @@ docker compose -f docker-compose.coolify.yml config
 - 数据库迁移链、身份认证、角色权限和 CI 属于 `@ZhuoJian-AI/developers` 管理的单航道区域，同一时刻只能由一个任务修改。
 - 保留无关用户修改，禁止 stash、丢弃、reset 或 clean 其他贡献者的工作。
 - 交接必须记录范围、行为变化、准确验证命令与结果、剩余工作、风险和决策。
-
