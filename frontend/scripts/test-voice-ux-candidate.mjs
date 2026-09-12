@@ -8,7 +8,7 @@ const browser = await chromium.launch({ headless: true, channel: 'chrome', args:
 try {
   const page = await browser.newPage();
   const errors = []; page.on('pageerror', e => errors.push(e.message));
-  await page.route(`${base}/**`, async route => {
+  if (process.env.E2E_ONLINE !== '1') await page.route(`${base}/**`, async route => {
     const pathname = new URL(route.request().url()).pathname;
     const local = pathname.startsWith('/assets/') ? pathname.slice(1) : pathname.startsWith('/alphabet/terminal') ? 'index.html' : null;
     if (!local) return route.continue();
