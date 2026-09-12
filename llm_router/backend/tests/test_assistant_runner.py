@@ -332,7 +332,7 @@ async def test_transport_success_is_not_business_completion(monkeypatch, kind, s
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [
     "failed", "error", "pending", "retryable_error", "needs_input", "needs_confirmation",
-    "queued", "running", "cancelled",
+    "queued", "running", "cancelled", "executing", "expired", "rejected", "unknown", "", "success",
 ])
 @pytest.mark.parametrize("recovers", [False, True])
 async def test_write_requires_completed_receipt_and_allows_recovery(monkeypatch, status, recovers):
