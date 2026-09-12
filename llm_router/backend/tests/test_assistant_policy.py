@@ -99,8 +99,21 @@ def test_artifact_failure_preserves_a_completed_business_mutation():
     completed = nodes._apply_artifact_completion_guard(state, [])
 
     assert completed is False
-    assert state["assistant_final"].startswith("业务操作已经成功，但文件生成未完成")
-    assert "不会重复执行已经成功的业务操作" in state["assistant_final"]
+    assert state["assistant_final"].startswith("本轮已有业务操作返回成功回执，但文件生成未完成")
+    assert "请勿重复提交已成功的业务修改" in state["assistant_final"]
+
+
+@pytest.mark.parametrize("status", ["", "pending", "needs_confirmation", "unknown", "failed", "rejected"])
+def test_artifact_failure_does_not_invent_a_successful_mutation(status):
+    state = {
+        "request": "修改负责人并导出 Excel",
+        "business_tool_executions": [{
+            "kind": "enterprise_action", "operation": "update", "ok": True,
+            "resultStatus": status,
+        }],
+    }
+    assert nodes._apply_artifact_completion_guard(state, []) is False
+    assert "成功回执" not in state["assistant_final"]
 
 
 def test_completion_policy_adds_only_trusted_composite_export_tools():

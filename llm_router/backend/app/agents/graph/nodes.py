@@ -217,14 +217,17 @@ def _apply_artifact_completion_guard(state: AgentState, artifacts: list[dict[str
         and item.get("kind") == "enterprise_action"
         and item.get("operation") in {"create", "update", "delete", "approve"}
         and item.get("ok") is True
-        and item.get("resultStatus") not in {"pending", "needs_confirmation", "failed", "retryable_error"}
+        and item.get("resultStatus") == "completed"
         for item in state.get("business_tool_executions") or []
     )
-    prefix = "业务操作已经成功，但" if completed_business_mutation else ""
+    prefix = "本轮已有业务操作返回成功回执，但" if completed_business_mutation else ""
     state["assistant_final"] = (
         f"{prefix}文件生成未完成：本轮没有得到平台工作空间确认且符合要求格式的有效文件，"
         "因此不会把文字、服务器路径或下载地址冒充为已交付文件。"
-        + ("重新生成文件时不会重复执行已经成功的业务操作。" if completed_business_mutation else "请稍后重试。")
+        + (
+            "后续只需继续处理未完成的文件，请勿重复提交已成功的业务修改。"
+            if completed_business_mutation else "请稍后重试。"
+        )
     )
     state["error"] = "assistant artifact delivery failed"
     return False
