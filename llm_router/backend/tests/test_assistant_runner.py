@@ -124,13 +124,18 @@ async def test_successful_auxiliary_query_does_not_hide_a_failed_mutation(monkey
         {"type": "tool_result", "id": "query", "name": "find_order", "ok": True,
          "content": json.dumps({"status": "completed", "data": {"id": "order-1"}})},
         {"type": "tool_result", "id": "write", "name": "update_owner", "ok": False,
-         "content": json.dumps({"status": "failed", "error": {"messageZh": "写入失败"}})},
+         "content": json.dumps({"status": "failed", "error": {"messageZh": "写入失败"},
+                                "result": {"executionOutcome": "unknown"},
+                                "provenance": {"requestId": "original-write"}})},
         {"type": "done", "text": "查询和修改都已完成。"},
     ], state)
 
     assert state["error"] == "Requested business mutation was not completed"
     assert state["assistant_final"].startswith("辅助查询已经成功，但本轮未获得业务操作的成功回执")
     assert "查询和修改都已完成" not in state["assistant_final"]
+    execution = state["business_tool_executions"][-1]
+    assert execution["requestId"] == "original-write"
+    assert execution["executionOutcome"] == "unknown"
 
 
 @pytest.mark.asyncio

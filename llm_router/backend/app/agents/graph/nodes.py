@@ -49,6 +49,7 @@ from app.services import (
     workspace_service,
 )
 from app.services import model_gateway as llm_client
+from app.services.assistant_recovery_context import historical_tool_references
 from app.services.assistant_tool_catalog import entry_tool_definitions
 from app.services.assistant_tool_protocol import tool_result_json
 from app.services.file_capability_registry import (
@@ -556,16 +557,7 @@ async def _load_memory_general(state: AgentState, deps, db, select) -> dict:
                 for item in metadata.get("artifacts") or []
                 if isinstance(item, dict) and (item.get("file_id") or item.get("fileId"))
             ][:20]
-            tool_refs = [
-                {
-                    "toolCallId": str(item.get("toolCallId") or ""),
-                    "name": str(item.get("name") or "")[:160],
-                    "operation": str(item.get("operation") or "")[:40],
-                    "ok": bool(item.get("ok")),
-                }
-                for item in metadata.get("tool_executions") or []
-                if isinstance(item, dict)
-            ][:20]
+            tool_refs = historical_tool_references(metadata.get("tool_executions"))
             business_context = {
                 "pageKey": historical_page.get("page_key"),
                 "pageName": historical_page.get("page_name") or historical_page.get("module_name"),

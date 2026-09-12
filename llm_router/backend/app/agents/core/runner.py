@@ -758,6 +758,16 @@ async def _consume_native(
                 "operation": published_event.get("business_operation") or _enterprise_operation(entry, name),
                 "ok": ok,
                 "resultStatus": published_event.get("business_result_status") or "",
+                "requestId": (
+                    str((tool_envelope.get("provenance") or {}).get("requestId") or "")[:160]
+                    if isinstance(tool_envelope, dict) and isinstance(tool_envelope.get("provenance"), dict)
+                    and entry_kind == "enterprise_action" else ""
+                ),
+                "executionOutcome": (
+                    str((tool_envelope.get("result") or {}).get("executionOutcome") or "")[:40]
+                    if isinstance(tool_envelope, dict) and isinstance(tool_envelope.get("result"), dict)
+                    and entry_kind == "enterprise_action" else ""
+                ),
             })
             if not ok:
                 failed_tools.append((name, str(event.get("content") or "工具未返回错误详情")))
