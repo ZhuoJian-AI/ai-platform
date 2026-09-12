@@ -815,7 +815,8 @@ async def _consume_native(
             )
         elif enterprise_mutation_calls:
             detail = " ".join((failed_enterprise_mutations[-1] if failed_enterprise_mutations else "").split())[:300]
-            text = "本轮未获得业务操作的成功回执，暂时无法确认修改结果。请先核实执行状态，避免重复提交。"
+            auxiliary = "辅助查询已经成功，但" if successful_enterprise_queries else ""
+            text = f"{auxiliary}本轮未获得业务操作的成功回执，暂时无法确认修改结果。请先核实执行状态，避免重复提交。"
             if detail:
                 text += f" 原因：{detail}"
             state["error"] = "Requested business mutation was not completed"

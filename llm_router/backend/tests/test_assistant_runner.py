@@ -107,6 +107,33 @@ async def test_failed_tool_without_final_text_is_reported_as_the_tool_failure(mo
 
 
 @pytest.mark.asyncio
+async def test_successful_auxiliary_query_does_not_hide_a_failed_mutation(monkeypatch):
+    state = {
+        "run_id": 2,
+        "request": "先查询订单再修改负责人",
+        "application_id": "app-1",
+        "messages": [],
+        "steps": [],
+        "business_turn_intent": {"intent": "mutate", "operation": "update"},
+        "_assistant_tool_registry": {
+            "find_order": {"kind": "enterprise_action", "operation": "query"},
+            "update_owner": {"kind": "enterprise_action", "operation": "update"},
+        },
+    }
+    await _consume(monkeypatch, [
+        {"type": "tool_result", "id": "query", "name": "find_order", "ok": True,
+         "content": json.dumps({"status": "completed", "data": {"id": "order-1"}})},
+        {"type": "tool_result", "id": "write", "name": "update_owner", "ok": False,
+         "content": json.dumps({"status": "failed", "error": {"messageZh": "写入失败"}})},
+        {"type": "done", "text": "查询和修改都已完成。"},
+    ], state)
+
+    assert state["error"] == "Requested business mutation was not completed"
+    assert state["assistant_final"].startswith("辅助查询已经成功，但本轮未获得业务操作的成功回执")
+    assert "查询和修改都已完成" not in state["assistant_final"]
+
+
+@pytest.mark.asyncio
 async def test_current_business_data_fails_closed_when_page_action_fails(monkeypatch):
     state = {
         "run_id": 11,
