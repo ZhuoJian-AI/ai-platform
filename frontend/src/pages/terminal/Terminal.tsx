@@ -5,8 +5,9 @@ import {
 } from 'react';
 import { applicationConversationRoute, conversationIdFromRoute } from './assistantConversationRoute';
 import { claimVoiceChannel, STOP_RECORDING } from './voiceChannel';
-import VoiceConversationPanel from './VoiceConversationPanel';
+import VoiceConversationPanel, { VoiceConversationProvider } from './VoiceConversationPanel';
 import type { VoiceAdapter } from './voiceConversation';
+import { useCurrentTurnAnchor } from './useCurrentTurnAnchor';
 import {
   ConfigProvider, Button, Typography, Input, Tag, Drawer, Dropdown, Tabs, Empty, Spin,
   message, Avatar, Popover, Tooltip,
@@ -1013,6 +1014,7 @@ export default function Terminal() {
   };
 
   const businessVoiceSubmit = useRef<VoiceAdapter['submit'] | null>(null);
+  const adoptedVoiceTask = useRef<string | null>(null);
   const registerBusinessVoice = useCallback((handler: VoiceAdapter['submit'] | null) => { businessVoiceSubmit.current = handler; }, []);
   const voiceSubmit: VoiceAdapter['submit'] = async (text, signal) => {
     signal.throwIfAborted();
@@ -1020,7 +1022,16 @@ export default function Terminal() {
       if (!businessVoiceSubmit.current) throw Error('页面上下文尚未就绪');
       return businessVoiceSubmit.current(text, signal);
     }
-    if (!selectedId || streaming) throw Error('请等待当前任务完成');
+    if (streaming) throw Error('请等待当前任务完成');
+    if (!selectedId || composerOpen) {
+      const createdId = await startTask(text, signal);
+      signal.throwIfAborted();
+      if (!createdId) throw Error('语音任务未创建，请稍后再试');
+      const created = await terminal.getTask(createdId);
+      const reply = [...created.messages].reverse().find(item => item.role === 'assistant');
+      if (!reply || ['error', 'cancelled', 'timeout', 'busy'].includes(created.run_status ?? '')) throw Error('本轮未完成，请查看对话记录');
+      return { taskId: createdId, messageId: reply.id, needsConfirmation: created.run_status === 'interrupted' };
+    }
     const before = await terminal.getTask(selectedId);
     if (['queued', 'running'].includes(before.run_status ?? '')) throw Error('当前任务仍在运行，请稍后继续');
     const priorIds = new Set(before.messages.map(item => item.id));
@@ -1033,17 +1044,20 @@ export default function Terminal() {
     return { taskId: selectedId, messageId: reply.id, needsConfirmation: after.run_status === 'interrupted' };
   };
 
-  const startTask = async () => {
+  const startTask = async (voiceText?: string, signal?: AbortSignal) => {
     const readyAttachments = inputAttachments.filter((item) => item.status === 'ready' && item.file_id);
-    if ((!input.trim() && !readyAttachments.length && !inputFileRefs.length) || streaming) return;
-    const msg = input.trim() || (readyAttachments.length
+    if (inputAttachments.some(item => item.status !== 'ready')) throw Error('请等待附件处理完成');
+    if ((!(voiceText ?? input).trim() && !readyAttachments.length && !inputFileRefs.length) || streaming) return;
+    const msg = (voiceText ?? input).trim() || (readyAttachments.length
       ? `请分析附件：${readyAttachments.map((item) => item.name).join('、')}`
       : '请处理已引用的工作空间文件');
     const attachmentSnapshots: MessageAttachment[] = readyAttachments.map(({ file_id, workspace_id, path, name }) => ({
       file_id, workspace_id, path, name,
     }));
     try {
+      signal?.throwIfAborted();
       const task = await terminal.createTask({ message: msg, config });
+      if (signal && !signal.aborted) adoptedVoiceTask.current = task.id;
       // 新建后立即让左栏任务列表可见（不再等流结束才 invalidate）——根治「执行期间左栏看不到任务」诱因。
       qc.invalidateQueries({ queryKey: ['terminal-tasks'] });
       // 标记本次选中是「新建并立即 live 执行」，阻止 selectedTask 回放清掉实时轨迹；
@@ -1057,9 +1071,12 @@ export default function Terminal() {
       setFollowUpFileRefs(selectedFileRefs.filter((item) => item.scope === 'task'));
       setInputFileRefs([]);
       setInputAttachments([]);
+      signal?.throwIfAborted();
       await runStream(task.id, msg, attachmentSnapshots, config.application_id, pageContext, selectedFileRefs);
       setPageContext({});
+      return task.id;
     } catch (e) {
+      if (signal) throw e;
       message.error((e as Error).message);
     }
   };
@@ -1273,9 +1290,9 @@ export default function Terminal() {
         },
       }}
     >
+      <VoiceConversationProvider scopeKey={selectedId || `draft:${draftAttachmentKey}`} adoptedTask={adoptedVoiceTask}
+        enabled={view === 'assistant' || view === 'application'} submit={voiceSubmit}>
       <div className="terminal-shell" style={{ background: '#f5f5f5', fontFamily: WB_FONT }}>
-        <VoiceConversationPanel scopeKey={`${selectedId}:${view}:${selectedApplicationModuleKey}:${selectedApplicationPageKey}`}
-          enabled={Boolean(selectedId) && (view === 'assistant' || view === 'application')} submit={voiceSubmit} />
         {/* 主内容区 */}
         <div className="terminal-shell__body" style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
           {!applicationShellActive && (
@@ -1716,7 +1733,7 @@ export default function Terminal() {
                   return true;
                 }}
                 onOpenConfig={() => { setCfgContext('composer'); setCfgOpen(true); }}
-                onStart={startTask}
+                onStart={() => { void startTask(); }}
                 streaming={streaming}
                 agentLabel={agentLabel}
               />
@@ -2028,6 +2045,7 @@ export default function Terminal() {
           }
         }}
       />
+      </VoiceConversationProvider>
     </ConfigProvider>
   );
 }
@@ -3014,6 +3032,8 @@ function TaskInputBox(props: {
               <span style={chipBtnStyle}><FolderOpenOutlined /> 工作空间 {wsName ?? '未选择'}</span>
             </span>
           </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <VoiceConversationPanel />
           {streaming && onStop ? (
             <Tooltip title="停止生成">
               <button
@@ -3034,6 +3054,7 @@ function TaskInputBox(props: {
               </button>
             </Tooltip>
           )}
+          </div>
         </div>
       </div>
       </Popover>
@@ -3167,11 +3188,9 @@ function ChatView(props: {
     selectedId, onLink, onOpenFile, fileLinks, fileRefMap, fileRefsLoaded, onDeleteTurn, agentLabel,
   } = props;
   const scrollRef = useRef<HTMLDivElement>(null);
+  const { listRef, jump } = useCurrentTurnAnchor(selectedId, chat.filter(item => item.role === 'user').length);
   // 每轮 hover 才显示删除按钮：避免常驻图标干扰阅读，且只在 user 气泡上触发（删除一整轮）
   const [hoveredTurn, setHoveredTurn] = useState<number | null>(null);
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [chat, streaming]);
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -3180,11 +3199,12 @@ function ChatView(props: {
         <Button size="small" type="text" icon={<PlusOutlined />} onClick={onNew} />
         <span style={{ fontSize: 13, fontWeight: 500, color: '#1f2937', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{taskTitle}</span>
         <div style={{ flex: 1 }} />
+        <Button size="small" type="text" onClick={jump}>回到当前回复</Button>
       </div>
 
       {/* 聊天内容区 */}
       <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: '24px 24px', background: '#fafafa' }} className="wb-scroll-hide">
-        <div style={{ maxWidth: 820, margin: '0 auto' }}>
+        <div ref={listRef} style={{ maxWidth: 820, margin: '0 auto' }}>
           {chat.length === 0 && (
             <div style={{ textAlign: 'center', color: '#9ca3af', fontSize: 13, marginTop: 40 }}>发送消息开始对话。</div>
           )}
@@ -3209,6 +3229,7 @@ function ChatView(props: {
             return (
               <div
                 key={i}
+                data-user-turn={isUser ? '' : undefined}
                 onMouseEnter={() => { if (canDelete) setHoveredTurn(i); }}
                 onMouseLeave={() => { if (hoveredTurn === i) setHoveredTurn(null); }}
                 style={{ display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start', marginBottom: 18, alignItems: 'flex-start', gap: 8 }}
